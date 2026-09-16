@@ -19,9 +19,8 @@ Thumb-first slider:
 		format?: (v: number) => string;
 		onchange: (v: number) => void;
 		oncommit?: () => void;
-		onactive?: (active: boolean) => void;
 	};
-	let { id, label, value, min, max, step = 1, defaultValue = min, bipolar = false, trackGradient, disabled = false, format = (v) => String(v), onchange, oncommit, onactive }: Props = $props();
+	let { id, label, value, min, max, step = 1, defaultValue = min, bipolar = false, trackGradient, disabled = false, format = (v) => String(v), onchange, oncommit }: Props = $props();
 
 	let row: HTMLDivElement;
 	let active = $state(false);
@@ -53,7 +52,6 @@ Thumb-first slider:
 		raw = value;
 		moved = false;
 		active = true;
-		onactive?.(true);
 	}
 
 	function move(e: PointerEvent) {
@@ -71,7 +69,6 @@ Thumb-first slider:
 	function up() {
 		if (!active) return;
 		active = false;
-		onactive?.(false);
 		const now = performance.now();
 		if (!moved) {
 			if (now - lastTapAt < 320) {

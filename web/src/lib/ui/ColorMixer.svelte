@@ -3,8 +3,8 @@
 	import Slider from './Slider.svelte';
 	import type { Band, MixerBand } from '$lib/types';
 
-	type Props = { mixer: Record<Band, MixerBand>; onchange: (band: Band, field: keyof MixerBand, v: number) => void; oncommit: () => void; onactive?: (a: boolean) => void };
-	let { mixer, onchange, oncommit, onactive }: Props = $props();
+	type Props = { mixer: Record<Band, MixerBand>; onchange: (band: Band, field: keyof MixerBand, v: number) => void; oncommit: () => void };
+	let { mixer, onchange, oncommit }: Props = $props();
 
 	const bands: { band: Band; label: string; swatch: string }[] = [
 		{ band: 'red', label: 'Red', swatch: '#c0392b' },
@@ -39,8 +39,8 @@
 		{/each}
 	</div>
 	{#key selected}
-		<Slider id="mix-hue" label="{bands.find((b) => b.band === selected)?.label} hue" value={mixer[selected].hue} min={-100} max={100} defaultValue={0} bipolar format={signed} onchange={(v) => onchange(selected, 'hue', v)} {oncommit} {onactive} />
-		<Slider id="mix-sat" label="Saturation" value={mixer[selected].saturation} min={-100} max={100} defaultValue={0} bipolar format={signed} onchange={(v) => onchange(selected, 'saturation', v)} {oncommit} {onactive} />
-		<Slider id="mix-lum" label="Luminance" value={mixer[selected].luminance} min={-100} max={100} defaultValue={0} bipolar format={signed} onchange={(v) => onchange(selected, 'luminance', v)} {oncommit} {onactive} />
+		<Slider id="mix-hue" label="{bands.find((b) => b.band === selected)?.label} hue" value={mixer[selected].hue} min={-100} max={100} defaultValue={0} bipolar format={signed} onchange={(v) => onchange(selected, 'hue', v)} {oncommit} />
+		<Slider id="mix-sat" label="Saturation" value={mixer[selected].saturation} min={-100} max={100} defaultValue={0} bipolar format={signed} onchange={(v) => onchange(selected, 'saturation', v)} {oncommit} />
+		<Slider id="mix-lum" label="Luminance" value={mixer[selected].luminance} min={-100} max={100} defaultValue={0} bipolar format={signed} onchange={(v) => onchange(selected, 'luminance', v)} {oncommit} />
 	{/key}
 </div>

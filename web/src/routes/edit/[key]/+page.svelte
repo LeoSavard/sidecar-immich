@@ -33,7 +33,6 @@
 	let clipHigh = $state(false);
 	let clipLow = $state(false);
 	let before = $state(false);
-	let focusMode = $state(false);
 	let section = $state<Section>('light');
 	let showPhoneHistogram = $state(true);
 	let wide = $state(false);
@@ -359,7 +358,6 @@
 
 	const signed = (v: number, digits = 0) => `${v > 0 ? '+' : ''}${v.toFixed(digits)}`;
 	const shutter = (s: number) => (s >= 1 ? `${s}s` : `1/${Math.round(1 / s)}`);
-	const active = (a: boolean) => (focusMode = a);
 	const TEMP_TRACK = 'linear-gradient(90deg,#5f7fb6,#9aa0a6 45%,#c9a15f)';
 	const TINT_TRACK = 'linear-gradient(90deg,#6f9f6f,#9aa0a6 50%,#b07aa6)';
 	const sections: { id: Section; label: string; short: string }[] = [
@@ -377,12 +375,12 @@
 {#snippet wbSection()}
 	{#if edit}
 		<div class="grid gap-2">
-			<div class="flex items-center justify-between text-xs {focusMode ? 'invisible' : ''}">
+			<div class="flex items-center justify-between text-xs">
 				<span class="text-fg-2">{edit.whiteBalance.mode === 'asShot' ? 'As shot' : 'Custom'}</span>
 				<button type="button" class="rounded px-2 py-1 text-fg-2 hover:bg-raised disabled:opacity-40" disabled={edit.whiteBalance.mode === 'asShot'} onclick={() => { edit!.whiteBalance.mode = 'asShot'; changed(); committed(); }}>Reset to as shot</button>
 			</div>
-			<Slider id="wb-temp" label="Temperature" value={edit.whiteBalance.mode === 'asShot' ? Math.round(resolvedWb.temperatureK) : edit.whiteBalance.temperatureK} min={2000} max={12000} step={10} defaultValue={Math.round(resolvedWb.temperatureK)} trackGradient={TEMP_TRACK} format={(v) => `${v} K`} onchange={(v) => setWb('temperatureK', v)} oncommit={committed} onactive={active} />
-			<Slider id="wb-tint" label="Tint" value={edit.whiteBalance.mode === 'asShot' ? Math.round(resolvedWb.tint) : edit.whiteBalance.tint} min={-150} max={150} defaultValue={0} bipolar trackGradient={TINT_TRACK} format={(v) => signed(v)} onchange={(v) => setWb('tint', v)} oncommit={committed} onactive={active} />
+			<Slider id="wb-temp" label="Temperature" value={edit.whiteBalance.mode === 'asShot' ? Math.round(resolvedWb.temperatureK) : edit.whiteBalance.temperatureK} min={2000} max={12000} step={10} defaultValue={Math.round(resolvedWb.temperatureK)} trackGradient={TEMP_TRACK} format={(v) => `${v} K`} onchange={(v) => setWb('temperatureK', v)} oncommit={committed} />
+			<Slider id="wb-tint" label="Tint" value={edit.whiteBalance.mode === 'asShot' ? Math.round(resolvedWb.tint) : edit.whiteBalance.tint} min={-150} max={150} defaultValue={0} bipolar trackGradient={TINT_TRACK} format={(v) => signed(v)} onchange={(v) => setWb('tint', v)} oncommit={committed} />
 		</div>
 	{/if}
 {/snippet}
@@ -390,13 +388,13 @@
 {#snippet lightSection()}
 	{#if edit}
 		<div class="grid gap-2">
-			<Slider id="exposure" label="Exposure" value={edit.exposure.ev} min={-5} max={5} step={0.01} defaultValue={0} bipolar format={(v) => `${signed(v, 2)} EV`} onchange={(v) => { edit!.exposure.ev = v; changed(); }} oncommit={committed} onactive={active} />
-			<Slider id="contrast" label="Contrast" value={Math.round((edit.tone.contrast - 1) * 100)} min={-70} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => { edit!.tone.contrast = 1 + v / 100; changed(); }} oncommit={committed} onactive={active} />
-			<Slider id="highlights" label="Highlights" value={curveOffset('highlights')} min={-100} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => setCurveOffset('highlights', v)} oncommit={committed} onactive={active} />
-			<Slider id="shadows" label="Shadows" value={curveOffset('shadows')} min={-100} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => setCurveOffset('shadows', v)} oncommit={committed} onactive={active} />
-			<Slider id="whites" label="Whites" value={Math.round(((4.5 - edit.tone.whiteEv) / 2) * 100)} min={-100} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => { edit!.tone.whiteEv = 4.5 - (v / 100) * 2; changed(); }} oncommit={committed} onactive={active} />
-			<Slider id="blacks" label="Blacks" value={Math.round(((-8 - edit.tone.blackEv) / 3) * 100)} min={-100} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => { edit!.tone.blackEv = -8 - (v / 100) * 3; changed(); }} oncommit={committed} onactive={active} />
-			<Slider id="hl-blend" label="Highlight recovery" value={Math.round(edit.exposure.highlightBlend * 100)} min={0} max={100} defaultValue={50} format={(v) => `${v} %`} onchange={(v) => { edit!.exposure.highlightBlend = v / 100; changed(); }} oncommit={committed} onactive={active} />
+			<Slider id="exposure" label="Exposure" value={edit.exposure.ev} min={-5} max={5} step={0.01} defaultValue={0} bipolar format={(v) => `${signed(v, 2)} EV`} onchange={(v) => { edit!.exposure.ev = v; changed(); }} oncommit={committed} />
+			<Slider id="contrast" label="Contrast" value={Math.round((edit.tone.contrast - 1) * 100)} min={-70} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => { edit!.tone.contrast = 1 + v / 100; changed(); }} oncommit={committed} />
+			<Slider id="highlights" label="Highlights" value={curveOffset('highlights')} min={-100} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => setCurveOffset('highlights', v)} oncommit={committed} />
+			<Slider id="shadows" label="Shadows" value={curveOffset('shadows')} min={-100} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => setCurveOffset('shadows', v)} oncommit={committed} />
+			<Slider id="whites" label="Whites" value={Math.round(((4.5 - edit.tone.whiteEv) / 2) * 100)} min={-100} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => { edit!.tone.whiteEv = 4.5 - (v / 100) * 2; changed(); }} oncommit={committed} />
+			<Slider id="blacks" label="Blacks" value={Math.round(((-8 - edit.tone.blackEv) / 3) * 100)} min={-100} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => { edit!.tone.blackEv = -8 - (v / 100) * 3; changed(); }} oncommit={committed} />
+			<Slider id="hl-blend" label="Highlight recovery" value={Math.round(edit.exposure.highlightBlend * 100)} min={0} max={100} defaultValue={50} format={(v) => `${v} %`} onchange={(v) => { edit!.exposure.highlightBlend = v / 100; changed(); }} oncommit={committed} />
 		</div>
 	{/if}
 {/snippet}
@@ -415,17 +413,17 @@
 		<div class="grid gap-2">
 			<Loupe assetKey={key} edit={$state.snapshot(edit)} center={loupeCenter} colorSpace={displaySpace} />
 			<p class="text-xs text-muted">Tap the photo to move the loupe.</p>
-			<Slider id="sharpen" label="Sharpening" value={edit.detail.sharpenAmount} min={0} max={100} defaultValue={0} format={(v) => String(v)} onchange={(v) => { edit!.detail.sharpenAmount = v; changed(); }} oncommit={committed} onactive={active} />
-			<Slider id="sharpen-radius" label="Sharpening radius" value={edit.detail.sharpenRadius} min={0.5} max={2} step={0.1} defaultValue={1} format={(v) => `${v.toFixed(1)} px`} onchange={(v) => { edit!.detail.sharpenRadius = v; changed(); }} oncommit={committed} onactive={active} />
-			<Slider id="denoise-luma" label="Noise reduction" value={edit.detail.denoiseLuminance} min={0} max={100} defaultValue={0} format={(v) => String(v)} onchange={(v) => { edit!.detail.denoiseLuminance = v; changed(); }} oncommit={committed} onactive={active} />
-			<Slider id="denoise-chroma" label="Colour noise reduction" value={edit.detail.denoiseChroma} min={0} max={100} defaultValue={0} format={(v) => String(v)} onchange={(v) => { edit!.detail.denoiseChroma = v; changed(); }} oncommit={committed} onactive={active} />
+			<Slider id="sharpen" label="Sharpening" value={edit.detail.sharpenAmount} min={0} max={100} defaultValue={0} format={(v) => String(v)} onchange={(v) => { edit!.detail.sharpenAmount = v; changed(); }} oncommit={committed} />
+			<Slider id="sharpen-radius" label="Sharpening radius" value={edit.detail.sharpenRadius} min={0.5} max={2} step={0.1} defaultValue={1} format={(v) => `${v.toFixed(1)} px`} onchange={(v) => { edit!.detail.sharpenRadius = v; changed(); }} oncommit={committed} />
+			<Slider id="denoise-luma" label="Noise reduction" value={edit.detail.denoiseLuminance} min={0} max={100} defaultValue={0} format={(v) => String(v)} onchange={(v) => { edit!.detail.denoiseLuminance = v; changed(); }} oncommit={committed} />
+			<Slider id="denoise-chroma" label="Colour noise reduction" value={edit.detail.denoiseChroma} min={0} max={100} defaultValue={0} format={(v) => String(v)} onchange={(v) => { edit!.detail.denoiseChroma = v; changed(); }} oncommit={committed} />
 		</div>
 	{/if}
 {/snippet}
 
 {#snippet colorSection()}
 	{#if edit}
-		<ColorMixer mixer={edit.mixer} onchange={(band: Band, field: keyof MixerBand, v: number) => { edit!.mixer[band][field] = v; changed(); }} oncommit={committed} onactive={active} />
+		<ColorMixer mixer={edit.mixer} onchange={(band: Band, field: keyof MixerBand, v: number) => { edit!.mixer[band][field] = v; changed(); }} oncommit={committed} />
 	{/if}
 {/snippet}
 
@@ -444,7 +442,7 @@
 			<p class="absolute inset-x-4 top-[max(1rem,env(safe-area-inset-top))] text-center text-sm {error ? 'text-danger' : 'text-fg-2'}">{error || status}</p>
 		{/if}
 		{#if before}<span class="absolute top-[max(1rem,env(safe-area-inset-top))] left-4 rounded bg-ground/80 px-2 py-1 text-xs">As shot</span>{/if}
-		<div class="absolute top-[max(0.75rem,env(safe-area-inset-top))] right-3 {focusMode ? 'opacity-0' : ''}">
+		<div class="absolute top-[max(0.75rem,env(safe-area-inset-top))] right-3">
 			{#if !wide && showPhoneHistogram}
 				<Histogram data={histogram} {clipHigh} {clipLow} compact ontoggle={(w) => { if (w === 'high') clipHigh = !clipHigh; else clipLow = !clipLow; schedule(); }} />
 			{/if}
@@ -454,7 +452,7 @@
 	{#if edit && meta}
 		<!-- Phone: one tool at a time in a bottom sheet. Desktop: all sections in pipeline order. -->
 		<aside class="flex max-h-[48dvh] shrink-0 flex-col bg-panel pb-[max(0.75rem,env(safe-area-inset-bottom))] lg:max-h-none lg:w-80 lg:pb-3">
-			<header class="flex items-center justify-between gap-3 px-6 pt-3 pb-2 lg:px-4 {focusMode ? 'invisible' : ''}">
+			<header class="flex items-center justify-between gap-3 px-6 pt-3 pb-2 lg:px-4">
 				<div class="min-w-0 text-xs text-fg-2">
 					<p class="truncate text-sm text-fg">{meta.fileName}</p>
 					<p class="truncate">{meta.info.make} {meta.info.model} · ISO {meta.info.iso} · {shutter(meta.info.shutterS)} · f/{meta.info.aperture}</p>
@@ -466,7 +464,7 @@
 					</button>
 				</div>
 			</header>
-			<div class="grid gap-2 px-6 lg:px-4 {focusMode ? 'invisible' : ''}">
+			<div class="grid gap-2 px-6 lg:px-4">
 				{#if readOnly}<p class="rounded bg-raised p-2 text-xs">A newer Sidecar edited this photo. Update Sidecar to change it.</p>{/if}
 				{#if restoredDraft && dirty}<p class="rounded bg-raised p-2 text-xs">Restored unsaved changes from this device.</p>{/if}
 				{#if conflict}
@@ -487,7 +485,7 @@
 			</div>
 
 			{:else}
-			<nav class="flex items-center gap-2 overflow-x-auto px-6 py-2 {focusMode ? 'invisible' : ''}" aria-label="Tools">
+			<nav class="flex items-center gap-2 overflow-x-auto px-6 py-2" aria-label="Tools">
 				{#each sections as s (s.id)}
 					<button type="button" aria-pressed={section === s.id} class="h-8 shrink-0 rounded-full px-3 text-xs {section === s.id ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" aria-label={s.label} onclick={() => (section = s.id)}>{s.short}</button>
 				{/each}
