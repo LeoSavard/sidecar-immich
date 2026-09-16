@@ -7,8 +7,10 @@ use anyhow::{Context, Result};
 pub mod compute;
 pub mod detail;
 pub mod develop;
+pub mod focus;
 pub mod ingest;
 pub use develop::DevelopPass;
+pub use focus::focus_energy;
 pub use ingest::{Ingest, MosaicInput};
 
 /// Linear RGBA image in f32, row-major, top-left origin.
@@ -19,7 +21,7 @@ pub struct RgbaF32 {
     pub data: Vec<f32>,
 }
 
-fn area_weights(src: u32, dst: u32) -> Vec<Vec<(usize, f32)>> {
+pub(crate) fn area_weights(src: u32, dst: u32) -> Vec<Vec<(usize, f32)>> {
     let scale = src as f64 / dst as f64;
     (0..dst)
         .map(|d| {
@@ -107,6 +109,53 @@ impl RgbaF32 {
     pub fn from_f16_bytes(width: u32, height: u32, bytes: &[u8]) -> Self {
         let half: &[half::f16] = bytemuck::cast_slice(bytes);
         Self { width, height, data: half.iter().map(|v| v.to_f32()).collect() }
+    }
+}
+
+/// Single-channel image in f32, row-major, top-left origin.
+#[derive(Clone, Debug)]
+pub struct Mono {
+    pub width: u32,
+    pub height: u32,
+    pub data: Vec<f32>,
+}
+
+impl Mono {
+    /// Max-pooled downsample: unlike `RgbaF32::downsampled`'s area-weighted average, the brightest sample in
+    /// each destination cell survives instead of being blended away. Never upscales. See docs/ROADMAP.md,
+    /// "Focus peaking measures the wrong thing" — a single sharp pixel has to survive.
+    pub fn max_pooled(&self, long_edge: u32) -> Mono {
+        let scale = (long_edge as f64 / self.width.max(self.height) as f64).min(1.0);
+        if scale >= 1.0 {
+            return self.clone();
+        }
+        let (dw, dh) = (((self.width as f64 * scale).round() as u32).max(1), ((self.height as f64 * scale).round() as u32).max(1));
+        let (wx, wy) = (area_weights(self.width, dw), area_weights(self.height, dh));
+        let sw = self.width as usize;
+        let mut tmp = vec![f32::NEG_INFINITY; dw as usize * self.height as usize];
+        for y in 0..self.height as usize {
+            for (x, ws) in wx.iter().enumerate() {
+                let slot = &mut tmp[y * dw as usize + x];
+                for &(s, _) in ws {
+                    *slot = slot.max(self.data[y * sw + s]);
+                }
+            }
+        }
+        let mut data = vec![f32::NEG_INFINITY; dw as usize * dh as usize];
+        for (y, ws) in wy.iter().enumerate() {
+            for x in 0..dw as usize {
+                let slot = &mut data[y * dw as usize + x];
+                for &(s, _) in ws {
+                    *slot = slot.max(tmp[s * dw as usize + x]);
+                }
+            }
+        }
+        Mono { width: dw, height: dh, data }
+    }
+
+    /// Display-ready `r8unorm` bytes: clamp to 0…1 and round.
+    pub fn to_r8_bytes(&self) -> Vec<u8> {
+        self.data.iter().map(|&v| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8).collect()
     }
 }
 

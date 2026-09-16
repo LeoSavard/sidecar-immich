@@ -2002,6 +2002,7 @@ dependencies = [
  "sidecar-engine",
  "sidecar-raw",
  "sidecar-xmp",
+ "tempfile",
  "tiff",
  "tokio",
  "tokio-stream",

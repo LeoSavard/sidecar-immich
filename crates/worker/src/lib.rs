@@ -79,6 +79,7 @@ impl Worker {
     pub fn new(cache: PathBuf) -> Result<Arc<Self>> {
         std::fs::create_dir_all(cache.join("meta"))?;
         std::fs::create_dir_all(cache.join("proxies"))?;
+        std::fs::create_dir_all(cache.join("focus"))?;
         std::fs::create_dir_all(cache.join("outbox"))?;
         let kit = sidecar_engine::Gpu::new_headless().and_then(|gpu| {
             let ingest = sidecar_engine::Ingest::new(&gpu)?;
@@ -105,6 +106,12 @@ impl Worker {
 
     fn proxy_path(&self, key: &str, edge: u32) -> PathBuf {
         self.cache.join("proxies").join(format!("{key}-pv{PROCESS_VERSION}-{edge}.f16"))
+    }
+
+    /// Focus-peaking mask at `edge`: max-pooled from a full-resolution measure, so it caches (and expires)
+    /// alongside the proxy it overlays, keyed the same way. See docs/ROADMAP.md, "Focus peaking...".
+    fn focus_path(&self, key: &str, edge: u32) -> PathBuf {
+        self.cache.join("focus").join(format!("{key}-pv{PROCESS_VERSION}-{edge}.png"))
     }
 
     pub async fn ingest(self: &Arc<Self>, path: PathBuf) -> Result<Meta> {
@@ -146,12 +153,12 @@ impl Worker {
             return Ok(found);
         }
         let path = self.paths.lock().unwrap().get(key).cloned().context("unknown asset; ingest it first")?;
-        let edges: Vec<(u32, PathBuf)> = [edge, PREVIEW_EDGE].into_iter().map(|e| (e, self.proxy_path(key, e))).collect();
+        let edges: Vec<(u32, PathBuf, PathBuf)> = [edge, PREVIEW_EDGE].into_iter().map(|e| (e, self.proxy_path(key, e), self.focus_path(key, e))).collect();
         let gpu = self.gpu.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let started = std::time::Instant::now();
             let mut raw = RawFile::open(&path)?;
-            let largest = edges.iter().map(|(e, _)| *e).max().unwrap_or(edge);
+            let largest = edges.iter().map(|(e, _, _)| *e).max().unwrap_or(edge);
             let full = match (gpu.as_deref(), raw.mosaic()) {
                 (Some(export::Kit { gpu: g, ingest, .. }), Ok(m)) => {
                     let mul = raw.info().color.as_shot_mul;
@@ -164,7 +171,10 @@ impl Worker {
                     sidecar_engine::RgbaF32 { width: p.width, height: p.height, data: p.rgba }
                 }
             };
-            for (e, out) in edges {
+            // Full-resolution, on the demosaiced image, before any develop setting applies (§ ingest, not §
+            // develop) — so it caches like the proxy and never has to be recomputed when a slider moves.
+            let focus = sidecar_engine::focus_energy(&full);
+            for (e, out, focus_out) in edges {
                 let p = full.downsampled(e);
                 let mut bytes = Vec::with_capacity(8 + p.data.len() * 2);
                 bytes.extend_from_slice(&p.width.to_le_bytes());
@@ -173,6 +183,9 @@ impl Worker {
                 let tmp = out.with_extension("tmp");
                 std::fs::write(&tmp, &bytes)?;
                 std::fs::rename(&tmp, &out)?;
+
+                let pooled = focus.max_pooled(e);
+                write_focus_png(&focus_out, &pooled)?;
             }
             tracing::info!("proxy for {} in {:.0} ms", path.display(), started.elapsed().as_secs_f64() * 1e3);
             Ok(())
@@ -187,6 +200,21 @@ async fn read_proxy(path: &std::path::Path) -> Option<(u32, u32, Vec<u8>)> {
     let w = u32::from_le_bytes(bytes.get(0..4)?.try_into().ok()?);
     let h = u32::from_le_bytes(bytes.get(4..8)?.try_into().ok()?);
     Some((w, h, bytes[8..].to_vec()))
+}
+
+/// Atomic write, mirroring the proxy cache's temp-then-rename pattern.
+fn write_focus_png(path: &std::path::Path, mono: &sidecar_engine::Mono) -> Result<()> {
+    let mut out = Vec::new();
+    {
+        let mut info = png::Info::with_size(mono.width, mono.height);
+        info.color_type = png::ColorType::Grayscale;
+        info.bit_depth = png::BitDepth::Eight;
+        png::Encoder::with_info(&mut out, info)?.write_header()?.write_image_data(&mono.to_r8_bytes())?;
+    }
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, &out)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
 }
 
 pub struct Session {
@@ -424,5 +452,27 @@ async fn proxy_handler(State(w): State<Arc<Worker>>, Path(key): Path<String>, Qu
             (h, bytes).into_response()
         }
         Err(e) => internal(e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn focus_png_round_trips_and_leaves_no_temp_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("f.png");
+        let mono = sidecar_engine::Mono { width: 3, height: 2, data: vec![0.0, 0.5, 1.0, 1.0, 0.5, 0.0] };
+        write_focus_png(&path, &mono).unwrap();
+        assert!(!path.with_extension("tmp").exists());
+
+        let decoder = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(&path).unwrap()));
+        let mut reader = decoder.read_info().unwrap();
+        assert_eq!((reader.info().width, reader.info().height), (3, 2));
+        assert_eq!(reader.info().color_type, png::ColorType::Grayscale);
+        let mut buf = vec![0u8; reader.output_buffer_size().unwrap()];
+        reader.next_frame(&mut buf).unwrap();
+        assert_eq!(buf, mono.to_r8_bytes());
     }
 }

@@ -25,3 +25,6 @@ tracing.workspace = true
 sidecar-color.workspace = true
 sidecar-raw.workspace = true
 sidecar-engine.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
