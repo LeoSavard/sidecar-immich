@@ -70,10 +70,10 @@ fn coerce(key: &str, s: &str) -> Value {
     if let Ok(f) = s.parse::<f64>() {
         return Value::from(f);
     }
-    if let Some((a, b)) = s.split_once(',') {
-        if let (Ok(x), Ok(y)) = (a.trim().parse::<f64>(), b.trim().parse::<f64>()) {
-            return Value::from(vec![x, y]);
-        }
+    if let Some((a, b)) = s.split_once(',')
+        && let (Ok(x), Ok(y)) = (a.trim().parse::<f64>(), b.trim().parse::<f64>())
+    {
+        return Value::from(vec![x, y]);
     }
     match s {
         "True" | "true" => Value::Bool(true),

@@ -88,9 +88,9 @@ mod tests {
     #[test]
     fn inverse_round_trips() {
         let i = mul(&XYZ_TO_REC2020, &inverse(&XYZ_TO_REC2020));
-        for r in 0..3 {
-            for c in 0..3 {
-                assert!((i[r][c] - if r == c { 1.0 } else { 0.0 }).abs() < 1e-9);
+        for (r, row) in i.iter().enumerate() {
+            for (c, v) in row.iter().enumerate() {
+                assert!((v - if r == c { 1.0 } else { 0.0 }).abs() < 1e-9);
             }
         }
     }

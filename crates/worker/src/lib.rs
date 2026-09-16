@@ -114,10 +114,10 @@ impl Worker {
         };
         self.paths.lock().unwrap().insert(key.clone(), path.clone());
         let meta_path = self.meta_path(&key);
-        if let Ok(bytes) = tokio::fs::read(&meta_path).await {
-            if let Ok(meta) = serde_json::from_slice::<Meta>(&bytes) {
-                return Ok(meta);
-            }
+        if let Ok(bytes) = tokio::fs::read(&meta_path).await
+            && let Ok(meta) = serde_json::from_slice::<Meta>(&bytes)
+        {
+            return Ok(meta);
         }
         let _slot = self.decode_slots.acquire().await?;
         let (k, p) = (key.clone(), path.clone());
@@ -268,9 +268,9 @@ fn loupe_png(w: &Worker, kit: &export::Kit, req: &LoupeRequest) -> Result<Vec<u8
     }
     let img = sidecar_engine::RgbaF32 { width: uw, height: uh, data }.oriented(flip);
     let mut rgb = Vec::with_capacity((img.width * img.height * 3) as usize);
-    for p in img.data.chunks_exact(4) {
-        for c in 0..3 {
-            let v = p[c].clamp(0.0, 1.0);
+    for p in img.data.as_chunks::<4>().0.iter() {
+        for v in &p[..3] {
+            let v = v.clamp(0.0, 1.0);
             let e = if v <= 0.0031308 { 12.92 * v } else { 1.055 * v.powf(1.0 / 2.4) - 0.055 };
             rgb.push((e * 255.0 + 0.5) as u8);
         }

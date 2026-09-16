@@ -46,7 +46,7 @@ pub fn build(img: &LinearImage, long_edge: u32) -> Proxy {
     let saturated = saturation_threshold(&img.rgb);
     let src: Vec<[f32; 4]> = img
         .rgb
-        .chunks_exact(3)
+        .as_chunks::<3>().0.iter()
         .map(|p| {
             let clip = p.iter().any(|&v| v >= saturated) as u8 as f32;
             [p[0] as f32 / 65535.0, p[1] as f32 / 65535.0, p[2] as f32 / 65535.0, clip]

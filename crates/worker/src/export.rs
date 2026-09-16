@@ -89,7 +89,7 @@ pub fn full_source(kit: &Kit, raw: &mut RawFile) -> Result<(wgpu::Texture, i32)>
             let linear = raw.develop_linear(false)?;
             let data: Vec<f32> = linear
                 .rgb
-                .chunks_exact(3)
+                .as_chunks::<3>().0.iter()
                 .flat_map(|p| {
                     let clip = p.iter().any(|&v| v >= 64880) as u8 as f32;
                     [p[0] as f32 / 65535.0, p[1] as f32 / 65535.0, p[2] as f32 / 65535.0, clip]
@@ -131,10 +131,10 @@ fn encode(img: &RgbaF32, req: &RenderRequest, out: &Path) -> Result<()> {
                 bail!("JPEG is limited to 65,535 pixels per side; export a TIFF or set a long edge");
             }
             let mut rgb = Vec::with_capacity((img.width * img.height * 3) as usize);
-            for (i, p) in img.data.chunks_exact(4).enumerate() {
-                for c in 0..3 {
+            for (i, p) in img.data.as_chunks::<4>().0.iter().enumerate() {
+                for (c, v) in p[..3].iter().enumerate() {
                     let n = tri_noise((i as u64) * 3 + c as u64);
-                    rgb.push((srgb_encode(p[c]) * 255.0 + n + 0.5).clamp(0.0, 255.0) as u8);
+                    rgb.push((srgb_encode(*v) * 255.0 + n + 0.5).clamp(0.0, 255.0) as u8);
                 }
             }
             let mut enc = jpeg_encoder::Encoder::new_file(out, req.quality.clamp(1, 100))?;
@@ -144,7 +144,7 @@ fn encode(img: &RgbaF32, req: &RenderRequest, out: &Path) -> Result<()> {
         }
         Format::Tiff => {
             use tiff::encoder::{TiffEncoder, colortype};
-            let data: Vec<u16> = img.data.chunks_exact(4).flat_map(|p| [0, 1, 2].map(|c| (srgb_encode(p[c]) * 65535.0 + 0.5) as u16)).collect();
+            let data: Vec<u16> = img.data.as_chunks::<4>().0.iter().flat_map(|p| [0, 1, 2].map(|c| (srgb_encode(p[c]) * 65535.0 + 0.5) as u16)).collect();
             let mut t = TiffEncoder::new(std::io::BufWriter::new(std::fs::File::create(out)?))?;
             let mut image = t.new_image::<colortype::RGB16>(img.width, img.height)?;
             image.encoder().write_tag(tiff::tags::Tag::IccProfile, icc)?;

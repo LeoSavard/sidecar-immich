@@ -1,6 +1,6 @@
 # Sidecar — system design
 
-*Sidecar* is a working name. Status: draft 2, 2026-09-14; Immich API details checked against the source of Immich 3.1.0, the pinned version. Revised for iPhone as the primary platform, an external library with a strict date layout, versioned exports with the JPEG leading the stack, and crop / lens correction / local masks after V1.
+*Sidecar* is a working name. Status: draft 2, 2026-09-14, with a build log kept current (last entry 2026-09-16); Immich API details checked against the source of Immich 3.1.0, the pinned version. Revised for iPhone as the primary platform, an external library with a strict date layout, versioned exports with the JPEG leading the stack, and crop / lens correction / local masks after V1.
 Source: the architecture plan (PWA entry, XMP sidecars, server-side demosaic, WebGPU preview, SSE export telemetry, Carbon/shadcn/HIG interface references).
 
 ## Implementation notes (build log)
@@ -21,6 +21,11 @@ Where the code differs from the text below, the code and these notes win.
 - **Internal library** roots can set `per_user = true`: Immich keeps a folder per user (storage label or id) before the template.
 - **Entry points (milestone 8):** Android share target hashes in the service worker and opens `/open?sha1=…`; desktop pastes an Immich link, resolved through `GET /api/assets/{id}`.
 - **Development:** `./dev/serve` runs api + worker on `127.0.0.1:8090`, the real library read-only, and a writable test copy under `testdata/cache/library`.
+- **First live run (2026-09-15):** share → resolve → develop → sidecar → export → upload → stack, against the real external library. The Immich *admin* key is scoped without `asset.read`, so stacks can't be checked from the CLI — only in the Immich app.
+- **Output space is a user setting** (§11), not a guess from `matchMedia`. It drives the develop uniform, the canvas, the loupe request and the export default together; the export sheet still overrides it for one export. The editor previewing in P3 while exports defaulted to sRGB was a real trap: saturated reds fit on screen and clipped in the file.
+- **Tint direction:** the slider names what happens to the *image*, as every editor does. Positive tint moves the assumed illuminant toward green so the photo goes magenta. It shipped inverted and is fixed; `positive_tint_moves_the_illuminant_toward_green` pins it.
+- **Tone curve, measured:** the logistic base curve starts shouldering immediately above middle grey — log-log slope 0.80 at +1 EV, 0.57 at +2 EV, 0.40 at +2.5 EV. Raising exposure therefore costs upper-midtone texture (0.73× the local contrast of the unedited render in one real case, measured as mean |∇ log Y|). The underlying constraint is headroom: sRGB holds 2.47 stops above grey while the default `whiteEv` asks the curve to fit 4.5. Lowering Whites is the working answer; replacing the curve is on the roadmap, with a candidate patch measured and rejected for regressing shadow contrast.
+- **Interaction:** slider rows allow vertical panning and claim a touch only after 4 px of sideways travel, so the tool panel scrolls. Holding a slider no longer hides the editor chrome — the histogram is exactly what you want to watch while dragging.
 
 ## 0. Summary
 
@@ -316,7 +321,7 @@ proxy bytes → sourceTex (rgba16float, immutable)
 - **View pass** — samples `developedTex` through a `geometry: mat3x3f` transform (pan and zoom in V1; crop and straighten compose into it later), mip chain for zoom-out, applies clip overlays, sRGB-encodes, adds dither from Christoph Peters' blue-noise textures (CC0). Runs on view changes and after develop.
 - **Histogram compute** — reads `developedTex` with stride 2 on phones, 1 on desktop, after each develop; one readback in flight.
 
-Canvas: `configure({ device, format: navigator.gpu.getPreferredCanvasFormat(), colorSpace: matchMedia('(color-gamut: p3)').matches ? 'display-p3' : 'srgb', alphaMode: 'opaque' })`. Every current iPhone display matches P3.
+Canvas: `configure({ device, format: navigator.gpu.getPreferredCanvasFormat(), colorSpace, alphaMode: 'opaque' })`, where `colorSpace` is the user's output space (§11), not the display's gamut. Declaring sRGB on a P3 screen makes the viewport a soft proof: the OS maps it to the panel, and what is on screen is what the exported file holds.
 
 ```wgsl
 // shaders/client/develop.wgsl — composed from shaders/develop/*.wgsl
@@ -401,6 +406,15 @@ if ((V.flags & CLIP_LOWS)  != 0u && m <= V.loT) { return vec4f(0.0, 0.0, 1.0, 1.
 ```
 
 The test runs after tone mapping, so red means *the output file will clip here*, not "an intermediate value exceeded 1.0". Corner triangles on the histogram show the clipped percentage and toggle each overlay (`J` with a keyboard).
+
+**Focus peaking** shares the pass and the same principle — judge what the pixels actually hold:
+
+```wgsl
+let step = max(1.0 / vec2f(textureDimensions(developed)), vec2f(V.uv_from_px[0][0], V.uv_from_px[1][1]));
+if (focus_energy(uv, step) >= V.peak_t) { return vec4f(PEAK_COLOUR, 1.0); }   // amber; red and blue stay clipping
+```
+
+`focus_energy` is the central-difference gradient of encoded luminance. The step is the larger of one texel and one canvas pixel, so zooming out averages detail away instead of aliasing downscaling noise into false peaks. It reads the proxy, so at fit zoom it reports composition-scale sharpness; critical focus means zooming in or opening the loupe.
 
 ## 9. Export
 

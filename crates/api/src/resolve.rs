@@ -183,7 +183,7 @@ pub async fn resolve(app: &App, user: &User, q: &OpenQuery) -> Result<Resolved> 
         let want = stem(name);
         let assets = app.immich.search(&user.api_key, json!({ "originalFileName": want })).await?;
         let mut list: Vec<Candidate> = assets.iter().filter(|a| stem(&a.original_file_name) == want).filter_map(|a| from_asset(app, a)).collect();
-        list.sort_by(|a, b| sidecar_template::is_raw(&b.path).cmp(&sidecar_template::is_raw(&a.path)));
+        list.sort_by_key(|c| !sidecar_template::is_raw(&c.path));
         let mut list = narrow_by_content(list, q.sha1.as_deref()).await;
         match list.len() {
             0 => {}

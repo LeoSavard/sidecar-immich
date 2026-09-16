@@ -7,8 +7,11 @@ browser, and your server renders every version back into Immich, stacked on the 
 - **Preview and export run the same shaders** (WGSL): WebGPU in the browser, wgpu on Vulkan on the server.
 - **GPU RAW pipeline:** highlight reconstruction, RCD demosaicing, wavelet noise reduction, Richardson–Lucy sharpening.
 - **Every export is kept** as a numbered version (`DSC_1234-v2.jpg`), and the newest JPEG leads the stack in Immich.
+- **You edit in the space you export to** — sRGB or Display P3 — so the viewport is a soft proof, with clipping
+  warnings and focus peaking over it.
 
-Status: early. See [`docs/DESIGN.md`](docs/DESIGN.md) for the specification and the build log.
+Status: early. See [`docs/DESIGN.md`](docs/DESIGN.md) for the specification and the build log, and
+[`docs/ROADMAP.md`](docs/ROADMAP.md) for what's missing or known wrong.
 
 ## Requirements
 
@@ -16,7 +19,8 @@ Status: early. See [`docs/DESIGN.md`](docs/DESIGN.md) for the specification and 
 - An NVIDIA GPU with the container toolkit (Vulkan), for the worker
 - HTTPS in front of Sidecar — browsers only offer WebGPU on secure pages. Use your reverse proxy, a Cloudflare Tunnel,
   or `tailscale serve`.
-- A browser with WebGPU: Safari 26 (iOS 26), or a current Chromium
+- A browser with WebGPU: Safari 26 (iOS 26), or a current Chromium. Firefox ships WebGPU on some platforms only;
+  a server-rendered fallback for browsers without it is on the [roadmap](docs/ROADMAP.md).
 
 ## Run it
 

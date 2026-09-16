@@ -77,7 +77,7 @@ fn phase(m: &MosaicInput) -> Result<(u32, u32, u32, u32, u32)> {
             let ok_block = |bx: u32, by: u32| {
                 let (x0, y0) = (bx * 3, by * 3);
                 let greens = g(x0, y0) && g(x0 + 2, y0) && g(x0 + 1, y0 + 1) && g(x0, y0 + 2) && g(x0 + 2, y0 + 2);
-                let even = (bx + by) % 2 == 0;
+                let even = (bx + by).is_multiple_of(2);
                 let (edge_v, edge_h) = if even { (2, 0) } else { (0, 2) };
                 greens && colour(oy + y0 + 1, ox + x0) == edge_v && colour(oy + y0 + 1, ox + x0 + 2) == edge_v && colour(oy + y0, ox + x0 + 1) == edge_h && colour(oy + y0 + 2, ox + x0 + 1) == edge_h
             };

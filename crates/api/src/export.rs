@@ -98,10 +98,10 @@ pub async fn create(State(app): State<Arc<App>>, ApiUser(user): ApiUser, headers
         return (StatusCode::BAD_REQUEST, "format must be jpeg or tiff").into_response();
     }
     let idem = headers.get("idempotency-key").and_then(|v| v.to_str().ok()).map(|v| format!("{}:{v}", user.id));
-    if let Some(k) = &idem {
-        if let Some(id) = app.jobs.by_idempotency.lock().unwrap().get(k).cloned() {
-            return (StatusCode::ACCEPTED, Json(json!({ "jobId": id }))).into_response();
-        }
+    if let Some(k) = &idem
+        && let Some(id) = app.jobs.by_idempotency.lock().unwrap().get(k).cloned()
+    {
+        return (StatusCode::ACCEPTED, Json(json!({ "jobId": id }))).into_response();
     }
 
     let path = rec.path.clone();

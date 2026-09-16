@@ -111,7 +111,7 @@ impl Detail {
         let band = texture(gpu, w, h, F::Rgba16Float);
         self.band.run(gpu, &mut enc, &Self::p(size), size, &[Res::View(&view(&opp)), Res::View(&view(&coarse)), Res::View(&view(&band))]);
         gpu.queue.submit([enc.finish()]);
-        let mut d: Vec<f32> = read_rgba16(gpu, &band)?.data.chunks_exact(4).map(|p| p[0]).collect();
+        let mut d: Vec<f32> = read_rgba16(gpu, &band)?.data.as_chunks::<4>().0.iter().map(|p| p[0]).collect();
         let mid = d.len() / 2;
         let (_, median, _) = d.select_nth_unstable_by(mid, f32::total_cmp);
         Ok((*median / 0.6745 / BAND_NOISE[0]).max(1e-5))
@@ -218,7 +218,7 @@ mod tests {
         assert!(sigma > 0.0);
         let out = read_rgba16(&gpu, &detail.denoise(&gpu, &tex, sigma, 100.0, 100.0)).unwrap();
         let stats = |d: &[f32]| {
-            let g: Vec<f32> = d.chunks_exact(4).map(|p| p[1]).collect();
+            let g: Vec<f32> = d.as_chunks::<4>().0.iter().map(|p| p[1]).collect();
             let mean = g.iter().sum::<f32>() / g.len() as f32;
             let var = g.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / g.len() as f32;
             (mean, var.sqrt())

@@ -10,6 +10,7 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
         with: { command: check licenses }
       - run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers libvulkan1
+      - run: cargo clippy --workspace --all-targets -- -D warnings
       # GPU tests fall back to lavapipe (software Vulkan) on CI runners.
       - run: cargo test --workspace
   parity:
