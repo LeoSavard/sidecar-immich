@@ -9,20 +9,37 @@ use crate::{Mono, RgbaF32};
 const LUMA: [f64; 3] = [0.2126, 0.7152, 0.0722];
 /// Local-contrast window, one edge: WINDOW×WINDOW samples, "roughly sixteen" per the roadmap.
 const WINDOW: i64 = 4;
+/// Box-blur radius applied before the Laplacian, "one to two pixels" per the roadmap. A bare adjacent-pixel
+/// Laplacian responds fully to single-pixel sensor noise, which has the same statistics everywhere in the
+/// frame — its Laplacian and local standard deviation both scale with the noise's own amplitude, so their
+/// ratio stays roughly constant (and comparable to a real edge's) regardless of exposure or ISO. Pre-blurring
+/// averages away noise that doesn't correlate pixel-to-pixel while barely touching real edges or texture,
+/// which occupy more than one pixel once optics and the demosaic have had their say.
+const BLUR_RADIUS: i64 = 2;
 
-/// Discrete Laplacian energy over luminance, divided by the local standard deviation over a small window —
-/// a soft high-contrast edge has a large gradient but also a large local deviation, so it scores low; crisp
-/// fine texture has a large gradient against a locally flat surround, so it scores high.
+/// Laplacian energy over a lightly blurred luminance, divided by the local standard deviation of the
+/// unblurred luminance over a small window — a soft high-contrast edge has a large gradient but also a large
+/// local deviation, so it scores low; crisp fine texture has a large gradient against a locally flat
+/// surround, so it scores high.
 pub fn focus_energy(img: &RgbaF32) -> Mono {
     let (w, h) = (img.width as usize, img.height as usize);
     let luma: Vec<f64> = img.data.as_chunks::<4>().0.iter().map(|p| LUMA[0] * p[0] as f64 + LUMA[1] * p[1] as f64 + LUMA[2] * p[2] as f64).collect();
     let (sum, sumsq) = summed_area_tables(&luma, w, h);
+    let stride = w + 1;
 
-    let at = |x: i64, y: i64| luma[y.clamp(0, h as i64 - 1) as usize * w + x.clamp(0, w as i64 - 1) as usize];
+    let blurred = |x: i64, y: i64| -> f64 {
+        let x0 = (x - BLUR_RADIUS).clamp(0, w as i64) as usize;
+        let y0 = (y - BLUR_RADIUS).clamp(0, h as i64) as usize;
+        let x1 = (x + BLUR_RADIUS + 1).clamp(0, w as i64) as usize;
+        let y1 = (y + BLUR_RADIUS + 1).clamp(0, h as i64) as usize;
+        let n = ((x1 - x0) * (y1 - y0)).max(1) as f64;
+        rect_sum(&sum, stride, x0, y0, x1, y1) / n
+    };
+
     let mut data = vec![0f32; w * h];
     for y in 0..h as i64 {
         for x in 0..w as i64 {
-            let laplacian = (4.0 * at(x, y) - at(x - 1, y) - at(x + 1, y) - at(x, y - 1) - at(x, y + 1)).abs();
+            let laplacian = (4.0 * blurred(x, y) - blurred(x - 1, y) - blurred(x + 1, y) - blurred(x, y - 1) - blurred(x, y + 1)).abs();
             let variance = window_variance(&sum, &sumsq, w, h, x, y);
             let std = variance.max(0.0).sqrt();
             let raw = laplacian / (std + 1e-3);
@@ -104,6 +121,27 @@ mod tests {
     fn a_flat_field_scores_zero() {
         let img = flat(16, 16, 0.4);
         assert!(focus_energy(&img).data.iter().all(|&v| v == 0.0));
+    }
+
+    /// Caught live: a smooth, noisy sky lit up almost entirely yellow under peaking. A bare adjacent-pixel
+    /// Laplacian divided by local std scores pure per-pixel noise at a roughly constant ratio regardless of
+    /// amplitude (both terms scale with the same noise sigma), which happened to sit above the UI's
+    /// threshold everywhere. The fix pre-blurs before the Laplacian; this pins the regression.
+    #[test]
+    fn uncorrelated_per_pixel_noise_scores_low() {
+        let n = 64;
+        let mut img = flat(n, n, 0.0);
+        let mut state: u32 = 12345;
+        for i in 0..(n * n) as usize {
+            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+            let v = ((state >> 16) & 0xff) as f32 / 255.0 * 0.1 + 0.4; // noise around 0.4, independent per pixel
+            img.data[i * 4] = v;
+            img.data[i * 4 + 1] = v;
+            img.data[i * 4 + 2] = v;
+        }
+        let energy = focus_energy(&img);
+        let mean = energy.data.iter().sum::<f32>() / energy.data.len() as f32;
+        assert!(mean < 0.3, "pure per-pixel noise should score well below the peaking threshold: mean={mean}");
     }
 
     #[test]
