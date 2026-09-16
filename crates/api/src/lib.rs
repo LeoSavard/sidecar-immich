@@ -342,6 +342,22 @@ async fn proxy(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Path(key): P
     resp
 }
 
+#[derive(Deserialize)]
+struct FocusQuery {
+    edge: Option<u32>,
+}
+
+/// Focus-peaking mask: PNG bytes at the same edge as a proxy, so the client can pair them up.
+async fn focus(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Path(key): Path<String>, Query(q): Query<FocusQuery>) -> Response {
+    if asset_for(&app, &user, &key).await.is_none() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let edge = q.edge.unwrap_or(2560);
+    let mut resp = relay(app.http.get(app.worker(&format!("/v1/assets/{key}/focus?edge={edge}"))).send().await).await;
+    resp.headers_mut().insert(header::CACHE_CONTROL, "private, max-age=86400".parse().unwrap());
+    resp
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct EditState {
@@ -431,6 +447,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/immich/assets/{id}/thumbnail", get(thumbnail))
         .route("/api/assets/{key}/meta", get(meta))
         .route("/api/assets/{key}/proxy", get(proxy))
+        .route("/api/assets/{key}/focus", get(focus))
         .route("/api/assets/{key}/edit", get(get_edit).put(put_edit))
         .route("/api/assets/{key}/loupe", axum::routing::post(loupe))
         .route("/api/exports", axum::routing::post(export::create))

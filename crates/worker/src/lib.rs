@@ -193,6 +193,16 @@ impl Worker {
         .await??;
         read_proxy(&target).await.context("proxy was not written")
     }
+
+    /// The focus-peaking mask at `edge`: PNG bytes, built (and cached) alongside the proxy at the same edge.
+    pub async fn focus(self: &Arc<Self>, key: &str, edge: u32) -> Result<Vec<u8>> {
+        let target = self.focus_path(key, edge);
+        if let Ok(bytes) = tokio::fs::read(&target).await {
+            return Ok(bytes);
+        }
+        self.proxy(key, edge).await?;
+        tokio::fs::read(&target).await.context("focus mask was not written")
+    }
 }
 
 async fn read_proxy(path: &std::path::Path) -> Option<(u32, u32, Vec<u8>)> {
@@ -410,6 +420,7 @@ pub fn router(worker: Arc<Worker>) -> Router {
         .route("/v1/ingest", post(ingest))
         .route("/v1/assets/{key}/meta", get(meta))
         .route("/v1/assets/{key}/proxy", get(proxy_handler))
+        .route("/v1/assets/{key}/focus", get(focus_handler))
         .with_state(worker)
 }
 
@@ -451,6 +462,19 @@ async fn proxy_handler(State(w): State<Arc<Worker>>, Path(key): Path<String>, Qu
             h.insert("x-process-version", PROCESS_VERSION.into());
             (h, bytes).into_response()
         }
+        Err(e) => internal(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct FocusQuery {
+    edge: Option<u32>,
+}
+
+async fn focus_handler(State(w): State<Arc<Worker>>, Path(key): Path<String>, Query(q): Query<FocusQuery>) -> Response {
+    let edge = q.edge.unwrap_or(DEFAULT_EDGE).clamp(256, 8192);
+    match w.focus(&key, edge).await {
+        Ok(bytes) => ([("content-type", "image/png")], bytes).into_response(),
         Err(e) => internal(e),
     }
 }

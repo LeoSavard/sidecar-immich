@@ -6,8 +6,12 @@ export const CLIP_HIGHS = 1;
 export const CLIP_LOWS = 2;
 export const PEAKING = 4;
 
-/** Encoded-luminance gradient across one step that counts as sharp. Low enough to catch soft subjects. */
-const PEAK_THRESHOLD = 0.1;
+/**
+ * Threshold (0…1) on the worker's focus_mask that counts as sharp. The mask is a Laplacian energy over
+ * local contrast squashed through raw / (raw + 1), so 0.5 is where a moderately sharp edge lands; a
+ * first-pass value, to tune against real photos rather than derive analytically.
+ */
+const PEAK_THRESHOLD = 0.5;
 
 const srgbDecode = (v: number) => (v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4);
 
@@ -19,6 +23,8 @@ export class ViewPass {
 	private sampler: GPUSampler;
 	private bindGroup?: GPUBindGroup;
 	private boundTexture?: GPUTexture;
+	private boundFocusMask?: GPUTexture;
+	private focusMask: GPUTexture;
 	private params = new ArrayBuffer(80);
 
 	private constructor(
@@ -30,6 +36,25 @@ export class ViewPass {
 		this.pipeline = pipeline;
 		this.ubo = device.createBuffer({ label: 'view params', size: 80, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 		this.sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
+		// Placeholder until loadFocusMask() lands the real one; never triggers peaking (0 < any threshold > 0).
+		this.focusMask = device.createTexture({ label: 'focus mask placeholder', size: [1, 1], format: 'r8unorm', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+		device.queue.writeTexture({ texture: this.focusMask }, new Uint8Array([0]), {}, [1, 1]);
+	}
+
+	/** Decode a focus_mask PNG (grayscale, from `/api/assets/{key}/focus`) and upload it as `r8unorm`. */
+	async loadFocusMask(pngBytes: ArrayBuffer) {
+		const bitmap = await createImageBitmap(new Blob([pngBytes], { type: 'image/png' }));
+		const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+		const ctx = canvas.getContext('2d')!;
+		ctx.drawImage(bitmap, 0, 0);
+		const { data } = ctx.getImageData(0, 0, bitmap.width, bitmap.height);
+		bitmap.close();
+		// Grayscale PNGs decode to RGBA with R = G = B; take the one channel we need.
+		const gray = new Uint8Array(bitmap.width * bitmap.height);
+		for (let i = 0; i < gray.length; i++) gray[i] = data[i * 4];
+		this.focusMask.destroy();
+		this.focusMask = this.device.createTexture({ label: 'focus mask', size: [bitmap.width, bitmap.height], format: 'r8unorm', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+		this.device.queue.writeTexture({ texture: this.focusMask }, gray, { bytesPerRow: bitmap.width }, [bitmap.width, bitmap.height]);
 	}
 
 	static async create(device: GPUDevice, canvas: HTMLCanvasElement, displayP3: boolean): Promise<ViewPass> {
@@ -65,16 +90,18 @@ export class ViewPass {
 		dv.setFloat32(60, 0x16 / 255, true);
 		dv.setFloat32(64, PEAK_THRESHOLD, true);
 		this.device.queue.writeBuffer(this.ubo, 0, this.params);
-		if (this.boundTexture !== developed) {
+		if (this.boundTexture !== developed || this.boundFocusMask !== this.focusMask) {
 			this.bindGroup = this.device.createBindGroup({
 				layout: this.pipeline.getBindGroupLayout(0),
 				entries: [
 					{ binding: 0, resource: { buffer: this.ubo } },
 					{ binding: 1, resource: developed.createView() },
-					{ binding: 2, resource: this.sampler }
+					{ binding: 2, resource: this.sampler },
+					{ binding: 3, resource: this.focusMask.createView() }
 				]
 			});
 			this.boundTexture = developed;
+			this.boundFocusMask = this.focusMask;
 		}
 		const encoder = this.device.createCommandEncoder();
 		const pass = encoder.beginRenderPass({

@@ -155,10 +155,11 @@
 	}
 
 	async function loadProxy(longEdge: number) {
-		const r = await api(`/api/assets/${key}/proxy?long_edge=${longEdge}`);
-		const w = Number(r.headers.get('x-width'));
-		const h = Number(r.headers.get('x-height'));
-		develop.setSource(w, h, await r.arrayBuffer());
+		const [proxyResp, focusResp] = await Promise.all([api(`/api/assets/${key}/proxy?long_edge=${longEdge}`), api(`/api/assets/${key}/focus?edge=${longEdge}`)]);
+		const w = Number(proxyResp.headers.get('x-width'));
+		const h = Number(proxyResp.headers.get('x-height'));
+		develop.setSource(w, h, await proxyResp.arrayBuffer());
+		await view.loadFocusMask(await focusResp.arrayBuffer());
 		schedule(true);
 	}
 
