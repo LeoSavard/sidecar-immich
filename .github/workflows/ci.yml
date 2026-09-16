@@ -9,7 +9,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: EmbarkStudios/cargo-deny-action@v2
         with: { command: check licenses }
-      - run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers libvulkan1
+      # LibRaw builds against zlib and libjpeg; exiftool is shelled out to when copying export metadata.
+      - run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers libvulkan1 libjpeg-dev zlib1g-dev pkg-config libimage-exiftool-perl
       - run: cargo clippy --workspace --all-targets -- -D warnings
       # GPU tests fall back to lavapipe (software Vulkan) on CI runners.
       - run: cargo test --workspace
@@ -21,7 +22,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-node@v4
         with: { node-version: 24 }
-      - run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers libvulkan1
+      # LibRaw builds against zlib and libjpeg; exiftool is shelled out to when copying export metadata.
+      - run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers libvulkan1 libjpeg-dev zlib1g-dev pkg-config libimage-exiftool-perl
       - run: cargo run -p sidecar-devtools -- shaders web/src/lib/gpu/wgsl
       - run: cargo run -p sidecar-devtools -- parity fixtures web/static/parity
       - run: cargo run -p sidecar-devtools -- parity native web/static/parity testdata/parity-out
