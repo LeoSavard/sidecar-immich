@@ -1,4 +1,5 @@
-# This server: Immich in docker (network immich_default), libraries on /mnt/volume, HTTPS through `tailscale serve`.
+# This server: Immich in docker (network immich_default), libraries on /mnt/volume, HTTPS via a Caddy
+# reverse proxy on the proxy host dialing this host's VPN address directly.
 services:
   sidecar-api:
     image: sidecar:local
@@ -11,7 +12,7 @@ services:
       - /mnt/volume/immich_library:/data:rw
       - sidecar-cache:/cache:ro
       - sidecar-state:/state
-    ports: ["127.0.0.1:8090:8080"]
+    ports: ["8090:8080"]                                 # reachable on the VPN interface, not just loopback
     security_opt: ["label=disable"]
     networks: [immich, sidecar]
     restart: unless-stopped
