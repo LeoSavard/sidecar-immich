@@ -60,11 +60,61 @@ pipeline and the same output. Until then the app should say which browsers work 
   Safari yet) and an HDR container: 10-bit AVIF with PQ or HLG (rav1e is BSD-2, so licence-compatible), or an
   ISO 21496-1 gain map as Apple writes. Settle the encoder question before the UI.
 
+**Editing non-RAW images — done, in `sidecar_raw::decoded`.** JPEG, PNG and TIFF decode in-process; HEIC runs
+an external decoder. They skip the RAW-only ingest stages (hot pixels, demosaic, highlight reconstruction all
+assume a mosaic) and join the pipeline where the RAW path does — linear light, own primaries — so
+downsampling, the focus measure, the develop pass and export are unchanged. The colour model needed no
+special case: `SourceSpace::camera_color` hands the pipeline a `CameraColor` whose "camera" space *is* sRGB
+or Display P3 with unity as-shot multipliers, so `camera::resolve` returns unity multipliers and the right
+primaries matrix, and temperature and tint become relative shifts around D65.
+
+What's left, if it's ever wanted: Adobe RGB is treated as sRGB (its primaries would be a third matrix);
+`RawInfo.source_kind` currently only hides highlight recovery in the editor, and the white-balance slider
+still reads in kelvin rather than as an explicit relative shift.
+
+The leeway varies a lot by format, and that shapes what the editor should offer. *TIFF* is the easy case when
+it's what it usually is (uncompressed or losslessly compressed, sometimes 16-bit): no artifact concerns, the
+only loss is recovery headroom. *JPEG* is 8-bit, already gamma-encoded, and typically 4:2:0
+chroma-subsampled, so aggressive tone or white-balance moves posterize and show colour-selective (mixer)
+fringing much sooner than the same move on a RAW — modest global adjustments are fine, recovery-style ones
+aren't. *HEIC* is 8- or 10-bit and usually Display P3, so it has meaningfully more room than JPEG.
+
+*The HEIC licensing trap, checked against LICENSE files rather than recalled.* libheif — the de facto
+decoder — is LGPL-3.0-or-later; linking it, even dynamically, is off limits (CLAUDE.md). HEVC also carries
+patent-pool royalty exposure (MPEG LA, HEVC Advance, …) independent of any copyright licence. So Sidecar
+links no HEIF decoder at all: it runs one as a separate program if the operator installed one, the boundary
+NOTICE already documents for ExifTool, and the published image ships none (`--build-arg HEIF=1` opts in).
+For any format Sidecar might one day *write*, **prefer AVIF**: `libavif` and `dav1d` are both BSD-2-Clause
+and AV1 is royalty-free, avoiding both problems — but note AVIF decodes AV1, not HEVC, so it is not a way to
+open the HEIC files a phone actually produces.
+
 ## Features after V1
 
 Lens correction, then crop and straighten, then local masks — in that order, and for the reason given in
 [§15 of the design](DESIGN.md#15-after-v1-lens-correction-crop-local-masks): lens correction redefines the
 geometry that crops and masks are stored in.
+
+## Specialised tools worth integrating
+
+Licences below were checked against the projects' own LICENSE files, not recalled — but re-check before
+adopting, since licences change. The pattern to watch: for anything model-based, the **weights** carry their
+own licence, separate from the code's, and are often the more restrictive of the two.
+
+**AI upscaling — viable.** Real-ESRGAN is BSD-3-Clause for both code and pretrained weights; its
+`Real-ESRGAN-ncnn-vulkan` port is MIT, and NCNN itself is BSD-3-Clause throughout. The ncnn/Vulkan route
+needs no PyTorch runtime, which suits the image — and the worker already has a Vulkan device. The two tools
+most people reach for first, chaiNNer (GPL-3.0) and Upscayl (AGPL-3.0), are both hard excludes.
+
+**Panorama stitching — viable, with a patent caveat.** OpenCV has been Apache-2.0 since 4.5, `stitching`
+module included. Hugin and Enblend/Enfuse — the traditional open-source stitching stack — are GPL, excluded.
+The caveat is patents, not copyright: OpenCV's SURF feature finder sits behind `OPENCV_ENABLE_NONFREE`; use
+ORB or AKAZE instead. No mature pure-Rust stitching crate exists, so this means an OpenCV dependency.
+
+**Context-aware auto-edit — thin.** OpenCV's `xphoto` auto white balance (gray-world, simple, learning-based)
+is Apache-2.0 and genuinely shippable. Beyond that it's mostly dead-but-permissive research code (Google's
+HDRNet is Apache-2.0 but archived and TensorFlow-1.x) or non-commercial licences (Zero-DCE is CC BY-NC 4.0,
+which blocks redistribution just as firmly as copyleft does, for a different reason). Realistic split:
+auto-WB off the shelf, auto-tone built here — published methods are always fair game, their code isn't.
 
 ## Interface
 

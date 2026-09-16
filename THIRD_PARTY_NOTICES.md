@@ -57,5 +57,12 @@ Published algorithms; implemented in `crates/color`.
 ## ExifTool — Perl licence (Artistic or GPL)
 Copyright Phil Harvey. Runs as a separate program in the image.
 
+## libheif — LGPL-3.0-or-later
+Copyright Dirk Farin. Present only in images built with `--build-arg HEIF=1`, which is not how the published
+image is built. Sidecar never links a HEIF decoder: `sidecar_raw::decoded` runs whichever one it finds as a
+separate program, the same boundary as ExifTool, so no LGPL code is linked into the Sidecar binary. Anyone
+redistributing an image built that way also inherits HEVC patent-pool obligations, which are independent of
+this copyright licence.
+
 ## Independent JPEG Group
 This software is based in part on the work of the Independent JPEG Group.

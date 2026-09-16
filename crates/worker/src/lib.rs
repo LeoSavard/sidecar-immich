@@ -129,9 +129,15 @@ impl Worker {
         let _slot = self.decode_slots.acquire().await?;
         let (k, p) = (key.clone(), path.clone());
         let meta = tokio::task::spawn_blocking(move || -> Result<Meta> {
-            let raw = RawFile::open(&p)?;
-            let mut info = raw.info();
-            info.af_point = sidecar_raw::af::af_point(&p, info.orientation_flip);
+            let info = if sidecar_raw::decoded::is_supported(&p) {
+                // Non-RAW: EXIF alone, without decoding the pixels — see `decoded::info`.
+                sidecar_raw::decoded::info(&p, &sidecar_raw::decoded::exif(&p))
+            } else {
+                let raw = RawFile::open(&p)?;
+                let mut info = raw.info();
+                info.af_point = sidecar_raw::af::af_point(&p, info.orientation_flip);
+                info
+            };
             Ok(Meta {
                 asset_key: k,
                 file_name: p.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default(),
@@ -162,20 +168,8 @@ impl Worker {
         let gpu = self.gpu.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let started = std::time::Instant::now();
-            let mut raw = RawFile::open(&path)?;
             let largest = edges.iter().map(|(e, _, _)| *e).max().unwrap_or(edge);
-            let full = match (gpu.as_deref(), raw.mosaic()) {
-                (Some(export::Kit { gpu: g, ingest, .. }), Ok(m)) => {
-                    let mul = raw.info().color.as_shot_mul;
-                    let input = sidecar_engine::MosaicInput { width: m.width, height: m.height, data: &m.data, black: m.black, white: m.white, pattern: m.pattern, period: m.period };
-                    ingest.proxy(g, &input, [mul[0] as f32, 1.0, mul[2] as f32], largest)?.oriented(m.flip)
-                }
-                _ => {
-                    let linear = raw.develop_linear(true)?;
-                    let p = proxy::build(&linear, largest);
-                    sidecar_engine::RgbaF32 { width: p.width, height: p.height, data: p.rgba }
-                }
-            };
+            let full = decode_full(&path, gpu.as_deref(), largest)?;
             // Full-resolution, on the demosaiced image, before any develop setting applies (§ ingest, not §
             // develop) — so it caches like the proxy and never has to be recomputed when a slider moves.
             let focus = sidecar_engine::focus_energy(&full);
@@ -208,6 +202,33 @@ impl Worker {
         self.proxy(key, edge).await?;
         tokio::fs::read(&target).await.context("focus mask was not written")
     }
+}
+
+/// Full-resolution linear RGBA, orientation applied, from whichever decoder this file's format needs.
+///
+/// RAW goes through LibRaw and the GPU ingest pass (normalize, hot pixels, demosaic, highlight
+/// reconstruction). A JPEG, HEIC or TIFF has had all of that done to it already by whatever wrote it, so it
+/// is decoded straight to linear light in its own primaries — the same shape, joining the pipeline at the
+/// same point. `largest` only bounds the RAW path's GPU work; the others decode at native size.
+fn decode_full(path: &std::path::Path, gpu: Option<&export::Kit>, largest: u32) -> Result<sidecar_engine::RgbaF32> {
+    if sidecar_raw::decoded::is_supported(path) {
+        let exif = sidecar_raw::decoded::exif(path);
+        let d = sidecar_raw::decoded::decode(path, &exif)?;
+        return Ok(sidecar_engine::RgbaF32 { width: d.width, height: d.height, data: d.rgba }.oriented(d.pending_flip));
+    }
+    let mut raw = RawFile::open(path)?;
+    Ok(match (gpu, raw.mosaic()) {
+        (Some(export::Kit { gpu: g, ingest, .. }), Ok(m)) => {
+            let mul = raw.info().color.as_shot_mul;
+            let input = sidecar_engine::MosaicInput { width: m.width, height: m.height, data: &m.data, black: m.black, white: m.white, pattern: m.pattern, period: m.period };
+            ingest.proxy(g, &input, [mul[0] as f32, 1.0, mul[2] as f32], largest)?.oriented(m.flip)
+        }
+        _ => {
+            let linear = raw.develop_linear(true)?;
+            let p = proxy::build(&linear, largest);
+            sidecar_engine::RgbaF32 { width: p.width, height: p.height, data: p.rgba }
+        }
+    })
 }
 
 async fn read_proxy(path: &std::path::Path) -> Option<(u32, u32, Vec<u8>)> {
@@ -268,9 +289,7 @@ fn loupe_png(w: &Worker, kit: &export::Kit, req: &LoupeRequest) -> Result<Vec<u8
     let (source, flip, sigma, color) = match session {
         Some(s) => s,
         None => {
-            let mut raw = RawFile::open(&req.path)?;
-            let color = raw.info().color;
-            let (tex, flip) = export::full_source(kit, &mut raw)?;
+            let (tex, flip, color) = export::full_source_for(kit, &req.path)?;
             let sigma = kit.detail.noise_sigma(&kit.gpu, &tex)?;
             let tex = Arc::new(tex);
             let mut sessions = w.sessions.lock().unwrap();

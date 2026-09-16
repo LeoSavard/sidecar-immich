@@ -88,7 +88,25 @@ pub const RAW_EXTENSIONS: &[&str] =
     &["nef", "nrw", "arw", "srf", "sr2", "raf", "cr2", "cr3", "crw", "dng", "orf", "rw2", "pef", "srw", "x3f", "3fr", "iiq", "erf", "mef", "mos", "rwl"];
 
 pub fn is_raw(path: &Path) -> bool {
-    path.extension().and_then(|e| e.to_str()).is_some_and(|e| RAW_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
+    has_extension(path, RAW_EXTENSIONS)
+}
+
+/// Already-developed formats Sidecar can also open, decoded by `sidecar_raw::decoded` rather than LibRaw.
+/// HEIC belongs here even though the published image ships no HEIF decoder: whether a given deployment can
+/// decode one is the worker's business, and it explains itself better than a refusal at resolution time.
+pub const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "tif", "tiff", "heic", "heif"];
+
+pub fn is_image(path: &Path) -> bool {
+    has_extension(path, IMAGE_EXTENSIONS)
+}
+
+/// Anything Sidecar will try to open, RAW or not.
+pub fn is_editable(path: &Path) -> bool {
+    is_raw(path) || is_image(path)
+}
+
+fn has_extension(path: &Path, extensions: &[&str]) -> bool {
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| extensions.contains(&e.to_ascii_lowercase().as_str()))
 }
 
 #[derive(Clone, Debug, PartialEq)]

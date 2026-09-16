@@ -74,6 +74,22 @@ pub fn detail_settings(edit: &EditParams) -> sidecar_engine::detail::DetailSetti
     }
 }
 
+/// Full-resolution linear RGB on the GPU, the orientation still to apply, and the colour model to develop it
+/// with. RAW comes from LibRaw and the demosaic; a JPEG, HEIC or TIFF was developed by whatever wrote it, so
+/// it is decoded straight to linear light and carries a colour model standing for its own primaries.
+pub fn full_source_for(kit: &Kit, path: &Path) -> Result<(wgpu::Texture, i32, sidecar_color::camera::CameraColor)> {
+    if sidecar_raw::decoded::is_supported(path) {
+        let exif = sidecar_raw::decoded::exif(path);
+        let decoded = sidecar_raw::decoded::decode(path, &exif)?;
+        let img = RgbaF32 { width: decoded.width, height: decoded.height, data: decoded.rgba };
+        return Ok((sidecar_engine::upload_rgba16(&kit.gpu, &img), decoded.pending_flip, decoded.space.camera_color()));
+    }
+    let mut raw = RawFile::open(path)?;
+    let color = raw.info().color;
+    let (texture, flip) = full_source(kit, &mut raw)?;
+    Ok((texture, flip, color))
+}
+
 /// Full-resolution camera-native linear RGB on the GPU, and the orientation still to apply.
 pub fn full_source(kit: &Kit, raw: &mut RawFile) -> Result<(wgpu::Texture, i32)> {
     let info = raw.info();
@@ -173,11 +189,8 @@ fn copy_metadata(raw: &Path, out: &Path, width: u32, height: u32) -> Result<()> 
 
 pub fn render(kit: &Kit, req: &RenderRequest, outbox: &Path, tx: &Sender<Progress>) -> Result<Progress> {
     stage(tx, "decode", 0.02);
-    let mut raw = RawFile::open(&req.path)?;
-    let info = raw.info();
-
     stage(tx, "demosaic", 0.15);
-    let (mut source, flip) = full_source(kit, &mut raw)?;
+    let (mut source, flip, color) = full_source_for(kit, &req.path)?;
 
     let settings = detail_settings(&req.edit);
     if !settings.is_noop() {
@@ -187,7 +200,7 @@ pub fn render(kit: &Kit, req: &RenderRequest, outbox: &Path, tx: &Sender<Progres
     }
 
     stage(tx, "develop", 0.45);
-    let packed = pack(&req.edit, &info.color, req.color_space);
+    let packed = pack(&req.edit, &color, req.color_space);
     let developed = kit.develop.render(&kit.gpu, &source, &packed.uniform, &packed.lut)?;
     drop(source);
     let mut img = sidecar_engine::read_rgba16(&kit.gpu, &developed)?;

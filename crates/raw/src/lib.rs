@@ -8,8 +8,10 @@ use std::ffi::{CStr, CString, c_char};
 use std::path::Path;
 
 pub mod af;
+pub mod decoded;
 pub mod proxy;
 pub use af::AfPoint;
+pub use decoded::SourceSpace;
 
 #[derive(Debug, thiserror::Error)]
 #[error("LibRaw: {0}")]
@@ -48,6 +50,21 @@ pub struct RawInfo {
     /// Set separately by `af::af_point()`, which needs the file path for ExifTool; `None` until then.
     #[serde(default)]
     pub af_point: Option<AfPoint>,
+    /// Defaults to `Raw` so metadata cached before this field existed still reads correctly.
+    #[serde(default)]
+    pub source_kind: SourceKind,
+}
+
+/// Whether the pixels came off a sensor mosaic or out of a file something else already developed. The
+/// editor offers different controls for each: there is nothing to recover from a clipped highlight in a
+/// JPEG, and its white balance is baked in rather than measured. Distinct from `SensorKind`, which also
+/// says `Other` for real RAW files with no colour-filter mosaic.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum SourceKind {
+    #[default]
+    Raw,
+    Developed,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -180,6 +197,7 @@ impl RawFile {
             captured_unix: i.timestamp,
             color: camera_color(i),
             af_point: None,
+            source_kind: SourceKind::Raw,
         }
     }
 

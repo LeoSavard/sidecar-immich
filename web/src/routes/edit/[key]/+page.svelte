@@ -43,6 +43,8 @@
 	/** Screen position (CSS px, relative to the canvas's positioned ancestor) of the AF point marker. */
 	let markerPos = $state<{ x: number; y: number } | null>(null);
 	let showAfPoint = $state(true);
+	/** A JPEG, HEIC, PNG or TIFF: something else already developed it, so some controls have nothing to act on. */
+	const developed = $derived(meta?.info.sourceKind === 'developed');
 	let displaySpace = $state<DisplaySpace>('srgb');
 	let viewport: Viewport = { zoom: 1, panX: 0, panY: 0 };
 
@@ -388,6 +390,17 @@
 
 	const signed = (v: number, digits = 0) => `${v > 0 ? '+' : ''}${v.toFixed(digits)}`;
 	const shutter = (s: number) => (s >= 1 ? `${s}s` : `1/${Math.round(1 / s)}`);
+
+	/** Camera line, skipping whatever this file didn't record — plenty of JPEGs carry almost no EXIF. */
+	const cameraLine = (info: Meta['info']) =>
+		[
+			[info.make, info.model].filter(Boolean).join(' '),
+			info.iso > 0 && `ISO ${info.iso}`,
+			info.shutterS > 0 && shutter(info.shutterS),
+			info.aperture > 0 && `f/${info.aperture}`
+		]
+			.filter(Boolean)
+			.join(' · ');
 	const TEMP_TRACK = 'linear-gradient(90deg,#5f7fb6,#9aa0a6 45%,#c9a15f)';
 	const TINT_TRACK = 'linear-gradient(90deg,#6f9f6f,#9aa0a6 50%,#b07aa6)';
 	const sections: { id: Section; label: string; short: string }[] = [
@@ -406,8 +419,8 @@
 	{#if edit}
 		<div class="grid gap-2">
 			<div class="flex items-center justify-between text-xs">
-				<span class="text-fg-2">{edit.whiteBalance.mode === 'asShot' ? 'As shot' : 'Custom'}</span>
-				<button type="button" class="rounded px-2 py-1 text-fg-2 hover:bg-raised disabled:opacity-40" disabled={edit.whiteBalance.mode === 'asShot'} onclick={() => { edit!.whiteBalance.mode = 'asShot'; changed(); committed(); }}>Reset to as shot</button>
+				<span class="text-fg-2">{edit.whiteBalance.mode === 'asShot' ? (developed ? 'As saved' : 'As shot') : 'Custom'}</span>
+				<button type="button" class="rounded px-2 py-1 text-fg-2 hover:bg-raised disabled:opacity-40" disabled={edit.whiteBalance.mode === 'asShot'} onclick={() => { edit!.whiteBalance.mode = 'asShot'; changed(); committed(); }}>Reset to {developed ? 'as saved' : 'as shot'}</button>
 			</div>
 			<Slider id="wb-temp" label="Temperature" value={edit.whiteBalance.mode === 'asShot' ? Math.round(resolvedWb.temperatureK) : edit.whiteBalance.temperatureK} min={2000} max={12000} step={10} defaultValue={Math.round(resolvedWb.temperatureK)} trackGradient={TEMP_TRACK} format={(v) => `${v} K`} onchange={(v) => setWb('temperatureK', v)} oncommit={committed} />
 			<Slider id="wb-tint" label="Tint" value={edit.whiteBalance.mode === 'asShot' ? Math.round(resolvedWb.tint) : edit.whiteBalance.tint} min={-150} max={150} defaultValue={0} bipolar trackGradient={TINT_TRACK} format={(v) => signed(v)} onchange={(v) => setWb('tint', v)} oncommit={committed} />
@@ -424,7 +437,11 @@
 			<Slider id="shadows" label="Shadows" value={curveOffset('shadows')} min={-100} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => setCurveOffset('shadows', v)} oncommit={committed} />
 			<Slider id="whites" label="Whites" value={Math.round(((4.5 - edit.tone.whiteEv) / 2) * 100)} min={-100} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => { edit!.tone.whiteEv = 4.5 - (v / 100) * 2; changed(); }} oncommit={committed} />
 			<Slider id="blacks" label="Blacks" value={Math.round(((-8 - edit.tone.blackEv) / 3) * 100)} min={-100} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => { edit!.tone.blackEv = -8 - (v / 100) * 3; changed(); }} oncommit={committed} />
-			<Slider id="hl-blend" label="Highlight recovery" value={Math.round(edit.exposure.highlightBlend * 100)} min={0} max={100} defaultValue={50} format={(v) => `${v} %`} onchange={(v) => { edit!.exposure.highlightBlend = v / 100; changed(); }} oncommit={committed} />
+			<!-- Highlight recovery reconstructs clipped sensor channels; an already-developed file has none to
+			     reconstruct, so the control would sit there doing nothing. -->
+			{#if !developed}
+				<Slider id="hl-blend" label="Highlight recovery" value={Math.round(edit.exposure.highlightBlend * 100)} min={0} max={100} defaultValue={50} format={(v) => `${v} %`} onchange={(v) => { edit!.exposure.highlightBlend = v / 100; changed(); }} oncommit={committed} />
+			{/if}
 		</div>
 	{/if}
 {/snippet}
@@ -500,7 +517,7 @@
 			<header class="flex items-center justify-between gap-3 px-6 pt-3 pb-2 lg:px-4">
 				<div class="min-w-0 text-xs text-fg-2">
 					<p class="truncate text-sm text-fg">{meta.fileName}</p>
-					<p class="truncate">{meta.info.make} {meta.info.model} · ISO {meta.info.iso} · {shutter(meta.info.shutterS)} · f/{meta.info.aperture}</p>
+					<p class="truncate">{cameraLine(meta.info)}</p>
 				</div>
 				<div class="flex shrink-0 gap-2">
 					<button type="button" class="h-9 rounded bg-raised px-3 text-sm" onclick={() => (exporting = true)}>Export</button>

@@ -200,9 +200,9 @@ async fn open(State(app): State<Arc<App>>, PageUser(user): PageUser, Query(q): Q
     };
     let query = q.name.clone().unwrap_or_default();
     match outcome {
-        Resolved::Found(c) if !sidecar_template::is_raw(&c.path) && !c.path.extension().is_some_and(|e| e.eq_ignore_ascii_case("dng")) => error_page(
+        Resolved::Found(c) if !sidecar_template::is_editable(&c.path) => error_page(
             StatusCode::UNPROCESSABLE_ENTITY,
-            &format!("Sidecar edits RAW files. {} isn't one — edit it in Immich instead.", c.file_name),
+            &format!("Sidecar can't open {} — it edits RAW files, JPEG, HEIC, PNG and TIFF.", c.file_name),
         ),
         Resolved::Found(c) => match admit(&app, &user, c).await {
             Ok(key) => Redirect::to(&format!("/edit/{key}")).into_response(),

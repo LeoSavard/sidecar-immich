@@ -1,5 +1,10 @@
 # This server: Immich in docker (network immich_default), libraries on /mnt/volume, HTTPS via a Caddy
 # reverse proxy on the proxy host dialing this host's VPN address directly.
+#
+# This library is mostly HEIC and JPEG, so the image is built with a HEIF decoder:
+#   docker build --build-arg HEIF=1 -t sidecar:local .
+# Without it everything still works except HEIC, which reports what's missing. See the Dockerfile for why
+# that decoder isn't in the published image.
 services:
   sidecar-api:
     image: sidecar:local

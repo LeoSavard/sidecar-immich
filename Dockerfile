@@ -31,6 +31,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && rm -rf /var/lib/apt/lists/* \
  && useradd --uid 1000 --create-home sidecar \
  && mkdir -p /cache /state && chown sidecar:sidecar /cache /state
+
+# Opt-in HEIC support, off in the published image. Every HEIF decoder worth having is LGPL (libheif), which
+# an Apache-2.0 image can't link, and HEVC carries patent-pool royalties regardless of the decoder's copyright
+# licence. So Sidecar never links one: it runs whatever decoder it finds as a separate program, the boundary
+# NOTICE already documents for ExifTool. Building with `--build-arg HEIF=1` installs one and accepts both
+# consequences for that build. See docs/ROADMAP.md, "Editing non-RAW images".
+ARG HEIF=0
+RUN if [ "$HEIF" = "1" ]; then \
+      apt-get update && apt-get install -y --no-install-recommends libheif-examples \
+   && rm -rf /var/lib/apt/lists/*; \
+    fi
 COPY --from=build /usr/local/bin/sidecar /usr/local/bin/sidecar
 COPY --from=build /src/web/build /usr/share/sidecar/web
 COPY LICENSE NOTICE THIRD_PARTY_NOTICES.md /usr/share/doc/sidecar/

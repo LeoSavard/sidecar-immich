@@ -1962,11 +1962,16 @@ name = "sidecar-raw"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "png",
  "serde",
  "serde_json",
  "sidecar-color",
  "sidecar-libraw-sys",
+ "sidecar-template",
+ "tempfile",
  "thiserror",
+ "tiff",
+ "zune-jpeg",
 ]
 
 [[package]]
