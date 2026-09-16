@@ -66,6 +66,21 @@ Lens correction, then crop and straighten, then local masks — in that order, a
 [§15 of the design](DESIGN.md#15-after-v1-lens-correction-crop-local-masks): lens correction redefines the
 geometry that crops and masks are stored in.
 
+## Interface
+
+**Hide the editing tools.** A circled-i toggle in the canvas's top-left corner (a different corner from the
+existing clip/peaking/AF-point toggles, top-right) collapses the sidebar — file/camera details, the develop
+sliders, Export/Save — into a compact center bar: the section tabs (WB · Light · Curve · Color · Detail) stay
+reachable, so switching tools still works, but everything else shrinks to its smallest useful form and the
+photo gets the rest of the viewport. Client-only state, no sidecar involved.
+
+The same panel is the right place to put output space (sRGB / Display P3) inline, instead of only reachable
+by leaving the editor for `/settings`. This is wiring, not an architecture change: `ViewPass.create`'s
+`context.configure({ colorSpace })` in `web/src/lib/gpu/view.ts` only runs once today, but a
+`GPUCanvasContext` can be reconfigured live — switching mid-edit means calling `configure()` again with the
+new colour space and re-packing the develop uniforms (`packer.pack(source, meta.info.color, display)`) for
+the new `DisplaySpace`, then `schedule(true)`.
+
 ## Housekeeping
 
 - The Rust sources are hand-wrapped well past rustfmt's comfort at any `max_width`; either adopt a formatter
