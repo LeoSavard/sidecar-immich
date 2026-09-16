@@ -39,6 +39,23 @@ fn creates_reads_back_and_keeps_etag() {
 }
 
 #[test]
+fn lens_round_trips_and_is_absent_from_disk_when_off() {
+    let tmp = tempfile::tempdir().unwrap();
+    let roots = [tmp.path().canonicalize().unwrap()];
+    let original = fixture(tmp.path(), "f.NEF");
+    update(&original, &roots, |d| d.set_edit(&EditParams::default(), "x")).unwrap();
+    let text = std::fs::read_to_string(tmp.path().join("f.NEF.xmp")).unwrap();
+    assert!(!text.contains("Lens"), "no sc:Lens should be written while lens is absent: {text}");
+
+    let mut edit = EditParams::default();
+    edit.lens = Some(sidecar_color::params::Lens { profile: "fujifilm/xf16mmf14".into(), distortion: 80.0, ..Default::default() });
+    update(&original, &roots, |d| d.set_edit(&edit, "x")).unwrap();
+    let doc = SidecarDoc::load(&original).unwrap();
+    assert_eq!(doc.edit(), edit);
+    assert_eq!(doc.edit().lens.unwrap().profile, "fujifilm/xf16mmf14");
+}
+
+#[test]
 fn preserves_lightroom_fields_and_uses_the_existing_stem_sidecar() {
     let tmp = tempfile::tempdir().unwrap();
     let roots = [tmp.path().canonicalize().unwrap()];

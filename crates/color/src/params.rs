@@ -19,6 +19,8 @@ pub struct EditParams {
     pub tone: Tone,
     pub mixer: Mixer,
     pub detail: Detail,
+    /// Absent means off: photos edited before this field existed render unchanged. See DESIGN.md §15.
+    pub lens: Option<Lens>,
 }
 
 impl Default for EditParams {
@@ -30,6 +32,7 @@ impl Default for EditParams {
             tone: Tone::default(),
             mixer: Mixer::default(),
             detail: Detail::default(),
+            lens: None,
         }
     }
 }
@@ -125,6 +128,25 @@ pub struct Detail {
 impl Default for Detail {
     fn default() -> Self {
         Self { sharpen_amount: 0.0, sharpen_radius: 1.0, sharpen_iterations: 10, denoise_luminance: 0.0, denoise_chroma: 0.0 }
+    }
+}
+
+/// Distortion, lateral CA and vignetting from a matched profile. Not yet applied by `pack`; the shader and
+/// worker wiring lands separately (DESIGN.md §15).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Lens {
+    /// The matched profile: a DNG opcode marker, or `"maker/model"` from the lensfun database.
+    pub profile: String,
+    /// Correction strength, 0…100; 100 is the full profile-modeled correction.
+    pub distortion: f64,
+    pub lateral_ca: f64,
+    pub vignetting: f64,
+}
+
+impl Default for Lens {
+    fn default() -> Self {
+        Self { profile: String::new(), distortion: 100.0, lateral_ca: 100.0, vignetting: 100.0 }
     }
 }
 
@@ -242,5 +264,22 @@ mod tests {
         assert_eq!(e.exposure.ev, 0.65);
         assert_eq!(e.mixer.blue.luminance, -35.0);
         assert_eq!(e.tone.white_ev, 4.5);
+        assert_eq!(e.lens, None);
+    }
+
+    #[test]
+    fn lens_absent_by_default_present_when_set() {
+        assert_eq!(EditParams::default().lens, None);
+
+        let json = r#"{"lens":{"profile":"fujifilm/xf16mmf14","distortion":80}}"#;
+        let e: EditParams = serde_json::from_str(json).unwrap();
+        let lens = e.lens.clone().expect("lens present");
+        assert_eq!(lens.profile, "fujifilm/xf16mmf14");
+        assert_eq!(lens.distortion, 80.0);
+        assert_eq!(lens.lateral_ca, 100.0);
+        assert_eq!(lens.vignetting, 100.0);
+
+        let round_tripped: EditParams = serde_json::from_value(serde_json::to_value(&e).unwrap()).unwrap();
+        assert_eq!(round_tripped, e);
     }
 }
