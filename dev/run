@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Run a command inside the Sidecar dev container with the GPU, repo and build caches mounted.
+# The container runs as root (toolchains and caches live there); files it creates in the repo are handed
+# back to the invoking user afterwards.
+set -euo pipefail
+here="$(cd "$(dirname "$0")/.." && pwd)"
+uid="$(id -u)"; gid="$(id -g)"
+tty=""; [ -t 0 ] && tty="-t"
+exec docker run --rm -i $tty \
+  --device nvidia.com/gpu=all -e NVIDIA_DRIVER_CAPABILITIES=all \
+  --security-opt label=disable \
+  -v "$here":/src -v sidecar-dev-cache:/cache \
+  ${SIDECAR_DEV_EXTRA:-} \
+  -w /src sidecar-dev bash -c '"$@"; rc=$?; find /src -xdev -user 0 -not -path "/src/.git/*" -exec chown '"$uid:$gid"' {} + 2>/dev/null; exit $rc' _ "$@"

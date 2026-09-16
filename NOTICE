@@ -1,0 +1,18 @@
+Sidecar
+Copyright Sidecar contributors
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+Sidecar builds on the work of others. Full licence texts for every dependency and ported file are in
+THIRD_PARTY_NOTICES.md, which ships in the Docker image at /usr/share/doc/sidecar/.
+
+- LibRaw — LibRaw LLC, used under CDDL-1.0; LibRaw builds on dcraw by Dave Coffin.
+- vkdt — Johannes Hanika (BSD-2-Clause): demosaic, highlight, denoise and deconvolution shaders ported to WGSL.
+- ACES Reference Gamut Compression — Academy Software Foundation (Apache-2.0).
+- OKLab — Björn Ottosson.
+- Adobe XMP Toolkit — Adobe (BSD-3-Clause), via xmp_toolkit (MIT OR Apache-2.0).
+- ExifTool — Phil Harvey (Perl licence: Artistic or GPL), run as a separate program.
+- mozjpeg and libjpeg-turbo — this software is based in part on the work of the Independent JPEG Group.
+- Compact-ICC-Profiles — Clinton Ingram (CC0-1.0).
+- Free blue-noise textures — Christoph Peters (CC0-1.0).
+- wgpu and naga — the wgpu contributors (MIT OR Apache-2.0).

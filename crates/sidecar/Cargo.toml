@@ -1,0 +1,17 @@
+[package]
+name = "sidecar"
+description = "Sidecar: a RAW editor beside Immich. One binary; `sidecar api` and `sidecar worker` run as separate containers."
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+clap.workspace = true
+reqwest.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+sidecar-api.workspace = true
+sidecar-worker.workspace = true

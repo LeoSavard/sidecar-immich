@@ -1,0 +1,16 @@
+[package]
+name = "sidecar-color"
+description = "White balance, camera matrices, tone curve LUTs and develop-uniform packing (native and wasm32)"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+bytemuck.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+naga.workspace = true
+sidecar-shaders.workspace = true

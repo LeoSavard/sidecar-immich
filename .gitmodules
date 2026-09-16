@@ -1,0 +1,4 @@
+[submodule "third_party/libraw"]
+	path = third_party/libraw
+	url = https://github.com/LibRaw/LibRaw.git
+	branch = master

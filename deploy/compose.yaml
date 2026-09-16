@@ -1,0 +1,39 @@
+# Example deployment. Put HTTPS in front of port 8080 (your reverse proxy, a Cloudflare Tunnel, or `tailscale serve`).
+services:
+  sidecar-api:
+    image: ghcr.io/OWNER/sidecar:latest
+    command: ["api", "--config", "/etc/sidecar.toml"]
+    user: "1000:1000"                                   # the owner of your photo files
+    volumes:
+      - ./sidecar.toml:/etc/sidecar.toml:ro
+      - ./immich-admin-key:/run/secrets/immich_admin_key:ro   # optional, job.create only
+      - /path/to/photos:/photos:rw                      # sidecar writer only creates *.xmp files
+      - sidecar-cache:/cache:ro
+      - sidecar-state:/state
+    ports: ["8080:8080"]
+    networks: [immich, sidecar]
+    restart: unless-stopped
+
+  sidecar-worker:
+    image: ghcr.io/OWNER/sidecar:latest
+    command: ["worker", "--listen", "0.0.0.0:8081", "--cache", "/cache"]
+    read_only: true
+    cap_drop: [ALL]
+    volumes:
+      - /path/to/photos:/photos:ro
+      - sidecar-cache:/cache
+    tmpfs: [/tmp]
+    deploy:
+      resources:
+        reservations:
+          devices: [{ driver: nvidia, count: 1, capabilities: [gpu] }]
+    networks: [sidecar]
+    restart: unless-stopped
+
+volumes:
+  sidecar-cache: {}
+  sidecar-state: {}
+
+networks:
+  immich: { external: true, name: immich_default }
+  sidecar: { internal: true }

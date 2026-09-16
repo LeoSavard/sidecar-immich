@@ -1,0 +1,12 @@
+[package]
+name = "sidecar-libraw-sys"
+description = "Static build of the pinned LibRaw in third_party/libraw (used under CDDL-1.0) and a flat C shim"
+edition.workspace = true
+version.workspace = true
+# Sidecar's own code in this crate is Apache-2.0; the LibRaw sources it compiles are CDDL-1.0.
+license = "Apache-2.0 AND CDDL-1.0"
+links = "raw"
+build = "build.rs"
+
+[build-dependencies]
+cc = "1"

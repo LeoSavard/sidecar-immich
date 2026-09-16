@@ -1,0 +1,40 @@
+# This server: Immich in docker (network immich_default), libraries on /mnt/volume, HTTPS through `tailscale serve`.
+services:
+  sidecar-api:
+    image: sidecar:local
+    command: ["api", "--config", "/etc/sidecar.toml"]
+    user: "1000:1000"
+    volumes:
+      - ./sidecar.toml:/etc/sidecar.toml:ro
+      - ${HOME}/.config/sidecar/immich-admin-key:/run/secrets/immich_admin_key:ro
+      - /mnt/volume/Photography:/mnt/volume/Photography:rw
+      - /mnt/volume/immich_library:/data:rw
+      - sidecar-cache:/cache:ro
+      - sidecar-state:/state
+    ports: ["127.0.0.1:8090:8080"]
+    security_opt: ["label=disable"]
+    networks: [immich, sidecar]
+    restart: unless-stopped
+
+  sidecar-worker:
+    image: sidecar:local
+    command: ["worker", "--listen", "0.0.0.0:8081", "--cache", "/cache"]
+    read_only: true
+    cap_drop: [ALL]
+    volumes:
+      - /mnt/volume/Photography:/mnt/volume/Photography:ro
+      - /mnt/volume/immich_library:/data:ro
+      - sidecar-cache:/cache
+    tmpfs: [/tmp]
+    security_opt: ["label=disable"]
+    devices: ["nvidia.com/gpu=all"]                     # CDI device from the NVIDIA container toolkit
+    networks: [sidecar]
+    restart: unless-stopped
+
+volumes:
+  sidecar-cache: {}
+  sidecar-state: {}
+
+networks:
+  immich: { external: true, name: immich_default }
+  sidecar: { internal: true }

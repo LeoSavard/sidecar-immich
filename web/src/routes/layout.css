@@ -1,0 +1,36 @@
+@import 'tailwindcss';
+
+/* Neutral surfaces from Carbon's Gray 100 theme. A tinted UI shifts how the eye reads white balance, so the only
+   saturated colours on screen are the clip overlays. */
+@theme {
+	--color-ground: #161616;
+	--color-panel: #262626;
+	--color-raised: #393939;
+	--color-line: #393939;
+	--color-fg: #f4f4f4;
+	--color-fg-2: #c6c6c6;
+	--color-muted: #8d8d8d;
+	--color-danger: #ff8389;
+	--font-sans: 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
+	--font-mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+}
+
+html,
+body {
+	background: var(--color-ground);
+	color: var(--color-fg);
+	-webkit-text-size-adjust: 100%;
+	overscroll-behavior: none;
+}
+
+:focus-visible {
+	outline: 2px solid var(--color-fg);
+	outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	* {
+		transition: none !important;
+		animation: none !important;
+	}
+}

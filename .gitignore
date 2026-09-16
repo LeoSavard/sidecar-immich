@@ -1,0 +1,9 @@
+/target
+node_modules
+/web/.svelte-kit
+/web/build
+/web/static/parity
+/web/src/lib/gpu/wgsl/*.wgsl
+/testdata/cache
+/testdata/parity-out
+/web/src/lib/color/sidecar_color.wasm

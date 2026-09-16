@@ -1,0 +1,27 @@
+[package]
+name = "sidecar-worker"
+description = "Sidecar worker: RAW decoding, proxies and GPU rendering. Mounts the libraries read-only."
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+png.workspace = true
+wgpu.workspace = true
+futures-util.workspace = true
+jpeg-encoder.workspace = true
+tiff.workspace = true
+tokio-stream.workspace = true
+sidecar-xmp.workspace = true
+anyhow.workspace = true
+axum.workspace = true
+half.workspace = true
+hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha1.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+sidecar-color.workspace = true
+sidecar-raw.workspace = true
+sidecar-engine.workspace = true

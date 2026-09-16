@@ -1,0 +1,18 @@
+# cargo-deny: licence allowlist for everything that ends up in the published image.
+[licenses]
+allow = [
+  "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "MIT", "MIT-0", "BSD-2-Clause", "BSD-3-Clause",
+  "ISC", "Zlib", "Unicode-3.0", "IJG", "CC0-1.0",
+]
+confidence-threshold = 0.9
+
+# LibRaw is used under its CDDL-1.0 option, only through libraw-sys.
+[[licenses.exceptions]]
+crate = "sidecar-libraw-sys"
+allow = ["CDDL-1.0"]
+
+[bans]
+multiple-versions = "allow"
+
+[advisories]
+ignore = []

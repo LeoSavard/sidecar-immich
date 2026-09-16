@@ -1,0 +1,13 @@
+[package]
+name = "sidecar-raw"
+description = "Safe RAW decoding over LibRaw: metadata, camera colour, linear camera-RGB proxies"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+sidecar-color.workspace = true
+sidecar-libraw-sys = { path = "../libraw-sys" }

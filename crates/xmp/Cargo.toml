@@ -1,0 +1,19 @@
+[package]
+name = "sidecar-xmp"
+description = "The sc:Sidecar schema inside XMP sidecars, read-modify-write through Adobe's XMP Toolkit"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+hex.workspace = true
+thiserror.workspace = true
+xmp_toolkit = "1.12"
+sidecar-color.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

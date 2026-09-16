@@ -1,0 +1,28 @@
+# Development against the real Immich on this server (dev container on the host network).
+# Libraries are mounted read-only by ./dev/serve, so edits can't be saved to them from this config.
+[server]
+listen = "127.0.0.1:8090"
+worker_url = "http://127.0.0.1:8091"
+web_root = "/src/web/build"
+state_dir = "/cache/sidecar-dev/state-immich"
+secure_cookies = false
+allow_path_open = true
+
+[immich]
+url = "http://127.0.0.1:2283"
+
+[[roots]]
+name          = "external"
+immich_prefix = "/mnt/volume/Photography/Library"
+mount         = "/mnt/volume/Photography/Library"
+template      = "{{y}}/{{MM}}.{{MMMM}}/{{y}}-{{MM}}-{{dd}}/{{filename}}"
+month_locale  = "en"
+
+[[roots]]
+name          = "internal"
+immich_prefix = "/data/library"
+mount         = "/data/library"
+template      = "{{y}}/{{MM}}.{{MMMM}}/{{y}}-{{MM}}-{{dd}}/{{filename}}"
+month_locale  = "en"
+moves_files   = true
+per_user      = true

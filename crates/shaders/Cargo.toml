@@ -1,0 +1,12 @@
+[package]
+name = "sidecar-shaders"
+description = "WGSL sources shared by the browser and the worker, with `//! requires:` composition"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+
+[dev-dependencies]
+naga.workspace = true

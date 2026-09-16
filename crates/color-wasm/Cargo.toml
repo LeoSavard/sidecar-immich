@@ -1,0 +1,15 @@
+[package]
+name = "sidecar-color-wasm"
+description = "sidecar-color for the browser: packs develop uniforms from edit parameters (plain wasm32 exports)"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sidecar-color.workspace = true

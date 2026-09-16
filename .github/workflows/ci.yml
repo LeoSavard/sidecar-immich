@@ -1,0 +1,29 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { submodules: true }
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with: { command: check licenses }
+      - run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers libvulkan1
+      # GPU tests fall back to lavapipe (software Vulkan) on CI runners.
+      - run: cargo test --workspace
+  parity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { submodules: true }
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with: { node-version: 24 }
+      - run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers libvulkan1
+      - run: cargo run -p sidecar-devtools -- shaders web/src/lib/gpu/wgsl
+      - run: cargo run -p sidecar-devtools -- parity fixtures web/static/parity
+      - run: cargo run -p sidecar-devtools -- parity native web/static/parity testdata/parity-out
+      - working-directory: web
+        run: npm ci && npx playwright install --with-deps chromium && npm run build && node scripts/parity-browser.mjs ../testdata/parity-out --swiftshader
+      - run: cargo run -p sidecar-devtools -- parity compare web/static/parity testdata/parity-out

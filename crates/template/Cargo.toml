@@ -1,0 +1,12 @@
+[package]
+name = "sidecar-template"
+description = "Immich-style storage templates: render a folder for a capture date and find an original by stem"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

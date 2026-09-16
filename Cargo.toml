@@ -1,0 +1,50 @@
+[workspace]
+resolver = "3"
+members = [
+  "crates/shaders", "crates/color", "crates/color-wasm", "crates/engine", "crates/devtools",
+  "crates/libraw-sys", "crates/raw", "crates/template", "crates/xmp", "crates/worker", "crates/api", "crates/sidecar",
+]
+
+[workspace.package]
+edition = "2024"
+license = "Apache-2.0"
+version = "0.1.0"
+repository = "https://github.com/<you>/sidecar"
+
+[workspace.dependencies]
+anyhow = "1"
+axum = "0.8"
+base64 = "0.22"
+chacha20poly1305 = "0.10"
+getrandom = "0.3"
+clap = { version = "4", features = ["derive"] }
+hex = "0.4"
+futures-util = "0.3"
+jpeg-encoder = "0.7"
+tiff = "0.11"
+tokio-stream = "0.1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "multipart"] }
+sha1 = "0.10"
+tokio = { version = "1", features = ["full"] }
+toml = "0.8"
+tower-http = { version = "0.6", features = ["fs", "compression-br", "compression-zstd", "compression-gzip", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt"] }
+bytemuck = { version = "1", features = ["derive"] }
+naga = { version = "30", features = ["wgsl-in"] }
+half = { version = "2", features = ["bytemuck"] }
+palette = "0.7"
+png = "0.18"
+pollster = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+wgpu = "30"
+sidecar-shaders = { path = "crates/shaders" }
+sidecar-color = { path = "crates/color" }
+sidecar-engine = { path = "crates/engine" }
+sidecar-raw = { path = "crates/raw" }
+sidecar-template = { path = "crates/template" }
+sidecar-xmp = { path = "crates/xmp" }
+sidecar-worker = { path = "crates/worker" }
+sidecar-api = { path = "crates/api" }

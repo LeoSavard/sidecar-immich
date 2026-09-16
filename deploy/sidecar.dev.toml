@@ -1,0 +1,30 @@
+# Development config for ./dev/serve — libraries mounted read-only at the same paths as on the host.
+[server]
+listen = "0.0.0.0:8080"
+worker_url = "http://127.0.0.1:8081"
+web_root = "/src/web/build"
+state_dir = "/cache/sidecar-dev/state"
+secure_cookies = false
+allow_path_open = true
+
+[immich]
+# Empty: no sign-in, no Immich lookups (local development). Set to http://immich_server:2283 to use Immich.
+url = ""
+
+# A writable copy for testing sidecar writes. The real library below is mounted read-only.
+[[roots]]
+name          = "test"
+immich_prefix = "/testlib"
+mount         = "/src/testdata/cache/library"
+template      = "{{y}}/{{MM}}.{{MMMM}}/{{y}}-{{MM}}-{{dd}}/{{filename}}"
+month_locale  = "en"
+moves_files   = false
+
+[[roots]]
+name          = "external"
+# The template starts at Library/. Confirm Immich's external-library import path matches once a key is set up.
+immich_prefix = "/mnt/volume/Photography/Library"
+mount         = "/mnt/volume/Photography/Library"
+template      = "{{y}}/{{MM}}.{{MMMM}}/{{y}}-{{MM}}-{{dd}}/{{filename}}"
+month_locale  = "en"
+moves_files   = false

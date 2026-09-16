@@ -1,0 +1,29 @@
+[server]
+listen = "0.0.0.0:8080"
+worker_url = "http://sidecar-worker:8081"
+web_root = "/usr/share/sidecar/web"
+state_dir = "/state"
+secure_cookies = true
+allow_path_open = false
+
+[immich]
+url = "http://immich_server:2283"
+admin_api_key_file = "/run/secrets/immich_admin_key"
+
+# Same container paths as immich_server, so originalPath maps directly.
+[[roots]]
+name          = "external"
+immich_prefix = "/mnt/volume/Photography/Library"
+mount         = "/mnt/volume/Photography/Library"
+template      = "{{y}}/{{MM}}.{{MMMM}}/{{y}}-{{MM}}-{{dd}}/{{filename}}"
+month_locale  = "en"
+moves_files   = false
+
+[[roots]]
+name          = "internal"
+immich_prefix = "/data/library"
+mount         = "/data/library"
+template      = "{{y}}/{{MM}}.{{MMMM}}/{{y}}-{{MM}}-{{dd}}/{{filename}}"
+month_locale  = "en"
+moves_files   = true
+per_user      = true

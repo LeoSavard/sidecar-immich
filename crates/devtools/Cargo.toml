@@ -1,0 +1,23 @@
+[package]
+name = "sidecar-devtools"
+description = "Developer commands: compose shaders for the web app, WebGPU parity fixtures and comparison"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+publish = false
+
+[[bin]]
+name = "sidecar-dev"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+bytemuck.workspace = true
+palette.workspace = true
+png.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sidecar-color.workspace = true
+sidecar-engine.workspace = true
+sidecar-raw = { path = "../raw" }
+sidecar-shaders.workspace = true

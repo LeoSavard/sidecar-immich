@@ -1,0 +1,18 @@
+{
+	"name": "Sidecar",
+	"short_name": "Sidecar",
+	"description": "A RAW editor beside Immich",
+	"start_url": "/",
+	"display": "standalone",
+	"background_color": "#161616",
+	"theme_color": "#161616",
+	"icons": [{ "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }],
+	"share_target": {
+		"action": "/share",
+		"method": "POST",
+		"enctype": "multipart/form-data",
+		"params": {
+			"files": [{ "name": "media", "accept": ["image/*", "application/octet-stream", ".nef", ".nrw", ".arw", ".dng", ".cr2", ".cr3", ".raf", ".orf", ".rw2", ".pef", ".srw"] }]
+		}
+	}
+}

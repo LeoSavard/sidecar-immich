@@ -1,0 +1,17 @@
+[package]
+name = "sidecar-engine"
+description = "Headless wgpu device and the develop pass, shared by the worker and the parity harness"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+bytemuck.workspace = true
+half.workspace = true
+pollster.workspace = true
+wgpu.workspace = true
+sidecar-shaders.workspace = true
+
+[dev-dependencies]
+naga.workspace = true
