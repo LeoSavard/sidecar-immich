@@ -178,12 +178,17 @@ impl Gpu {
                 .await
                 .context("no GPU adapter")?;
             let adapter_info = adapter.get_info();
+            // What full-resolution work wants, clamped to what this adapter offers: software Vulkan (CI) caps
+            // allocations at 2 GB and would otherwise refuse the device outright.
+            let have = adapter.limits();
+            let limits = wgpu::Limits {
+                max_texture_dimension_2d: have.max_texture_dimension_2d.min(16384),
+                max_storage_textures_per_shader_stage: have.max_storage_textures_per_shader_stage.min(8),
+                max_buffer_size: have.max_buffer_size.min(u32::MAX as u64),
+                ..wgpu::Limits::default()
+            };
             let (device, queue) = adapter
-                .request_device(&wgpu::DeviceDescriptor {
-                    label: Some("sidecar"),
-                    required_limits: wgpu::Limits { max_texture_dimension_2d: 16384, max_storage_textures_per_shader_stage: 8, max_buffer_size: u32::MAX as u64, ..wgpu::Limits::default() },
-                    ..Default::default()
-                })
+                .request_device(&wgpu::DeviceDescriptor { label: Some("sidecar"), required_limits: limits, ..Default::default() })
                 .await
                 .context("requesting GPU device")?;
             Ok(Self { adapter_info, device, queue })
