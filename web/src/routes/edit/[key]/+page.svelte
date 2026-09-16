@@ -42,6 +42,7 @@
 	let detailOpen = $state(false);
 	/** Screen position (CSS px, relative to the canvas's positioned ancestor) of the AF point marker. */
 	let markerPos = $state<{ x: number; y: number } | null>(null);
+	let showAfPoint = $state(true);
 	let displaySpace = $state<DisplaySpace>('srgb');
 	let viewport: Viewport = { zoom: 1, panX: 0, panY: 0 };
 
@@ -467,7 +468,7 @@
 			onpointercancel={canvasUp}
 			oncontextmenu={(e) => e.preventDefault()}
 		></canvas>
-		{#if markerPos}
+		{#if markerPos && showAfPoint}
 			<button
 				type="button"
 				class="absolute h-7 w-7 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-[#fadb26] shadow-[0_0_0_1px_rgba(0,0,0,0.4)]"
@@ -486,6 +487,9 @@
 			{/if}
 			{#if !wide}
 				<button type="button" aria-pressed={peaking} class="rounded-full px-2.5 py-1 text-[0.6875rem] {peaking ? 'bg-fg text-ground' : 'bg-ground/80 text-fg-2'}" onclick={() => { peaking = !peaking; schedule(); }}>Focus</button>
+				{#if meta?.info.afPoint}
+					<button type="button" aria-pressed={showAfPoint} class="rounded-full px-2.5 py-1 text-[0.6875rem] {showAfPoint ? 'bg-fg text-ground' : 'bg-ground/80 text-fg-2'}" onclick={() => (showAfPoint = !showAfPoint)}>AF</button>
+				{/if}
 			{/if}
 		</div>
 	</div>
@@ -523,7 +527,12 @@
 			<div class="px-4 pb-2">
 				<Histogram data={histogram} {clipHigh} {clipLow} ontoggle={(w) => { if (w === 'high') clipHigh = !clipHigh; else clipLow = !clipLow; schedule(); }} />
 				<div class="mt-1 flex items-center justify-between gap-2 text-[0.6875rem]">
-					<button type="button" aria-pressed={peaking} class="rounded-full px-2 py-0.5 {peaking ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" onclick={() => { peaking = !peaking; schedule(); }}>Focus peaking</button>
+					<div class="flex items-center gap-2">
+						<button type="button" aria-pressed={peaking} class="rounded-full px-2 py-0.5 {peaking ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" onclick={() => { peaking = !peaking; schedule(); }}>Focus peaking</button>
+						{#if meta?.info.afPoint}
+							<button type="button" aria-pressed={showAfPoint} class="rounded-full px-2 py-0.5 {showAfPoint ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" onclick={() => (showAfPoint = !showAfPoint)}>AF point</button>
+						{/if}
+					</div>
 					<a href="/settings" class="text-fg-2">Viewing and exporting in {SPACE_LABELS[displaySpace]}</a>
 				</div>
 			</div>
