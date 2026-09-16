@@ -22,9 +22,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-node@v4
         with: { node-version: 24 }
+      - run: rustup target add wasm32-unknown-unknown
       # LibRaw builds against zlib and libjpeg; exiftool is shelled out to when copying export metadata.
       - run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers libvulkan1 libjpeg-dev zlib1g-dev pkg-config libimage-exiftool-perl
+      # The web app imports generated files that are not in git: the composed WGSL and the colour maths as wasm.
       - run: cargo run -p sidecar-devtools -- shaders web/src/lib/gpu/wgsl
+      - run: cargo build --release -p sidecar-color-wasm --target wasm32-unknown-unknown
+      - run: cp target/wasm32-unknown-unknown/release/sidecar_color_wasm.wasm web/src/lib/color/sidecar_color.wasm
       - run: cargo run -p sidecar-devtools -- parity fixtures web/static/parity
       - run: cargo run -p sidecar-devtools -- parity native web/static/parity testdata/parity-out
       - working-directory: web
