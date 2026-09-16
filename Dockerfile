@@ -17,9 +17,13 @@ RUN --mount=type=cache,target=/root/.npm cd web && npm ci --no-audit --no-fund &
 
 FROM debian:trixie-slim
 ARG VERSION=dev
+ARG REVISION=unknown
+# `image.source` is what links the package to its repository on GHCR, including its visibility.
 LABEL org.opencontainers.image.title="Sidecar" \
       org.opencontainers.image.description="A RAW editor beside Immich" \
+      org.opencontainers.image.source="https://github.com/LeoSavard/sidecar-immich" \
       org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.revision="${REVISION}" \
       org.opencontainers.image.version="${VERSION}"
 # libEGL, libXext and libX11 are needed by NVIDIA's Vulkan driver inside containers.
 RUN apt-get update && apt-get install -y --no-install-recommends \

@@ -1,7 +1,7 @@
 # Example deployment. Put HTTPS in front of port 8080 (your reverse proxy, a Cloudflare Tunnel, or `tailscale serve`).
 services:
   sidecar-api:
-    image: ghcr.io/OWNER/sidecar:latest
+    image: ghcr.io/leosavard/sidecar-immich:latest
     command: ["api", "--config", "/etc/sidecar.toml"]
     user: "1000:1000"                                   # the owner of your photo files
     volumes:
@@ -15,7 +15,7 @@ services:
     restart: unless-stopped
 
   sidecar-worker:
-    image: ghcr.io/OWNER/sidecar:latest
+    image: ghcr.io/leosavard/sidecar-immich:latest
     command: ["worker", "--listen", "0.0.0.0:8081", "--cache", "/cache"]
     read_only: true
     cap_drop: [ALL]
