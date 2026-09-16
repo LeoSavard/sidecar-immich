@@ -15,8 +15,11 @@ jobs:
         with: { submodules: true }
       - uses: dtolnay/rust-toolchain@stable
       - name: Third-party notices
+        # cargo-about puts its binary behind the `cli` feature: without it the install "succeeds" and
+        # installs nothing. Pinned so a future release can't change the interface under a tag push.
         run: |
-          cargo install --locked cargo-about
+          cargo install --locked cargo-about --version "^0.9" --features cli
+          cargo about --version
           cargo about generate about.hbs >> THIRD_PARTY_NOTICES.md
       # GHCR rejects uppercase names, and the owner here is mixed case. `latest` follows real releases only:
       # a tag containing a hyphen (v0.2.0-rc1) is a prerelease and must not move it.
