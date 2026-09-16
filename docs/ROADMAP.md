@@ -13,6 +13,29 @@ encoded space was built and measured: it raises +2 EV to 0.63 but pushes shadow 
 −2 EV, which is worse. A straight segment in *log-log* space holds ~0.98 at +1 EV with neutral shadows and
 costs highlights above +2 EV. Either is a `ProcessVersion` bump. Decide with pictures, not slopes.
 
+**Focus peaking measures the wrong thing.** It runs in the view pass over the proxy, where downsampling has
+already averaged the high frequencies away, so it reports edge *contrast* rather than sharpness: a soft
+high-contrast edge keeps a large gradient across two texels while crisp fine texture has no signal left.
+Peaking has to be measured at full resolution.
+
+The plan: the worker computes a focus measure on the full-resolution demosaiced luminance — high-frequency
+energy (a Laplacian or difference-of-Gaussians at one to two pixels) normalized by the local standard
+deviation over roughly sixteen, so crisp detail beats a blurred edge of the same contrast. Because it reads
+the demosaiced image and not the developed one, it does not change when a slider moves: cache it per
+`assetKey + ProcessVersion`, like the proxy. Reduce to proxy resolution by **max**-pooling, never averaging —
+a single sharp pixel in a cell has to survive. Ship it as an 8-bit single-channel layer (mostly flat, so PNG
+carries it cheaply), upload as `r8unorm`, and sample it as a third binding in the view pass, with the
+threshold applied client-side so it stays live. `GET /api/assets/{key}/focus?edge=…` relaying a worker
+`/v1/focus`.
+
+**AF points from the RAW** are a separate, complementary overlay, not a driver for that mask. Most makers
+record them in MakerNotes and ExifTool reads them where LibRaw does not: Sony `FocusLocation` (width, height,
+x, y — a ZV-1 file here reads `5472 3648 4420 2409`), Canon `AFInfo2` with `AFPointsInFocus`, Nikon
+`AFInfo2`, Fujifilm `FocusPixel`. Caveats worth respecting: the coordinates are in sensor space and need the
+orientation and any future crop applied; the tag says where the camera *aimed*, not whether it succeeded; and
+manual focus, focus-and-recompose, or an adapted lens leave nothing useful. So draw it as a marker, and make
+it a place the loupe can jump to for a critical check — but let the peaking mask keep measuring actual pixels.
+
 **Highlight reconstruction** leaves faint bluish blotches at the edges of reconstructed areas.
 
 **X-Trans at full resolution** still runs LibRaw's Markesteijn on the CPU; only Bayer has a GPU demosaic for
