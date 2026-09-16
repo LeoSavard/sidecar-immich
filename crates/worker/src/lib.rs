@@ -130,11 +130,13 @@ impl Worker {
         let (k, p) = (key.clone(), path.clone());
         let meta = tokio::task::spawn_blocking(move || -> Result<Meta> {
             let raw = RawFile::open(&p)?;
+            let mut info = raw.info();
+            info.af_point = sidecar_raw::af::af_point(&p, info.orientation_flip);
             Ok(Meta {
                 asset_key: k,
                 file_name: p.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default(),
                 process_version: PROCESS_VERSION,
-                info: raw.info(),
+                info,
             })
         })
         .await??;

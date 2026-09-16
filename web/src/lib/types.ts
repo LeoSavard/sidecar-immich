@@ -46,5 +46,7 @@ export type Meta = {
 		focalLengthMm: number;
 		capturedUnix: number;
 		color: CameraColor;
+		/** Where the camera aimed autofocus, normalized to the oriented image; absent if unknown. */
+		afPoint?: { x: number; y: number } | null;
 	};
 };

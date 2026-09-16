@@ -7,7 +7,9 @@ use sidecar_libraw_sys as sys;
 use std::ffi::{CStr, CString, c_char};
 use std::path::Path;
 
+pub mod af;
 pub mod proxy;
+pub use af::AfPoint;
 
 #[derive(Debug, thiserror::Error)]
 #[error("LibRaw: {0}")]
@@ -43,6 +45,9 @@ pub struct RawInfo {
     pub focal_length_mm: f32,
     pub captured_unix: i64,
     pub color: CameraColor,
+    /// Set separately by `af::af_point()`, which needs the file path for ExifTool; `None` until then.
+    #[serde(default)]
+    pub af_point: Option<AfPoint>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -174,6 +179,7 @@ impl RawFile {
             focal_length_mm: i.focal_len,
             captured_unix: i.timestamp,
             color: camera_color(i),
+            af_point: None,
         }
     }
 

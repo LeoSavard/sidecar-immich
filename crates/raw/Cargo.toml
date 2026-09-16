@@ -8,6 +8,7 @@ version.workspace = true
 [dependencies]
 anyhow.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 sidecar-color.workspace = true
 sidecar-libraw-sys = { path = "../libraw-sys" }

@@ -40,6 +40,8 @@
 	let exporting = $state(false);
 	let loupeCenter = $state<[number, number]>([0.5, 0.5]);
 	let detailOpen = $state(false);
+	/** Screen position (CSS px, relative to the canvas's positioned ancestor) of the AF point marker. */
+	let markerPos = $state<{ x: number; y: number } | null>(null);
 	let displaySpace = $state<DisplaySpace>('srgb');
 	let viewport: Viewport = { zoom: 1, panX: 0, panY: 0 };
 
@@ -83,6 +85,31 @@
 			hist.run(develop.output, histStride, (h) => (histogram = h));
 		}
 		view.render(develop.output, canvas, viewport, (clipHigh ? CLIP_HIGHS : 0) | (clipLow ? CLIP_LOWS : 0) | (peaking ? PEAKING : 0));
+		markerPos = imageToScreen(meta.info.afPoint);
+	}
+
+	/** Normalized (oriented) image coordinates → CSS pixels over the canvas, or null off-screen/absent. */
+	function imageToScreen(point: { x: number; y: number } | null | undefined): { x: number; y: number } | null {
+		if (!point || !develop?.output) return null;
+		const out = develop.output;
+		const fit = Math.min(canvas.width / out.width, canvas.height / out.height);
+		const dw = out.width * fit * viewport.zoom;
+		const dh = out.height * fit * viewport.zoom;
+		const ox = (canvas.width - dw) / 2 + viewport.panX;
+		const oy = (canvas.height - dh) / 2 + viewport.panY;
+		const px = ox + point.x * dw;
+		const py = oy + point.y * dh;
+		if (px < 0 || py < 0 || px > canvas.width || py > canvas.height) return null;
+		return { x: px / devicePixelRatio, y: py / devicePixelRatio };
+	}
+
+	/** Move the loupe to the AF point and make sure it's visible. */
+	function jumpToAfPoint() {
+		const point = meta?.info.afPoint;
+		if (!point) return;
+		loupeCenter = [point.x, point.y];
+		section = 'detail';
+		detailOpen = true;
 	}
 
 	/** Continuous change during a gesture: redraw, mark unsaved, keep a device draft. */
@@ -440,6 +467,15 @@
 			onpointercancel={canvasUp}
 			oncontextmenu={(e) => e.preventDefault()}
 		></canvas>
+		{#if markerPos}
+			<button
+				type="button"
+				class="absolute h-7 w-7 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-[#fadb26] shadow-[0_0_0_1px_rgba(0,0,0,0.4)]"
+				style="left: {markerPos.x}px; top: {markerPos.y}px;"
+				aria-label="Autofocus point — tap to check in the loupe"
+				onclick={jumpToAfPoint}
+			></button>
+		{/if}
 		{#if status || error}
 			<p class="absolute inset-x-4 top-[max(1rem,env(safe-area-inset-top))] text-center text-sm {error ? 'text-danger' : 'text-fg-2'}">{error || status}</p>
 		{/if}
