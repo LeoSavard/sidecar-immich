@@ -30,6 +30,11 @@ Thumb-first slider:
 	let raw = 0;
 	let moved = false;
 	let lastTapAt = 0;
+	let engaged = false;
+	let slack = 0;
+
+	/** Sideways travel that turns a touch into a slider drag rather than a scroll. */
+	const ENGAGE_PX = 4;
 
 	const range = $derived(max - min);
 	const pct = (v: number) => ((v - min) / range) * 100;
@@ -51,11 +56,21 @@ Thumb-first slider:
 		lastX = e.clientX;
 		raw = value;
 		moved = false;
+		engaged = false;
+		slack = 0;
 		active = true;
 	}
 
 	function move(e: PointerEvent) {
 		if (!active) return;
+		// The row allows vertical panning, so a drag only counts as a slider drag once it has travelled far
+		// enough sideways; until then the browser can still take the gesture and scroll the panel.
+		if (!engaged) {
+			slack += e.clientX - lastX;
+			lastX = e.clientX;
+			if (Math.abs(slack) < ENGAGE_PX) return;
+			engaged = true;
+		}
 		const rect = row.getBoundingClientRect();
 		const above = Math.max(0, rect.top - e.clientY);
 		const gain = above < 44 ? 1 : above < 88 ? 0.5 : 0.25;
@@ -131,7 +146,7 @@ Thumb-first slider:
 	<div
 		bind:this={row}
 		{id}
-		class="relative h-11 cursor-ew-resize touch-none outline-none pointer-fine:h-8"
+		class="relative h-11 cursor-ew-resize touch-pan-y outline-none pointer-fine:h-8"
 		role="slider"
 		tabindex={disabled ? -1 : 0}
 		aria-labelledby="{id}-label"

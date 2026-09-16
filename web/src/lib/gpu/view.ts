@@ -4,6 +4,10 @@ import viewWgsl from './wgsl/client_view.wgsl?raw';
 
 export const CLIP_HIGHS = 1;
 export const CLIP_LOWS = 2;
+export const PEAKING = 4;
+
+/** Encoded-luminance gradient across one step that counts as sharp. Low enough to catch soft subjects. */
+const PEAK_THRESHOLD = 0.1;
 
 const srgbDecode = (v: number) => (v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4);
 
@@ -15,7 +19,7 @@ export class ViewPass {
 	private sampler: GPUSampler;
 	private bindGroup?: GPUBindGroup;
 	private boundTexture?: GPUTexture;
-	private params = new ArrayBuffer(64);
+	private params = new ArrayBuffer(80);
 
 	private constructor(
 		private device: GPUDevice,
@@ -24,7 +28,7 @@ export class ViewPass {
 		pipeline: GPURenderPipeline
 	) {
 		this.pipeline = pipeline;
-		this.ubo = device.createBuffer({ label: 'view params', size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+		this.ubo = device.createBuffer({ label: 'view params', size: 80, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 		this.sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
 	}
 
@@ -59,6 +63,7 @@ export class ViewPass {
 		dv.setFloat32(52, srgbDecode(254.5 / 255), true);
 		dv.setFloat32(56, srgbDecode(0.5 / 255), true);
 		dv.setFloat32(60, 0x16 / 255, true);
+		dv.setFloat32(64, PEAK_THRESHOLD, true);
 		this.device.queue.writeBuffer(this.ubo, 0, this.params);
 		if (this.boundTexture !== developed) {
 			this.bindGroup = this.device.createBindGroup({

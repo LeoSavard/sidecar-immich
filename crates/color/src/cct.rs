@@ -3,7 +3,9 @@
 //!
 //! The Planckian locus uses Krystek's rational approximation in CIE 1960 (u, v) (Krystek, 1985, "An
 //! algorithm to calculate correlated colour temperature", Color Research & Application 10(1)). Tint is a
-//! perpendicular offset from the locus of `tint / 3000` in (u, v); positive tint moves toward magenta.
+//! perpendicular offset from the locus of `tint / 3000` in (u, v). The slider names what happens to the
+//! *image*, as every editor does: positive tint makes the photo more magenta, which means moving the
+//! assumed illuminant toward green.
 
 pub const TINT_SCALE: f64 = 3000.0;
 
@@ -38,7 +40,7 @@ pub fn temp_tint_to_xy(temperature_k: f64, tint: f64) -> [f64; 2] {
     let t = temperature_k.clamp(1000.0, 50000.0);
     let base = locus_uv(t);
     let n = locus_normal(t);
-    let off = -tint / TINT_SCALE;
+    let off = tint / TINT_SCALE;
     uv_to_xy([base[0] + n[0] * off, base[1] + n[1] * off])
 }
 
@@ -70,7 +72,7 @@ pub fn xy_to_temp_tint(xy: [f64; 2]) -> (f64, f64) {
     let t = 1e6 / ((lo + hi) / 2.0);
     let p = locus_uv(t);
     let n = locus_normal(t);
-    let tint = -((uv[0] - p[0]) * n[0] + (uv[1] - p[1]) * n[1]) * TINT_SCALE;
+    let tint = ((uv[0] - p[0]) * n[0] + (uv[1] - p[1]) * n[1]) * TINT_SCALE;
     (t, tint)
 }
 
@@ -79,10 +81,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn d65_is_about_6500k_and_slightly_green_of_locus() {
+    fn d65_is_about_6500k_and_close_to_the_locus() {
         let (t, tint) = xy_to_temp_tint(crate::mat::D65);
         assert!((t - 6504.0).abs() < 25.0, "{t}");
         assert!(tint.abs() < 15.0, "{tint}");
+    }
+
+    /// Positive tint must make the image magenta, i.e. move the assumed illuminant toward green (higher v
+    /// in CIE 1960). Getting this backwards makes the slider fight its own track gradient.
+    #[test]
+    fn positive_tint_moves_the_illuminant_toward_green() {
+        let neutral = xy_to_uv(temp_tint_to_xy(5500.0, 0.0));
+        let magenta_image = xy_to_uv(temp_tint_to_xy(5500.0, 40.0));
+        assert!(magenta_image[1] > neutral[1], "{magenta_image:?} vs {neutral:?}");
     }
 
     #[test]

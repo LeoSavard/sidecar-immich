@@ -2,7 +2,7 @@
 <script lang="ts">
 	import { page } from '$app/state';
 	import { DevelopPass, requestDevice } from '$lib/gpu/develop';
-	import { CLIP_HIGHS, CLIP_LOWS, ViewPass, type Viewport } from '$lib/gpu/view';
+	import { CLIP_HIGHS, CLIP_LOWS, PEAKING, ViewPass, type Viewport } from '$lib/gpu/view';
 	import { HistogramPass, type HistogramData } from '$lib/gpu/histogram';
 	import { ColorPacker } from '$lib/color/pack';
 	import { api } from '$lib/api';
@@ -32,6 +32,7 @@
 	let histogram = $state<HistogramData | null>(null);
 	let clipHigh = $state(false);
 	let clipLow = $state(false);
+	let peaking = $state(false);
 	let before = $state(false);
 	let section = $state<Section>('light');
 	let showPhoneHistogram = $state(true);
@@ -81,7 +82,7 @@
 			developDirty = false;
 			hist.run(develop.output, histStride, (h) => (histogram = h));
 		}
-		view.render(develop.output, canvas, viewport, (clipHigh ? CLIP_HIGHS : 0) | (clipLow ? CLIP_LOWS : 0));
+		view.render(develop.output, canvas, viewport, (clipHigh ? CLIP_HIGHS : 0) | (clipLow ? CLIP_LOWS : 0) | (peaking ? PEAKING : 0));
 	}
 
 	/** Continuous change during a gesture: redraw, mark unsaved, keep a device draft. */
@@ -442,9 +443,12 @@
 			<p class="absolute inset-x-4 top-[max(1rem,env(safe-area-inset-top))] text-center text-sm {error ? 'text-danger' : 'text-fg-2'}">{error || status}</p>
 		{/if}
 		{#if before}<span class="absolute top-[max(1rem,env(safe-area-inset-top))] left-4 rounded bg-ground/80 px-2 py-1 text-xs">As shot</span>{/if}
-		<div class="absolute top-[max(0.75rem,env(safe-area-inset-top))] right-3">
+		<div class="absolute top-[max(0.75rem,env(safe-area-inset-top))] right-3 grid justify-items-end gap-1.5">
 			{#if !wide && showPhoneHistogram}
 				<Histogram data={histogram} {clipHigh} {clipLow} compact ontoggle={(w) => { if (w === 'high') clipHigh = !clipHigh; else clipLow = !clipLow; schedule(); }} />
+			{/if}
+			{#if !wide}
+				<button type="button" aria-pressed={peaking} class="rounded-full px-2.5 py-1 text-[0.6875rem] {peaking ? 'bg-fg text-ground' : 'bg-ground/80 text-fg-2'}" onclick={() => { peaking = !peaking; schedule(); }}>Focus</button>
 			{/if}
 		</div>
 	</div>
@@ -481,7 +485,10 @@
 			{#if wide}
 			<div class="px-4 pb-2">
 				<Histogram data={histogram} {clipHigh} {clipLow} ontoggle={(w) => { if (w === 'high') clipHigh = !clipHigh; else clipLow = !clipLow; schedule(); }} />
-				<a href="/settings" class="mt-1 block text-right text-[0.6875rem] text-fg-2">Viewing and exporting in {SPACE_LABELS[displaySpace]}</a>
+				<div class="mt-1 flex items-center justify-between gap-2 text-[0.6875rem]">
+					<button type="button" aria-pressed={peaking} class="rounded-full px-2 py-0.5 {peaking ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" onclick={() => { peaking = !peaking; schedule(); }}>Focus peaking</button>
+					<a href="/settings" class="text-fg-2">Viewing and exporting in {SPACE_LABELS[displaySpace]}</a>
+				</div>
 			</div>
 
 			{:else}
