@@ -4,7 +4,7 @@ jobs:
   rust:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with: { submodules: true }
       - uses: dtolnay/rust-toolchain@stable
       - uses: EmbarkStudios/cargo-deny-action@v2
@@ -17,10 +17,10 @@ jobs:
   parity:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with: { submodules: true }
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with: { node-version: 24 }
       - run: rustup target add wasm32-unknown-unknown
       # LibRaw builds against zlib and libjpeg; exiftool is shelled out to when copying export metadata.
