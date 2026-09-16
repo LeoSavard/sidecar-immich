@@ -30,6 +30,36 @@ Status: early. See [`docs/DESIGN.md`](docs/DESIGN.md) for the specification and 
 3. Sign in with an Immich API key with `user.read, asset.read, asset.view, asset.upload, asset.update, stack.create`.
 4. On iPhone, create the [Edit in Sidecar shortcut](ios/README.md). On Android, install Sidecar as an app and use Share.
 
+## Dependencies
+
+LibRaw is vendored as a submodule, so clone with it — the build fails without it:
+
+```bash
+git clone --recurse-submodules https://github.com/LeoSavard/sidecar-immich.git
+```
+
+For a clone you already have: `git submodule update --init`.
+
+**To build:** a Rust toolchain (edition 2024) with the `wasm32-unknown-unknown` target, Node 24, a C/C++
+compiler for LibRaw, `pkg-config`, zlib and libjpeg headers, a Vulkan loader and driver, and ExifTool.
+[`dev/Dockerfile`](dev/Dockerfile) pins the exact set, and `./dev/run` builds inside it, so none of this has to
+be installed on the host.
+
+**To run the image:** a Vulkan loader with a working ICD — for NVIDIA, the container toolkit's CDI device —
+plus `libegl1`, `libxext6` and `libx11-6`, without which NVIDIA's ICD fails to initialise, and ExifTool for
+copying metadata into exports.
+
+**Rust:** wgpu and naga 30 (GPU, WGSL), axum with tower-http and tokio (server), reqwest (Immich), the Adobe
+XMP Toolkit (sidecars), jpeg-encoder, tiff and png (encoders), palette (colour), chacha20poly1305 (sealing
+API keys at rest), plus serde, toml, anyhow, tracing, sha1, hex, base64, bytemuck and half.
+
+**Web:** SvelteKit 2 with Svelte 5 and Tailwind v4, built by Vite; Playwright drives Chromium for the parity
+harness only.
+
+Every third-party project, its licence and what it is used for is listed in
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) and [`NOTICE`](NOTICE); `cargo deny check licenses`
+enforces the allowlist in CI.
+
 ## Develop
 
 Everything builds and runs in a container with the GPU: `./dev/run <command>`, `./dev/serve` for a local server.
