@@ -145,11 +145,14 @@ impl Worker {
     /// Build (or reuse) the proxy at `edge`, building the preview size from the same decode.
     pub async fn proxy(self: &Arc<Self>, key: &str, edge: u32) -> Result<(u32, u32, Vec<u8>)> {
         let target = self.proxy_path(key, edge);
-        if let Some(found) = read_proxy(&target).await {
+        let focus_target = self.focus_path(key, edge);
+        // Both must exist: a proxy built before the focus mask existed (or raced ahead of a concurrent
+        // /v1/assets/{key}/focus call for the same edge) must not short-circuit past building it.
+        if let (Some(found), true) = (read_proxy(&target).await, tokio::fs::try_exists(&focus_target).await.unwrap_or(false)) {
             return Ok(found);
         }
         let _slot = self.decode_slots.acquire().await?;
-        if let Some(found) = read_proxy(&target).await {
+        if let (Some(found), true) = (read_proxy(&target).await, tokio::fs::try_exists(&focus_target).await.unwrap_or(false)) {
             return Ok(found);
         }
         let path = self.paths.lock().unwrap().get(key).cloned().context("unknown asset; ingest it first")?;

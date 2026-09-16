@@ -44,17 +44,18 @@ export class ViewPass {
 	/** Decode a focus_mask PNG (grayscale, from `/api/assets/{key}/focus`) and upload it as `r8unorm`. */
 	async loadFocusMask(pngBytes: ArrayBuffer) {
 		const bitmap = await createImageBitmap(new Blob([pngBytes], { type: 'image/png' }));
-		const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+		const { width, height } = bitmap; // bitmap.close() below zeroes these, so capture them first
+		const canvas = new OffscreenCanvas(width, height);
 		const ctx = canvas.getContext('2d')!;
 		ctx.drawImage(bitmap, 0, 0);
-		const { data } = ctx.getImageData(0, 0, bitmap.width, bitmap.height);
+		const { data } = ctx.getImageData(0, 0, width, height);
 		bitmap.close();
 		// Grayscale PNGs decode to RGBA with R = G = B; take the one channel we need.
-		const gray = new Uint8Array(bitmap.width * bitmap.height);
+		const gray = new Uint8Array(width * height);
 		for (let i = 0; i < gray.length; i++) gray[i] = data[i * 4];
 		this.focusMask.destroy();
-		this.focusMask = this.device.createTexture({ label: 'focus mask', size: [bitmap.width, bitmap.height], format: 'r8unorm', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
-		this.device.queue.writeTexture({ texture: this.focusMask }, gray, { bytesPerRow: bitmap.width }, [bitmap.width, bitmap.height]);
+		this.focusMask = this.device.createTexture({ label: 'focus mask', size: [width, height], format: 'r8unorm', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+		this.device.queue.writeTexture({ texture: this.focusMask }, gray, { bytesPerRow: width }, [width, height]);
 	}
 
 	static async create(device: GPUDevice, canvas: HTMLCanvasElement, displayP3: boolean): Promise<ViewPass> {
