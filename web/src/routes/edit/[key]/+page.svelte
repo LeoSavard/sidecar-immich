@@ -256,8 +256,16 @@
 			const [metaResp, stateResp] = await Promise.all([api(`/api/assets/${key}/meta`), api(`/api/assets/${key}/edit`)]);
 			meta = await metaResp.json();
 			const state: EditState = await stateResp.json();
-			// A browser without WebGPU still edits: the server runs the develop pass instead.
-			const [device, p] = await Promise.all([requestDevice().catch(() => null), ColorPacker.load()]);
+			// A browser without WebGPU still edits: the server runs the develop pass instead. Logged, not
+			// swallowed silently: "no WebGPU" in the UI can mean navigator.gpu is missing, requestAdapter()
+			// found no adapter, or requestDevice() itself rejected, and only the console message says which.
+			const [device, p] = await Promise.all([
+				requestDevice().catch((e) => {
+					console.error('WebGPU unavailable, falling back to server-rendered preview:', e);
+					return null;
+				}),
+				ColorPacker.load(),
+			]);
 			fallback = device === null;
 			packer = p;
 			defaults = packer.defaultEdit();
