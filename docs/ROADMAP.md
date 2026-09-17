@@ -47,11 +47,16 @@ never been in the loop. It needs a way to run the browser side on a phone and po
 
 ## Reach
 
-**Browsers without WebGPU (Firefox, older Safari).** The live editor needs WebGPU — that is the architecture,
-and it's what makes the preview match the export. The way to cover other browsers is a server-rendered
-fallback: the worker already renders proxies and loupe tiles, so a fallback client can send edit parameters
-and display returned JPEGs, with sliders that commit on release instead of live. Slower, but the same
-pipeline and the same output. Until then the app should say which browsers work rather than "no WebGPU".
+**Browsers without WebGPU (Firefox, older Safari) — done.** `POST /api/assets/{key}/preview` develops the
+cached proxy with the same shaders and parameters the browser would have used and returns a JPEG, so the
+picture is the same; it just arrives when a slider is released rather than while it moves. One request is in
+flight at a time and changes arriving mid-render coalesce into a single follow-up, so a drag costs one render,
+not one per frame. The colour packer is wasm, so the white-balance readout and the curve stay live without a
+GPU. The loupe and export already ran on the server and are unaffected.
+
+What's hidden in fallback, because it lives in the view shader rather than the develop pass: the histogram,
+the clipping overlays, focus peaking and the AF marker. Moving those server-side would mean returning the
+histogram alongside the JPEG and drawing the overlays into it.
 
 **Wide gamut and HDR.** These are separate: Rec.2020 is a gamut, HDR is a transfer function plus headroom.
 

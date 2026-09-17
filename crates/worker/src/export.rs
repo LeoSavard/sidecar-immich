@@ -136,27 +136,50 @@ fn srgb_encode(v: f32) -> f32 {
     if v <= 0.0031308 { 12.92 * v } else { 1.055 * v.powf(1.0 / 2.4) - 0.055 }
 }
 
-fn encode(img: &RgbaF32, req: &RenderRequest, out: &Path) -> Result<()> {
-    let icc = match req.color_space {
+pub fn icc_for(space: DisplaySpace) -> &'static [u8] {
+    match space {
         DisplaySpace::Srgb => SRGB_ICC,
         DisplaySpace::DisplayP3 => P3_ICC,
-    };
+    }
+}
+
+/// Display-linear RGBA → 8-bit sRGB-encoded RGB, dithered so gradients don't band.
+fn to_rgb8(img: &RgbaF32) -> Vec<u8> {
+    let mut rgb = Vec::with_capacity((img.width * img.height * 3) as usize);
+    for (i, p) in img.data.as_chunks::<4>().0.iter().enumerate() {
+        for (c, v) in p[..3].iter().enumerate() {
+            let n = tri_noise((i as u64) * 3 + c as u64);
+            rgb.push((srgb_encode(*v) * 255.0 + n + 0.5).clamp(0.0, 255.0) as u8);
+        }
+    }
+    rgb
+}
+
+/// A JPEG in memory, encoded exactly as an export would be. Used by the server-rendered preview that stands
+/// in for the browser's develop pass where there is no WebGPU.
+pub fn jpeg_bytes(img: &RgbaF32, quality: u8, space: DisplaySpace) -> Result<Vec<u8>> {
+    if img.width > u16::MAX as u32 || img.height > u16::MAX as u32 {
+        bail!("JPEG is limited to 65,535 pixels per side");
+    }
+    let mut out = Vec::new();
+    let mut enc = jpeg_encoder::Encoder::new(&mut out, quality.clamp(1, 100));
+    enc.set_sampling_factor(jpeg_encoder::SamplingFactor::R_4_4_4);
+    enc.add_icc_profile(icc_for(space))?;
+    enc.encode(&to_rgb8(img), img.width as u16, img.height as u16, jpeg_encoder::ColorType::Rgb)?;
+    Ok(out)
+}
+
+fn encode(img: &RgbaF32, req: &RenderRequest, out: &Path) -> Result<()> {
+    let icc = icc_for(req.color_space);
     match req.format {
         Format::Jpeg => {
             if img.width > u16::MAX as u32 || img.height > u16::MAX as u32 {
                 bail!("JPEG is limited to 65,535 pixels per side; export a TIFF or set a long edge");
             }
-            let mut rgb = Vec::with_capacity((img.width * img.height * 3) as usize);
-            for (i, p) in img.data.as_chunks::<4>().0.iter().enumerate() {
-                for (c, v) in p[..3].iter().enumerate() {
-                    let n = tri_noise((i as u64) * 3 + c as u64);
-                    rgb.push((srgb_encode(*v) * 255.0 + n + 0.5).clamp(0.0, 255.0) as u8);
-                }
-            }
             let mut enc = jpeg_encoder::Encoder::new_file(out, req.quality.clamp(1, 100))?;
             enc.set_sampling_factor(jpeg_encoder::SamplingFactor::R_4_4_4);
             enc.add_icc_profile(icc)?;
-            enc.encode(&rgb, img.width as u16, img.height as u16, jpeg_encoder::ColorType::Rgb)?;
+            enc.encode(&to_rgb8(img), img.width as u16, img.height as u16, jpeg_encoder::ColorType::Rgb)?;
         }
         Format::Tiff => {
             use tiff::encoder::{TiffEncoder, colortype};

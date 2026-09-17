@@ -45,6 +45,15 @@
 	let showAfPoint = $state(true);
 	/** A JPEG, HEIC, PNG or TIFF: something else already developed it, so some controls have nothing to act on. */
 	const developed = $derived(meta?.info.sourceKind === 'developed');
+
+	/**
+	 * No WebGPU here, so the server runs the develop pass instead and sends back a JPEG — same shaders, same
+	 * parameters, same picture, just not live. Sliders commit on release rather than on every move.
+	 */
+	let fallback = $state(false);
+	let previewUrl = $state<string | null>(null);
+	let previewBusy = $state(false);
+	let previewPending = false;
 	let displaySpace = $state<DisplaySpace>('srgb');
 	let viewport: Viewport = { zoom: 1, panX: 0, panY: 0 };
 
@@ -71,16 +80,32 @@
 		if (!frame) frame = requestAnimationFrame(draw);
 	}
 
+	/** Resolve the edit through the colour packer — wasm, so it works with or without a GPU. */
+	function repack() {
+		const source = before ? defaults : $state.snapshot(edit!);
+		const packed = packer.pack(source, meta!.info.color, display);
+		if (!before) {
+			resolvedWb = { temperatureK: packed.temperatureK, tint: packed.tint };
+			lut = packed.lut;
+		}
+		return packed;
+	}
+
 	function draw() {
 		frame = 0;
-		if (!develop?.output || !edit || !meta) return;
-		if (developDirty) {
-			const source = before ? defaults : $state.snapshot(edit);
-			const packed = packer.pack(source, meta.info.color, display);
-			if (!before) {
-				resolvedWb = { temperatureK: packed.temperatureK, tint: packed.tint };
-				lut = packed.lut;
+		if (!edit || !meta) return;
+		// Without WebGPU there is nothing to draw here: the picture is a JPEG the server developed. The
+		// packer still runs, so the white-balance readout and the curve stay live while sliders move.
+		if (fallback) {
+			if (developDirty) {
+				repack();
+				developDirty = false;
 			}
+			return;
+		}
+		if (!develop?.output) return;
+		if (developDirty) {
+			const packed = repack();
 			develop.setUniforms(packed.uniform);
 			develop.setToneLut(packed.lut);
 			develop.render();
@@ -115,6 +140,38 @@
 		detailOpen = true;
 	}
 
+	/**
+	 * Ask the server for a freshly developed JPEG. Only ever one request in flight: a change arriving while
+	 * one is running sets a flag and is served by another round after it, so dragging a slider can't queue a
+	 * render per frame.
+	 */
+	async function renderPreview() {
+		if (!edit || !meta) return;
+		if (previewBusy) {
+			previewPending = true;
+			return;
+		}
+		previewBusy = true;
+		try {
+			do {
+				previewPending = false;
+				const body = JSON.stringify({
+					edit: before ? defaults : $state.snapshot(edit),
+					colorSpace: display,
+					longEdge: Math.round(Math.min(Math.max(innerWidth, innerHeight) * devicePixelRatio, 2560))
+				});
+				const r = await api(`/api/assets/${key}/preview`, { method: 'POST', headers: { 'content-type': 'application/json' }, body });
+				const url = URL.createObjectURL(await r.blob());
+				if (previewUrl) URL.revokeObjectURL(previewUrl);
+				previewUrl = url;
+			} while (previewPending);
+		} catch (e) {
+			error = e instanceof Error ? e.message : String(e);
+		} finally {
+			previewBusy = false;
+		}
+	}
+
 	/** Continuous change during a gesture: redraw, mark unsaved, keep a device draft. */
 	function changed() {
 		schedule(true);
@@ -123,9 +180,10 @@
 		draftTimer = setTimeout(() => edit && saveDraft(key, { edit: $state.snapshot(edit), baseEtag: etag, savedAt: Date.now() }), 500);
 	}
 
-	/** A gesture ended: one undo step. */
+	/** A gesture ended: one undo step, and in fallback mode the moment to ask for a new render. */
 	function committed() {
 		if (edit) history.commit($state.snapshot(edit));
+		if (fallback) renderPreview();
 	}
 
 	function restore(state: EditParams | null) {
@@ -198,7 +256,9 @@
 			const [metaResp, stateResp] = await Promise.all([api(`/api/assets/${key}/meta`), api(`/api/assets/${key}/edit`)]);
 			meta = await metaResp.json();
 			const state: EditState = await stateResp.json();
-			const [device, p] = await Promise.all([requestDevice(), ColorPacker.load()]);
+			// A browser without WebGPU still edits: the server runs the develop pass instead.
+			const [device, p] = await Promise.all([requestDevice().catch(() => null), ColorPacker.load()]);
+			fallback = device === null;
 			packer = p;
 			defaults = packer.defaultEdit();
 			edit = state.edit;
@@ -216,6 +276,12 @@
 			displaySpace = display;
 			clipHigh = prefs.clipHighlights;
 			clipLow = prefs.clipShadows;
+			if (!device) {
+				status = 'Rendering on the server…';
+				await renderPreview();
+				status = '';
+				return;
+			}
 			[develop, view, hist] = await Promise.all([DevelopPass.create(device), ViewPass.create(device, canvas, display === 'display-p3'), HistogramPass.create(device)]);
 			device.lost.then((info) => (error = `The GPU was reset (${info.reason}). Reload to continue — your edits are kept as a draft.`));
 			const phone = matchMedia('(pointer: coarse)').matches;
@@ -254,6 +320,7 @@
 		if (before === on) return;
 		before = on;
 		schedule(true);
+		if (fallback) renderPreview();
 	}
 
 	function canvasDown(e: PointerEvent) {
@@ -295,7 +362,8 @@
 		const now = performance.now();
 		const still = Math.hypot(px(e).x - downAt.x, px(e).y - downAt.y) < 8 * devicePixelRatio && now - downAt.t < 300;
 		if (still && pointers.size === 0) {
-			const out = develop.output!;
+			if (fallback || !develop?.output) return;
+			const out = develop.output;
 			const fit = Math.min(canvas.width / out.width, canvas.height / out.height);
 			const dw = out.width * fit * viewport.zoom;
 			const dh = out.height * fit * viewport.zoom;
@@ -476,15 +544,27 @@
 
 <div class="flex h-dvh flex-col overflow-hidden bg-ground text-fg select-none [-webkit-touch-callout:none] lg:flex-row">
 	<div class="relative min-h-0 flex-1">
+		<!-- The canvas stays mounted either way so its size observer and gesture handlers keep their bindings;
+		     without WebGPU nothing ever draws into it and the server's JPEG sits on top. -->
 		<canvas
 			bind:this={canvas}
-			class="block h-full w-full touch-none"
+			class="block h-full w-full touch-none {fallback ? 'invisible' : ''}"
 			onpointerdown={canvasDown}
 			onpointermove={canvasMove}
 			onpointerup={canvasUp}
 			onpointercancel={canvasUp}
 			oncontextmenu={(e) => e.preventDefault()}
 		></canvas>
+		{#if fallback}
+			<div class="absolute inset-0 flex items-center justify-center p-2">
+				{#if previewUrl}
+					<img src={previewUrl} alt="" class="max-h-full max-w-full object-contain {previewBusy ? 'opacity-60' : ''}" />
+				{/if}
+			</div>
+			{#if previewBusy}
+				<p class="absolute inset-x-4 bottom-3 text-center text-xs text-fg-2">Rendering…</p>
+			{/if}
+		{/if}
 		{#if markerPos && showAfPoint}
 			<button
 				type="button"
@@ -499,10 +579,10 @@
 		{/if}
 		{#if before}<span class="absolute top-[max(1rem,env(safe-area-inset-top))] left-4 rounded bg-ground/80 px-2 py-1 text-xs">As shot</span>{/if}
 		<div class="absolute top-[max(0.75rem,env(safe-area-inset-top))] right-3 grid justify-items-end gap-1.5">
-			{#if !wide && showPhoneHistogram}
+			{#if !wide && showPhoneHistogram && !fallback}
 				<Histogram data={histogram} {clipHigh} {clipLow} compact ontoggle={(w) => { if (w === 'high') clipHigh = !clipHigh; else clipLow = !clipLow; schedule(); }} />
 			{/if}
-			{#if !wide}
+			{#if !wide && !fallback}
 				<button type="button" aria-pressed={peaking} class="rounded-full px-2.5 py-1 text-[0.6875rem] {peaking ? 'bg-fg text-ground' : 'bg-ground/80 text-fg-2'}" onclick={() => { peaking = !peaking; schedule(); }}>Focus</button>
 				{#if meta?.info.afPoint}
 					<button type="button" aria-pressed={showAfPoint} class="rounded-full px-2.5 py-1 text-[0.6875rem] {showAfPoint ? 'bg-fg text-ground' : 'bg-ground/80 text-fg-2'}" onclick={() => (showAfPoint = !showAfPoint)}>AF</button>
@@ -527,6 +607,13 @@
 				</div>
 			</header>
 			<div class="grid gap-2 px-6 lg:px-4">
+				{#if fallback}
+					<p class="rounded bg-raised p-2 text-xs">
+						This browser has no WebGPU, so the server is developing the photo — same result, but it
+						updates when you let go of a slider rather than as you drag. Safari 26 or a current
+						Chromium edits live.
+					</p>
+				{/if}
 				{#if readOnly}<p class="rounded bg-raised p-2 text-xs">A newer Sidecar edited this photo. Update Sidecar to change it.</p>{/if}
 				{#if restoredDraft && dirty}<p class="rounded bg-raised p-2 text-xs">Restored unsaved changes from this device.</p>{/if}
 				{#if conflict}
@@ -540,7 +627,7 @@
 				{/if}
 			</div>
 
-			{#if wide}
+			{#if wide && !fallback}
 			<div class="px-4 pb-2">
 				<Histogram data={histogram} {clipHigh} {clipLow} ontoggle={(w) => { if (w === 'high') clipHigh = !clipHigh; else clipLow = !clipLow; schedule(); }} />
 				<div class="mt-1 flex items-center justify-between gap-2 text-[0.6875rem]">

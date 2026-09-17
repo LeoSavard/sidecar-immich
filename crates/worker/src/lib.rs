@@ -193,6 +193,11 @@ impl Worker {
         read_proxy(&target).await.context("proxy was not written")
     }
 
+    async fn cached_meta(&self, key: &str) -> Result<Meta> {
+        let bytes = tokio::fs::read(self.meta_path(key)).await.context("no cached metadata; ingest it first")?;
+        Ok(serde_json::from_slice(&bytes)?)
+    }
+
     /// The focus-peaking mask at `edge`: PNG bytes, built (and cached) alongside the proxy at the same edge.
     pub async fn focus(self: &Arc<Self>, key: &str, edge: u32) -> Result<Vec<u8>> {
         let target = self.focus_path(key, edge);
@@ -262,6 +267,52 @@ pub struct Session {
 }
 
 const SESSION_LIMIT: usize = 2;
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewRequest {
+    pub key: String,
+    pub path: PathBuf,
+    pub edit: sidecar_color::EditParams,
+    #[serde(default)]
+    pub color_space: sidecar_color::DisplaySpace,
+    /// Long edge of the returned JPEG. The cached proxy at this size is developed — not the original — so
+    /// this costs a develop pass over a small image, not a decode.
+    pub long_edge: Option<u32>,
+}
+
+/// The develop pass the browser would have run, run here instead, over the same cached proxy and with the
+/// same parameters and shaders — so a browser without WebGPU sees the same picture, just later. See
+/// docs/ROADMAP.md, "Browsers without WebGPU".
+fn preview_jpeg(kit: &export::Kit, color: &sidecar_color::camera::CameraColor, req: &PreviewRequest, proxy: (u32, u32, Vec<u8>)) -> Result<Vec<u8>> {
+    let (width, height, bytes) = proxy;
+    let source = sidecar_engine::upload_rgba16(&kit.gpu, &sidecar_engine::RgbaF32::from_f16_bytes(width, height, &bytes));
+    let packed = sidecar_color::pack(&req.edit, color, req.color_space);
+    let developed = kit.develop.render(&kit.gpu, &source, &packed.uniform, &packed.lut)?;
+    let img = sidecar_engine::read_rgba16(&kit.gpu, &developed)?;
+    export::jpeg_bytes(&img, 88, req.color_space)
+}
+
+async fn preview(State(w): State<Arc<Worker>>, Json(req): Json<PreviewRequest>) -> Response {
+    let Some(kit) = w.gpu.clone() else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "This worker has no GPU; the fallback preview needs one.").into_response();
+    };
+    w.paths.lock().unwrap().insert(req.key.clone(), req.path.clone());
+    let edge = req.long_edge.unwrap_or(1600).clamp(256, 4096);
+    let proxy = match w.proxy(&req.key, edge).await {
+        Ok(p) => p,
+        Err(e) => return internal(e),
+    };
+    let color = match w.cached_meta(&req.key).await {
+        Ok(m) => m.info.color,
+        Err(e) => return internal(e),
+    };
+    match tokio::task::spawn_blocking(move || preview_jpeg(&kit, &color, &req, proxy)).await {
+        Ok(Ok(jpeg)) => ([("content-type", "image/jpeg"), ("cache-control", "no-store")], jpeg).into_response(),
+        Ok(Err(e)) => internal(e),
+        Err(e) => internal(e.into()),
+    }
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -439,6 +490,7 @@ pub fn router(worker: Arc<Worker>) -> Router {
         .route("/v1/health", get(|| async { "ok" }))
         .route("/v1/render", post(render))
         .route("/v1/loupe", post(loupe))
+        .route("/v1/preview", post(preview))
         .route("/v1/outbox/{job}/{file}", get(outbox_file))
         .route("/v1/outbox/{job}", axum::routing::delete(outbox_delete))
         .route("/v1/ingest", post(ingest))

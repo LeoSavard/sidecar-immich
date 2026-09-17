@@ -434,6 +434,23 @@ async fn loupe(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Path(key): P
     relay(app.http.post(app.worker("/v1/loupe")).json(&req).send().await).await
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PreviewBody {
+    edit: EditParams,
+    #[serde(default)]
+    color_space: sidecar_color::DisplaySpace,
+    long_edge: Option<u32>,
+}
+
+/// `POST /api/assets/{key}/preview` — the whole photo developed on the server, as JPEG, for browsers that
+/// can't run the develop pass themselves.
+async fn preview(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Path(key): Path<String>, Json(body): Json<PreviewBody>) -> Response {
+    let Some(rec) = asset_for(&app, &user, &key).await else { return StatusCode::NOT_FOUND.into_response() };
+    let req = serde_json::json!({ "key": key, "path": rec.path, "edit": body.edit, "colorSpace": body.color_space, "longEdge": body.long_edge });
+    relay(app.http.post(app.worker("/v1/preview")).json(&req).send().await).await
+}
+
 pub fn router(app: Arc<App>) -> Router {
     let web = &app.config.server.web_root;
     let spa = ServeDir::new(web).fallback(ServeFile::new(web.join("index.html")));
@@ -450,6 +467,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/assets/{key}/focus", get(focus))
         .route("/api/assets/{key}/edit", get(get_edit).put(put_edit))
         .route("/api/assets/{key}/loupe", axum::routing::post(loupe))
+        .route("/api/assets/{key}/preview", axum::routing::post(preview))
         .route("/api/exports", axum::routing::post(export::create))
         .route("/api/exports/{id}", get(export::status))
         .route("/api/exports/{id}/events", get(export::events))
