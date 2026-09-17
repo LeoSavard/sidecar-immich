@@ -1862,7 +1862,7 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "sidecar"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -1877,7 +1877,7 @@ dependencies = [
 
 [[package]]
 name = "sidecar-api"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -1902,7 +1902,7 @@ dependencies = [
 
 [[package]]
 name = "sidecar-color"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "bytemuck",
  "naga",
@@ -1914,7 +1914,7 @@ dependencies = [
 
 [[package]]
 name = "sidecar-color-wasm"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -1923,7 +1923,7 @@ dependencies = [
 
 [[package]]
 name = "sidecar-devtools"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -1939,7 +1939,7 @@ dependencies = [
 
 [[package]]
 name = "sidecar-engine"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -1952,14 +1952,14 @@ dependencies = [
 
 [[package]]
 name = "sidecar-libraw-sys"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "cc",
 ]
 
 [[package]]
 name = "sidecar-raw"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "png",
@@ -1976,7 +1976,7 @@ dependencies = [
 
 [[package]]
 name = "sidecar-shaders"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "naga",
@@ -1984,7 +1984,7 @@ dependencies = [
 
 [[package]]
 name = "sidecar-template"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "tempfile",
@@ -1992,7 +1992,7 @@ dependencies = [
 
 [[package]]
 name = "sidecar-worker"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -2018,7 +2018,7 @@ dependencies = [
 
 [[package]]
 name = "sidecar-xmp"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "hex",
