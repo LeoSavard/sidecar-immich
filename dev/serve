@@ -5,7 +5,7 @@
 set -euo pipefail
 here="$(cd "$(dirname "$0")/.." && pwd)"
 config="${SIDECAR_CONFIG:-deploy/sidecar.dev.toml}"
-mounts="-v /mnt/volume/Photography:/mnt/volume/Photography:ro -v /mnt/volume/immich_library:/data:ro"
+mounts="-v /mnt/storage/Photography:/mnt/storage/Photography:ro -v /mnt/storage/immich_library:/data:ro"
 if grep -q '127.0.0.1:2283' "$here/$config"; then net="--network host"; else net="-p 127.0.0.1:${SIDECAR_PORT:-8090}:8080"; fi
 SIDECAR_DEV_EXTRA="$net $mounts ${SIDECAR_DEV_EXTRA:-}" \
   "$here/dev/run" bash -c "cd web && npm run -s generate && npm run -s build && cd .. && cargo run -q --release -p sidecar -- dev --config $config"

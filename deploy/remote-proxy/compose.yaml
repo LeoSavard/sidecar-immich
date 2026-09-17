@@ -1,5 +1,5 @@
-# This server: Immich in docker (network immich_default), libraries on /mnt/volume, HTTPS via a Caddy
-# reverse proxy on the proxy host dialing this host's VPN address directly.
+# This server: Immich in docker (network immich_default), libraries on /mnt/storage, HTTPS via a Caddy
+# reverse proxy on a proxy host dialing this host's VPN address directly.
 #
 # This library is mostly HEIC and JPEG, so the image is built with a HEIF decoder:
 #   docker build --build-arg HEIF=1 -t sidecar:local .
@@ -13,8 +13,8 @@ services:
     volumes:
       - ./sidecar.toml:/etc/sidecar.toml:ro
       - ${HOME}/.config/sidecar/immich-admin-key:/run/secrets/immich_admin_key:ro
-      - /mnt/volume/Photography:/mnt/volume/Photography:rw
-      - /mnt/volume/immich_library:/data:rw
+      - /mnt/storage/Photography:/mnt/storage/Photography:rw
+      - /mnt/storage/immich_library:/data:rw
       - sidecar-cache:/cache:ro
       - sidecar-state:/state
     ports: ["8090:8080"]                                 # reachable on the VPN interface, not just loopback
@@ -28,8 +28,8 @@ services:
     read_only: true
     cap_drop: [ALL]
     volumes:
-      - /mnt/volume/Photography:/mnt/volume/Photography:ro
-      - /mnt/volume/immich_library:/data:ro
+      - /mnt/storage/Photography:/mnt/storage/Photography:ro
+      - /mnt/storage/immich_library:/data:ro
       - sidecar-cache:/cache
     tmpfs: [/tmp]
     security_opt: ["label=disable"]

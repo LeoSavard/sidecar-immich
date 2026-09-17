@@ -13,8 +13,8 @@ url = "http://127.0.0.1:2283"
 
 [[roots]]
 name          = "external"
-immich_prefix = "/mnt/volume/Photography/Library"
-mount         = "/mnt/volume/Photography/Library"
+immich_prefix = "/mnt/storage/Photography/Library"
+mount         = "/mnt/storage/Photography/Library"
 template      = "{{y}}/{{MM}}.{{MMMM}}/{{y}}-{{MM}}-{{dd}}/{{filename}}"
 month_locale  = "en"
 

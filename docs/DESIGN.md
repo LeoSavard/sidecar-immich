@@ -13,7 +13,7 @@ Where the code differs from the text below, the code and these notes win.
 - **Vulkan in containers** also needs `libegl1`, `libxext6` and `libx11-6` in the image; NVIDIA's ICD fails to initialise without libEGL.
 - **Proxies (milestone 2)** use LibRaw's half-size mode (2×2 binning, no interpolation): 0.3–0.5 s for a 45 MP NEF, ~2 s for a compressed RAF. The GPU demosaic of milestone 5 replaces this.
 - **XMP field names** follow the JSON parameters in PascalCase inside `sc:Sidecar/sc:Edit` (`sc:Ev`, `sc:TemperatureK`, …). The namespace URI is `https://sidecar.ls-tech.ca/ns/1.0/` and must never change.
-- **Library root:** the external library's template starts at `/mnt/volume/Photography/Library`.
+- **Library root:** the external library's template starts at `/mnt/storage/Photography/Library`.
 - **Known limitation:** Lightroom-merged panorama DNGs use a compression LibRaw 0.22 can't decode; Sidecar reports them as unsupported.
 - **GPU ingest (milestone 5):** vkdt's highlight pyramid and RCD are ported to WGSL; RCD is split into five full-texture passes instead of vkdt's shared-memory tiles. X-Trans proxies use 3×3 binning on the GPU; full-resolution X-Trans (export, loupe) still uses LibRaw's Markesteijn on the CPU — a WGSL port of LibRaw's code is the remaining step. LibRaw is built with OpenMP (a Fuji RAF opens in 0.2 s instead of 1.7 s).
 - **Export (milestone 6):** JPEG through `jpeg-encoder` (pure Rust, MIT/Apache + IJG) rather than mozjpeg. The worker streams NDJSON progress to the api, which relays it as SSE with `Last-Event-ID` replay. The outbox is reached through worker endpoints, so the api keeps `/cache` read-only.

@@ -13,8 +13,8 @@ admin_api_key_file = "/run/secrets/immich_admin_key"
 # Same container paths as immich_server, so originalPath maps directly.
 [[roots]]
 name          = "external"
-immich_prefix = "/mnt/volume/Photography/Library"
-mount         = "/mnt/volume/Photography/Library"
+immich_prefix = "/mnt/storage/Photography/Library"
+mount         = "/mnt/storage/Photography/Library"
 template      = "{{y}}/{{MM}}.{{MMMM}}/{{y}}-{{MM}}-{{dd}}/{{filename}}"
 month_locale  = "en"
 moves_files   = false

@@ -22,7 +22,7 @@ Sidecar is published as an Apache-2.0 image. Every file you add must keep that p
 
 ## Safety on the real server
 
-- The photo libraries under `/mnt/volume/` are the user's. Read them freely; never write, rename or delete
+- The photo libraries under `/mnt/storage/` are the user's. Read them freely; never write, rename or delete
   there during development. Tests use copies under `testdata/cache/`.
 - Don't touch the running Immich containers or their data.
 

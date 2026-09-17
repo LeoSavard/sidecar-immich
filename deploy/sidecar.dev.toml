@@ -23,8 +23,8 @@ moves_files   = false
 [[roots]]
 name          = "external"
 # The template starts at Library/. Confirm Immich's external-library import path matches once a key is set up.
-immich_prefix = "/mnt/volume/Photography/Library"
-mount         = "/mnt/volume/Photography/Library"
+immich_prefix = "/mnt/storage/Photography/Library"
+mount         = "/mnt/storage/Photography/Library"
 template      = "{{y}}/{{MM}}.{{MMMM}}/{{y}}-{{MM}}-{{dd}}/{{filename}}"
 month_locale  = "en"
 moves_files   = false
