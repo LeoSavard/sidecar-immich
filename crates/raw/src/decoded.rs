@@ -239,10 +239,20 @@ fn decode_tiff(bytes: &[u8]) -> Result<(u32, u32, Vec<f32>), DecodeError> {
     Ok((width, height, to_linear_rgba(&samples, channels)))
 }
 
-/// Commands we know how to drive, tried in order when the environment doesn't name one. ImageMagick is asked
-/// for 16-bit PPM: uncompressed, so a 36-megapixel frame costs about two seconds instead of the twenty PNG's
-/// deflate would, and 16 bits keeps whatever precision a 10-bit HDR HEIC had. `heif-convert` only writes PNG
-/// or JPEG, so it pays the deflate.
+/// Commands we know how to drive, tried in order when the environment doesn't name one.
+///
+/// ImageMagick is asked for 16-bit PPM: uncompressed, so a 36-megapixel frame costs about two seconds
+/// instead of the twenty PNG's deflate would, and 16 bits keeps whatever precision a 10-bit HDR HEIC had.
+/// This is the fallback, not the default: it's not what `--build-arg HEIF=1` actually installs.
+///
+/// `heif-convert` (from `libheif-examples`, what the Dockerfile really installs) is asked for TIFF, not PNG —
+/// checked, not assumed, after finding this exact spot was the whole reason a HEIC "decode" was taking
+/// several seconds despite the underlying HEVC decode measuring well under half a second on its own: PNG's
+/// default compression on a 12-megapixel frame measured 3.6 s here, `--png-compression-level 0` measured
+/// 895 ms, and TIFF (heif-convert's other lossless option, and the one with no compression flag to reach
+/// for) measured 340 ms — an order of magnitude faster than what was actually shipping, because `decode()`'s
+/// extension detection matched the *template string* for "tif" and found none in `heif-convert %i %o`, so it
+/// silently fell through to PNG.
 const HEIF_COMMANDS: &[&str] = &["magick %i -depth 16 ppm:%o", "convert %i -depth 16 ppm:%o", "heif-convert %i %o"];
 
 fn heif_command() -> Option<String> {
@@ -255,12 +265,14 @@ fn heif_command() -> Option<String> {
 }
 
 /// What the command will write, read back off the template so a custom `SIDECAR_HEIF_DECODER` naming `ppm:`
-/// or `.tif` is handled without a second setting to keep in step.
+/// or `.tif` is handled without a second setting to keep in step. `heif-convert` picks its output format
+/// from the output filename's extension with no format flag to grep for in the template text, so it's
+/// matched on the program name explicitly rather than joining the fall-through "else" this got wrong before.
 fn heif_output_extension(template: &str) -> &'static str {
     let t = template.to_ascii_lowercase();
     if t.contains("ppm") || t.contains("pnm") {
         "ppm"
-    } else if t.contains("tif") {
+    } else if t.contains("tif") || t.trim_start().starts_with("heif-convert") {
         "tif"
     } else {
         "png"
@@ -300,6 +312,26 @@ fn decode_heif(path: &Path) -> Result<(u32, u32, Vec<f32>), DecodeError> {
     }
 }
 
+/// Rotation still owed to a decoder's output, given the file's EXIF Orientation and the decoder that will
+/// have run for its extension.
+///
+/// HEIC's rotation is spent before we ever see the pixels: HEIF specifies "irot"/"imir" as transform
+/// properties of the coded image itself, and libheif applies them unconditionally while decoding —
+/// independent of, and not necessarily consistent with, the separate legacy EXIF Orientation tag
+/// `orientation_flip` came from. Confirmed empirically, not assumed: forcing a HEIC's EXIF Orientation to
+/// different values with exiftool and decoding through ImageMagick produced byte-identical pixels every
+/// time. An earlier version of this function tried to detect an already-rotated decode from a width/height
+/// swap, which happens to work for 90°/270° but has no signal at all for 180° — an orientation-3 HEIC came
+/// out upside down, decoded correctly by libheif and then flipped again downstream. JPEG, PNG and TIFF
+/// decoders are "dumb": they hand back exactly the stored pixel grid, so those still need the EXIF rotation
+/// applied.
+fn pending_flip_for(extension: &str, orientation_flip: i32) -> i32 {
+    match extension {
+        "heic" | "heif" => 0,
+        _ => orientation_flip,
+    }
+}
+
 /// Decode a non-RAW image, given the EXIF already read for it — the orientation (see `crate::af`'s notes on
 /// the numbering) and the colour space its ICC profile claims. When the decoder has already applied the
 /// rotation, the returned `flip` is zero so the worker doesn't rotate twice.
@@ -319,12 +351,7 @@ pub fn decode(path: &Path, exif: &Exif) -> Result<Decoded, DecodeError> {
         }
     };
 
-    // A decoder that rotated the pixels itself leaves the frame transposed against what EXIF describes; in
-    // that case the rotation is already spent. Checking the pixels beats trusting each tool's flags.
-    let rotates = matches!(orientation_flip, 5 | 6);
-    let pending_flip = if rotates && width < height { 0 } else { orientation_flip };
-
-    Ok(Decoded { width, height, rgba, pending_flip, space: exif.space })
+    Ok(Decoded { width, height, rgba, pending_flip: pending_flip_for(&ext, orientation_flip), space: exif.space })
 }
 
 /// Metadata for a non-RAW source, shaped like the RAW path's so the api and the editor need no special case.
@@ -498,6 +525,35 @@ mod tests {
         assert_eq!(rgba[0], 0.0);
         assert!((rgba[4] - 0.2158).abs() < 1e-3);
         assert!((rgba[8] - 1.0).abs() < 1e-6);
+    }
+
+    /// Caught live: a real HEIC with Orientation=3 (180°) came out upside down. libheif already applies the
+    /// HEIF container's own rotation regardless of orientation_flip's value, so HEIC must always report zero
+    /// pending rotation — including 180°, where the old width/height-swap heuristic had no signal to detect
+    /// that the decode was already correct and re-applied the flip on top of it.
+    /// Caught live: the published HEIF=1 image only installs libheif-examples, which is `heif-convert`, not
+    /// ImageMagick — this was the actual decoder in production the whole time, and its command template has
+    /// no "tif" substring for the old generic contains() check to find, so it silently fell through to PNG
+    /// and paid PNG's default deflate on every single HEIC decode: measured 3.6s against TIFF's 340ms on the
+    /// same file. `heif-convert` has no raw/PPM output at all (checked against its own --help), so this
+    /// program-name match is load-bearing, not a style preference.
+    #[test]
+    fn heif_convert_is_asked_for_tiff_not_png() {
+        assert_eq!(heif_output_extension("heif-convert %i %o"), "tif");
+        assert_eq!(heif_output_extension("magick %i -depth 16 ppm:%o"), "ppm");
+        assert_eq!(heif_output_extension("convert %i -depth 16 ppm:%o"), "ppm");
+        assert_eq!(heif_output_extension("some-custom-tool %i %o"), "png");
+    }
+
+    #[test]
+    fn heic_never_owes_a_rotation_jpeg_always_does() {
+        for flip in [0, 3, 5, 6] {
+            assert_eq!(pending_flip_for("heic", flip), 0, "heic, exif flip {flip}");
+            assert_eq!(pending_flip_for("heif", flip), 0, "heif, exif flip {flip}");
+            assert_eq!(pending_flip_for("jpg", flip), flip, "jpg, exif flip {flip}");
+            assert_eq!(pending_flip_for("png", flip), flip, "png, exif flip {flip}");
+            assert_eq!(pending_flip_for("tiff", flip), flip, "tiff, exif flip {flip}");
+        }
     }
 
     #[test]

@@ -179,7 +179,7 @@ impl Worker {
                 bytes.extend_from_slice(&p.width.to_le_bytes());
                 bytes.extend_from_slice(&p.height.to_le_bytes());
                 bytes.extend_from_slice(&p.to_f16_bytes());
-                let tmp = out.with_extension("tmp");
+                let tmp = unique_tmp(&out);
                 std::fs::write(&tmp, &bytes)?;
                 std::fs::rename(&tmp, &out)?;
 
@@ -214,12 +214,16 @@ impl Worker {
 /// RAW goes through LibRaw and the GPU ingest pass (normalize, hot pixels, demosaic, highlight
 /// reconstruction). A JPEG, HEIC or TIFF has had all of that done to it already by whatever wrote it, so it
 /// is decoded straight to linear light in its own primaries — the same shape, joining the pipeline at the
-/// same point. `largest` only bounds the RAW path's GPU work; the others decode at native size.
+/// same point. `largest` bounds every path's work, same as the RAW GPU path's own downsample: without it, a
+/// 48-megapixel HEIC would pay full-resolution cost in `focus_energy` and the downsample loop for a proxy
+/// that only ever needs at most 2,560 pixels on the long edge — measured at several seconds on this server's
+/// CPU for a single 12-megapixel photo, against a sub-second HEIC decode itself.
 fn decode_full(path: &std::path::Path, gpu: Option<&export::Kit>, largest: u32) -> Result<sidecar_engine::RgbaF32> {
     if sidecar_raw::decoded::is_supported(path) {
         let exif = sidecar_raw::decoded::exif(path);
         let d = sidecar_raw::decoded::decode(path, &exif)?;
-        return Ok(sidecar_engine::RgbaF32 { width: d.width, height: d.height, data: d.rgba }.oriented(d.pending_flip));
+        let full = sidecar_engine::RgbaF32 { width: d.width, height: d.height, data: d.rgba };
+        return Ok(full.downsampled(largest).oriented(d.pending_flip));
     }
     let mut raw = RawFile::open(path)?;
     Ok(match (gpu, raw.mosaic()) {
@@ -243,6 +247,15 @@ async fn read_proxy(path: &std::path::Path) -> Option<(u32, u32, Vec<u8>)> {
     Some((w, h, bytes[8..].to_vec()))
 }
 
+/// A tmp path next to `target` that won't collide with a concurrent writer of the same target: `/open`'s
+/// background pre-build and the client's own immediate request race on identical key+edge cache entries
+/// often enough to hit this in practice, and a shared `.tmp` name meant the second writer's rename found the
+/// first writer's tmp file already gone. Same PID-xor-nanoseconds nonce as `sidecar_xmp`'s sidecar writer.
+fn unique_tmp(target: &std::path::Path) -> PathBuf {
+    let nonce = std::process::id() as u64 ^ std::time::SystemTime::now().duration_since(std::time::SystemTime::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(0);
+    target.with_extension(format!("tmp-{nonce}"))
+}
+
 /// Atomic write, mirroring the proxy cache's temp-then-rename pattern.
 fn write_focus_png(path: &std::path::Path, mono: &sidecar_engine::Mono) -> Result<()> {
     let mut out = Vec::new();
@@ -252,7 +265,7 @@ fn write_focus_png(path: &std::path::Path, mono: &sidecar_engine::Mono) -> Resul
         info.bit_depth = png::BitDepth::Eight;
         png::Encoder::with_info(&mut out, info)?.write_header()?.write_image_data(&mono.to_r8_bytes())?;
     }
-    let tmp = path.with_extension("tmp");
+    let tmp = unique_tmp(path);
     std::fs::write(&tmp, &out)?;
     std::fs::rename(&tmp, path)?;
     Ok(())
@@ -565,7 +578,7 @@ mod tests {
         let path = tmp.path().join("f.png");
         let mono = sidecar_engine::Mono { width: 3, height: 2, data: vec![0.0, 0.5, 1.0, 1.0, 0.5, 0.0] };
         write_focus_png(&path, &mono).unwrap();
-        assert!(!path.with_extension("tmp").exists());
+        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 1, "only f.png should remain, no leftover tmp file");
 
         let decoder = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(&path).unwrap()));
         let mut reader = decoder.read_info().unwrap();
@@ -574,5 +587,26 @@ mod tests {
         let mut buf = vec![0u8; reader.output_buffer_size().unwrap()];
         reader.next_frame(&mut buf).unwrap();
         assert_eq!(buf, mono.to_r8_bytes());
+    }
+
+    /// Caught live: `/open`'s background pre-build and the client's own immediate request race on the same
+    /// key+edge often enough to hit this in practice. A shared `.tmp` name meant the second writer's rename
+    /// found the first writer's tmp file already gone — "No such file or directory" on real photos.
+    #[test]
+    fn concurrent_writes_to_the_same_target_never_collide_on_the_tmp_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("shared.png");
+        let mono = sidecar_engine::Mono { width: 2, height: 2, data: vec![0.0, 0.5, 1.0, 0.25] };
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let target = target.clone();
+                let mono = mono.clone();
+                std::thread::spawn(move || write_focus_png(&target, &mono))
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap().unwrap();
+        }
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "only the final target should remain");
     }
 }
