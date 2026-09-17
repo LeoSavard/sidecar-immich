@@ -10,10 +10,13 @@ allow_path_open = false
 url = "http://immich_server:2283"
 admin_api_key_file = "/run/secrets/immich_admin_key"
 
-# Same container paths as immich_server, so originalPath maps directly.
 [[roots]]
 name          = "external"
-immich_prefix = "/mnt/storage/Photography/Library"
+# immich_prefix must match Immich's own container path exactly — its own compose file's bind mount, not
+# Sidecar's — because it's how Immich's reported originalPath gets translated into Sidecar's local `mount`.
+# The two fields don't have to be the same string; check your Immich compose file's volumes for this value,
+# don't assume it matches whatever Sidecar itself mounts at.
+immich_prefix = "/mnt/volume/Photography/Library"
 mount         = "/mnt/storage/Photography/Library"
 template      = "{{y}}/{{MM}}.{{MMMM}}/{{y}}-{{MM}}-{{dd}}/{{filename}}"
 month_locale  = "en"
