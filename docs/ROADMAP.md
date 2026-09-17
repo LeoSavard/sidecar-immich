@@ -93,6 +93,24 @@ For any format Sidecar might one day *write*, **prefer AVIF**: `libavif` and `da
 and AV1 is royalty-free, avoiding both problems — but note AVIF decodes AV1, not HEVC, so it is not a way to
 open the HEIC files a phone actually produces.
 
+**Non-NVIDIA GPUs (iGPUs, AMD and Intel dGPUs).** Nothing in the renderer itself is NVIDIA-specific:
+`sidecar_engine::Gpu::new_headless()` opens whatever Vulkan adapter wgpu finds, and no WGSL shader or Rust
+pipeline stage reaches for an NVIDIA-only feature — the "cooperative matrix configurations" line wgpu logs on
+startup is naga's own capability enumeration, not something Sidecar's code depends on. What's actually
+NVIDIA-specific today is the container plumbing, not the rendering: `deploy/compose.yaml` and
+`deploy/remote-proxy/compose.yaml` both request `devices: [nvidia.com/gpu=all]` (the NVIDIA Container Toolkit's
+CDI device), the Dockerfile sets `NVIDIA_DRIVER_CAPABILITIES` and installs only the libraries NVIDIA's Vulkan
+ICD needs (`libegl1`, `libxext6`, `libx11-6`), and DESIGN.md's GPU-sharing section assumes Immich's own ML
+and transcoding share the same NVIDIA card, which doesn't hold on an Intel or AMD box — Immich's ML runs on
+CUDA or OpenVINO, not ROCm.
+
+An AMD or Intel deployment needs a compose profile passing through `/dev/dri` (render nodes) instead of the
+CDI device, confirmation that the base image's Mesa Vulkan ICD (RADV for AMD, ANV for Intel) is present
+instead of relying on NVIDIA's proprietary one, and dropping the shared-VRAM-budget assumption where Immich
+isn't also on that card. Worth testing on real AMD and Intel hardware before documenting it as supported —
+Mesa's compute-shader support has historically lagged NVIDIA's on some corner cases the ingest and develop
+passes might hit, and that needs checking with pictures, not assumed from the driver's feature flags.
+
 ## Features after V1
 
 Lens correction, then crop and straighten, then local masks — in that order, and for the reason given in
