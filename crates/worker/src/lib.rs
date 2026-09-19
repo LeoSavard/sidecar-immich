@@ -22,6 +22,7 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::sync::Semaphore;
 
 /// Proxy sizes built together from one decode: a quick first paint, and the phone-sized proxy.
@@ -46,6 +47,8 @@ pub struct Worker {
     cache: PathBuf,
     paths: Mutex<HashMap<String, PathBuf>>,
     decode_slots: Semaphore,
+    /// One decode at a time per asset — see `decode_guard`.
+    decoding: Mutex<HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>>,
     /// GPU ingest and develop (Vulkan). `None` when no usable GPU: proxies then come from LibRaw on the CPU,
     /// and exports are refused.
     gpu: Option<Arc<export::Kit>>,
@@ -97,7 +100,15 @@ impl Worker {
                 None
             }
         };
-        Ok(Arc::new(Self { cache, paths: Mutex::new(HashMap::new()), decode_slots: Semaphore::new(2), gpu, export_slot: Semaphore::new(1), sessions: Mutex::new(Vec::new()) }))
+        Ok(Arc::new(Self {
+            cache,
+            paths: Mutex::new(HashMap::new()),
+            decode_slots: Semaphore::new(2),
+            decoding: Mutex::new(HashMap::new()),
+            gpu,
+            export_slot: Semaphore::new(1),
+            sessions: Mutex::new(Vec::new()),
+        }))
     }
 
     fn meta_path(&self, key: &str) -> PathBuf {
@@ -150,6 +161,32 @@ impl Worker {
         Ok(meta)
     }
 
+    /// Serialize decodes of one asset. Opening a photo fans out into four requests that all want the same
+    /// decode: `/open`'s pre-build, the `meta` route's re-ingest pre-build, and the client's own proxy and
+    /// focus fetches. Each used to decode the file itself, and `decode_slots` let two of them run at once —
+    /// every photo in this server's logs was decoded exactly twice, ~5 s apiece for a 12 Mpx HEIC. Holding
+    /// this first means the later callers re-check the cache and find what the first one wrote.
+    ///
+    /// Keyed on the asset, not on `key + edge`, because one decode writes every edge it was asked for: a
+    /// caller waiting on a different edge of the same photo still wants that decode to happen only once.
+    async fn decode_guard(&self, key: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let lock = {
+            let mut map = self.decoding.lock().unwrap();
+            match map.get(key).and_then(std::sync::Weak::upgrade) {
+                Some(l) => l,
+                None => {
+                    // Nobody is decoding this asset, so every remaining weak entry with no owner is a
+                    // finished decode: drop them rather than grow one entry per photo ever opened.
+                    map.retain(|_, l| l.strong_count() > 0);
+                    let l = Arc::new(tokio::sync::Mutex::new(()));
+                    map.insert(key.to_string(), Arc::downgrade(&l));
+                    l
+                }
+            }
+        };
+        lock.lock_owned().await
+    }
+
     /// Build (or reuse) the proxy at `edge`, building the preview size from the same decode.
     pub async fn proxy(self: &Arc<Self>, key: &str, edge: u32) -> Result<(u32, u32, Vec<u8>)> {
         let target = self.proxy_path(key, edge);
@@ -159,12 +196,22 @@ impl Worker {
         if let (Some(found), true) = (read_proxy(&target).await, tokio::fs::try_exists(&focus_target).await.unwrap_or(false)) {
             return Ok(found);
         }
+        // Before the global slot, so waiting for this photo's turn never occupies one of the two decoders.
+        let _decoding = self.decode_guard(key).await;
+        if let (Some(found), true) = (read_proxy(&target).await, tokio::fs::try_exists(&focus_target).await.unwrap_or(false)) {
+            return Ok(found);
+        }
         let _slot = self.decode_slots.acquire().await?;
         if let (Some(found), true) = (read_proxy(&target).await, tokio::fs::try_exists(&focus_target).await.unwrap_or(false)) {
             return Ok(found);
         }
         let path = self.paths.lock().unwrap().get(key).cloned().context("unknown asset; ingest it first")?;
-        let edges: Vec<(u32, PathBuf, PathBuf)> = [edge, PREVIEW_EDGE].into_iter().map(|e| (e, self.proxy_path(key, e), self.focus_path(key, e))).collect();
+        // `edge` is the preview size when the client asks for the first paint: build it once, not twice.
+        let mut wanted = vec![edge];
+        if edge != PREVIEW_EDGE {
+            wanted.push(PREVIEW_EDGE);
+        }
+        let edges: Vec<(u32, PathBuf, PathBuf)> = wanted.into_iter().map(|e| (e, self.proxy_path(key, e), self.focus_path(key, e))).collect();
         let gpu = self.gpu.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let started = std::time::Instant::now();
@@ -466,6 +513,37 @@ async fn render(State(w): State<Arc<Worker>>, Json(req): Json<export::RenderRequ
     ([("content-type", "application/x-ndjson")], axum::body::Body::from_stream(tokio_stream::wrappers::UnboundedReceiverStream::new(arx))).into_response()
 }
 
+/// How long a rendered file stays fetchable after its job finishes. It used to be deleted the moment Immich
+/// took it, which is still what happens when Immich is the only destination — but an export the browser is
+/// going to download has to outlive the job, and a phone that locks mid-download gets to come back to it.
+const OUTBOX_TTL: Duration = Duration::from_secs(24 * 3600);
+
+/// Delete outbox entries older than `OUTBOX_TTL`, hourly. Without this, keeping a copy for the device to
+/// download would grow the cache by one full-resolution file per export, forever.
+fn sweep_outbox(cache: PathBuf) {
+    tokio::spawn(async move {
+        let outbox = cache.join("outbox");
+        loop {
+            let mut swept = 0usize;
+            if let Ok(mut entries) = tokio::fs::read_dir(&outbox).await {
+                while let Ok(Some(entry)) = entries.next_entry().await {
+                    let old = match entry.metadata().await.and_then(|m| m.modified()) {
+                        Ok(t) => t.elapsed().map(|age| age > OUTBOX_TTL).unwrap_or(false),
+                        Err(_) => false,
+                    };
+                    if old && tokio::fs::remove_dir_all(entry.path()).await.is_ok() {
+                        swept += 1;
+                    }
+                }
+            }
+            if swept > 0 {
+                tracing::info!("swept {swept} finished export{} from the outbox", if swept == 1 { "" } else { "s" });
+            }
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+        }
+    });
+}
+
 async fn outbox_file(State(w): State<Arc<Worker>>, Path((job, file)): Path<(String, String)>) -> Response {
     let Some(dir) = outbox_dir(&w, &job) else { return StatusCode::NOT_FOUND.into_response() };
     if file.contains('/') || file.starts_with('.') {
@@ -499,6 +577,7 @@ async fn outbox_delete(State(w): State<Arc<Worker>>, Path(job): Path<String>) ->
 }
 
 pub fn router(worker: Arc<Worker>) -> Router {
+    sweep_outbox(worker.cache.clone());
     Router::new()
         .route("/v1/health", get(|| async { "ok" }))
         .route("/v1/render", post(render))
@@ -571,6 +650,33 @@ async fn focus_handler(State(w): State<Arc<Worker>>, Path(key): Path<String>, Qu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The waste this was written for: opening one photo fans out into four requests that all want the same
+    /// decode, and two of them used to run it at once — every photo in this server's logs was decoded twice,
+    /// ~5 s apiece for a 12 Mpx HEIC. Different photos still decode in parallel.
+    #[tokio::test]
+    async fn one_decode_per_asset_at_a_time() {
+        let tmp = tempfile::tempdir().unwrap();
+        let w = Worker::new(tmp.path().to_path_buf()).unwrap();
+        let wait = Duration::from_millis(100);
+
+        let held = w.decode_guard("aaa").await;
+        assert!(tokio::time::timeout(wait, w.decode_guard("bbb")).await.is_ok(), "a different photo shouldn't wait");
+        assert!(tokio::time::timeout(wait, w.decode_guard("aaa")).await.is_err(), "the same photo should wait");
+        drop(held);
+        assert!(tokio::time::timeout(wait, w.decode_guard("aaa")).await.is_ok(), "and go ahead once the first decode is done");
+    }
+
+    /// The map is keyed by asset, so it would otherwise hold one entry per photo ever opened.
+    #[tokio::test]
+    async fn finished_decodes_leave_nothing_behind() {
+        let tmp = tempfile::tempdir().unwrap();
+        let w = Worker::new(tmp.path().to_path_buf()).unwrap();
+        for i in 0..32 {
+            drop(w.decode_guard(&format!("key{i}")).await);
+        }
+        assert!(w.decoding.lock().unwrap().len() <= 1, "dead entries should be swept as new ones are made");
+    }
 
     #[test]
     fn focus_png_round_trips_and_leaves_no_temp_file() {

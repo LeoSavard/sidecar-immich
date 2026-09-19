@@ -28,6 +28,11 @@ pub enum SidecarError {
     NewerProcessVersion { found: u64 },
     #[error("the sidecar changed on disk while Sidecar was writing it")]
     ChangedOnDisk,
+    #[error(
+        "Sidecar can't write in {}, so this edit can't be saved. That folder belongs to another user — give the account Sidecar runs as write access to it (in Docker, the `user:` of the api container).",
+        .dir.display()
+    )]
+    NotWritable { dir: PathBuf },
 }
 
 /// `DSC_1234.NEF.xmp` if it exists, else `DSC_1234.xmp` if that exists, else `DSC_1234.NEF.xmp`.
@@ -38,6 +43,18 @@ pub fn sidecar_path_for(original: &Path) -> PathBuf {
     }
     let stem = original.with_extension("xmp");
     if stem.exists() { stem } else { full }
+}
+
+/// Can a sidecar be written beside `original`? The editor asks when it opens, so a photo whose folder
+/// Sidecar has no write access to says so before the edit is made rather than after five minutes of work.
+///
+/// Advisory only. The directory is what has to be writable — an existing sidecar is replaced through a temp
+/// file beside it, never opened for writing in place — but ACLs, read-only remounts and a full disk all
+/// answer this question later than `access(2)` can. `save` is still the authority, and reports
+/// `SidecarError::NotWritable` when this was too optimistic.
+pub fn writable_beside(original: &Path) -> bool {
+    let Some(dir) = original.parent() else { return false };
+    rustix::fs::access(dir, rustix::fs::Access::WRITE_OK | rustix::fs::Access::EXEC_OK).is_ok()
 }
 
 fn register() -> Result<()> {
@@ -271,7 +288,13 @@ impl SidecarDoc {
         let text = self.meta.to_string_with_options(ToStringOptions::default().omit_packet_wrapper())?;
 
         let tmp = dir.join(format!(".{name}.tmp-{}", std::process::id() as u64 ^ SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_nanos() as u64));
-        let mut f = std::fs::File::options().write(true).create_new(true).open(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
+        let mut f = match std::fs::File::options().write(true).create_new(true).open(&tmp) {
+            Ok(f) => f,
+            // Worth its own error: the photo opens and edits normally, and only the save fails, so the raw
+            // "Permission denied (os error 13)" reaches the user after the work is already done.
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => bail!(SidecarError::NotWritable { dir: dir.to_path_buf() }),
+            Err(e) => return Err(anyhow::Error::new(e).context(format!("creating {}", tmp.display()))),
+        };
         let result = (|| -> Result<()> {
             f.write_all(text.as_bytes())?;
             f.sync_all()?;

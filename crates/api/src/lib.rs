@@ -186,6 +186,86 @@ async fn admit(app: &Arc<App>, user: &User, c: Candidate) -> Result<String> {
     Ok(key)
 }
 
+/// The largest photo `POST /api/intake` will take. A 100-megapixel 16-bit TIFF is around 600 MB; this leaves
+/// room for one and refuses a video someone dropped on the page by mistake before it is read into memory.
+const INTAKE_LIMIT: usize = 1 << 30;
+
+/// How long to wait for Immich to put an uploaded photo where its storage template says it goes. Upload
+/// returns as soon as the bytes land, and metadata extraction — which is what reads the capture date the
+/// template is keyed on — runs after. Until it has, the asset's `originalPath` points somewhere Sidecar
+/// either can't see or would open only to have the file move out from under it.
+const INTAKE_SETTLE: Duration = Duration::from_secs(20);
+
+/// `POST /api/intake` (multipart) — a photo chosen on the device being edited on, rather than one already in
+/// the library. It goes into Immich first and is then opened exactly like any other asset: the edit belongs
+/// in an XMP beside an original, so the original has to become a file in a library root before there is
+/// anywhere to put it. Nothing about the editor downstream knows the photo arrived this way.
+async fn intake(State(app): State<Arc<App>>, ApiUser(user): ApiUser, mut form: axum::extract::Multipart) -> Response {
+    if !app.immich.enabled() {
+        return (StatusCode::NOT_IMPLEMENTED, "This Sidecar has no Immich library to put a photo into, so it can only open photos already on the server.").into_response();
+    }
+    let mut file: Option<(String, Vec<u8>)> = None;
+    loop {
+        match form.next_field().await {
+            Ok(Some(field)) => {
+                if field.name() != Some("file") {
+                    continue;
+                }
+                let name = field.file_name().map(str::to_string).unwrap_or_default();
+                match field.bytes().await {
+                    Ok(b) => file = Some((name, b.to_vec())),
+                    Err(e) => return (StatusCode::BAD_REQUEST, format!("reading the upload: {e}")).into_response(),
+                }
+            }
+            Ok(None) => break,
+            Err(e) => return (StatusCode::BAD_REQUEST, format!("reading the upload: {e}")).into_response(),
+        }
+    }
+    let Some((file_name, bytes)) = file.filter(|(n, b)| !n.is_empty() && !b.is_empty()) else {
+        return (StatusCode::BAD_REQUEST, "No photo in the request.").into_response();
+    };
+    // The same check `/open` makes, before anything is uploaded: a file Sidecar can't edit shouldn't be put
+    // into someone's library by an editor that then refuses to open it.
+    if !sidecar_template::is_editable(std::path::Path::new(&file_name)) {
+        return (StatusCode::UNPROCESSABLE_ENTITY, format!("Sidecar can't open {file_name} — it edits RAW files, JPEG, HEIC, PNG and TIFF.")).into_response();
+    }
+
+    let id = match app.immich.upload(&user.api_key, &file_name, bytes, &sidecar_xmp::utc_now()).await {
+        Ok(id) => id,
+        Err(e) => return (StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response(),
+    };
+
+    // Poll rather than sleep once: a duplicate is already filed and resolves on the first try, while a large
+    // RAW on a busy server can take several seconds to be moved into place.
+    let deadline = Instant::now() + INTAKE_SETTLE;
+    let mut last_path;
+    loop {
+        match app.immich.asset(&user.api_key, &id).await {
+            Ok(asset) => {
+                last_path = asset.original_path.clone();
+                if let Some(c) = resolve::from_asset(&app, &asset) {
+                    return match admit(&app, &user, c).await {
+                        Ok(key) => Json(serde_json::json!({ "assetKey": key })).into_response(),
+                        Err(e) => (StatusCode::UNPROCESSABLE_ENTITY, format!("{e:#}")).into_response(),
+                    };
+                }
+            }
+            Err(e) => return (StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response(),
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    // Uploaded and safe, just not openable from here — say which, since the two causes need different fixes.
+    let detail = if last_path.is_empty() {
+        "Immich hasn't finished filing it yet.".to_string()
+    } else {
+        format!("Immich put it at {last_path}, which isn't inside a library Sidecar is configured for.")
+    };
+    (StatusCode::BAD_GATEWAY, format!("{file_name} is in your library, but Sidecar can't open it yet. {detail} Try opening it from Immich in a moment.")).into_response()
+}
+
 async fn new_pick(app: &App, user: &User, query: String, candidates: Vec<Candidate>) -> Result<String> {
     let token = random_hex(16);
     app.store.put("picks", &token, &PickRecord { user_id: user.id.clone(), query, candidates }).await?;
@@ -299,11 +379,27 @@ fn valid_key(key: &str) -> bool {
 }
 
 /// The asset record, if this user has opened the photo.
+///
+/// The stored path can stop being true while the record stays valid: Immich moves a file in its internal
+/// library whenever the storage template's inputs change, and a record written before `immich_prefix` was
+/// understood holds an Immich path that was never mapped to Sidecar's mount at all (five of those are still
+/// in this server's state directory). The asset id finds the photo either way, so a path that no longer
+/// exists is re-resolved through Immich once and written back, rather than every route downstream failing
+/// with "No such file or directory" until the photo is opened from Immich again.
 pub(crate) async fn asset_for(app: &App, user: &User, key: &str) -> Option<AssetRecord> {
     if !valid_key(key) {
         return None;
     }
-    app.store.get::<AssetRecord>("assets", key).await.filter(|r| r.users.contains(&user.id))
+    let rec: AssetRecord = app.store.get("assets", key).await.filter(|r: &AssetRecord| r.users.contains(&user.id))?;
+    if rec.path.is_file() {
+        return Some(rec);
+    }
+    let asset = app.immich.asset(&user.api_key, rec.immich_asset_id.as_deref()?).await.ok()?;
+    let found = resolve::from_asset(app, &asset)?;
+    tracing::info!("{} is gone; Immich has it at {}", rec.path.display(), found.path.display());
+    let fixed = AssetRecord { path: found.path, file_name: found.file_name, ..rec };
+    let _ = app.store.put("assets", key, &fixed).await;
+    Some(fixed)
 }
 
 pub(crate) async fn relay(resp: reqwest::Result<reqwest::Response>) -> Response {
@@ -332,12 +428,27 @@ struct ProxyQuery {
     long_edge: Option<u32>,
 }
 
-async fn proxy(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Path(key): Path<String>, Query(q): Query<ProxyQuery>) -> Response {
-    if asset_for(&app, &user, &key).await.is_none() {
-        return StatusCode::NOT_FOUND.into_response();
+/// The worker forgets which path an asset key came from when it restarts, and answers 500 — "unknown asset;
+/// ingest it first" — to every request for it until something re-ingests it, which an open editor sees as a
+/// broken photo. `meta` pays that cost up front on every open; these routes don't, because re-hashing the
+/// original is the expensive part of ingest, so they retry once and only after a failure.
+async fn relay_or_reingest(app: &Arc<App>, rec: &AssetRecord, path: &str) -> Response {
+    let resp = relay(app.http.get(app.worker(path)).send().await).await;
+    if resp.status().is_success() {
+        return resp;
     }
+    let ingested = app.http.post(app.worker("/v1/ingest")).json(&serde_json::json!({ "path": rec.path })).send().await;
+    if !ingested.map(|r| r.status().is_success()).unwrap_or(false) {
+        return resp;
+    }
+    tracing::info!("re-ingested {} after the worker forgot it", rec.path.display());
+    relay(app.http.get(app.worker(path)).send().await).await
+}
+
+async fn proxy(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Path(key): Path<String>, Query(q): Query<ProxyQuery>) -> Response {
+    let Some(rec) = asset_for(&app, &user, &key).await else { return StatusCode::NOT_FOUND.into_response() };
     let edge = q.long_edge.unwrap_or(2560);
-    let mut resp = relay(app.http.get(app.worker(&format!("/v1/assets/{key}/proxy?long_edge={edge}"))).send().await).await;
+    let mut resp = relay_or_reingest(&app, &rec, &format!("/v1/assets/{key}/proxy?long_edge={edge}")).await;
     resp.headers_mut().insert(header::CACHE_CONTROL, "private, max-age=86400".parse().unwrap());
     resp
 }
@@ -349,11 +460,9 @@ struct FocusQuery {
 
 /// Focus-peaking mask: PNG bytes at the same edge as a proxy, so the client can pair them up.
 async fn focus(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Path(key): Path<String>, Query(q): Query<FocusQuery>) -> Response {
-    if asset_for(&app, &user, &key).await.is_none() {
-        return StatusCode::NOT_FOUND.into_response();
-    }
+    let Some(rec) = asset_for(&app, &user, &key).await else { return StatusCode::NOT_FOUND.into_response() };
     let edge = q.edge.unwrap_or(2560);
-    let mut resp = relay(app.http.get(app.worker(&format!("/v1/assets/{key}/focus?edge={edge}"))).send().await).await;
+    let mut resp = relay_or_reingest(&app, &rec, &format!("/v1/assets/{key}/focus?edge={edge}")).await;
     resp.headers_mut().insert(header::CACHE_CONTROL, "private, max-age=86400".parse().unwrap());
     resp
 }
@@ -364,15 +473,22 @@ struct EditState {
     edit: EditParams,
     etag: String,
     read_only: bool,
+    /// False when the photo's folder can't take a sidecar, so the editor can say so before the edit is made
+    /// rather than at the first save. Advisory — see `sidecar_xmp::writable_beside`.
+    writable: bool,
     exports: Vec<serde_json::Value>,
 }
 
 async fn get_edit(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Path(key): Path<String>) -> Response {
     let Some(rec) = asset_for(&app, &user, &key).await else { return StatusCode::NOT_FOUND.into_response() };
-    let loaded = tokio::task::spawn_blocking(move || sidecar_xmp::SidecarDoc::load(&rec.path)).await;
+    let loaded = tokio::task::spawn_blocking(move || {
+        let writable = sidecar_xmp::writable_beside(&rec.path);
+        sidecar_xmp::SidecarDoc::load(&rec.path).map(|d| (d, writable))
+    })
+    .await;
     match loaded {
-        Ok(Ok(doc)) => {
-            let state = EditState { edit: doc.edit(), etag: doc.etag(), read_only: doc.is_read_only(), exports: doc.exports() };
+        Ok(Ok((doc, writable))) => {
+            let state = EditState { edit: doc.edit(), etag: doc.etag(), read_only: doc.is_read_only(), writable, exports: doc.exports() };
             ([(header::ETAG, format!("\"{}\"", state.etag))], Json(state)).into_response()
         }
         Ok(Err(e)) => internal(e),
@@ -390,10 +506,11 @@ async fn put_edit(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Path(key)
     let path = rec.path.clone();
     let result = tokio::task::spawn_blocking(move || {
         let created = !sidecar_xmp::sidecar_path_for(&path).exists();
+        let writable = sidecar_xmp::writable_beside(&path);
         let mut conflict = None;
         let saved = sidecar_xmp::update(&path, &roots, |doc| {
             if doc.etag() != if_match {
-                conflict = Some(EditState { edit: doc.edit(), etag: doc.etag(), read_only: doc.is_read_only(), exports: doc.exports() });
+                conflict = Some(EditState { edit: doc.edit(), etag: doc.etag(), read_only: doc.is_read_only(), writable, exports: doc.exports() });
                 anyhow::bail!("conflict");
             }
             doc.set_edit(&edit, &key)
@@ -409,10 +526,16 @@ async fn put_edit(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Path(key)
             }
             ([(header::ETAG, format!("\"{etag}\""))], Json(serde_json::json!({ "etag": etag }))).into_response()
         }
-        Ok((Err(e), None, _)) => {
-            let readonly = e.downcast_ref::<sidecar_xmp::SidecarError>().is_some_and(|s| matches!(s, sidecar_xmp::SidecarError::NewerProcessVersion { .. }));
-            if readonly { (StatusCode::CONFLICT, format!("{e}")).into_response() } else { internal(e) }
-        }
+        // The two failures the person can act on carry their own message through; anything else is a bug
+        // here and goes to the log as one.
+        Ok((Err(e), None, _)) => match e.downcast_ref::<sidecar_xmp::SidecarError>() {
+            Some(sidecar_xmp::SidecarError::NewerProcessVersion { .. }) => (StatusCode::CONFLICT, format!("{e}")).into_response(),
+            Some(sidecar_xmp::SidecarError::NotWritable { .. }) => {
+                tracing::error!("{e:#}");
+                (StatusCode::FORBIDDEN, format!("{e}")).into_response()
+            }
+            _ => internal(e),
+        },
         Err(e) => internal(e.into()),
     }
 }
@@ -461,6 +584,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/recent", get(recent))
         .route("/api/settings", get(get_settings).put(put_settings))
         .route("/api/picks/{token}", get(get_pick).post(choose_pick))
+        .route("/api/intake", axum::routing::post(intake).layer(axum::extract::DefaultBodyLimit::max(INTAKE_LIMIT)))
         .route("/api/immich/assets/{id}/thumbnail", get(thumbnail))
         .route("/api/assets/{key}/meta", get(meta))
         .route("/api/assets/{key}/proxy", get(proxy))

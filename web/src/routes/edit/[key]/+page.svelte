@@ -17,7 +17,7 @@
 	import Loupe from '$lib/ui/Loupe.svelte';
 	import type { Band, DisplaySpace, EditParams, Meta, MixerBand } from '$lib/types';
 
-	type EditState = { edit: EditParams; etag: string; readOnly: boolean; exports: unknown[] };
+	type EditState = { edit: EditParams; etag: string; readOnly: boolean; writable?: boolean; exports: unknown[] };
 	type Section = 'wb' | 'light' | 'curve' | 'color' | 'detail';
 
 	const key = page.params.key!;
@@ -59,6 +59,8 @@
 
 	let etag = '';
 	let readOnly = $state(false);
+	/// False when the photo's folder can't take a sidecar: said here rather than at the first save.
+	let writable = $state(true);
 	let dirty = $state(false);
 	let saving = $state(false);
 	let conflict = $state<EditState | null>(null);
@@ -272,6 +274,7 @@
 			edit = state.edit;
 			etag = state.etag;
 			readOnly = state.readOnly;
+			writable = state.writable !== false;
 			const draft = await loadDraft(key);
 			if (draft && draft.baseEtag === state.etag && JSON.stringify(draft.edit) !== JSON.stringify(state.edit)) {
 				edit = draft.edit;
@@ -623,6 +626,7 @@
 					</p>
 				{/if}
 				{#if readOnly}<p class="rounded bg-raised p-2 text-xs">A newer Sidecar edited this photo. Update Sidecar to change it.</p>{/if}
+				{#if !readOnly && !writable}<p class="rounded bg-raised p-2 text-xs text-warning">Sidecar can't write in this photo's folder, so edits here can't be saved. Give the account Sidecar runs as write access to it.</p>{/if}
 				{#if restoredDraft && dirty}<p class="rounded bg-raised p-2 text-xs">Restored unsaved changes from this device.</p>{/if}
 				{#if conflict}
 					<div class="grid gap-2 rounded bg-raised p-2 text-xs">

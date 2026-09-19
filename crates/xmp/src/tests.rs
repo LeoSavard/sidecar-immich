@@ -148,3 +148,32 @@ fn exiftool_sees_only_prefixed_tag_names() {
         assert!(k.starts_with("Sidecar"), "exiftool reports `{k}`, which could collide with a standard tag");
     }
 }
+
+/// The failure this was written for: Immich's internal library is owned by root and the api container runs
+/// as the photo owner, so creating the sidecar fails with `Permission denied (os error 13)` — after the edit
+/// has been made. `writable_beside` answers before it, and `save` names the folder rather than the errno.
+#[test]
+fn an_unwritable_folder_is_reported_up_front_and_by_name() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let roots = [tmp.path().canonicalize().unwrap()];
+    let dir = tmp.path().join("readonly");
+    std::fs::create_dir(&dir).unwrap();
+    let original = fixture(&dir, "r.NEF");
+    assert!(crate::writable_beside(&original), "a normal folder takes a sidecar");
+
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    // Running as root ignores the mode bits entirely, so there is nothing to test there.
+    if crate::writable_beside(&original) {
+        eprintln!("running as root; skipping");
+        return;
+    }
+
+    let err = update(&original, &roots, |d| d.set_edit(&EditParams::default(), "x")).unwrap_err();
+    assert!(
+        matches!(err.downcast_ref::<crate::SidecarError>(), Some(crate::SidecarError::NotWritable { .. })),
+        "expected NotWritable, got {err:#}"
+    );
+    assert!(err.to_string().contains("readonly"), "the message should name the folder: {err}");
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+}

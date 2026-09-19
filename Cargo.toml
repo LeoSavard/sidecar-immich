@@ -13,7 +13,8 @@ repository = "https://github.com/LeoSavard/sidecar-immich"
 
 [workspace.dependencies]
 anyhow = "1"
-axum = "0.8"
+# `multipart` for `POST /api/intake`: a photo handed straight to Sidecar from the device being edited on.
+axum = { version = "0.8", features = ["multipart"] }
 base64 = "0.22"
 chacha20poly1305 = "0.10"
 getrandom = "0.3"

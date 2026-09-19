@@ -52,7 +52,7 @@ fn stem(name: &str) -> String {
     s.to_ascii_lowercase()
 }
 
-fn from_asset(app: &App, a: &ImmichAsset) -> Option<Candidate> {
+pub(crate) fn from_asset(app: &App, a: &ImmichAsset) -> Option<Candidate> {
     let (_, path) = app.config.mount_path(&a.original_path)?;
     path.is_file().then(|| Candidate { path, file_name: a.original_file_name.clone(), immich_asset_id: Some(a.id.clone()), taken: a.local_date_time.clone() })
 }

@@ -137,6 +137,10 @@ pub struct SessionInfo {
     name: String,
     email: String,
     auth_required: bool,
+    /// Whether an Immich library is configured at all. Equal to `auth_required` today — signing in *is*
+    /// signing in to Immich — but the export sheet asks this one, because "is there somewhere to upload to"
+    /// and "does this deployment have accounts" are not the same question and won't always share an answer.
+    immich: bool,
 }
 
 pub async fn sign_in(State(app): State<Arc<App>>, Json(body): Json<SignIn>) -> Response {
@@ -159,12 +163,12 @@ pub async fn sign_in(State(app): State<Arc<App>>, Json(body): Json<SignIn>) -> R
         return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")).into_response();
     }
     let cookie = format!("{COOKIE}={sid}; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000{}", if app.config.server.secure_cookies { "; Secure" } else { "" });
-    ([(header::SET_COOKIE, cookie)], Json(SessionInfo { name: me.name, email: me.email, auth_required: true })).into_response()
+    ([(header::SET_COOKIE, cookie)], Json(SessionInfo { name: me.name, email: me.email, auth_required: true, immich: app.immich.enabled() })).into_response()
 }
 
 pub async fn session(State(app): State<Arc<App>>, parts: Parts) -> Response {
     match user_from(&parts, &app).await {
-        Some(u) => Json(SessionInfo { name: u.name, email: u.email, auth_required: app.immich.enabled() }).into_response(),
+        Some(u) => Json(SessionInfo { name: u.name, email: u.email, auth_required: app.immich.enabled(), immich: app.immich.enabled() }).into_response(),
         None => StatusCode::UNAUTHORIZED.into_response(),
     }
 }

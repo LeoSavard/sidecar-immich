@@ -44,6 +44,19 @@ pub struct ImmichAsset {
     pub stack: Option<AssetStack>,
 }
 
+/// Content type for an upload. Everything Sidecar can open that has no registered image type — every RAW —
+/// goes up as bytes, which Immich accepts: it types an asset from the extension, not this header.
+fn mime_for(file_name: &str) -> &'static str {
+    match file_name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).as_deref() {
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("tif" | "tiff") => "image/tiff",
+        Some("png") => "image/png",
+        Some("heic") => "image/heic",
+        Some("heif") => "image/heif",
+        _ => "application/octet-stream",
+    }
+}
+
 impl Immich {
     pub fn enabled(&self) -> bool {
         !self.base.is_empty()
@@ -88,8 +101,10 @@ impl Immich {
 
     /// `POST /api/assets` (multipart) — needs `asset.upload`. Immich 3.x has no deviceAssetId; it rejects exact
     /// duplicates per user by checksum and answers `{ id, status: "duplicate" }`, which counts as success.
+    /// Used both for finished exports and for a photo handed in from the editing device, so `file_name` is
+    /// what decides the type — Immich goes by the extension too.
     pub async fn upload(&self, key: &str, file_name: &str, bytes: Vec<u8>, captured_at: &str) -> Result<String> {
-        let part = reqwest::multipart::Part::bytes(bytes).file_name(file_name.to_string()).mime_str(if file_name.ends_with(".tif") { "image/tiff" } else { "image/jpeg" })?;
+        let part = reqwest::multipart::Part::bytes(bytes).file_name(file_name.to_string()).mime_str(mime_for(file_name))?;
         let form = reqwest::multipart::Form::new()
             .part("assetData", part)
             .text("filename", file_name.to_string())

@@ -11,6 +11,8 @@ serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"
 hex.workspace = true
+# `access(2)`, to tell the editor a photo's folder is unwritable before the edit is made rather than after.
+rustix = { version = "1", features = ["fs"] }
 thiserror.workspace = true
 xmp_toolkit = "1.12"
 sidecar-color.workspace = true

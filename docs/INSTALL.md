@@ -18,6 +18,23 @@ deliberate, not an oversight.
 4. On iPhone, create the [Edit in Sidecar shortcut](../ios/README.md). On Android, install Sidecar as an app
    and use Share.
 
+You can also open a photo that isn't on the server yet: choose or drag one onto Sidecar's home page and it is
+uploaded to your Immich library first, then opened like any other. Exports go to Immich, to the device you're
+editing on, or both — on a phone that's the share sheet, ending in *Save Image*.
+
+### The `user:` of the api container has to be able to write
+
+Sidecar stores an edit in an XMP file *beside the original*, so `sidecar-api` needs write access to the folders
+your photos are in — that's the one thing the compose file's `user: "1000:1000"` is there for, and the comment
+"the owner of your photo files" is meant literally.
+
+Immich's own internal library (`UPLOAD_LOCATION`) is a common place to get this wrong: Immich runs as root by
+default, so it writes that tree as `root:root` with mode 755, and a `sidecar-api` running as uid 1000 can read
+every photo in it and save nothing. The symptom is that editing works normally and the first save fails.
+Sidecar now says so when the photo opens rather than after the edit, but the fix is on your side — either give
+that account write access to the tree (`chown -R 1000:1000`, or a group both accounts are in), or run
+`sidecar-api` as whatever user owns it. `sidecar-worker` stays read-only; it never writes to a library.
+
 Your browser doesn't need WebGPU to use Sidecar: Safari 26 and current Chromium edit live in the browser;
 anything else — Firefox, older Safari — falls back to the server developing each change and sending back a
 JPEG. Slower per change, same result, no separate setup.

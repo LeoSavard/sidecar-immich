@@ -22,6 +22,26 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+/// Where a finished render goes. `Immich` is the default and what every earlier client asks for by saying
+/// nothing: upload, stack with the original, drop the local copy. The other two keep the rendered file in the
+/// worker's outbox so the browser can fetch it — the phone or laptop doing the editing is then a destination
+/// in its own right, not only a remote control for the library.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum Destination {
+    #[default]
+    Immich,
+    Device,
+    Both,
+}
+
+impl Destination {
+    /// Does the browser need to be able to download the rendered file afterwards?
+    fn to_device(self) -> bool {
+        matches!(self, Self::Device | Self::Both)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ExportRequest {
@@ -35,6 +55,8 @@ pub struct ExportRequest {
     pub quality: u8,
     #[serde(default)]
     pub long_edge: Option<u32>,
+    #[serde(default)]
+    pub destination: Destination,
 }
 
 fn jpeg() -> String {
@@ -113,8 +135,15 @@ pub async fn create(State(app): State<Arc<App>>, ApiUser(user): ApiUser, headers
     if doc.etag() != req.edit_etag {
         return (StatusCode::CONFLICT, "Save your edit before exporting; the sidecar has changed.").into_response();
     }
+    // An identical export already in `sc:Exports` normally answers the request on its own — nothing renders
+    // twice. It can't when the file is wanted on this device, though: that copy was uploaded and deleted, so
+    // there are no bytes left to hand back. Render it again under its existing version number, and let `run`
+    // know not to upload or record a second time.
     let exports = doc.exports();
-    if let Some(existing) = exports.iter().find(|e| same_settings(e, &req)) {
+    let already = exports.iter().find(|e| same_settings(e, &req)).cloned();
+    if let Some(existing) = &already
+        && !req.destination.to_device()
+    {
         return (StatusCode::OK, Json(json!({ "existing": existing }))).into_response();
     }
 
@@ -134,7 +163,7 @@ pub async fn create(State(app): State<Arc<App>>, ApiUser(user): ApiUser, headers
     job.push("queued", json!({ "version": version, "file": file_name }));
     let (app2, job2, edit, name2) = (app.clone(), job.clone(), doc.edit(), file_name.clone());
     tokio::spawn(async move {
-        let outcome = run(&app2, &job2, &user, &rec, &req, edit, version, &name2).await;
+        let outcome = run(&app2, &job2, &user, &rec, &req, edit, version, &name2, already).await;
         app2.jobs.numbering.lock().unwrap().remove(&req.asset_key);
         if let Err(e) = outcome {
             tracing::error!("export {}: {e:#}", job2.id);
@@ -145,7 +174,7 @@ pub async fn create(State(app): State<Arc<App>>, ApiUser(user): ApiUser, headers
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn run(app: &Arc<App>, job: &Job, user: &crate::session::User, rec: &AssetRecord, req: &ExportRequest, edit: EditParams, version: u64, file_name: &str) -> Result<()> {
+async fn run(app: &Arc<App>, job: &Job, user: &crate::session::User, rec: &AssetRecord, req: &ExportRequest, edit: EditParams, version: u64, file_name: &str, recorded: Option<Value>) -> Result<()> {
     let sidecar = json!({
         "processVersion": sidecar_color::params::PROCESS_VERSION,
         "sourceSha1": req.asset_key,
@@ -180,8 +209,11 @@ async fn run(app: &Arc<App>, job: &Job, user: &crate::session::User, rec: &Asset
     }
     let done = done.context("the worker stopped before finishing")?;
 
+    // `recorded` means this exact render is already in Immich under this version number: it is being made
+    // again only so the browser can download it, so uploading it a second time would ask Immich to dedupe
+    // something it has no reason to see twice.
     let mut immich_asset_id: Option<String> = None;
-    if app.immich.enabled() {
+    if app.immich.enabled() && req.destination != Destination::Device && recorded.is_none() {
         job.push("progress", json!({ "stage": "upload", "overall": 0.88 }));
         let file = app.http.get(app.worker(&format!("/v1/outbox/{}/{}", job.id, file_name))).send().await?.error_for_status()?.bytes().await?;
         let meta: Value = app.http.get(app.worker(&format!("/v1/assets/{}/meta", req.asset_key))).send().await?.json().await?;
@@ -198,24 +230,38 @@ async fn run(app: &Arc<App>, job: &Job, user: &crate::session::User, rec: &Asset
         immich_asset_id = Some(id);
     }
 
-    let entry = json!({
-        "version": version, "editEtag": req.edit_etag, "file": file_name, "format": req.format,
-        "colorSpace": req.color_space, "quality": req.quality, "longEdge": req.long_edge,
-        "fileSha1": done["sha1"], "exported": sidecar_xmp::utc_now(), "immichAssetId": immich_asset_id,
-    });
-    let roots = app.config.canonical_mounts();
-    let path = rec.path.clone();
-    let entry2 = entry.clone();
-    tokio::task::spawn_blocking(move || sidecar_xmp::update(&path, &roots, |d| {
-        d.append_export(entry2.clone());
-        Ok(())
-    }))
-    .await??;
+    if recorded.is_none() {
+        let entry = json!({
+            "version": version, "editEtag": req.edit_etag, "file": file_name, "format": req.format,
+            "colorSpace": req.color_space, "quality": req.quality, "longEdge": req.long_edge,
+            "fileSha1": done["sha1"], "exported": sidecar_xmp::utc_now(), "immichAssetId": immich_asset_id,
+        });
+        let roots = app.config.canonical_mounts();
+        let path = rec.path.clone();
+        // An export that reached Immich is not lost when the sidecar can't be written, so this one failure
+        // is reported and stepped over rather than failing the job: the photo's version history misses an
+        // entry, and the file the person asked for still arrives.
+        let saved = tokio::task::spawn_blocking(move || sidecar_xmp::update(&path, &roots, |d| {
+            d.append_export(entry.clone());
+            Ok(())
+        }))
+        .await?;
+        if let Err(e) = saved {
+            tracing::error!("recording export v{version} of {}: {e:#}", rec.path.display());
+            job.push("warning", json!({ "message": format!("{e}") }));
+        }
+    }
 
-    if immich_asset_id.is_some() {
+    // The outbox copy is what `GET /api/exports/{id}/file` serves, so it only goes when nothing wants it:
+    // the render reached Immich and this device isn't asking for it too. What stays is swept by the worker.
+    // A re-render of an export that is already in Immich still belongs to that asset, so the finished event
+    // names it rather than reporting the photo as never uploaded.
+    let immich_id = immich_asset_id.clone().or_else(|| recorded.as_ref().and_then(|e| e["immichAssetId"].as_str().map(String::from)));
+    let download = (req.destination.to_device() || immich_id.is_none()).then(|| format!("/api/exports/{}/file", job.id));
+    if download.is_none() {
         let _ = app.http.delete(app.worker(&format!("/v1/outbox/{}", job.id))).send().await;
     }
-    job.push("done", json!({ "version": version, "file": file_name, "bytes": done["bytes"], "width": done["width"], "height": done["height"], "immichAssetId": immich_asset_id, "download": immich_asset_id.is_none().then(|| format!("/api/exports/{}/file", job.id)) }));
+    job.push("done", json!({ "version": version, "file": file_name, "bytes": done["bytes"], "width": done["width"], "height": done["height"], "immichAssetId": immich_id, "download": download }));
     Ok(())
 }
 
@@ -279,4 +325,43 @@ pub async fn file(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Path(id):
     resp.headers_mut().insert("content-type", ct.parse().unwrap());
     resp.headers_mut().insert("content-disposition", format!("attachment; filename=\"{name}\"").parse().unwrap());
     resp
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A client that predates the destination picker sends no `destination` at all, and has to keep getting
+    /// what it has always got: uploaded to Immich, stacked, local copy dropped.
+    #[test]
+    fn a_request_without_a_destination_still_means_immich() {
+        let req: ExportRequest = serde_json::from_str(r#"{"assetKey":"a","editEtag":"b"}"#).unwrap();
+        assert_eq!(req.destination, Destination::Immich);
+        assert!(!req.destination.to_device());
+        assert_eq!(req.format, "jpeg");
+    }
+
+    #[test]
+    fn both_destinations_keep_the_file_for_the_browser() {
+        for (json, want, to_device) in [
+            (r#"{"assetKey":"a","editEtag":"b","destination":"device"}"#, Destination::Device, true),
+            (r#"{"assetKey":"a","editEtag":"b","destination":"both"}"#, Destination::Both, true),
+            (r#"{"assetKey":"a","editEtag":"b","destination":"immich"}"#, Destination::Immich, false),
+        ] {
+            let req: ExportRequest = serde_json::from_str(json).unwrap();
+            assert_eq!(req.destination, want);
+            assert_eq!(req.destination.to_device(), to_device, "{json}");
+        }
+    }
+
+    /// `same_settings` decides whether a render is skipped entirely, so it must not start matching on the
+    /// destination: the same file asked for twice, once for Immich and once for this phone, is one version.
+    #[test]
+    fn destination_is_not_part_of_what_makes_two_exports_the_same() {
+        let entry = json!({ "editEtag": "b", "format": "jpeg", "colorSpace": "srgb", "quality": 92, "longEdge": null });
+        let to_immich: ExportRequest = serde_json::from_str(r#"{"assetKey":"a","editEtag":"b"}"#).unwrap();
+        let to_device: ExportRequest = serde_json::from_str(r#"{"assetKey":"a","editEtag":"b","destination":"device"}"#).unwrap();
+        assert!(same_settings(&entry, &to_immich));
+        assert!(same_settings(&entry, &to_device));
+    }
 }

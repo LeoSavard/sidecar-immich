@@ -2,12 +2,14 @@
 Export: saves the edit first, creates a job, and follows it over Server-Sent Events. The render runs on the
 server whether or not this page stays open; reopening the sheet later shows the result. -->
 <script lang="ts">
-	type Settings = { format: 'jpeg' | 'tiff'; quality: number; longEdge: number | null; colorSpace: 'srgb' | 'display-p3' };
+	type Destination = 'immich' | 'device' | 'both';
+	type Settings = { format: 'jpeg' | 'tiff'; quality: number; longEdge: number | null; colorSpace: 'srgb' | 'display-p3'; destination: Destination };
 	type Props = { assetKey: string; colorSpace: Settings['colorSpace']; prepare: () => Promise<string | null>; onclose: () => void };
 	let { assetKey, colorSpace, prepare, onclose }: Props = $props();
 
 	const SIZES: [string, number | null][] = [['Full size', null], ['4096 px', 4096], ['2048 px', 2048], ['1024 px', 1024]];
 	const STAGES: Record<string, string> = { decode: 'Reading the RAW', demosaic: 'Demosaicing', develop: 'Developing', resample: 'Resizing', encode: 'Encoding', metadata: 'Copying metadata', upload: 'Uploading to Immich', stack: 'Stacking with the original' };
+	const DESTINATIONS: [Destination, string][] = [['immich', 'Immich'], ['device', 'This device'], ['both', 'Both']];
 
 	let settings = $state<Settings>(load());
 	let phase = $state<'idle' | 'running' | 'done' | 'failed'>('idle');
@@ -15,12 +17,29 @@ server whether or not this page stays open; reopening the sheet later shows the 
 	let overall = $state(0);
 	let result = $state<{ file: string; immichAssetId?: string | null; download?: string | null; existing?: boolean } | null>(null);
 	let error = $state('');
+	let warning = $state('');
+	let saving = $state(false);
+	let immich = $state(true);
 	let source: EventSource | null = null;
+
+	// Without an Immich library there is nowhere to upload to, so the device is the only destination and the
+	// picker would be a choice of one.
+	$effect(() => {
+		fetch('/api/session')
+			.then((r) => (r.ok ? r.json() : null))
+			.then((s) => {
+				if (s && s.immich === false) {
+					immich = false;
+					settings.destination = 'device';
+				}
+			})
+			.catch(() => {});
+	});
 
 	// The space comes from the editor (the settings page choice), so the export matches what was on screen;
 	// the picker below still overrides it for one export.
 	function load(): Settings {
-		const base: Settings = { format: 'jpeg', quality: 92, longEdge: null, colorSpace };
+		const base: Settings = { format: 'jpeg', quality: 92, longEdge: null, colorSpace, destination: 'immich' };
 		try {
 			const s = JSON.parse(localStorage.getItem('sidecar.export') ?? '');
 			if (s && typeof s === 'object') return { ...base, ...s, colorSpace };
@@ -42,6 +61,11 @@ server whether or not this page stays open; reopening the sheet later shows the 
 			phase = 'done';
 			source?.close();
 		});
+		// The render and any upload succeeded, but something after them didn't — recording the version in the
+		// sidecar, most often. Worth saying, not worth throwing the export away over.
+		source.addEventListener('warning', (e) => {
+			warning = JSON.parse((e as MessageEvent).data).message;
+		});
 		source.addEventListener('failed', (e) => {
 			error = JSON.parse((e as MessageEvent).data).message;
 			phase = 'failed';
@@ -57,6 +81,7 @@ server whether or not this page stays open; reopening the sheet later shows the 
 		stage = 'Saving your edit';
 		overall = 0;
 		error = '';
+		warning = '';
 		result = null;
 		const etag = await prepare();
 		if (!etag) {
@@ -82,6 +107,43 @@ server whether or not this page stays open; reopening the sheet later shows the 
 		}
 		const { jobId } = await r.json();
 		follow(jobId);
+	}
+
+	/**
+	 * Put the finished file on the device this page is running on. The share sheet is the one that ends in
+	 * "Save Image" on a phone, so it's tried first; a browser without it — or one that refuses because the
+	 * fetch cost us the user gesture — falls back to an ordinary download of the same URL.
+	 */
+	async function saveToDevice() {
+		if (!result?.download) return;
+		saving = true;
+		error = '';
+		try {
+			const r = await fetch(result.download);
+			if (!r.ok) throw new Error((await r.text()) || r.statusText);
+			const blob = await r.blob();
+			const file = new File([blob], result.file, { type: blob.type || 'application/octet-stream' });
+			if (navigator.canShare?.({ files: [file] })) {
+				await navigator.share({ files: [file], title: result.file });
+				return;
+			}
+			const url = URL.createObjectURL(blob);
+			const a = document.createElement('a');
+			a.href = url;
+			a.download = result.file;
+			a.click();
+			setTimeout(() => URL.revokeObjectURL(url), 30_000);
+		} catch (e) {
+			// Dismissing the share sheet is a choice, not a failure.
+			if (e instanceof DOMException && e.name === 'AbortError') return;
+			if (e instanceof DOMException && e.name === 'NotAllowedError') {
+				window.location.href = result.download;
+				return;
+			}
+			error = e instanceof Error ? e.message : String(e);
+		} finally {
+			saving = false;
+		}
 	}
 
 	$effect(() => () => source?.close());
@@ -126,6 +188,16 @@ server whether or not this page stays open; reopening the sheet later shows the 
 						{/each}
 					</div>
 				</fieldset>
+				{#if immich}
+					<fieldset class="grid gap-2">
+						<legend class="mb-1 text-xs text-fg-2">Save to</legend>
+						<div class="grid grid-cols-3 gap-2">
+							{#each DESTINATIONS as [value, label] (value)}
+								<button type="button" aria-pressed={settings.destination === value} class="h-10 rounded text-xs {settings.destination === value ? 'bg-fg text-ground' : 'bg-raised'}" onclick={() => (settings.destination = value)}>{label}</button>
+							{/each}
+						</div>
+					</fieldset>
+				{/if}
 				{#if phase === 'failed'}<p class="text-danger">{error}</p>{/if}
 				<button type="button" class="h-11 rounded bg-fg font-medium text-ground" onclick={start}>{phase === 'failed' ? 'Try again' : 'Export'}</button>
 			</div>
@@ -144,7 +216,13 @@ server whether or not this page stays open; reopening the sheet later shows the 
 					{:else if result.immichAssetId}Saved to Immich as <span class="font-mono">{result.file}</span>, stacked with the original.
 					{:else}Exported <span class="font-mono">{result.file}</span>.{/if}
 				</p>
-				{#if result.download}<a class="grid h-11 place-items-center rounded bg-fg font-medium text-ground" href={result.download} download>Download</a>{/if}
+				{#if warning}<p class="text-warning">{warning}</p>{/if}
+				{#if error}<p class="text-danger">{error}</p>{/if}
+				{#if result.download}
+					<button type="button" class="h-11 rounded bg-fg font-medium text-ground disabled:opacity-60" disabled={saving} onclick={saveToDevice}>
+						{saving ? 'Preparing…' : 'Save to this device'}
+					</button>
+				{/if}
 			</div>
 		{/if}
 	</div>

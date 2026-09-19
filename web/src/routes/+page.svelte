@@ -25,6 +25,40 @@
 		location.href = `/open?immich=${id}`;
 	}
 
+	// ---------- a photo from this device: uploaded into the library, then opened like any other
+	let intakeName = $state('');
+	let intakeError = $state('');
+	let dragging = $state(false);
+
+	async function intake(file: File) {
+		intakeName = file.name;
+		intakeError = '';
+		try {
+			const body = new FormData();
+			body.append('file', file, file.name);
+			const r = await api('/api/intake', { method: 'POST', body });
+			location.href = `/edit/${(await r.json()).assetKey}`;
+		} catch (e) {
+			intakeError = e instanceof Error ? e.message : String(e);
+			intakeName = '';
+		}
+	}
+
+	function chosen(e: Event) {
+		const input = e.currentTarget as HTMLInputElement;
+		const file = input.files?.[0];
+		// Cleared so choosing the same file twice in a row still fires a change event.
+		input.value = '';
+		if (file) intake(file);
+	}
+
+	function dropped(e: DragEvent) {
+		e.preventDefault();
+		dragging = false;
+		const file = e.dataTransfer?.files?.[0];
+		if (file) intake(file);
+	}
+
 	async function signOut() {
 		await fetch('/api/session', { method: 'DELETE' });
 		location.href = '/signin';
@@ -45,6 +79,29 @@
 		<button class="h-11 rounded bg-raised px-4 text-sm">Open</button>
 	</form>
 	{#if linkError}<p class="mt-2 text-sm text-danger">{linkError}</p>{/if}
+
+	<!-- svelte-ignore a11y_no_static_element_interactions -->
+	<div
+		class="mt-3 rounded border border-dashed p-4 text-center text-sm transition-colors {dragging ? 'border-fg bg-raised' : 'border-[#393939]'}"
+		ondragover={(e) => {
+			e.preventDefault();
+			dragging = true;
+		}}
+		ondragleave={() => (dragging = false)}
+		ondrop={dropped}
+	>
+		{#if intakeName}
+			<p aria-live="polite">Adding <span class="font-mono">{intakeName}</span> to your library…</p>
+		{:else}
+			<label class="cursor-pointer">
+				<input type="file" class="sr-only" accept="image/*,.arw,.nef,.cr2,.cr3,.raf,.rw2,.orf,.dng,.pef,.srw" onchange={chosen} />
+				<span class="underline underline-offset-4">Choose a photo on this device</span>
+			</label>
+			<p class="mt-1 text-xs text-fg-2">It goes into your Immich library first, then opens in the editor.</p>
+		{/if}
+	</div>
+	{#if intakeError}<p class="mt-2 text-sm text-danger">{intakeError}</p>{/if}
+
 	<div class="mt-3 flex flex-wrap gap-4 text-sm text-fg-2">
 		<a href="/setup" class="underline underline-offset-4">Set up the iPhone shortcut</a>
 		<a href="/settings" class="underline underline-offset-4">Settings</a>

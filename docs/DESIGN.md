@@ -92,6 +92,7 @@ It still holds write access to directories, so btrfs/ZFS snapshots of both libra
 | iPhone / iPad — primary | Share → *Edit in Sidecar*, from the Immich app | Shortcut → Safari `GET /open?…` |
 | Android | Share → Sidecar, from the Immich app | Web Share Target → service worker → `/open` |
 | Desktop | Paste an Immich photo link | `/photos/<uuid>` → Immich API → checksum → `/open` |
+| Any | Choose or drag a file on the device being edited on | `POST /api/intake` → Immich upload → `/edit/{assetKey}` |
 
 ### The iOS Shortcut
 
@@ -112,6 +113,31 @@ It reads the file the Immich app already downloaded in order to share it; nothin
 ### `GET /open`
 
 Cookie-authenticated (a signed-out visitor goes to sign-in and comes back). It resolves the photo, records it in *Recent*, starts ingest in the background so the proxy is usually decoding before the page loads, and answers `303 → /edit/{assetKey}`. Several candidates go to `/pick`, which shows Immich thumbnails; no match goes to `/pick` with search.
+
+The recorded path can stop being true while the record stays valid — Immich moves a file in its internal
+library whenever the storage template's inputs change. So a stored path that no longer exists is re-resolved
+through Immich by asset id, once, and written back, rather than every route failing until the photo is opened
+from Immich again. Reopening from *Recent* is the case this matters for; `/open` always resolves afresh.
+
+### Intake from the editing device
+
+Every route above finds a photo that is already on the server. `POST /api/intake` (multipart, one `file`
+field) is for one that isn't: a photo picked on the phone or laptop doing the editing, or dropped on the home
+page.
+
+It is not a separate kind of asset. An edit lives in an XMP beside an original, so the original has to become
+a file in a library root before there is anywhere to put one — the photo is uploaded to Immich with the
+user's own key, and from there it is opened exactly like anything else. Nothing downstream of `/edit/{key}`
+knows it arrived this way.
+
+The one wrinkle is timing. `POST /api/assets` returns as soon as the bytes land, but the capture date the
+storage template is keyed on comes from metadata extraction, which runs after — so for a moment the asset's
+`originalPath` names somewhere Sidecar either can't see or would open only to have the file move out from
+under it. Intake polls the asset until its path maps to a file under a configured root, for up to 20 seconds,
+and otherwise says the photo is safely in the library but not openable from here yet. An exact duplicate is
+already filed and resolves on the first try.
+
+Without an Immich library configured there is nowhere to put the file, and the route answers `501`.
 
 ### Library roots
 
@@ -277,6 +303,12 @@ The client calls `queue.writeTexture({ texture }, bytes, { bytesPerRow: width * 
 
 **Progressive.** A 768 px proxy arrives first (≈ 3 MB before compression); the full proxy swaps in when ready.
 
+**One decode per photo.** Opening a photo fans out into four requests that all want the same decode: `/open`'s
+background pre-build, the `meta` route's re-ingest pre-build, and the client's own proxy and focus fetches for
+the first paint. They are serialized on the asset key, not on key + edge, because one decode writes every size
+it was asked for — a caller waiting on a different edge of the same photo still wants that decode to happen
+once. Two decoders run at a time overall, so different photos are unaffected.
+
 **Loupe.**
 
 ```
@@ -421,12 +453,20 @@ if (focus_energy(uv, step) >= V.peak_t) { return vec4f(PEAK_COLOUR, 1.0); }   //
 Every export is kept. Each distinct edit that gets exported becomes a numbered version, and the newest JPEG leads the photo's stack in Immich.
 
 1. **Commit** — `PUT /api/assets/{key}/edit` with `If-Match` → XMP written → new ETag.
-2. **Create job** — `POST /api/exports` with `Idempotency-Key` (one UUID per Export tap) and `{ assetKey, editEtag, format, colorSpace, quality, longEdge }`.
-   - If `sc:Exports` already holds this ETag with these settings, the answer is `200 { version, immichAssetId }` — nothing renders twice.
+2. **Create job** — `POST /api/exports` with `Idempotency-Key` (one UUID per Export tap) and `{ assetKey, editEtag, format, colorSpace, quality, longEdge, destination }`.
+   - If `sc:Exports` already holds this ETag with these settings, the answer is `200 { version, immichAssetId }` — nothing renders twice. Unless the file is wanted on this device: that copy was uploaded and deleted, so there are no bytes left to hand back, and it renders again under its existing version number without uploading or recording a second time.
    - Otherwise the api assigns the version under a per-photo lock and answers `202 { jobId, version }`. The job is pinned to that ETag; later edits don't touch it. Retrying with the same key returns the same job.
 3. **Stream** — `new EventSource('/api/exports/' + jobId + '/events')`.
 4. **Render** — worker, full resolution, tiled.
 5. **Upload and stack** — api.
+
+**Destination.** `destination` is `immich` (the default, and what a client that sends nothing means), `device`
+or `both`. `immich` is the original behaviour: upload, stack, drop the local copy. The other two keep the
+rendered file in the worker's outbox and put a download link in the `done` event, so the phone or laptop doing
+the editing is a destination in its own right rather than only a remote control for the library. The browser
+hands it to the share sheet where there is one — that's the path that ends in *Save Image* on a phone — and
+falls back to an ordinary download. Kept files are swept after 24 hours; the destination is not part of what
+makes two exports the same version, so asking for the same render twice, once for each place, is one version.
 
 **Versions and file names.** A new edit ETag takes the next version number; the same edit exported in another format or size reuses its number.
 
@@ -495,7 +535,12 @@ Full-resolution render, in 4,096² tiles with overlap ≥ the largest filter sup
 
    Every merge creates a new stack ID, so Sidecar never stores one. No separate call to change the primary is needed.
 4. Append the version to `sc:Exports` in the RAW's sidecar.
-5. Delete the outbox entry. On restart the api retries leftover outbox entries with backoff, so an Immich outage never loses a finished render.
+5. Delete the outbox entry, unless the device asked for the file too. On restart the api retries leftover outbox entries with backoff, so an Immich outage never loses a finished render.
+
+Step 4 is the one failure that doesn't sink the export. A render that reached Immich is not lost because the
+sidecar couldn't be written — the commonest reason being a library folder the api container has no write
+access to — so that failure is reported as a `warning` event and stepped over: the photo's version history
+misses an entry, and the file the person asked for still arrives.
 
 **Also confirmed** in the 3.1.0 source: stack creation checks `asset.update` on every listed asset, and a merge keeps all members of the absorbed stack.
 
@@ -511,7 +556,8 @@ Full-resolution render, in 4,096² tiles with overlap ≥ the largest filter sup
 | POST | `/api/assets/{key}/loupe` | 1:1 tile, PNG |
 | GET | `/api/assets/{key}/edit` | Params + `ETag` |
 | PUT | `/api/assets/{key}/edit` | Commit; `If-Match` required; `412` on conflict |
-| POST | `/api/exports` | `202` new job, or `200` existing version; `Idempotency-Key` |
+| POST | `/api/intake` | multipart `file` → upload to Immich, `{ assetKey }`; `501` without a library |
+| POST | `/api/exports` | `202` new job, or `200` existing version; `Idempotency-Key`; `destination` |
 | GET | `/api/exports/{id}/events` | `text/event-stream` |
 | GET | `/api/exports/{id}` | Status snapshot |
 | DELETE | `/api/exports/{id}` | Cancel |

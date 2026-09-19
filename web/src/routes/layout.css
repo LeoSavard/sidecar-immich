@@ -11,6 +11,8 @@
 	--color-fg-2: #c6c6c6;
 	--color-muted: #8d8d8d;
 	--color-danger: #ff8389;
+	/* Carbon's Yellow 30: something completed but not entirely — not a failure, so not danger's red. */
+	--color-warning: #f1c21b;
 	--font-sans: 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
 	--font-mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, monospace;
 }

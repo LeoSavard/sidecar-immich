@@ -3,7 +3,10 @@ services:
   sidecar-api:
     image: ghcr.io/leosavard/sidecar-immich:latest
     command: ["api", "--config", "/etc/sidecar.toml"]
-    user: "1000:1000"                                   # the owner of your photo files
+    # Literally the owner of your photo files: Sidecar saves an edit as an XMP beside the original, so this
+    # account needs write access to the folders below. Immich writes its own internal library as root:root by
+    # default, which this user can read and not write — see docs/INSTALL.md.
+    user: "1000:1000"
     volumes:
       - ./sidecar.toml:/etc/sidecar.toml:ro
       - ./immich-admin-key:/run/secrets/immich_admin_key:ro   # optional, job.create only
