@@ -265,7 +265,7 @@ Draft 1's local hash index is gone: the strict layout makes step 2 two or three 
 
 ## 5. Ingest and proxy (sidecar-worker)
 
-On first open, cached by `assetKey + ProcessVersion`:
+On first open, cached by `assetKey + ProcessVersion + IngestGeneration`:
 
 1. **Open** — LibRaw `open_file` + `unpack`. Read `black`/`cblack`, `maximum`, `cam_mul`, `pre_mul`, `rgb_cam`, DNG ColorMatrix1/2 with illuminants, CFA `filters`/`xtrans`, `flip`, ISO, lens.
 2. **Upload CFA** to the GPU as `r16uint`.
@@ -302,6 +302,15 @@ The client calls `queue.writeTexture({ texture }, bytes, { bytesPerRow: width * 
 **Sizing.** `long_edge = min(maxViewportEdge × devicePixelRatio × 1.25, device.limits.maxTextureDimension2D, classCap)` with `classCap` = 2,560 on iPhone and 4,096 on iPad and desktop. The texture limit is a ceiling, not a target: one 4,096² RGBA16F texture is 128 MB, and the pipeline holds about two.
 
 **Progressive.** A 768 px proxy arrives first (≈ 3 MB before compression); the full proxy swaps in when ready.
+
+**Cache generation.** `ProcessVersion` versions the develop parameters in a sidecar, and raising it marks
+every sidecar read-only to an older Sidecar — so it cannot also stand for what the pixels were decoded by.
+`INGEST_GENERATION` does that, and is bumped by any change to what ingest produces from the same original:
+demosaic, hot pixels, highlight reconstruction, orientation, the downsample. Both are in the file name.
+Without the second one, 0.2.1's fix for a HEIC being rotated 180° twice never reached a photo whose proxy had
+already been built — the name hadn't changed, so the cache kept answering, upside down. Files from an earlier
+generation can never be asked for again, so the worker sweeps them at startup. Cached metadata is untouched:
+it comes from EXIF, which no ingest change rewrites.
 
 **One decode per photo.** Opening a photo fans out into four requests that all want the same decode: `/open`'s
 background pre-build, the `meta` route's re-ingest pre-build, and the client's own proxy and focus fetches for

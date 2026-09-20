@@ -29,6 +29,17 @@ use tokio::sync::Semaphore;
 pub const PREVIEW_EDGE: u32 = 768;
 pub const DEFAULT_EDGE: u32 = 2560;
 
+/// What the cached proxy and focus mask were *decoded* by. Bump this whenever a change alters the pixels
+/// ingest produces from the same original — demosaic, hot pixels, highlight reconstruction, orientation,
+/// the downsample — so the cache stops answering with output the current code would not have made.
+///
+/// `ProcessVersion` alone used to key these files, and it can't do this job: it versions the develop
+/// parameters written into a sidecar, and raising it marks every sidecar as read-only to an older Sidecar.
+/// The two move for unrelated reasons. 0.2.1 fixed a HEIC at EXIF orientation 3 being rotated 180° twice —
+/// libheif had already applied the file's own `irot` — and left every proxy decoded before it in place and
+/// upside down, because nothing in the file name had changed. Generation 2 is that fix.
+pub const INGEST_GENERATION: u32 = 2;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Meta {
@@ -73,6 +84,38 @@ pub fn sha1_file(path: &std::path::Path) -> Result<String> {
     Ok(hex::encode(h.finalize()))
 }
 
+/// The marker every cached proxy and focus mask carries in its name. Both numbers are in it because they
+/// invalidate for different reasons: `ProcessVersion` decides whether a cached file still means what the
+/// client will ask for, and `INGEST_GENERATION` whether this code would have decoded it that way.
+fn cache_generation() -> String {
+    format!("pv{PROCESS_VERSION}-g{INGEST_GENERATION}")
+}
+
+/// Drop proxies and focus masks from an earlier generation. Nothing will ever ask for those file names
+/// again, so they are unreadable rather than stale — without this, a bump would leave them on disk for good.
+/// Cached metadata is left alone: it comes from EXIF, which no ingest change rewrites.
+fn sweep_stale_cache(cache: &std::path::Path) {
+    let marker = format!("-{}-", cache_generation());
+    let (mut removed, mut bytes) = (0u64, 0u64);
+    for dir in ["proxies", "focus"] {
+        let Ok(entries) = std::fs::read_dir(cache.join(dir)) else { continue };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if name.to_str().is_some_and(|n| n.contains(&marker)) {
+                continue;
+            }
+            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+            if std::fs::remove_file(entry.path()).is_ok() {
+                removed += 1;
+                bytes += size;
+            }
+        }
+    }
+    if removed > 0 {
+        tracing::info!("dropped {removed} cached files from an earlier ingest generation ({} MB); they rebuild on demand", bytes >> 20);
+    }
+}
+
 fn internal(e: anyhow::Error) -> Response {
     tracing::error!("{e:#}");
     (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")).into_response()
@@ -84,6 +127,7 @@ impl Worker {
         std::fs::create_dir_all(cache.join("proxies"))?;
         std::fs::create_dir_all(cache.join("focus"))?;
         std::fs::create_dir_all(cache.join("outbox"))?;
+        sweep_stale_cache(&cache);
         let kit = sidecar_engine::Gpu::new_headless().and_then(|gpu| {
             let ingest = sidecar_engine::Ingest::new(&gpu)?;
             let develop = sidecar_engine::DevelopPass::new(&gpu)?;
@@ -116,13 +160,13 @@ impl Worker {
     }
 
     fn proxy_path(&self, key: &str, edge: u32) -> PathBuf {
-        self.cache.join("proxies").join(format!("{key}-pv{PROCESS_VERSION}-{edge}.f16"))
+        self.cache.join("proxies").join(format!("{key}-{}-{edge}.f16", cache_generation()))
     }
 
     /// Focus-peaking mask at `edge`: max-pooled from a full-resolution measure, so it caches (and expires)
     /// alongside the proxy it overlays, keyed the same way. See docs/ROADMAP.md, "Focus peaking...".
     fn focus_path(&self, key: &str, edge: u32) -> PathBuf {
-        self.cache.join("focus").join(format!("{key}-pv{PROCESS_VERSION}-{edge}.png"))
+        self.cache.join("focus").join(format!("{key}-{}-{edge}.png", cache_generation()))
     }
 
     pub async fn ingest(self: &Arc<Self>, path: PathBuf) -> Result<Meta> {
@@ -665,6 +709,29 @@ mod tests {
         assert!(tokio::time::timeout(wait, w.decode_guard("aaa")).await.is_err(), "the same photo should wait");
         drop(held);
         assert!(tokio::time::timeout(wait, w.decode_guard("aaa")).await.is_ok(), "and go ahead once the first decode is done");
+    }
+
+    /// What went wrong on the real server: 0.2.1 stopped rotating a HEIC twice, and every proxy decoded
+    /// before it stayed on disk and upside down, because the file name only carried `ProcessVersion` — which
+    /// that fix had no reason to change. A cached file from an earlier generation must be unreachable, and
+    /// then swept, rather than answering for pixels this code would not have produced.
+    #[test]
+    fn an_earlier_ingest_generation_is_unreachable_and_swept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let key = "a".repeat(40);
+        let (proxies, focus) = (tmp.path().join("proxies"), tmp.path().join("focus"));
+        std::fs::create_dir_all(&proxies).unwrap();
+        std::fs::create_dir_all(&focus).unwrap();
+        // How the files were named before ingest had a generation of its own.
+        let old = proxies.join(format!("{key}-pv{PROCESS_VERSION}-2560.f16"));
+        let older = focus.join(format!("{key}-pv{PROCESS_VERSION}-g1-768.png"));
+        std::fs::write(&old, b"upside down").unwrap();
+        std::fs::write(&older, b"upside down").unwrap();
+
+        let w = Worker::new(tmp.path().to_path_buf()).unwrap();
+        assert_ne!(w.proxy_path(&key, 2560), old, "the current code must not look at the old name");
+        assert_ne!(w.focus_path(&key, 768), older);
+        assert!(!old.exists() && !older.exists(), "and Worker::new should have swept both");
     }
 
     /// The map is keyed by asset, so it would otherwise hold one entry per photo ever opened.
