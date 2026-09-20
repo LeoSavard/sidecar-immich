@@ -5,6 +5,12 @@
 #   docker build --build-arg HEIF=1 -t sidecar:local .
 # Without it everything still works except HEIC, which reports what's missing. See the Dockerfile for why
 # that decoder isn't in the published image.
+
+# Pinned, because the default is the directory's name and the named volumes below are prefixed with it:
+# renaming this directory would otherwise start a second stack on empty `sidecar-state` and `sidecar-cache`
+# volumes -- every session signed out, Recent empty, every proxy decoded again -- while the old one kept the
+# port. Which is exactly what the rename of deploy/remote-proxy to deploy/remote-proxy did.
+name: sidecar
 services:
   sidecar-api:
     image: sidecar:local

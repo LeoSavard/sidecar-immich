@@ -1,4 +1,9 @@
 # Example deployment. Put HTTPS in front of port 8080 (your reverse proxy, a Cloudflare Tunnel, or `tailscale serve`).
+
+# Pinned, because the default is the directory's name and the named volumes below are prefixed with it:
+# renaming or moving this directory would otherwise start a second stack on empty volumes rather than the
+# one holding your sessions and cached proxies.
+name: sidecar
 services:
   sidecar-api:
     image: ghcr.io/leosavard/sidecar-immich:latest
