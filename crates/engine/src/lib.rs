@@ -73,32 +73,32 @@ impl RgbaF32 {
         RgbaF32 { width: dw, height: dh, data }
     }
 
-    /// Apply a LibRaw orientation: 3 = 180°, 5 = 90° counter-clockwise, 6 = 90° clockwise.
+    /// Apply a LibRaw orientation. `flip` is a bit set — 4 transposes, 2 mirrors top to bottom, 1 mirrors
+    /// left to right — so 3 is 180°, 5 is 90° counter-clockwise, 6 is 90° clockwise, and 1, 2, 4 and 7 are the
+    /// mirrored EXIF orientations.
     pub fn oriented(self, flip: i32) -> RgbaF32 {
-        let (w, h) = (self.width as usize, self.height as usize);
-        let px = |x: usize, y: usize| &self.data[(y * w + x) * 4..(y * w + x) * 4 + 4];
-        match flip {
-            3 => {
-                let mut data = Vec::with_capacity(self.data.len());
-                for y in (0..h).rev() {
-                    for x in (0..w).rev() {
-                        data.extend_from_slice(px(x, y));
-                    }
-                }
-                RgbaF32 { width: self.width, height: self.height, data }
-            }
-            5 | 6 => {
-                let mut data = Vec::with_capacity(self.data.len());
-                for ny in 0..w {
-                    for nx in 0..h {
-                        let (x, y) = if flip == 6 { (ny, h - 1 - nx) } else { (w - 1 - ny, nx) };
-                        data.extend_from_slice(px(x, y));
-                    }
-                }
-                RgbaF32 { width: self.height, height: self.width, data }
-            }
-            _ => self,
+        let flip = flip & 7;
+        if flip == 0 {
+            return self;
         }
+        let (w, h) = (self.width as usize, self.height as usize);
+        let transpose = flip & 4 != 0;
+        let (nw, nh) = if transpose { (h, w) } else { (w, h) };
+        let mut data = Vec::with_capacity(self.data.len());
+        for ny in 0..nh {
+            for nx in 0..nw {
+                let (mut x, mut y) = if transpose { (ny, nx) } else { (nx, ny) };
+                if flip & 2 != 0 {
+                    y = h - 1 - y;
+                }
+                if flip & 1 != 0 {
+                    x = w - 1 - x;
+                }
+                let i = (y * w + x) * 4;
+                data.extend_from_slice(&self.data[i..i + 4]);
+            }
+        }
+        RgbaF32 { width: nw as u32, height: nh as u32, data }
     }
 
     pub fn to_f16_bytes(&self) -> Vec<u8> {
@@ -110,6 +110,19 @@ impl RgbaF32 {
         let half: &[half::f16] = bytemuck::cast_slice(bytes);
         Self { width, height, data: half.iter().map(|v| v.to_f32()).collect() }
     }
+}
+
+/// Where a rectangle of the image `oriented(flip)` produces lies in the image before orientation, for a
+/// source of `sw` × `sh`. Both are `(x, y, width, height)` in pixels.
+pub fn source_rect(flip: i32, sw: u32, sh: u32, (x, y, w, h): (u32, u32, u32, u32)) -> (u32, u32, u32, u32) {
+    let (mut x, mut y, w, h) = if flip & 4 != 0 { (y, x, h, w) } else { (x, y, w, h) };
+    if flip & 2 != 0 {
+        y = sh - y - h;
+    }
+    if flip & 1 != 0 {
+        x = sw - x - w;
+    }
+    (x, y, w, h)
 }
 
 /// Single-channel image in f32, row-major, top-left origin.
@@ -242,5 +255,47 @@ impl Gpu {
                 .context("requesting GPU device")?;
             Ok(Self { adapter_info, device, queue })
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A 3 × 2 image whose every pixel is its own index, so any remap is visible.
+    fn indexed() -> RgbaF32 {
+        RgbaF32 { width: 3, height: 2, data: (0..6).flat_map(|i| [i as f32; 4]).collect() }
+    }
+
+    #[test]
+    fn rotations_and_mirrors_land_where_exif_says() {
+        let rows = |img: RgbaF32| -> Vec<Vec<u32>> {
+            img.data.chunks(4 * img.width as usize).map(|r| r.chunks(4).map(|p| p[0] as u32).collect()).collect()
+        };
+        // 0 1 2
+        // 3 4 5
+        assert_eq!(rows(indexed().oriented(0)), [[0, 1, 2], [3, 4, 5]]);
+        assert_eq!(rows(indexed().oriented(1)), [[2, 1, 0], [5, 4, 3]], "EXIF 2, mirrored left to right");
+        assert_eq!(rows(indexed().oriented(3)), [[5, 4, 3], [2, 1, 0]], "180°");
+        assert_eq!(rows(indexed().oriented(2)), [[3, 4, 5], [0, 1, 2]], "EXIF 4, mirrored top to bottom");
+        assert_eq!(rows(indexed().oriented(6)), [[3, 0], [4, 1], [5, 2]], "90° clockwise");
+        assert_eq!(rows(indexed().oriented(5)), [[2, 5], [1, 4], [0, 3]], "90° counter-clockwise");
+        assert_eq!(rows(indexed().oriented(4)), [[0, 3], [1, 4], [2, 5]], "EXIF 5, transposed");
+        assert_eq!(rows(indexed().oriented(7)), [[5, 2], [4, 1], [3, 0]], "EXIF 7, transversed");
+    }
+
+    /// The loupe cuts its tile out of the unoriented image with this, then orients it: the two must agree.
+    #[test]
+    fn source_rect_is_the_inverse_of_oriented() {
+        for flip in 0..8 {
+            let src = indexed();
+            let out = src.clone().oriented(flip);
+            for (x, y) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                let (sx, sy, sw, sh) = source_rect(flip, 3, 2, (x, y, 1, 1));
+                assert_eq!((sw, sh), (1, 1));
+                let want = out.data[((y * out.width + x) * 4) as usize];
+                assert_eq!(src.data[((sy * 3 + sx) * 4) as usize], want, "flip {flip} at {x},{y}");
+            }
+        }
     }
 }

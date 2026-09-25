@@ -119,7 +119,8 @@ enum Samples {
     Sixteen(Vec<u16>),
 }
 
-/// Interleaved integer samples → linear RGBA f32. `channels` is 1, 3 or 4.
+/// Interleaved integer samples → linear RGBA f32. `channels` is 1 (grey), 2 (grey + alpha), 3 or 4; any
+/// alpha is dropped, see below.
 ///
 /// Alpha is **zero**, not one, and any alpha the source carried is dropped. Downstream, alpha is not opacity:
 /// it is the fraction of the pixel clipped at the sensor, and `highlight_blend` pulls those pixels toward
@@ -132,7 +133,7 @@ fn to_linear_rgba(samples: &Samples, channels: usize) -> Vec<f32> {
         let lut = linear_lut(levels);
         let mut out = Vec::with_capacity(samples.len() / channels * 4);
         for p in samples.chunks_exact(channels) {
-            let (r, g, b) = if channels == 1 { (p[0], p[0], p[0]) } else { (p[0], p[1], p[2]) };
+            let (r, g, b) = if channels < 3 { (p[0], p[0], p[0]) } else { (p[0], p[1], p[2]) };
             out.push(lut[index(r)]);
             out.push(lut[index(g)]);
             out.push(lut[index(b)]);
@@ -206,7 +207,10 @@ fn decode_jpeg(bytes: &[u8]) -> Result<(u32, u32, Vec<f32>), DecodeError> {
 }
 
 fn decode_png(bytes: &[u8]) -> Result<(u32, u32, Vec<f32>), DecodeError> {
-    let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+    // Palette and 1/2/4-bit files arrive as indices or packed bits otherwise: a palette PNG read as grey
+    // indices, and grey + alpha as two channels the converter indexed three deep and panicked on.
+    decoder.set_transformations(png::Transformations::EXPAND);
     let mut reader = decoder.read_info().map_err(|e| DecodeError::Decode(format!("PNG: {e}")))?;
     let mut buf = vec![0u8; reader.output_buffer_size().ok_or_else(|| DecodeError::Decode("PNG too large".into()))?];
     let frame = reader.next_frame(&mut buf).map_err(|e| DecodeError::Decode(format!("PNG: {e}")))?;
@@ -358,7 +362,7 @@ pub fn decode(path: &Path, exif: &Exif) -> Result<Decoded, DecodeError> {
 /// Read from EXIF alone — decoding a 36-megapixel HEIC just to learn its dimensions would cost seconds on
 /// every open. `width` and `height` are the visible size *after* orientation, matching `RawFile::info`.
 pub fn info(path: &Path, exif: &Exif) -> RawInfo {
-    let rotated = matches!(exif.orientation_flip, 5 | 6);
+    let rotated = exif.orientation_flip & 4 != 0;
     let (w, h) = (exif.width, exif.height);
     RawInfo {
         make: exif.make.clone(),
@@ -399,11 +403,16 @@ pub struct Exif {
     pub space: SourceSpace,
 }
 
-/// EXIF orientation (1…8) → LibRaw's flip numbering, the same mapping `RgbaF32::oriented` expects.
+/// EXIF orientation (1…8) → LibRaw's flip bits, the numbering `RgbaF32::oriented` expects. The mirrored
+/// orientations (2, 4, 5, 7) used to fall through to "upright"; some front cameras and scanners write them.
 fn flip_from_orientation(orientation: i64) -> i32 {
     match orientation {
+        2 => 1,
         3 => 3,
+        4 => 2,
+        5 => 4,
         6 => 6,
+        7 => 7,
         8 => 5,
         _ => 0,
     }
@@ -505,6 +514,10 @@ mod tests {
         assert_eq!(flip_from_orientation(3), 3);
         assert_eq!(flip_from_orientation(6), 6);
         assert_eq!(flip_from_orientation(8), 5);
+        assert_eq!(flip_from_orientation(2), 1);
+        assert_eq!(flip_from_orientation(4), 2);
+        assert_eq!(flip_from_orientation(5), 4);
+        assert_eq!(flip_from_orientation(7), 7);
     }
 
     /// Caught by reading the develop shader, not by looking at a render: alpha feeds `highlight_blend` as a
@@ -564,6 +577,39 @@ mod tests {
         assert_eq!(captured_unix("2026:07:29 18:30:00"), 1785349800);
         assert_eq!(captured_unix(""), 0);
         assert_eq!(captured_unix("nonsense"), 0);
+    }
+
+    fn png_bytes(w: u32, h: u32, color: png::ColorType, depth: png::BitDepth, palette: Option<Vec<u8>>, data: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut enc = png::Encoder::new(&mut out, w, h);
+        enc.set_color(color);
+        enc.set_depth(depth);
+        if let Some(p) = palette {
+            enc.set_palette(p);
+        }
+        enc.write_header().unwrap().write_image_data(data).unwrap();
+        out
+    }
+
+    /// A palette PNG used to come back as its grey indices, and grey + alpha panicked the decode outright.
+    #[test]
+    fn palette_and_grey_alpha_pngs_decode_to_their_colours() {
+        let red_blue = png_bytes(2, 1, png::ColorType::Indexed, png::BitDepth::Eight, Some(vec![255, 0, 0, 0, 0, 255]), &[0, 1]);
+        let (w, h, rgba) = decode_png(&red_blue).unwrap();
+        assert_eq!((w, h), (2, 1));
+        assert_eq!(&rgba[..3], &[1.0, 0.0, 0.0]);
+        assert_eq!(&rgba[4..7], &[0.0, 0.0, 1.0]);
+
+        let grey_alpha = png_bytes(1, 1, png::ColorType::GrayscaleAlpha, png::BitDepth::Eight, None, &[255, 7]);
+        let (_, _, rgba) = decode_png(&grey_alpha).unwrap();
+        assert_eq!(rgba.len(), 4);
+        assert!(rgba[..3].iter().all(|&v| (v - 1.0).abs() < 1e-6), "{rgba:?}");
+        assert_eq!(rgba[3], 0.0);
+
+        let one_bit = png_bytes(8, 1, png::ColorType::Grayscale, png::BitDepth::One, None, &[0b1000_0000]);
+        let (_, _, rgba) = decode_png(&one_bit).unwrap();
+        assert_eq!(rgba.len(), 32);
+        assert!((rgba[0] - 1.0).abs() < 1e-6 && rgba[4] == 0.0, "{:?}", &rgba[..8]);
     }
 
     #[test]

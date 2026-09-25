@@ -37,8 +37,9 @@ pub const DEFAULT_EDGE: u32 = 2560;
 /// parameters written into a sidecar, and raising it marks every sidecar as read-only to an older Sidecar.
 /// The two move for unrelated reasons. 0.2.1 fixed a HEIC at EXIF orientation 3 being rotated 180° twice —
 /// libheif had already applied the file's own `irot` — and left every proxy decoded before it in place and
-/// upside down, because nothing in the file name had changed. Generation 2 is that fix.
-pub const INGEST_GENERATION: u32 = 2;
+/// upside down, because nothing in the file name had changed. Generation 2 is that fix; 3 orients the
+/// mirrored EXIF orientations (2, 4, 5, 7), which every earlier generation left upright.
+pub const INGEST_GENERATION: u32 = 3;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -46,6 +47,11 @@ pub struct Meta {
     pub asset_key: String,
     pub file_name: String,
     pub process_version: u32,
+    /// `INGEST_GENERATION` when this was read. Metadata carries orientation-derived fields — the flip, the
+    /// oriented size, the AF point — so a generation that changes orientation has to re-read it too; files
+    /// cached before this field existed read as 0 and are re-read once.
+    #[serde(default)]
+    pub generation: u32,
     pub info: RawInfo,
 }
 
@@ -178,6 +184,7 @@ impl Worker {
         let meta_path = self.meta_path(&key);
         if let Ok(bytes) = tokio::fs::read(&meta_path).await
             && let Ok(meta) = serde_json::from_slice::<Meta>(&bytes)
+            && meta.generation == INGEST_GENERATION
         {
             return Ok(meta);
         }
@@ -197,11 +204,16 @@ impl Worker {
                 asset_key: k,
                 file_name: p.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default(),
                 process_version: PROCESS_VERSION,
+                generation: INGEST_GENERATION,
                 info,
             })
         })
         .await??;
-        tokio::fs::write(&meta_path, serde_json::to_vec_pretty(&meta)?).await?;
+        // Temp-then-rename: `GET …/meta` reads this file directly, and a concurrent ingest of the same photo
+        // must not let it see half a JSON document.
+        let tmp = unique_tmp(&meta_path);
+        tokio::fs::write(&tmp, serde_json::to_vec_pretty(&meta)?).await?;
+        tokio::fs::rename(&tmp, &meta_path).await?;
         Ok(meta)
     }
 
@@ -341,10 +353,10 @@ async fn read_proxy(path: &std::path::Path) -> Option<(u32, u32, Vec<u8>)> {
 /// A tmp path next to `target` that won't collide with a concurrent writer of the same target: `/open`'s
 /// background pre-build and the client's own immediate request race on identical key+edge cache entries
 /// often enough to hit this in practice, and a shared `.tmp` name meant the second writer's rename found the
-/// first writer's tmp file already gone. Same PID-xor-nanoseconds nonce as `sidecar_xmp`'s sidecar writer.
+/// first writer's tmp file already gone. The process id and a counter make every name distinct.
 fn unique_tmp(target: &std::path::Path) -> PathBuf {
-    let nonce = std::process::id() as u64 ^ std::time::SystemTime::now().duration_since(std::time::SystemTime::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(0);
-    target.with_extension(format!("tmp-{nonce}"))
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    target.with_extension(format!("tmp-{}-{}", std::process::id(), SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)))
 }
 
 /// Atomic write, mirroring the proxy cache's temp-then-rename pattern.
@@ -448,25 +460,21 @@ fn loupe_png(w: &Worker, kit: &export::Kit, req: &LoupeRequest) -> Result<Vec<u8
             let sigma = kit.detail.noise_sigma(&kit.gpu, &tex)?;
             let tex = Arc::new(tex);
             let mut sessions = w.sessions.lock().unwrap();
+            // Two loupe requests on a cold photo both decode it; keep one, or the pair fills every slot.
+            sessions.retain(|s| s.key != req.key);
             sessions.insert(0, Session { key: req.key.clone(), source: tex.clone(), flip, sigma, color: color.clone() });
             sessions.truncate(SESSION_LIMIT);
             (tex, flip, sigma, color)
         }
     };
     let (sw, sh) = (source.width(), source.height());
-    let rotated = matches!(flip, 5 | 6);
-    let (ow, oh) = if rotated { (sh, sw) } else { (sw, sh) };
+    let (ow, oh) = if flip & 4 != 0 { (sh, sw) } else { (sw, sh) };
     let (tw, th) = (req.size[0].clamp(64, 1024).min(ow), req.size[1].clamp(64, 1024).min(oh));
     // Tile rectangle in oriented pixels, kept inside the image.
     let ox = ((req.center[0].clamp(0.0, 1.0) * ow as f32) as i64 - tw as i64 / 2).clamp(0, (ow - tw) as i64) as u32;
     let oy = ((req.center[1].clamp(0.0, 1.0) * oh as f32) as i64 - th as i64 / 2).clamp(0, (oh - th) as i64) as u32;
     // Same rectangle in sensor (unoriented) pixels.
-    let (ux, uy, uw, uh) = match flip {
-        3 => (sw - ox - tw, sh - oy - th, tw, th),
-        6 => (oy, sh - ox - tw, th, tw),
-        5 => (sw - oy - th, ox, th, tw),
-        _ => (ox, oy, tw, th),
-    };
+    let (ux, uy, uw, uh) = sidecar_engine::source_rect(flip, sw, sh, (ox, oy, tw, th));
     let settings = export::detail_settings(&req.edit);
     let m = settings.margin();
     let (cx, cy) = (ux.saturating_sub(m), uy.saturating_sub(m));

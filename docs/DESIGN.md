@@ -309,8 +309,10 @@ every sidecar read-only to an older Sidecar — so it cannot also stand for what
 demosaic, hot pixels, highlight reconstruction, orientation, the downsample. Both are in the file name.
 Without the second one, 0.2.1's fix for a HEIC being rotated 180° twice never reached a photo whose proxy had
 already been built — the name hadn't changed, so the cache kept answering, upside down. Files from an earlier
-generation can never be asked for again, so the worker sweeps them at startup. Cached metadata is untouched:
-it comes from EXIF, which no ingest change rewrites.
+generation can never be asked for again, so the worker sweeps them at startup. Cached metadata records the
+generation it was read under and is re-read when that differs: it holds the orientation, the oriented size
+and the AF point, which is how 0.2.2's support for the mirrored EXIF orientations (2, 4, 5, 7) reaches photos
+opened before it.
 
 **One decode per photo.** Opening a photo fans out into four requests that all want the same decode: `/open`'s
 background pre-build, the `meta` route's re-ingest pre-build, and the client's own proxy and focus fetches for

@@ -61,7 +61,7 @@ pub(crate) fn from_asset(app: &App, a: &ImmichAsset) -> Option<Candidate> {
 /// `sha1("path:" + originalPath)` as their checksum instead of hashing the file.
 pub async fn immich_asset_at(app: &App, user: &User, path: &std::path::Path) -> Result<Option<ImmichAsset>> {
     let Some((root, _)) = app.config.root_of(path) else { return Ok(None) };
-    let Some(original_path) = app.config.immich_path(root, &path.canonicalize()?) else { return Ok(None) };
+    let Some(original_path) = app.config.immich_path(root, path) else { return Ok(None) };
     let assets = app.immich.search(&user.api_key, json!({ "originalPath": original_path })).await?;
     Ok(assets.into_iter().find(|a| a.original_path == original_path))
 }

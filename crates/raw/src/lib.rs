@@ -176,7 +176,7 @@ impl RawFile {
 
     pub fn info(&self) -> RawInfo {
         let i = &self.info;
-        let rotated = matches!(i.flip, 5 | 6);
+        let rotated = i.flip & 4 != 0;
         let (w, h) = (i.width as u32, i.height as u32);
         RawInfo {
             make: text(&i.make),

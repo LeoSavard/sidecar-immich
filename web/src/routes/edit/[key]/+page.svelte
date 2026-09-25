@@ -63,6 +63,7 @@
 	let writable = $state(true);
 	let dirty = $state(false);
 	let saving = $state(false);
+	let saveQueue: Promise<void> = Promise.resolve();
 	let conflict = $state<EditState | null>(null);
 	let restoredDraft = $state(false);
 	let draftTimer: ReturnType<typeof setTimeout> | undefined;
@@ -194,24 +195,40 @@
 		changed();
 	}
 
-	async function commit(keepalive = false) {
-		if (!edit || !dirty || readOnly || saving) return;
+	/**
+	 * Save the edit. One PUT at a time, each sending the latest state: a call made while one is out waits for
+	 * it and then saves whatever is still unsaved, instead of being dropped.
+	 */
+	function commit(keepalive = false): Promise<void> {
+		saveQueue = saveQueue.then(() => save(keepalive));
+		return saveQueue;
+	}
+
+	async function save(keepalive: boolean) {
+		if (!edit || !dirty || readOnly || conflict) return;
 		saving = true;
 		try {
+			const body = JSON.stringify($state.snapshot(edit));
 			const r = await api(`/api/assets/${key}/edit`, {
 				method: 'PUT',
 				keepalive,
 				headers: { 'content-type': 'application/json', 'if-match': `"${etag}"` },
-				body: JSON.stringify($state.snapshot(edit))
+				body
 			});
 			if (r.status === 412) {
 				conflict = await r.json();
 				return;
 			}
 			etag = (await r.json()).etag;
-			dirty = false;
-			restoredDraft = false;
-			await clearDraft(key);
+			// Only what was sent is saved. A slider moved while the request was out used to be marked saved
+			// here, and its draft cleared, so the change was lost without a word.
+			if (JSON.stringify($state.snapshot(edit)) === body) {
+				dirty = false;
+				restoredDraft = false;
+				await clearDraft(key);
+			} else {
+				await saveDraft(key, { edit: $state.snapshot(edit), baseEtag: etag, savedAt: Date.now() });
+			}
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
 		} finally {
@@ -222,7 +239,8 @@
 	/** Save if needed and return the ETag an export should pin, or null when saving failed. */
 	async function prepareExport(): Promise<string | null> {
 		if (readOnly) return etag;
-		if (dirty) await commit();
+		// Always through the queue: a save already out has to land before its ETag is the one to pin.
+		await commit();
 		return dirty || conflict ? null : etag;
 	}
 

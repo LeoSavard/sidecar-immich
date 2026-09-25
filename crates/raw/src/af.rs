@@ -56,12 +56,9 @@ fn fujifilm_focus_pixel(tags: &Value) -> Option<(f64, f64)> {
 /// Maps a point through the same flip `RgbaF32::oriented` applies to the image, so a marker lands where the
 /// oriented photo shows it. Derived from, and must stay in step with, that function's pixel remap.
 fn oriented_point(u: f64, v: f64, flip: i32) -> AfPoint {
-    let (x, y) = match flip {
-        3 => (1.0 - u, 1.0 - v),
-        5 => (v, 1.0 - u),
-        6 => (1.0 - v, u),
-        _ => (u, v),
-    };
+    let u = if flip & 1 != 0 { 1.0 - u } else { u };
+    let v = if flip & 2 != 0 { 1.0 - v } else { v };
+    let (x, y) = if flip & 4 != 0 { (v, u) } else { (u, v) };
     AfPoint { x, y }
 }
 
@@ -108,5 +105,11 @@ mod tests {
         // 90° CW (flip 6): x' = 1 - y, y' = x.
         let p = oriented_point(0.2, 0.7, 6);
         assert!((p.x - 0.3).abs() < 1e-9 && (p.y - 0.2).abs() < 1e-9);
+        // Mirrored left to right (EXIF 2): x' = 1 - x.
+        let p = oriented_point(0.2, 0.7, 1);
+        assert!((p.x - 0.8).abs() < 1e-9 && (p.y - 0.7).abs() < 1e-9);
+        // Transposed (EXIF 5): x' = y, y' = x.
+        let p = oriented_point(0.2, 0.7, 4);
+        assert!((p.x - 0.7).abs() < 1e-9 && (p.y - 0.2).abs() < 1e-9);
     }
 }

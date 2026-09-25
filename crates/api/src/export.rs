@@ -76,6 +76,7 @@ struct JobEvent {
 pub struct Job {
     pub id: String,
     user_id: String,
+    created: std::time::Instant,
     events: Mutex<Vec<JobEvent>>,
     notify: tokio::sync::Notify,
 }
@@ -100,6 +101,22 @@ pub struct Jobs {
     by_idempotency: Mutex<HashMap<String, String>>,
     /// Asset keys with an export being numbered, so two taps can't claim the same version.
     numbering: Mutex<HashSet<String>>,
+}
+
+/// How long a finished job stays answerable — the worker's outbox keeps its file this long too, so the
+/// download link and the job that names it expire together.
+const JOB_TTL: Duration = Duration::from_secs(24 * 3600);
+
+impl Jobs {
+    /// Forget finished jobs older than `JOB_TTL`. Nothing else ever removed one, so every export since the
+    /// api started stayed in memory with its whole event log.
+    pub fn sweep(&self) -> usize {
+        let mut by_id = self.by_id.lock().unwrap();
+        let before = by_id.len();
+        by_id.retain(|_, j| !(j.finished() && j.created.elapsed() > JOB_TTL));
+        self.by_idempotency.lock().unwrap().retain(|_, id| by_id.contains_key(id));
+        before - by_id.len()
+    }
 }
 
 fn file_stem(name: &str) -> &str {
@@ -155,7 +172,7 @@ pub async fn create(State(app): State<Arc<App>>, ApiUser(user): ApiUser, headers
     let size_suffix = req.long_edge.map(|e| format!("-{e}px")).unwrap_or_default();
     let file_name = format!("{}-v{version}{size_suffix}.{ext}", file_stem(&rec.file_name));
 
-    let job = Arc::new(Job { id: random_hex(16), user_id: user.id.clone(), events: Mutex::new(Vec::new()), notify: tokio::sync::Notify::new() });
+    let job = Arc::new(Job { id: random_hex(16), user_id: user.id.clone(), created: std::time::Instant::now(), events: Mutex::new(Vec::new()), notify: tokio::sync::Notify::new() });
     app.jobs.by_id.lock().unwrap().insert(job.id.clone(), job.clone());
     if let Some(k) = idem {
         app.jobs.by_idempotency.lock().unwrap().insert(k, job.id.clone());
@@ -323,13 +340,49 @@ pub async fn file(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Path(id):
     let mut resp = crate::relay(app.http.get(app.worker(&format!("/v1/outbox/{id}/{name}"))).send().await).await;
     let ct = if name.ends_with(".tif") { "image/tiff" } else { "image/jpeg" };
     resp.headers_mut().insert("content-type", ct.parse().unwrap());
-    resp.headers_mut().insert("content-disposition", format!("attachment; filename=\"{name}\"").parse().unwrap());
+    resp.headers_mut().insert("content-disposition", attachment(&name));
     resp
+}
+
+/// `Content-Disposition` for a download named after the original. The quoted `filename` alone mangled any
+/// non-ASCII name (browsers read it as Latin-1) and broke on a `"`; RFC 6266 has browsers prefer the UTF-8
+/// `filename*`, and the plain one stays as an ASCII fallback.
+fn attachment(name: &str) -> axum::http::HeaderValue {
+    let fallback: String = name.chars().map(|c| if c.is_ascii_graphic() && c != '"' && c != '\\' || c == ' ' { c } else { '_' }).collect();
+    let encoded: String = name
+        .bytes()
+        .map(|b| if b.is_ascii_alphanumeric() || b"!#$&+-.^_`|~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") })
+        .collect();
+    axum::http::HeaderValue::from_str(&format!("attachment; filename=\"{fallback}\"; filename*=UTF-8''{encoded}")).expect("ASCII only")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finished_jobs_expire_and_running_ones_stay() {
+        let jobs = Jobs::default();
+        let job = |id: &str, age: Duration, kind: &str| {
+            let j = Arc::new(Job { id: id.into(), user_id: "u".into(), created: std::time::Instant::now() - age, events: Mutex::default(), notify: Default::default() });
+            j.push(kind, json!({}));
+            jobs.by_id.lock().unwrap().insert(id.into(), j);
+            jobs.by_idempotency.lock().unwrap().insert(format!("u:{id}"), id.into());
+        };
+        let day = Duration::from_secs(25 * 3600);
+        job("old-done", day, "done");
+        job("old-running", day, "progress");
+        job("new-done", Duration::ZERO, "done");
+        assert_eq!(jobs.sweep(), 1);
+        assert!(!jobs.by_id.lock().unwrap().contains_key("old-done"));
+        assert_eq!(jobs.by_idempotency.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn download_names_survive_accents_and_quotes() {
+        assert_eq!(attachment("IMG_1-v2.jpg").to_str().unwrap(), "attachment; filename=\"IMG_1-v2.jpg\"; filename*=UTF-8''IMG_1-v2.jpg");
+        assert_eq!(attachment("Été \"1\".jpg").to_str().unwrap(), "attachment; filename=\"_t_ _1_.jpg\"; filename*=UTF-8''%C3%89t%C3%A9%20%221%22.jpg");
+    }
 
     /// A client that predates the destination picker sends no `destination` at all, and has to keep getting
     /// what it has always got: uploaded to Immich, stacked, local copy dropped.

@@ -65,6 +65,23 @@ impl App {
         format!("{}{}", self.config.server.worker_url.trim_end_matches('/'), path)
     }
 
+    /// Hourly: drop finished export jobs, picker tokens nobody came back to, and sessions past their cookie's
+    /// one-year lifetime. None of these were ever removed otherwise.
+    fn start_housekeeping(self: &Arc<Self>) {
+        let app = self.clone();
+        tokio::spawn(async move {
+            loop {
+                let jobs = app.jobs.sweep();
+                let picks = app.store.sweep("picks", Duration::from_secs(24 * 3600)).await;
+                let sessions = app.store.sweep("sessions", Duration::from_secs(366 * 24 * 3600)).await;
+                if jobs + picks + sessions > 0 {
+                    tracing::info!("housekeeping: dropped {jobs} finished jobs, {picks} picker tokens, {sessions} expired sessions");
+                }
+                tokio::time::sleep(Duration::from_secs(3600)).await;
+            }
+        });
+    }
+
     /// Ask Immich to discover a newly created internal-library sidecar: at most one run an hour.
     fn queue_sidecar_discovery(self: &Arc<Self>) {
         let Some(key) = self.admin_key.clone() else { return };
@@ -166,23 +183,28 @@ async fn admit(app: &Arc<App>, user: &User, c: Candidate) -> Result<String> {
     }
     let meta: serde_json::Value = resp.json().await?;
     let key = meta["assetKey"].as_str().unwrap_or_default().to_string();
-    let mut rec: AssetRecord = app.store.get("assets", &key).await.unwrap_or(AssetRecord {
-        path: c.path.clone(),
-        file_name: c.file_name.clone(),
-        immich_asset_id: None,
-        users: Vec::new(),
-    });
-    rec.path = c.path;
-    rec.immich_asset_id = c.immich_asset_id.or(rec.immich_asset_id);
-    if !rec.users.contains(&user.id) {
-        rec.users.push(user.id.clone());
-    }
-    app.store.put("assets", &key, &rec).await?;
-    let mut u: UserRecord = app.store.get("users", &user.id).await.unwrap_or_default();
-    u.recent.retain(|r| r.asset_key != key);
-    u.recent.insert(0, RecentItem { asset_key: key.clone(), file_name: rec.file_name, immich_asset_id: rec.immich_asset_id, opened_at: sidecar_xmp::utc_now() });
-    u.recent.truncate(50);
-    app.store.put("users", &user.id, &u).await?;
+    let rec: AssetRecord = app
+        .store
+        .update("assets", &key, |found: Option<AssetRecord>| {
+            let mut rec = found.unwrap_or(AssetRecord { path: c.path.clone(), file_name: c.file_name.clone(), immich_asset_id: None, users: Vec::new() });
+            rec.path = c.path;
+            rec.immich_asset_id = c.immich_asset_id.or(rec.immich_asset_id);
+            if !rec.users.contains(&user.id) {
+                rec.users.push(user.id.clone());
+            }
+            rec
+        })
+        .await?;
+    let item = RecentItem { asset_key: key.clone(), file_name: rec.file_name, immich_asset_id: rec.immich_asset_id, opened_at: sidecar_xmp::utc_now() };
+    app.store
+        .update("users", &user.id, |found: Option<UserRecord>| {
+            let mut u = found.unwrap_or_default();
+            u.recent.retain(|r| r.asset_key != key);
+            u.recent.insert(0, item);
+            u.recent.truncate(50);
+            u
+        })
+        .await?;
     Ok(key)
 }
 
@@ -348,10 +370,12 @@ async fn get_settings(State(app): State<Arc<App>>, ApiUser(user): ApiUser) -> Re
 }
 
 async fn put_settings(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Json(settings): Json<Settings>) -> Response {
-    let mut u: UserRecord = app.store.get("users", &user.id).await.unwrap_or_default();
-    u.settings = settings.clone();
-    match app.store.put("users", &user.id, &u).await {
-        Ok(()) => Json(settings).into_response(),
+    let saved = app
+        .store
+        .update("users", &user.id, |found: Option<UserRecord>| UserRecord { settings: settings.clone(), ..found.unwrap_or_default() })
+        .await;
+    match saved {
+        Ok(_) => Json(settings).into_response(),
         Err(e) => internal(e),
     }
 }
@@ -398,7 +422,9 @@ pub(crate) async fn asset_for(app: &App, user: &User, key: &str) -> Option<Asset
     let found = resolve::from_asset(app, &asset)?;
     tracing::info!("{} is gone; Immich has it at {}", rec.path.display(), found.path.display());
     let fixed = AssetRecord { path: found.path, file_name: found.file_name, ..rec };
-    let _ = app.store.put("assets", key, &fixed).await;
+    // Through `update`, so a user added by a concurrent `admit` isn't written back out of the record.
+    let (path, file_name) = (fixed.path.clone(), fixed.file_name.clone());
+    let _ = app.store.update("assets", key, |now: Option<AssetRecord>| AssetRecord { path, file_name, ..now.unwrap_or(fixed.clone()) }).await;
     Some(fixed)
 }
 
@@ -445,12 +471,19 @@ async fn relay_or_reingest(app: &Arc<App>, rec: &AssetRecord, path: &str) -> Res
     relay(app.http.get(app.worker(path)).send().await).await
 }
 
+/// Proxies and focus masks are keyed by content hash, so a success can be cached for a day. A failure must
+/// not be: a browser would go on showing a broken photo from its cache long after the worker recovered.
+fn cacheable(mut resp: Response) -> Response {
+    if resp.status().is_success() {
+        resp.headers_mut().insert(header::CACHE_CONTROL, header::HeaderValue::from_static("private, max-age=86400"));
+    }
+    resp
+}
+
 async fn proxy(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Path(key): Path<String>, Query(q): Query<ProxyQuery>) -> Response {
     let Some(rec) = asset_for(&app, &user, &key).await else { return StatusCode::NOT_FOUND.into_response() };
     let edge = q.long_edge.unwrap_or(2560);
-    let mut resp = relay_or_reingest(&app, &rec, &format!("/v1/assets/{key}/proxy?long_edge={edge}")).await;
-    resp.headers_mut().insert(header::CACHE_CONTROL, "private, max-age=86400".parse().unwrap());
-    resp
+    cacheable(relay_or_reingest(&app, &rec, &format!("/v1/assets/{key}/proxy?long_edge={edge}")).await)
 }
 
 #[derive(Deserialize)]
@@ -462,9 +495,7 @@ struct FocusQuery {
 async fn focus(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Path(key): Path<String>, Query(q): Query<FocusQuery>) -> Response {
     let Some(rec) = asset_for(&app, &user, &key).await else { return StatusCode::NOT_FOUND.into_response() };
     let edge = q.edge.unwrap_or(2560);
-    let mut resp = relay_or_reingest(&app, &rec, &format!("/v1/assets/{key}/focus?edge={edge}")).await;
-    resp.headers_mut().insert(header::CACHE_CONTROL, "private, max-age=86400".parse().unwrap());
-    resp
+    cacheable(relay_or_reingest(&app, &rec, &format!("/v1/assets/{key}/focus?edge={edge}")).await)
 }
 
 #[derive(Serialize)]
@@ -575,6 +606,7 @@ async fn preview(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Path(key):
 }
 
 pub fn router(app: Arc<App>) -> Router {
+    app.start_housekeeping();
     let web = &app.config.server.web_root;
     let spa = ServeDir::new(web).fallback(ServeFile::new(web.join("index.html")));
     Router::new()

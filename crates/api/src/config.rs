@@ -88,9 +88,11 @@ impl Config {
         })
     }
 
-    /// Map a mounted path back to the `originalPath` Immich uses.
+    /// Map a mounted path back to the `originalPath` Immich uses. Both sides are resolved first: a mount
+    /// reached through a symlink (`/mnt/storage` → `/mnt/volume` on the dev host) otherwise never shares a
+    /// prefix with its own canonical form, and every file under it maps to nothing.
     pub fn immich_path(&self, root: &Root, mounted: &Path) -> Option<String> {
-        let rest = mounted.strip_prefix(root.mount.canonicalize().ok()?).ok()?;
+        let rest = mounted.canonicalize().ok()?.strip_prefix(root.mount.canonicalize().ok()?).ok()?.to_path_buf();
         Some(format!("{}/{}", root.immich_prefix.trim_end_matches('/'), rest.to_string_lossy()))
     }
 
@@ -101,5 +103,34 @@ impl Config {
             let mount = r.mount.canonicalize().ok()?;
             real.starts_with(&mount).then(|| (r, real.clone()))
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The template lookup hands over paths built on the configured mount, which may run through a symlink.
+    #[cfg(unix)]
+    #[test]
+    fn a_mount_behind_a_symlink_still_maps_back_to_immich() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real");
+        std::fs::create_dir_all(real.join("2026")).unwrap();
+        std::fs::write(real.join("2026/a.NEF"), b"raw").unwrap();
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let root = Root {
+            name: "r".into(),
+            immich_prefix: "/data/library/".into(),
+            mount: link.clone(),
+            template: String::new(),
+            month_locale: english(),
+            moves_files: false,
+            per_user: false,
+        };
+        let config = Config { server: Server::default(), immich: Immich::default(), roots: vec![root.clone()] };
+        assert_eq!(config.immich_path(&root, &link.join("2026/a.NEF")).as_deref(), Some("/data/library/2026/a.NEF"));
+        assert_eq!(config.immich_path(&root, &real.join("2026/a.NEF")).as_deref(), Some("/data/library/2026/a.NEF"));
     }
 }
