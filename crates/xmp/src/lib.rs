@@ -19,8 +19,12 @@ pub const NS: &str = "https://sidecar.ls-tech.ca/ns/1.0/";
 pub const PREFIX: &str = "sc";
 const ROOT: &str = "Sidecar";
 
-/// Fields that stay strings even when they look numeric.
-const STRING_FIELDS: &[&str] = &["mode", "sourceSha1", "modified", "editEtag", "file", "immichAssetId", "exported", "format", "colorSpace"];
+/// Fields that stay strings even when they look numeric. The history's ids and ETags are hex, which a number
+/// parser takes for a float often enough ("12e456…"), and a label is whatever the person typed.
+const STRING_FIELDS: &[&str] = &[
+    "mode", "sourceSha1", "modified", "editEtag", "file", "immichAssetId", "exported", "format", "colorSpace", "head", "id", "parent",
+    "etag", "created", "kind", "label", "user", "session", "removed",
+];
 
 #[derive(Debug, thiserror::Error)]
 pub enum SidecarError {
@@ -28,6 +32,8 @@ pub enum SidecarError {
     NewerProcessVersion { found: u64 },
     #[error("the sidecar changed on disk while Sidecar was writing it")]
     ChangedOnDisk,
+    #[error("this photo's history has no version {id}")]
+    UnknownVersion { id: String },
     #[error(
         "Sidecar can't write in {}, so this edit can't be saved. That folder belongs to another user — give the account Sidecar runs as write access to it (in Docker, the `user:` of the api container).",
         .dir.display()
@@ -164,7 +170,7 @@ fn write_node(meta: &mut XmpMeta, path: &str, v: &Value) -> Result<()> {
 }
 
 /// Deep merge: objects merge key by key, anything else replaces.
-fn merge(dst: &mut Value, src: Value) {
+pub(crate) fn merge(dst: &mut Value, src: Value) {
     match (dst, src) {
         (Value::Object(d), Value::Object(s)) => {
             for (k, v) in s {
@@ -221,6 +227,9 @@ fn stamp(path: &Path) -> Option<(u64, SystemTime)> {
     let md = std::fs::metadata(path).ok()?;
     Some((md.len(), md.modified().ok()?))
 }
+
+pub mod history;
+pub use history::{Commit, Committed, History, Node, NodeKind};
 
 pub struct SidecarDoc {
     pub path: PathBuf,

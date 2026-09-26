@@ -162,6 +162,26 @@ HDRNet is Apache-2.0 but archived and TensorFlow-1.x) or non-commercial licences
 which blocks redistribution just as firmly as copyleft does, for a different reason). Realistic split:
 auto-WB off the shelf, auto-tone built here — published methods are always fair game, their code isn't.
 
+**Subject-aware tools: skin, colour ranges, subject masks and sharper peaking.** One model family, three
+uses, built together because they share the hard part — knowing what in the frame is a person, a face, skin,
+sky, the subject.
+
+- *Colour ranges, with skin as the first preset* (Capture One's Skin Tone tool is the reference): a hue sector
+  on a colour wheel with chroma and lightness limits and a soft edge, an eyedropper that centres it on a
+  tapped patch, hue/chroma/lightness shifts, and **uniformity** — pulling hue, chroma and lightness inside the
+  range toward its centre, which evens out blotches and redness while keeping the colour's depth. Measured in
+  OKLCh like the mixer, so evening out redness doesn't move perceived brightness. Several ranges per photo
+  (two people, skin and sky). A live mask overlay shows what's affected. A develop module after the mixer, in
+  the shared WGSL; neutral settings are the identity, and an edit that uses it bumps `ProcessVersion`.
+- *Subject and skin masks from a model*, so a skin range doesn't also catch a pink wall: range × mask. Needs a
+  segmentation model whose **weights** are permissively licensed (check face-parsing and person-segmentation
+  candidates one by one), run in the worker through ONNX Runtime (`ort`, MIT/Apache-2.0) on the Vulkan
+  device it already has; masks cache per asset like the focus mask.
+- *Focus peaking, refined*: weight the focus measure by the subject mask so peaking answers "is the subject
+  sharp?" rather than "where is anything sharp?"; make it noise-aware (normalise by the estimated noise σ the
+  detail module already computes, so high-ISO grain stops lighting up); and rank eyes and faces first, next to
+  the AF point overlay.
+
 ## Interface
 
 **Hide the editing tools.** A circled-i toggle in the canvas's top-left corner (a different corner from the

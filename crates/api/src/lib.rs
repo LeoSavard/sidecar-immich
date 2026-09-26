@@ -24,6 +24,7 @@ use session::{ApiUser, PageUser, User};
 use sidecar_color::EditParams;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use sidecar_xmp::{Commit, SidecarDoc};
 use store::{Store, random_hex};
 use tower_http::compression::Predicate;
 use tower_http::{
@@ -502,72 +503,196 @@ async fn focus(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Path(key): P
 struct EditState {
     edit: EditParams,
     etag: String,
+    /// The history node `edit` is: what the next save names as its base.
+    head: String,
     read_only: bool,
     /// False when the photo's folder can't take a sidecar, so the editor can say so before the edit is made
     /// rather than at the first save. Advisory — see `sidecar_xmp::writable_beside`.
     writable: bool,
     exports: Vec<serde_json::Value>,
+    /// This save branched: another device had saved since the version it was made from. Both are kept.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    forked: bool,
+}
+
+impl EditState {
+    fn of(doc: &SidecarDoc, writable: bool, forked: bool) -> Self {
+        Self { edit: doc.edit(), etag: doc.etag(), head: doc.history().head, read_only: doc.is_read_only(), writable, exports: doc.exports(), forked }
+    }
+
+    fn into_response(self) -> Response {
+        ([(header::ETAG, format!("\"{}\"", self.etag))], Json(self)).into_response()
+    }
 }
 
 async fn get_edit(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Path(key): Path<String>) -> Response {
     let Some(rec) = asset_for(&app, &user, &key).await else { return StatusCode::NOT_FOUND.into_response() };
     let loaded = tokio::task::spawn_blocking(move || {
         let writable = sidecar_xmp::writable_beside(&rec.path);
-        sidecar_xmp::SidecarDoc::load(&rec.path).map(|d| (d, writable))
+        SidecarDoc::load(&rec.path).map(|d| EditState::of(&d, writable, false))
     })
     .await;
     match loaded {
-        Ok(Ok((doc, writable))) => {
-            let state = EditState { edit: doc.edit(), etag: doc.etag(), read_only: doc.is_read_only(), writable, exports: doc.exports() };
-            ([(header::ETAG, format!("\"{}\"", state.etag))], Json(state)).into_response()
-        }
+        Ok(Ok(state)) => state.into_response(),
         Ok(Err(e)) => internal(e),
         Err(e) => internal(e.into()),
     }
 }
 
-async fn put_edit(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Path(key): Path<String>, headers: HeaderMap, Json(edit): Json<EditParams>) -> Response {
-    let Some(rec) = asset_for(&app, &user, &key).await else { return StatusCode::NOT_FOUND.into_response() };
-    let Some(if_match) = headers.get(header::IF_MATCH).and_then(|v| v.to_str().ok()).map(|v| v.trim_matches('"').to_string()) else {
-        return (StatusCode::PRECONDITION_REQUIRED, "Send If-Match with the ETag you edited from.").into_response();
-    };
+/// A client that predates history sent an edit whose `If-Match` is no longer current.
+#[derive(Debug, thiserror::Error)]
+#[error("the edit changed since it was loaded")]
+struct Stale;
+
+/// Change a photo's sidecar through the guarded writer, off the async runtime, and answer with the edit state
+/// it leaves. `change` returns whether the save forked. The failures a person can act on carry their own
+/// message and status; anything else is a bug here and goes to the log as one.
+async fn write_sidecar(app: &Arc<App>, rec: &AssetRecord, mut change: impl FnMut(&mut SidecarDoc) -> anyhow::Result<bool> + Send + 'static) -> Response {
     let roots = app.config.canonical_mounts();
     let moves_files = app.config.root_of(&rec.path).is_some_and(|(r, _)| r.moves_files);
     let path = rec.path.clone();
     let result = tokio::task::spawn_blocking(move || {
         let created = !sidecar_xmp::sidecar_path_for(&path).exists();
         let writable = sidecar_xmp::writable_beside(&path);
-        let mut conflict = None;
+        let mut state = None;
         let saved = sidecar_xmp::update(&path, &roots, |doc| {
-            if doc.etag() != if_match {
-                conflict = Some(EditState { edit: doc.edit(), etag: doc.etag(), read_only: doc.is_read_only(), writable, exports: doc.exports() });
-                anyhow::bail!("conflict");
-            }
-            doc.set_edit(&edit, &key)
+            let forked = change(doc)?;
+            state = Some(EditState::of(doc, writable, forked));
+            Ok(())
         });
-        (saved, conflict, created)
+        let stale = || SidecarDoc::load(&path).map(|d| EditState::of(&d, writable, false));
+        match saved {
+            Ok(_) => Ok((state.expect("set by a successful change"), created)),
+            Err(e) if e.is::<Stale>() => Err(Box::new(stale().map_or_else(internal, |s| (StatusCode::PRECONDITION_FAILED, [(header::ETAG, format!("\"{}\"", s.etag))], Json(s)).into_response()))),
+            Err(e) => Err(Box::new(match e.downcast_ref::<sidecar_xmp::SidecarError>() {
+                Some(sidecar_xmp::SidecarError::NewerProcessVersion { .. }) => (StatusCode::CONFLICT, format!("{e}")).into_response(),
+                Some(sidecar_xmp::SidecarError::UnknownVersion { .. }) => (StatusCode::NOT_FOUND, format!("{e}")).into_response(),
+                Some(sidecar_xmp::SidecarError::NotWritable { .. }) => {
+                    tracing::error!("{e:#}");
+                    (StatusCode::FORBIDDEN, format!("{e}")).into_response()
+                }
+                _ => internal(e),
+            })),
+        }
     })
     .await;
     match result {
-        Ok((_, Some(current), _)) => (StatusCode::PRECONDITION_FAILED, [(header::ETAG, format!("\"{}\"", current.etag))], Json(current)).into_response(),
-        Ok((Ok(etag), None, created)) => {
+        Ok(Ok((state, created))) => {
             if created && moves_files {
                 app.queue_sidecar_discovery();
             }
-            ([(header::ETAG, format!("\"{etag}\""))], Json(serde_json::json!({ "etag": etag }))).into_response()
+            state.into_response()
         }
-        // The two failures the person can act on carry their own message through; anything else is a bug
-        // here and goes to the log as one.
-        Ok((Err(e), None, _)) => match e.downcast_ref::<sidecar_xmp::SidecarError>() {
-            Some(sidecar_xmp::SidecarError::NewerProcessVersion { .. }) => (StatusCode::CONFLICT, format!("{e}")).into_response(),
-            Some(sidecar_xmp::SidecarError::NotWritable { .. }) => {
-                tracing::error!("{e:#}");
-                (StatusCode::FORBIDDEN, format!("{e}")).into_response()
-            }
-            _ => internal(e),
-        },
+        Ok(Err(resp)) => *resp,
         Err(e) => internal(e.into()),
     }
+}
+
+/// `PUT /api/assets/{key}/edit`. The editor sends the history node it edited from as `base`: a save from a
+/// node that is no longer the head forks instead of failing, and a `checkpoint` (sent after a pause) folds
+/// into the checkpoint before it. A bare edit, from a client that predates history, still needs `If-Match`.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum SaveBody {
+    Versioned(Save),
+    Bare(EditParams),
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Save {
+    edit: EditParams,
+    base: String,
+    #[serde(default)]
+    checkpoint: bool,
+    #[serde(default)]
+    session: Option<String>,
+}
+
+async fn put_edit(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Path(key): Path<String>, headers: HeaderMap, Json(body): Json<SaveBody>) -> Response {
+    let Some(rec) = asset_for(&app, &user, &key).await else { return StatusCode::NOT_FOUND.into_response() };
+    let if_match = headers.get(header::IF_MATCH).and_then(|v| v.to_str().ok()).map(|v| v.trim_matches('"').to_string());
+    let save = match body {
+        SaveBody::Versioned(save) => save,
+        SaveBody::Bare(edit) => {
+            let Some(if_match) = if_match else {
+                return (StatusCode::PRECONDITION_REQUIRED, "Send If-Match with the ETag you edited from.").into_response();
+            };
+            // Without a base the save can only go on top of the head, and only if the client saw the head.
+            return write_sidecar(&app, &rec, move |doc| {
+                if doc.etag() != if_match {
+                    anyhow::bail!(Stale);
+                }
+                let base = doc.history().head;
+                Ok(doc.commit(&Commit { edit: &edit, base: &base, checkpoint: false, session: None, user: None }, &key)?.forked)
+            })
+            .await;
+        }
+    };
+    let name = user.name.clone();
+    write_sidecar(&app, &rec, move |doc| {
+        let c = Commit { edit: &save.edit, base: &save.base, checkpoint: save.checkpoint, session: save.session.as_deref(), user: Some(&name) };
+        Ok(doc.commit(&c, &key)?.forked)
+    })
+    .await
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HistoryNode {
+    #[serde(flatten)]
+    node: sidecar_xmp::Node,
+    /// The full edit this node stands for, so the client can compare and render any two without a round trip.
+    edit: EditParams,
+    /// `sc:Exports` entries made from this node's edit.
+    exports: Vec<serde_json::Value>,
+}
+
+/// `GET /api/assets/{key}/history` — every version of this photo's edit, oldest first.
+async fn get_history(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Path(key): Path<String>) -> Response {
+    let Some(rec) = asset_for(&app, &user, &key).await else { return StatusCode::NOT_FOUND.into_response() };
+    let built = tokio::task::spawn_blocking(move || -> anyhow::Result<serde_json::Value> {
+        let doc = SidecarDoc::load(&rec.path)?;
+        let (history, exports) = (doc.history(), doc.exports());
+        let nodes = history
+            .nodes
+            .iter()
+            .map(|n| {
+                let edit = history.edit_of(&n.id)?;
+                let exports = exports.iter().filter(|e| e["editEtag"] == n.etag).cloned().collect();
+                Ok(HistoryNode { node: n.clone(), edit, exports })
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        Ok(serde_json::json!({ "head": history.head, "nodes": nodes }))
+    })
+    .await;
+    match built {
+        Ok(Ok(v)) => Json(v).into_response(),
+        Ok(Err(e)) => internal(e),
+        Err(e) => internal(e.into()),
+    }
+}
+
+#[derive(Deserialize)]
+struct Checkout {
+    node: String,
+}
+
+/// `POST /api/assets/{key}/history/checkout { node }` — make that version (or `original`) the current edit.
+async fn checkout(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Path(key): Path<String>, Json(body): Json<Checkout>) -> Response {
+    let Some(rec) = asset_for(&app, &user, &key).await else { return StatusCode::NOT_FOUND.into_response() };
+    write_sidecar(&app, &rec, move |doc| doc.checkout(&body.node, &key).map(|()| false)).await
+}
+
+#[derive(Deserialize)]
+struct Label {
+    label: Option<String>,
+}
+
+/// `PUT /api/assets/{key}/history/{node}/label { label }` — name a version, or clear its name with null.
+async fn label(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Path((key, node)): Path<(String, String)>, Json(body): Json<Label>) -> Response {
+    let Some(rec) = asset_for(&app, &user, &key).await else { return StatusCode::NOT_FOUND.into_response() };
+    write_sidecar(&app, &rec, move |doc| doc.label(&node, body.label.clone()).map(|()| false)).await
 }
 
 #[derive(Deserialize)]
@@ -621,6 +746,9 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/assets/{key}/proxy", get(proxy))
         .route("/api/assets/{key}/focus", get(focus))
         .route("/api/assets/{key}/edit", get(get_edit).put(put_edit))
+        .route("/api/assets/{key}/history", get(get_history))
+        .route("/api/assets/{key}/history/checkout", axum::routing::post(checkout))
+        .route("/api/assets/{key}/history/{node}/label", axum::routing::put(label))
         .route("/api/assets/{key}/loupe", axum::routing::post(loupe))
         .route("/api/assets/{key}/preview", axum::routing::post(preview))
         .route("/api/exports", axum::routing::post(export::create))
@@ -631,4 +759,23 @@ pub fn router(app: Arc<App>) -> Router {
         // Proxies compress with brotli for Safari and zstd for Chromium.
         .layer(CompressionLayer::new().br(true).zstd(true).gzip(true).compress_when(tower_http::compression::predicate::SizeAbove::new(1024).and(tower_http::compression::predicate::NotForContentType::new("text/event-stream"))))
         .with_state(app)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every field of an edit has a default, so a versioned save would also parse as a (default) bare edit if
+    /// the two were tried the other way round — and quietly save nothing.
+    #[test]
+    fn a_versioned_save_is_never_read_as_a_bare_edit() {
+        let mut edit = EditParams::default();
+        edit.exposure.ev = 0.7;
+        let versioned = serde_json::json!({ "edit": edit, "base": "original", "checkpoint": true, "session": "tab" });
+        let SaveBody::Versioned(s) = serde_json::from_value(versioned).unwrap() else { panic!("read as bare") };
+        assert_eq!((s.edit.exposure.ev, s.base.as_str(), s.checkpoint, s.session.as_deref()), (0.7, "original", true, Some("tab")));
+
+        let SaveBody::Bare(e) = serde_json::from_value(serde_json::to_value(&edit).unwrap()).unwrap() else { panic!("read as versioned") };
+        assert_eq!(e, edit, "a client from before history still saves");
+    }
 }

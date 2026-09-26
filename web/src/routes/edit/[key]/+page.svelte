@@ -15,11 +15,13 @@
 	import ColorMixer from '$lib/ui/ColorMixer.svelte';
 	import ExportSheet from '$lib/ui/ExportSheet.svelte';
 	import Loupe from '$lib/ui/Loupe.svelte';
-	import { clean, decimals, signed } from '$lib/ui/format';
-	import type { Band, DisplaySpace, EditParams, Meta, MixerBand } from '$lib/types';
+	import HistoryPanel from '$lib/ui/HistoryPanel.svelte';
+	import { CURVE_ANCHORS, PICKS, curveOffset, view as sliders, type Anchor } from '$lib/state/edit-view';
+	import { decimals, signed } from '$lib/ui/format';
+	import type { Band, DisplaySpace, EditParams, HistoryState, Meta, MixerBand } from '$lib/types';
 
-	type EditState = { edit: EditParams; etag: string; readOnly: boolean; writable?: boolean; exports: unknown[] };
-	type Section = 'wb' | 'light' | 'curve' | 'color' | 'detail';
+	type EditState = { edit: EditParams; etag: string; head: string; readOnly: boolean; writable?: boolean; exports: unknown[]; forked?: boolean };
+	type Section = 'wb' | 'light' | 'curve' | 'color' | 'detail' | 'history';
 
 	const key = page.params.key!;
 	let canvas: HTMLCanvasElement;
@@ -65,10 +67,27 @@
 	let dirty = $state(false);
 	let saving = $state(false);
 	let saveQueue: Promise<void> = Promise.resolve();
-	let conflict = $state<EditState | null>(null);
 	let restoredDraft = $state(false);
 	let draftTimer: ReturnType<typeof setTimeout> | undefined;
+	/** In-session undo: every gesture. The saved history below is coarser — saves and checkpoints. */
 	let history: History<EditParams>;
+	let canUndo = $state(false);
+	let canRedo = $state(false);
+
+	/** The history node the edit on screen came from: what the next save names as its base. */
+	let head = '';
+	/** This tab, so the server folds its checkpoints together and never another device's. */
+	const session = globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2);
+	/** A pause after a gesture saves a checkpoint, so the history keeps up without anyone pressing Save. */
+	let checkpointTimer: ReturnType<typeof setTimeout> | undefined;
+	const CHECKPOINT_MS = 4000;
+	/** Another device saved since this one loaded: both versions were kept, as branches. */
+	let forked = $state(false);
+	let versions = $state<HistoryState | null>(null);
+	let versionsBusy = $state(false);
+	/** What pressing and holding the photo shows instead of the edit: a chosen version, or the original. */
+	let compare = $state<{ id: string; label: string; edit: EditParams } | null>(null);
+	const compareEdit = () => compare?.edit ?? defaults;
 
 	let develop: DevelopPass;
 	let view: ViewPass;
@@ -86,7 +105,7 @@
 
 	/** Resolve the edit through the colour packer — wasm, so it works with or without a GPU. */
 	function repack() {
-		const source = before ? defaults : $state.snapshot(edit!);
+		const source = before ? compareEdit() : $state.snapshot(edit!);
 		const packed = packer.pack(source, meta!.info.color, meta!.info.sourceKind ?? 'raw', display);
 		if (!before) {
 			resolvedWb = { temperatureK: packed.temperatureK, tint: packed.tint };
@@ -164,7 +183,7 @@
 			do {
 				previewPending = false;
 				const body = JSON.stringify({
-					edit: before ? defaults : $state.snapshot(edit),
+					edit: before ? compareEdit() : $state.snapshot(edit),
 					colorSpace: display,
 					longEdge: Math.round(Math.min(Math.max(innerWidth, innerHeight) * devicePixelRatio, 2560))
 				});
@@ -184,6 +203,7 @@
 	function changed() {
 		schedule(true);
 		dirty = true;
+		clearTimeout(checkpointTimer);
 		clearTimeout(draftTimer);
 		draftTimer = setTimeout(() => edit && saveDraft(key, { edit: $state.snapshot(edit), baseEtag: etag, savedAt: Date.now() }), 500);
 	}
@@ -191,49 +211,66 @@
 	/** A gesture ended: one undo step, and in fallback mode the moment to ask for a new render. */
 	function committed() {
 		if (edit) history.commit($state.snapshot(edit));
+		syncUndo();
 		if (fallback) renderPreview();
+		scheduleCheckpoint();
+	}
+
+	function scheduleCheckpoint() {
+		clearTimeout(checkpointTimer);
+		if (writable && !readOnly) checkpointTimer = setTimeout(() => commit(false, true), CHECKPOINT_MS);
+	}
+
+	function syncUndo() {
+		canUndo = history.canUndo;
+		canRedo = history.canRedo;
 	}
 
 	function restore(state: EditParams | null) {
 		if (!state || !edit) return;
 		edit = state;
 		changed();
+		syncUndo();
+		if (fallback) renderPreview();
+		scheduleCheckpoint();
 	}
 
 	/**
-	 * Save the edit. One PUT at a time, each sending the latest state: a call made while one is out waits for
-	 * it and then saves whatever is still unsaved, instead of being dropped.
+	 * Save the edit as a version in the photo's history. One PUT at a time, each sending the latest state: a
+	 * call made while one is out waits for it and then saves whatever is still unsaved, instead of being
+	 * dropped. `checkpoint` is the save a pause triggers; the server folds this tab's checkpoints together.
 	 */
-	function commit(keepalive = false): Promise<void> {
-		saveQueue = saveQueue.then(() => save(keepalive));
+	function commit(keepalive = false, checkpoint = false): Promise<void> {
+		if (!checkpoint) clearTimeout(checkpointTimer);
+		saveQueue = saveQueue.then(() => save(keepalive, checkpoint));
 		return saveQueue;
 	}
 
-	async function save(keepalive: boolean) {
-		if (!edit || !dirty || readOnly || conflict) return;
+	async function save(keepalive: boolean, checkpoint: boolean) {
+		if (!edit || !dirty || readOnly) return;
 		saving = true;
 		try {
-			const body = JSON.stringify($state.snapshot(edit));
+			const sent = JSON.stringify($state.snapshot(edit));
 			const r = await api(`/api/assets/${key}/edit`, {
 				method: 'PUT',
 				keepalive,
-				headers: { 'content-type': 'application/json', 'if-match': `"${etag}"` },
-				body
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({ edit: JSON.parse(sent), base: head, checkpoint, session })
 			});
-			if (r.status === 412) {
-				conflict = await r.json();
-				return;
-			}
-			etag = (await r.json()).etag;
+			const state: EditState = await r.json();
+			etag = state.etag;
+			head = state.head;
+			forked ||= !!state.forked;
 			// Only what was sent is saved. A slider moved while the request was out used to be marked saved
 			// here, and its draft cleared, so the change was lost without a word.
-			if (JSON.stringify($state.snapshot(edit)) === body) {
+			if (JSON.stringify($state.snapshot(edit)) === sent) {
 				dirty = false;
 				restoredDraft = false;
 				await clearDraft(key);
 			} else {
 				await saveDraft(key, { edit: $state.snapshot(edit), baseEtag: etag, savedAt: Date.now() });
 			}
+			if (versions) loadVersions();
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
 		} finally {
@@ -246,26 +283,77 @@
 		if (readOnly) return etag;
 		// Always through the queue: a save already out has to land before its ETag is the one to pin.
 		await commit();
-		return dirty || conflict ? null : etag;
+		return dirty ? null : etag;
 	}
 
-	function keepMine() {
-		if (!conflict) return;
-		etag = conflict.etag;
-		conflict = null;
-		commit();
+	async function loadVersions() {
+		try {
+			versions = await (await api(`/api/assets/${key}/history`)).json();
+			// A compared version may have been folded into a later checkpoint; keep comparing only what exists.
+			if (compare && !versions!.nodes.some((n) => n.id === compare!.id)) compare = null;
+		} catch (e) {
+			error = e instanceof Error ? e.message : String(e);
+		}
 	}
 
-	function useTheirs() {
-		if (!conflict) return;
-		edit = conflict.edit;
-		etag = conflict.etag;
-		conflict = null;
-		dirty = false;
-		clearDraft(key);
-		history.reset($state.snapshot(edit));
-		schedule(true);
+	/** Make a version current. Unsaved changes are saved first, so opening something else never loses them. */
+	async function openVersion(id: string) {
+		versionsBusy = true;
+		try {
+			await commit();
+			if (dirty) return;
+			const r = await api(`/api/assets/${key}/history/checkout`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ node: id }) });
+			const state: EditState = await r.json();
+			edit = state.edit;
+			etag = state.etag;
+			head = state.head;
+			dirty = false;
+			restoredDraft = false;
+			await clearDraft(key);
+			history.reset($state.snapshot(edit));
+			syncUndo();
+			schedule(true);
+			if (fallback) renderPreview();
+			await loadVersions();
+		} catch (e) {
+			error = e instanceof Error ? e.message : String(e);
+		} finally {
+			versionsBusy = false;
+		}
 	}
+
+	/** Take one section — white balance, light, curve, mixer, detail — from another version into this edit. */
+	function pickFrom(id: string, section: string) {
+		const from = versions?.nodes.find((n) => n.id === id);
+		const pick = PICKS.find((p) => p.id === section);
+		if (!edit || !from || !pick) return;
+		pick.take(edit, from.edit);
+		changed();
+		committed();
+	}
+
+	async function labelVersion(id: string, label: string | null) {
+		try {
+			await api(`/api/assets/${key}/history/${id}/label`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ label }) });
+			await loadVersions();
+		} catch (e) {
+			error = e instanceof Error ? e.message : String(e);
+		}
+	}
+
+	function setCompare(id: string | null) {
+		const n = id ? versions?.nodes.find((v) => v.id === id) : undefined;
+		compare = n ? { id: n.id, label: n.label ?? (n.kind === 'original' ? 'Original' : 'Compared version'), edit: n.edit } : null;
+		if (before) {
+			schedule(true);
+			if (fallback) renderPreview();
+		}
+	}
+
+	// The history loads when it's first looked at, not with every photo.
+	$effect(() => {
+		if ((section === 'history' || wide) && edit && !versions) loadVersions();
+	});
 
 	async function loadProxy(longEdge: number) {
 		const [proxyResp, focusResp] = await Promise.all([api(`/api/assets/${key}/proxy?long_edge=${longEdge}`), api(`/api/assets/${key}/focus?edge=${longEdge}`)]);
@@ -296,6 +384,7 @@
 			defaults = packer.defaultEdit();
 			edit = state.edit;
 			etag = state.etag;
+			head = state.head;
 			readOnly = state.readOnly;
 			writable = state.writable !== false;
 			const draft = await loadDraft(key);
@@ -471,14 +560,7 @@
 		changed();
 	}
 
-	/** Shadows and Highlights move the curve points at 25 % and 75 % — the same curve the curve editor shows. */
-	const CURVE_ANCHORS = { shadows: 0.25, highlights: 0.75 } as const;
-	function curveOffset(which: keyof typeof CURVE_ANCHORS): number {
-		const x = CURVE_ANCHORS[which];
-		const p = edit?.tone.curve.find((q) => Math.abs(q[0] - x) < 1e-6);
-		return p ? clean(((p[1] - x) / 0.15) * 100) : 0;
-	}
-	function setCurveOffset(which: keyof typeof CURVE_ANCHORS, v: number) {
+	function setCurveOffset(which: Anchor, v: number) {
 		if (!edit) return;
 		const x = CURVE_ANCHORS[which];
 		const rest = edit.tone.curve.filter((q) => Math.abs(q[0] - x) >= 1e-6);
@@ -505,7 +587,8 @@
 		{ id: 'light', label: 'Light', short: 'Light' },
 		{ id: 'curve', label: 'Curve', short: 'Curve' },
 		{ id: 'color', label: 'Color', short: 'Color' },
-		{ id: 'detail', label: 'Detail', short: 'Detail' }
+		{ id: 'detail', label: 'Detail', short: 'Detail' },
+		{ id: 'history', label: 'History', short: 'History' }
 	];
 </script>
 
@@ -530,15 +613,15 @@
 		<div class="grid gap-2">
 			<!-- A developed file has no headroom past white to recover: ±2 EV is already most of what it holds. -->
 			<Slider id="exposure" label="Exposure" value={edit.exposure.ev} min={developed ? -2 : -5} max={developed ? 2 : 5} step={0.01} defaultValue={0} bipolar format={(v) => `${signed(v, 2)} EV`} onchange={(v) => { edit!.exposure.ev = v; changed(); }} oncommit={committed} />
-			<Slider id="contrast" label="Contrast" value={clean((edit.tone.contrast - 1) * 100)} min={-70} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => { edit!.tone.contrast = 1 + v / 100; changed(); }} oncommit={committed} />
-			<Slider id="highlights" label="Highlights" value={curveOffset('highlights')} min={-100} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => setCurveOffset('highlights', v)} oncommit={committed} />
-			<Slider id="shadows" label="Shadows" value={curveOffset('shadows')} min={-100} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => setCurveOffset('shadows', v)} oncommit={committed} />
-			<Slider id="whites" label="Whites" value={clean(((4.5 - edit.tone.whiteEv) / 2) * 100)} min={-100} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => { edit!.tone.whiteEv = 4.5 - (v / 100) * 2; changed(); }} oncommit={committed} />
-			<Slider id="blacks" label="Blacks" value={clean(((-8 - edit.tone.blackEv) / 3) * 100)} min={-100} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => { edit!.tone.blackEv = -8 - (v / 100) * 3; changed(); }} oncommit={committed} />
+			<Slider id="contrast" label="Contrast" value={sliders.contrast(edit)} min={-70} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => { edit!.tone.contrast = 1 + v / 100; changed(); }} oncommit={committed} />
+			<Slider id="highlights" label="Highlights" value={curveOffset(edit, 'highlights')} min={-100} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => setCurveOffset('highlights', v)} oncommit={committed} />
+			<Slider id="shadows" label="Shadows" value={curveOffset(edit, 'shadows')} min={-100} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => setCurveOffset('shadows', v)} oncommit={committed} />
+			<Slider id="whites" label="Whites" value={sliders.whites(edit)} min={-100} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => { edit!.tone.whiteEv = 4.5 - (v / 100) * 2; changed(); }} oncommit={committed} />
+			<Slider id="blacks" label="Blacks" value={sliders.blacks(edit)} min={-100} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => { edit!.tone.blackEv = -8 - (v / 100) * 3; changed(); }} oncommit={committed} />
 			<!-- Highlight recovery reconstructs clipped sensor channels; an already-developed file has none to
 			     reconstruct, so the control would sit there doing nothing. -->
 			{#if !developed}
-				<Slider id="hl-blend" label="Highlight recovery" value={clean(edit.exposure.highlightBlend * 100)} min={0} max={100} defaultValue={50} format={(v) => `${decimals(v)} %`} onchange={(v) => { edit!.exposure.highlightBlend = v / 100; changed(); }} oncommit={committed} />
+				<Slider id="hl-blend" label="Highlight recovery" value={sliders.highlightRecovery(edit)} min={0} max={100} defaultValue={50} format={(v) => `${decimals(v)} %`} onchange={(v) => { edit!.exposure.highlightBlend = v / 100; changed(); }} oncommit={committed} />
 			{/if}
 		</div>
 	{/if}
@@ -563,6 +646,14 @@
 			<Slider id="denoise-luma" label="Noise reduction" value={edit.detail.denoiseLuminance} min={0} max={100} defaultValue={0} format={(v) => decimals(v)} onchange={(v) => { edit!.detail.denoiseLuminance = v; changed(); }} oncommit={committed} />
 			<Slider id="denoise-chroma" label="Colour noise reduction" value={edit.detail.denoiseChroma} min={0} max={100} defaultValue={0} format={(v) => decimals(v)} onchange={(v) => { edit!.detail.denoiseChroma = v; changed(); }} oncommit={committed} />
 		</div>
+	{/if}
+{/snippet}
+
+{#snippet historySection()}
+	{#if versions}
+		<HistoryPanel history={versions} compareId={compare?.id ?? null} busy={versionsBusy || saving} onopen={openVersion} oncompare={setCompare} onpick={pickFrom} onlabel={labelVersion} />
+	{:else}
+		<p class="text-xs text-fg-2">Loading history…</p>
 	{/if}
 {/snippet}
 
@@ -607,7 +698,7 @@
 		{#if status || error}
 			<p class="absolute inset-x-4 top-[max(1rem,env(safe-area-inset-top))] text-center text-sm {error ? 'text-danger' : 'text-fg-2'}">{error || status}</p>
 		{/if}
-		{#if before}<span class="absolute top-[max(1rem,env(safe-area-inset-top))] left-4 rounded bg-ground/80 px-2 py-1 text-xs">As shot</span>{/if}
+		{#if before}<span class="absolute top-[max(1rem,env(safe-area-inset-top))] left-4 rounded bg-ground/80 px-2 py-1 text-xs">{compare?.label ?? (developed ? 'As saved' : 'As shot')}</span>{/if}
 		<div class="absolute top-[max(0.75rem,env(safe-area-inset-top))] right-3 grid justify-items-end gap-1.5">
 			{#if !wide && showPhoneHistogram && !fallback}
 				<Histogram data={histogram} {clipHigh} {clipLow} compact ontoggle={(w) => { if (w === 'high') clipHigh = !clipHigh; else clipLow = !clipLow; schedule(); }} />
@@ -630,6 +721,12 @@
 					<p class="truncate">{cameraLine(meta.info)}</p>
 				</div>
 				<div class="flex shrink-0 gap-2">
+					<button type="button" class="grid size-9 place-items-center rounded bg-raised text-fg-2 disabled:opacity-40" aria-label="Undo" disabled={!canUndo || readOnly} onclick={() => restore(history.undo())}>
+						<svg viewBox="0 0 16 16" class="size-4" aria-hidden="true"><path d="M6 3 2 7l4 4M2.5 7H10a4 4 0 0 1 0 8H8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></svg>
+					</button>
+					<button type="button" class="grid size-9 place-items-center rounded bg-raised text-fg-2 disabled:opacity-40" aria-label="Redo" disabled={!canRedo || readOnly} onclick={() => restore(history.redo())}>
+						<svg viewBox="0 0 16 16" class="size-4 -scale-x-100" aria-hidden="true"><path d="M6 3 2 7l4 4M2.5 7H10a4 4 0 0 1 0 8H8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></svg>
+					</button>
 					<button type="button" class="h-9 rounded bg-raised px-3 text-sm" onclick={() => (exporting = true)}>Export</button>
 					<button type="button" class="h-9 rounded bg-fg px-4 text-sm font-medium text-ground disabled:bg-raised disabled:text-muted" disabled={!dirty || saving || readOnly} onclick={() => commit()}>
 						{saving ? 'Saving…' : dirty ? 'Save' : 'Saved'}
@@ -647,14 +744,11 @@
 				{#if readOnly}<p class="rounded bg-raised p-2 text-xs">A newer Sidecar edited this photo. Update Sidecar to change it.</p>{/if}
 				{#if !readOnly && !writable}<p class="rounded bg-raised p-2 text-xs text-warning">Sidecar can't write in this photo's folder, so edits here can't be saved. Give the account Sidecar runs as write access to it.</p>{/if}
 				{#if restoredDraft && dirty}<p class="rounded bg-raised p-2 text-xs">Restored unsaved changes from this device.</p>{/if}
-				{#if conflict}
-					<div class="grid gap-2 rounded bg-raised p-2 text-xs">
-						<p>This photo was edited somewhere else since you opened it.</p>
-						<div class="flex gap-2">
-							<button type="button" class="rounded bg-fg px-3 py-1.5 text-ground" onclick={keepMine}>Keep mine</button>
-							<button type="button" class="rounded bg-panel px-3 py-1.5" onclick={useTheirs}>Use theirs</button>
-						</div>
-					</div>
+				{#if forked}
+					<p class="rounded bg-raised p-2 text-xs">
+						This photo was also saved somewhere else since you opened it. Both versions are kept —
+						<button type="button" class="underline" onclick={() => { section = 'history'; forked = false; }}>see History</button>.
+					</p>
 				{/if}
 			</div>
 
@@ -683,7 +777,7 @@
 			</nav>
 
 			<div class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-6 pt-1">
-				{#if section === 'wb'}{@render wbSection()}{:else if section === 'light'}{@render lightSection()}{:else if section === 'curve'}{@render curveSection()}{:else if section === 'color'}{@render colorSection()}{:else}{@render detailSection()}{/if}
+				{#if section === 'wb'}{@render wbSection()}{:else if section === 'light'}{@render lightSection()}{:else if section === 'curve'}{@render curveSection()}{:else if section === 'color'}{@render colorSection()}{:else if section === 'history'}{@render historySection()}{:else}{@render detailSection()}{/if}
 			</div>
 
 			{/if}
@@ -693,7 +787,7 @@
 					<details class="border-t border-line py-2" open={s.id === 'wb' || s.id === 'light'} ontoggle={(e) => s.id === 'detail' && (detailOpen = (e.currentTarget as HTMLDetailsElement).open)}>
 						<summary class="cursor-pointer py-1 text-xs font-medium">{s.label}</summary>
 						<div class="pt-2">
-							{#if s.id === 'wb'}{@render wbSection()}{:else if s.id === 'light'}{@render lightSection()}{:else if s.id === 'curve'}{@render curveSection()}{:else if s.id === 'color'}{@render colorSection()}{:else if detailOpen}{@render detailSection()}{/if}
+							{#if s.id === 'wb'}{@render wbSection()}{:else if s.id === 'light'}{@render lightSection()}{:else if s.id === 'curve'}{@render curveSection()}{:else if s.id === 'color'}{@render colorSection()}{:else if s.id === 'history'}{@render historySection()}{:else if detailOpen}{@render detailSection()}{/if}
 						</div>
 					</details>
 				{/each}

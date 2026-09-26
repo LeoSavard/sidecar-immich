@@ -192,11 +192,45 @@ Draft 1's local hash index is gone: the strict layout makes step 2 two or three 
 - **One wrapper element.** Everything Sidecar writes sits inside a single `sc:Sidecar` struct. Once Immich knows about a sidecar, metadata extraction merges every tag read from it over the RAW's own tags, and prefers its dates. Top-level `sc:ModifyDate` or `sc:WhiteBalance` would surface as the standard `ModifyDate` and `WhiteBalance` tags; inside the wrapper, exiftool reports them as `SidecarModified`, `SidecarWhiteBalanceTemperature` and so on, which collide with nothing. Every `sc:` name elsewhere in this document lives inside the wrapper.
 - **Namespace.** Sidecar's own (`sc:`). Never Adobe `crs:` — the math differs, and Lightroom would misrender those values.
 - **Read–modify–write**, through Adobe's `xmp_toolkit` crate (MIT OR Apache-2.0, built on the BSD-3-Clause XMP Toolkit SDK), which already preserves unknown namespaces. Parse the whole packet, replace only the `sc:` elements Sidecar knows, keep everything else — other namespaces (Immich ratings and descriptions, darktable history) and any `sc:` elements written by a newer Sidecar.
-- **Concurrency.** ETag = SHA-256 of the canonicalized edit parameters. It excludes `sc:Exports`, so a finishing export never makes the editor's next save conflict. `PUT` requires `If-Match`; `412` returns the current state so the client can offer *Keep mine* / *Use theirs*.
+- **Concurrency.** ETag = SHA-256 of the canonicalized edit parameters. It excludes `sc:Exports`, so a finishing export never makes the editor's next save conflict. A save names the history node it was edited from (`base`); when that is no longer the head — another device saved in between — the save forks instead of failing, and the editor says both were kept (see *Edit history*). A bare edit without `base`, from a client that predates history, still needs `If-Match` and gets `412` with the current state.
 - **`sc:ProcessVersion`** pins the math. A pipeline change that alters output bumps it; older sidecars keep rendering with the older path until the user updates them. A sidecar with a newer ProcessVersion than the running app opens read-only with "Update Sidecar to edit this photo" — a phone can hold an old cached copy of the app.
 - **`sc:SourceSHA1`** ties the sidecar to its original and catches a sidecar left behind by a rename.
 - **Immich writes too.** When a description, date, location, rating or tag changes in Immich, it writes those fields into `<original>.xmp` — the same file — through exiftool, which preserves unknown namespaces. Tagging alone creates the file, so many RAWs will already have one. Sidecar's writer re-checks the file's size and modification time just before its rename and starts over if Immich wrote in between. A test edits a rating in Immich and asserts `sc:Sidecar` survives.
-- **Drafts.** Slider state autosaves to IndexedDB (per device, 500 ms debounce). It commits to XMP on *Done*, on *Export*, and on `visibilitychange → hidden` via `fetch(…, { keepalive: true })`. Drafts also cover Safari's edge-swipe back gesture: swiping forward returns to the edit intact.
+- **Drafts.** Slider state autosaves to IndexedDB (per device, 500 ms debounce). It commits to XMP four seconds after a gesture ends (a checkpoint), on *Save*, on *Export*, and on `visibilitychange → hidden` via `fetch(…, { keepalive: true })`. Drafts also cover Safari's edge-swipe back gesture: swiping forward returns to the edit intact.
+
+### Edit history
+
+Every save is a version of the photo's edit, kept as a tree in `sc:Sidecar/sc:History` (`sidecar_xmp::history`),
+so it travels with the file, survives a reinstall, moves with it under Immich's storage template, and is the
+same on every device. `sc:Edit` stays the full current edit — the history's head — so anything that reads
+only it is unaffected.
+
+- **Nodes.** `id` (12 hex), `parent`, `etag` (of its full edit), `created`, `kind` (`original`, `imported`,
+  `save`, `auto`), optional `label`, `user` and `session`, and `delta`: the root (`id = original`) holds the
+  complete default parameters it was created with; every other node only the fields that differ from its
+  parent (objects recurse, arrays and scalars are replaced whole). XMP has no null, so fields a node turns
+  off are listed in `removed`. A few hundred bytes per node; five versions of an iPhone HEIC's edit came to
+  12 KB of sidecar. Ids, ETags and labels are in the XMP reader's string list — hex like `12e456…` would
+  otherwise come back as a float.
+- **Saving.** `PUT …/edit { edit, base, checkpoint, session }`. From the head, a save adds a child. From an
+  older node, it adds a child there: editing an old version branches and discards nothing. A save identical
+  to its base just moves the head there.
+- **Checkpoints.** The editor saves four seconds after a gesture ends. A checkpoint folds into the head
+  instead of adding a node when the head is this session's own checkpoint, under three minutes old,
+  unlabelled, not exported, childless, and the new changes only touch controls that checkpoint already
+  moved — so dragging exposure three times is one step, exposure then contrast two. A fold that leaves the
+  node equal to its parent (an undo) removes the step.
+- **Other operations.** `GET …/history` returns every node with its full edit and the exports made from it;
+  `POST …/history/checkout { node }` makes a version (or the original) current; `PUT …/history/{node}/label`
+  names one. Opening another version saves unsaved changes first.
+- **Pruning.** Past 300 nodes, the oldest node that is not the original, the head, labelled, exported or a
+  fork point is squashed into its only child. Exports record the ETag they were made from, so the version
+  behind every export stays reachable.
+- **Editor.** A History tool shows the tree, git-style — the current version's ancestry in the first lane,
+  each branch in its own — with a plain-language summary of each step ("Exposure +0.30 EV · Whites −12",
+  read through the same slider mapping the controls use), export badges, and per version: open, compare
+  (press and hold the photo to see it), name, and *use its* white balance, light, curve, colour mixer or
+  detail in the current edit. Undo and redo are on screen too; they stay per session and per gesture.
 
 ```xml
 <x:xmpmeta xmlns:x="adobe:ns:meta/">

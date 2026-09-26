@@ -22,7 +22,24 @@ export type EditParams = {
 		denoiseLuminance: number;
 		denoiseChroma: number;
 	};
+	/** Absent or null means off (DESIGN.md §15); the editor has no lens controls yet, but carries it through. */
+	lens?: Record<string, unknown> | null;
 };
+
+/** Mirrors `sidecar_xmp::history::Node`, plus the full edit and the exports made from it (`GET …/history`). */
+export type HistoryNode = {
+	id: string;
+	parent?: string;
+	etag: string;
+	created: string;
+	kind: 'original' | 'imported' | 'save' | 'auto';
+	label?: string;
+	user?: string;
+	edit: EditParams;
+	exports: { version?: number; file?: string; format?: string; immichAssetId?: string | null }[];
+};
+
+export type HistoryState = { head: string; nodes: HistoryNode[] };
 
 export type CameraColor = {
 	asShotMul: [number, number, number];

@@ -184,3 +184,194 @@ fn an_unwritable_folder_is_reported_up_front_and_by_name() {
     assert!(err.to_string().contains("readonly"), "the message should name the folder: {err}");
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
+
+mod history {
+    use super::*;
+    use crate::history::{AMEND_WINDOW_S, MAX_NODES, ORIGINAL};
+
+    fn ev(v: f64) -> EditParams {
+        let mut e = EditParams::default();
+        e.exposure.ev = v;
+        e
+    }
+
+    fn save(h: &mut History, edit: &EditParams, base: &str) -> Committed {
+        h.commit(&Commit { edit, base, checkpoint: false, session: Some("tab"), user: None }, &[]).unwrap()
+    }
+
+    /// Everything goes through the real file: ids, ETags and labels must come back as strings, deltas as
+    /// the numbers they were, and a cleared optional field as cleared.
+    #[test]
+    fn the_tree_round_trips_through_the_sidecar_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let roots = [tmp.path().canonicalize().unwrap()];
+        let original = fixture(tmp.path(), "IMG_1.HEIC");
+        let with_lens = EditParams { lens: Some(sidecar_color::params::Lens { profile: "a/b".into(), ..Default::default() }), ..ev(0.5) };
+        let edits = [ev(0.25), with_lens, ev(-1.0)];
+        let mut heads = Vec::new();
+        for e in &edits {
+            let base = SidecarDoc::load(&original).unwrap().history().head;
+            update(&original, &roots, |d| {
+                heads.push(d.commit(&Commit { edit: e, base: &base, checkpoint: false, session: None, user: Some("Léo") }, "sha")?.head);
+                Ok(())
+            })
+            .unwrap();
+        }
+        update(&original, &roots, |d| d.label(&heads[1], Some("1234e5".into()))).unwrap();
+
+        let doc = SidecarDoc::load(&original).unwrap();
+        let h = doc.history();
+        assert_eq!(h.nodes.len(), 4, "the original and three saves");
+        assert_eq!(h.head, heads[2]);
+        for (id, e) in heads.iter().zip(&edits) {
+            assert_eq!(&h.edit_of(id).unwrap(), e, "node {id}");
+        }
+        assert_eq!(h.edit_of(ORIGINAL).unwrap(), EditParams::default());
+        assert_eq!(h.node(&heads[1]).unwrap().label.as_deref(), Some("1234e5"), "a label that looks like a number stays text");
+        assert_eq!(h.edit_of(&heads[2]).unwrap().lens, None, "turning lens correction off survives the file");
+        assert_eq!(doc.edit(), edits[2], "sc:Edit is still the current edit on its own");
+    }
+
+    #[test]
+    fn reverting_to_the_original_keeps_everything() {
+        let mut h = History::begin(&EditParams::default());
+        let a = save(&mut h, &ev(1.0), ORIGINAL).head;
+        assert_eq!(h.checkout(ORIGINAL).unwrap(), EditParams::default());
+        assert_eq!(h.head, ORIGINAL);
+        assert_eq!(h.edit_of(&a).unwrap(), ev(1.0), "the reverted version is still there");
+    }
+
+    /// Going back and changing something branches; it never discards what came after.
+    #[test]
+    fn editing_an_older_version_branches() {
+        let mut h = History::begin(&EditParams::default());
+        let a = save(&mut h, &ev(1.0), ORIGINAL).head;
+        let b = save(&mut h, &ev(2.0), &a).head;
+        h.checkout(&a).unwrap();
+        let c = save(&mut h, &ev(-1.0), &a);
+        assert!(!c.forked, "checking out and editing is not a conflict");
+        assert_eq!(h.nodes.iter().filter(|n| n.parent.as_deref() == Some(a.as_str())).count(), 2);
+        assert_eq!(h.edit_of(&b).unwrap(), ev(2.0));
+        assert_eq!(h.edit_of(&c.head).unwrap(), ev(-1.0));
+    }
+
+    /// Two devices saving from the same version used to make one of them choose whose edit to throw away.
+    #[test]
+    fn two_devices_saving_from_the_same_version_fork() {
+        let mut h = History::begin(&EditParams::default());
+        let phone = h.commit(&Commit { edit: &ev(1.0), base: ORIGINAL, checkpoint: false, session: Some("phone"), user: None }, &[]).unwrap();
+        let desk = h.commit(&Commit { edit: &ev(-1.0), base: ORIGINAL, checkpoint: false, session: Some("desk"), user: None }, &[]).unwrap();
+        assert!(!phone.forked && desk.forked);
+        assert_eq!(h.head, desk.head);
+        assert_eq!(h.edit_of(&phone.head).unwrap(), ev(1.0), "the phone's edit is kept");
+    }
+
+    #[test]
+    fn checkpoints_fold_together_until_sealed() {
+        let mut h = History::begin(&EditParams::default());
+        let auto = |h: &mut History, v: f64, session: &str| {
+            let base = h.head.clone();
+            h.commit(&Commit { edit: &ev(v), base: &base, checkpoint: true, session: Some(session), user: None }, &[]).unwrap()
+        };
+        auto(&mut h, 0.1, "tab");
+        auto(&mut h, 0.2, "tab");
+        let last = auto(&mut h, 0.3, "tab");
+        assert_eq!(h.nodes.len(), 2, "three checkpoints in a row are one step");
+        assert_eq!(h.edit_of(&last.head).unwrap(), ev(0.3));
+
+        // Save with nothing new seals the checkpoint rather than adding a copy of it.
+        save(&mut h, &ev(0.3), &last.head);
+        assert_eq!((h.nodes.len(), h.node(&last.head).unwrap().kind), (2, NodeKind::Save));
+        auto(&mut h, 0.4, "tab");
+        assert_eq!(h.nodes.len(), 3, "a sealed step isn't amended");
+        auto(&mut h, 0.5, "other tab");
+        assert_eq!(h.nodes.len(), 4, "another device's checkpoint never folds into this one");
+    }
+
+    /// One step per control run: dragging exposure again folds in, touching contrast starts the next step.
+    #[test]
+    fn a_checkpoint_folds_only_more_of_the_same_controls() {
+        let mut h = History::begin(&EditParams::default());
+        let auto = |h: &mut History, e: &EditParams| {
+            let base = h.head.clone();
+            h.commit(&Commit { edit: e, base: &base, checkpoint: true, session: Some("tab"), user: None }, &[]).unwrap()
+        };
+        auto(&mut h, &ev(0.2));
+        auto(&mut h, &ev(0.4));
+        assert_eq!(h.nodes.len(), 2);
+        let mut both = ev(0.4);
+        both.tone.contrast = 1.2;
+        auto(&mut h, &both);
+        assert_eq!(h.nodes.len(), 3, "contrast is a new step");
+        both.tone.contrast = 1.3;
+        auto(&mut h, &both);
+        assert_eq!(h.nodes.len(), 3, "and more contrast folds into it");
+        assert_eq!(h.edit_of(&h.head).unwrap(), both);
+        let before_contrast = h.nodes[1].id.clone();
+        auto(&mut h, &ev(0.4));
+        assert_eq!((h.nodes.len(), h.head.as_str()), (2, before_contrast.as_str()), "undoing the contrast step removes it");
+    }
+
+    #[test]
+    fn a_checkpoint_that_was_exported_or_is_old_is_not_amended() {
+        let mut h = History::begin(&EditParams::default());
+        let first = h.commit(&Commit { edit: &ev(0.1), base: ORIGINAL, checkpoint: true, session: Some("t"), user: None }, &[]).unwrap();
+        let exported = [h.node(&first.head).unwrap().etag.clone()];
+        h.commit(&Commit { edit: &ev(0.2), base: &first.head, checkpoint: true, session: Some("t"), user: None }, &exported).unwrap();
+        assert_eq!(h.nodes.len(), 3, "the exported version stays what was exported");
+
+        let mut h = History::begin(&EditParams::default());
+        let first = h.commit(&Commit { edit: &ev(0.1), base: ORIGINAL, checkpoint: true, session: Some("t"), user: None }, &[]).unwrap();
+        h.nodes[1].created = rfc3339(now_secs() - AMEND_WINDOW_S - 1);
+        h.commit(&Commit { edit: &ev(0.2), base: &first.head, checkpoint: true, session: Some("t"), user: None }, &[]).unwrap();
+        assert_eq!(h.nodes.len(), 3, "an afternoon of editing leaves a trail, not one step");
+    }
+
+    fn now_secs() -> i64 {
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64
+    }
+
+    /// Sidecars written before history existed still open, with their edit as the first step after the original.
+    #[test]
+    fn a_sidecar_from_before_history_begins_with_its_edit() {
+        let h = History::begin(&ev(0.7));
+        assert_eq!(h.nodes.len(), 2);
+        assert_eq!(h.nodes[1].kind, NodeKind::Imported);
+        assert_eq!(h.edit_of(&h.head).unwrap(), ev(0.7));
+        assert_eq!(History::begin(&EditParams::default()).nodes.len(), 1, "an unedited photo is just the original");
+    }
+
+    #[test]
+    fn pruning_keeps_the_head_labels_and_exports_exact() {
+        let mut h = History::begin(&EditParams::default());
+        let mut exported = Vec::new();
+        let mut labelled = String::new();
+        for i in 0..MAX_NODES + 40 {
+            let base = h.head.clone();
+            let e = ev(i as f64 / 100.0);
+            let done = h.commit(&Commit { edit: &e, base: &base, checkpoint: false, session: None, user: None }, &exported).unwrap();
+            if i == 5 {
+                exported.push(h.node(&done.head).unwrap().etag.clone());
+            }
+            if i == 9 {
+                labelled = done.head.clone();
+                h.set_label(&done.head, Some("print".into())).unwrap();
+            }
+        }
+        assert!(h.nodes.len() <= MAX_NODES);
+        assert_eq!(h.edit_of(&h.head).unwrap(), ev((MAX_NODES + 39) as f64 / 100.0));
+        assert_eq!(h.edit_of(&labelled).unwrap(), ev(0.09));
+        assert!(h.nodes.iter().any(|n| n.etag == exported[0]), "the exported version survives");
+        assert!(h.node(ORIGINAL).is_some());
+        for n in &h.nodes {
+            h.edit_of(&n.id).unwrap();
+        }
+    }
+
+    #[test]
+    fn an_unknown_base_is_refused() {
+        let mut h = History::begin(&EditParams::default());
+        let err = h.commit(&Commit { edit: &ev(1.0), base: "nope", checkpoint: false, session: None, user: None }, &[]).unwrap_err();
+        assert!(matches!(err.downcast_ref::<SidecarError>(), Some(SidecarError::UnknownVersion { .. })));
+    }
+}
