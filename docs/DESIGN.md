@@ -379,7 +379,7 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   c = gamutCompress(c);                     //     pull negatives toward the neutral axis
   c = toneMap(c, P.tone);                   // 4   log encode → sigmoid → curve LUT on luminance
   c = colorMixer(c, P.mixer);               // 5   OKLCh, 8 bands
-  c = P.workToDisp * c;                     //     Rec.2020 → sRGB / P3 primaries, soft clip
+  c = P.workToDisp * c;                     //     Rec.2020 → sRGB / P3 primaries, soft clip (RAW) or clamp
   return vec4f(c, 1.0);
 }
 ```
@@ -393,6 +393,19 @@ Module functions take their values as arguments and never read the uniform buffe
 4. **Tone map.** Luminance Y (Rec.2020 weights) → `log2(Y / 0.18)` mapped from [BlackEV, WhiteEV] to [0, 1] → sigmoid (contrast, pivot) → user curve LUT → decode to Y′ → `rgb × Y′ / Y`, which keeps channel ratios and therefore hue. The curve is Fritsch–Carlson monotone cubic over display-encoded values, baked into 4,096 entries in an `r32float` 1D texture and interpolated manually (`r32float` isn't filterable without an optional feature). Shadows / Midtones / Highlights sliders in the UI move curve control points — the same spline.
 5. **Color mixer.** Linear → OKLab → LCh. Bands: red, orange, yellow, green, aqua, blue, purple, magenta. Raised-cosine weights span neighbouring band centres and sum to 1. `h += Σ wᵢ·hueᵢ`, `C ×= 1 + Σ wᵢ·satᵢ`, `L += Σ wᵢ·lumᵢ · smoothstep(0.02, 0.08, C)` so neutrals stay put. Back to linear.
 
+**Developed files take a display-referred path.** A JPEG, HEIC, PNG or TIFF was rendered for display by
+whatever wrote it — tone curve, white clip, gamut — and none of that can be undone, so the stages above that
+exist to render sensor light don't apply to it. `SourceKind::Developed` (from `RawInfo.source_kind`, passed to
+`pack`) sets `display_referred` in the uniform, and the develop pass then skips highlight blending (strength
+0), gamut compression and the RAW tone curve, and ends in a plain 0–1 clamp instead of the output soft clip.
+Step 4 becomes `tone_display`, on sRGB-encoded luminance, the identity at default settings: a shoulder that
+only engages once exposure is positive (knee `1 − 0.3·EV`, floor 0.4) → levels for Blacks (±0.1 encoded)
+and Whites (±0.2) → a power S-curve through encoded middle grey for Contrast (exponent = the stored
+contrast) → the same user-curve LUT → `rgb × Y′ / Y`, with black lifted to neutral grey. The stored fields
+are the RAW ones (`whiteEv`, `blackEv`, `contrast`), read through the slider mapping, so the editor and the
+sidecar format need no second meaning; the editor limits Exposure to ±2 EV and hides Highlight recovery.
+Measured on an iPhone HEIC at default settings: mean difference from the file 0.03/255, none above 0.12/255.
+
 Uniform buffer:
 
 ```wgsl
@@ -401,9 +414,10 @@ struct DevelopParams {            // offset  size
   exposure   : f32,               //   12      4   2^EV
   camToWork  : mat3x3f,           //   16     48
   workToDisp : mat3x3f,           //   64     48
-  tone       : vec4f,             //  112     16   blackEv, whiteEv, contrast, pivot
+  tone       : vec4f,             //  112     16   RAW: blackEv, whiteEv, steepness, pivot
+                                  //                developed: blacks, whites, contrast, knee
   hlStrength : f32,               //  128      4
-  _pad0      : f32,               //  132      4
+  displayReferred : f32,          //  132      4   0 RAW, 1 developed
   _pad1      : vec2f,             //  136      8
   mixer      : array<vec4f, 8>,   //  144    128   per band: hue, sat, lum, unused
 }                                 //  total 272 bytes

@@ -49,10 +49,13 @@ export type Meta = {
 		/** Where the camera aimed autofocus, normalized to the oriented image; absent if unknown. */
 		afPoint?: { x: number; y: number } | null;
 		/**
-		 * `developed` means a JPEG, HEIC, PNG or TIFF: already demosaiced and tone-mapped by something else,
-		 * so there is no clipped sensor data to recover and white balance is a relative shift, not a measured
-		 * illuminant. Absent in metadata cached before this existed, which is always RAW.
+		 * `developed` means a JPEG, HEIC, PNG or TIFF: already tone-mapped by something else, so it is developed
+		 * display-referred (identity at default settings), there is no clipped sensor data to recover, and white
+		 * balance is a relative shift, not a measured illuminant. Absent in metadata cached before this existed,
+		 * which is always RAW.
 		 */
-		sourceKind?: 'raw' | 'developed';
+		sourceKind?: SourceKind;
 	};
 };
+
+export type SourceKind = 'raw' | 'developed';

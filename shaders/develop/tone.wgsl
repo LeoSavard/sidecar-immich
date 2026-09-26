@@ -17,6 +17,48 @@ fn logistic(x: f32, k: f32, p: f32) -> f32 {
   return 1.0 / (1.0 + exp(-k * (x - p)));
 }
 
+/// Middle grey, sRGB-encoded: where Contrast pivots on a developed file, as the RAW curve pivots on it too.
+const GREY_ENC = 0.4613561295;
+/// How far Blacks and Whites at ±100 move a developed file's black and white points, in encoded units.
+const BLACKS_RANGE = 0.1;
+const WHITES_RANGE = 0.2;
+
+// Module 4, for a developed file (JPEG, HEIC, PNG, TIFF): its luminance is already display-linear — the camera
+// or app that wrote it chose the tone curve — so nothing here re-renders it, and at default settings every
+// step is the identity. Worked on sRGB-encoded luminance, the space the file's own tones were chosen in; RGB
+// is scaled by the luminance ratio, as for a RAW, so hue is kept.
+fn tone_display(c: vec3f, tone: vec4f, lut: texture_1d<f32>) -> vec3f {
+  let y = max(dot(c, LUMA_2020), 0.0);
+  // Not `srgb_encode1`, which clamps at white: exposure can take values past it, and the shoulder below is
+  // what brings them back.
+  var e = select(12.92 * y, 1.055 * pow(y, 1.0 / 2.4) - 0.055, y > 0.0031308);
+  // Shoulder: raising exposure rolls highlights off instead of clipping them flat. The knee sits at white
+  // (no shoulder) until exposure is positive; nothing brighter than white exists in the file to recover.
+  let knee = tone.w;
+  if (e > knee) {
+    e = select(1.0, knee + (1.0 - knee) * (1.0 - exp((knee - e) / (1.0 - knee))), knee < 1.0);
+  }
+  // Blacks and Whites, as levels: positive lifts the black point or clips toward white, negative crushes
+  // blacks or dims white. Neither reaches past what the file holds.
+  let in_lo = max(-tone.x, 0.0) * BLACKS_RANGE;
+  let out_lo = max(tone.x, 0.0) * BLACKS_RANGE;
+  let in_hi = 1.0 - max(tone.y, 0.0) * WHITES_RANGE;
+  let out_hi = 1.0 + min(tone.y, 0.0) * WHITES_RANGE;
+  e = out_lo + (out_hi - out_lo) * clamp((e - in_lo) / (in_hi - in_lo), 0.0, 1.0);
+  // Contrast: a power S-curve through middle grey, the identity at exponent 1, with the same slope on both
+  // sides of the pivot.
+  let g = tone.z;
+  if (e < GREY_ENC) {
+    e = GREY_ENC * pow(max(e, 0.0) / GREY_ENC, g);
+  } else {
+    e = 1.0 - (1.0 - GREY_ENC) * pow(max(1.0 - e, 0.0) / (1.0 - GREY_ENC), g);
+  }
+  let y_out = srgb_decode1(lut_sample(lut, e));
+  // Black has no hue to keep, and a ratio can't lift it: Blacks + raises it to a neutral grey.
+  if (y <= 1e-10) { return vec3f(y_out); }
+  return c * (y_out / y);
+}
+
 fn tone_map(c: vec3f, tone: vec4f, lut: texture_1d<f32>) -> vec3f {
   let y = dot(c, LUMA_2020);
   if (y <= 1e-10) { return vec3f(0.0); }

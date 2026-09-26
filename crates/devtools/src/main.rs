@@ -67,7 +67,7 @@ fn develop(input: &std::path::Path, out: &std::path::Path, long_edge: u32) -> Re
         Ok(json) => serde_json::from_str(&json)?,
         Err(_) => Default::default(),
     };
-    let packed = sidecar_color::pack(&edit, &info.color, sidecar_color::DisplaySpace::Srgb);
+    let packed = sidecar_color::pack(&edit, &info.color, info.source_kind, sidecar_color::DisplaySpace::Srgb);
     let src = sidecar_engine::RgbaF32 { width: proxy.width, height: proxy.height, data: proxy.rgba };
     let t_gpu0 = std::time::Instant::now();
     let img = pass.run(&gpu, &src, &packed.uniform, &packed.lut)?;
@@ -97,7 +97,7 @@ fn ingest(input: &std::path::Path, out: &std::path::Path, long_edge: u32) -> Res
     let proxy = ingest.proxy(&gpu, &input_m, [mul[0] as f32, 1.0, mul[2] as f32], long_edge)?.oriented(m.flip);
     let t_gpu = t0.elapsed();
     let edit: sidecar_color::EditParams = std::env::var("SIDECAR_EDIT").ok().map(|j| serde_json::from_str(&j)).transpose()?.unwrap_or_default();
-    let packed = sidecar_color::pack(&edit, &info.color, sidecar_color::DisplaySpace::Srgb);
+    let packed = sidecar_color::pack(&edit, &info.color, info.source_kind, sidecar_color::DisplaySpace::Srgb);
     let img = develop.run(&gpu, &proxy, &packed.uniform, &packed.lut)?;
     write_png(&img, out)?;
     println!(

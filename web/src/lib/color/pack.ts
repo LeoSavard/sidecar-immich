@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // The Rust colour maths (crates/color) running as WebAssembly. Same code the worker uses for export.
 import wasmUrl from './sidecar_color.wasm?url';
-import type { CameraColor, DisplaySpace, EditParams } from '$lib/types';
+import type { CameraColor, DisplaySpace, EditParams, SourceKind } from '$lib/types';
 
 type Exports = {
 	memory: WebAssembly.Memory;
@@ -32,8 +32,9 @@ export class ColorPacker {
 		return JSON.parse(new TextDecoder().decode(this.framed(this.x.sc_default_edit())));
 	}
 
-	pack(edit: EditParams, camera: CameraColor, display: DisplaySpace): Packed {
-		const input = new TextEncoder().encode(JSON.stringify({ edit, camera, display }));
+	/** `source` picks the develop pass's tone path: sensor light, or a picture a camera or app already rendered. */
+	pack(edit: EditParams, camera: CameraColor, source: SourceKind, display: DisplaySpace): Packed {
+		const input = new TextEncoder().encode(JSON.stringify({ edit, camera, source, display }));
 		const ptr = this.x.sc_alloc(input.length);
 		new Uint8Array(this.x.memory.buffer, ptr, input.length).set(input);
 		const out = this.framed(this.x.sc_pack(ptr, input.length));

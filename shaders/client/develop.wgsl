@@ -16,13 +16,19 @@ fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
 @fragment
 fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let src = textureLoad(source_tex, vec2i(pos.xy), 0);
+  let developed = P.display_referred > 0.5;
   var c = white_balance(src.rgb, P.wb_mul);                   // 1
   c = exposure(c, P.exposure);                                 // 2
   c = highlight_blend(c, src.a, P.hl_strength);
   c = P.cam_to_work * c;                                       // 3
-  c = gamut_compress(c);
-  c = tone_map(c, P.tone, tone_lut);                           // 4
+  if (developed) {
+    // Already inside its own display gamut and already tone-mapped: neither step is the file's to take again.
+    c = tone_display(c, P.tone, tone_lut);                     // 4
+  } else {
+    c = gamut_compress(c);
+    c = tone_map(c, P.tone, tone_lut);                         // 4
+  }
   c = color_mixer(c, P.mixer);                                 // 5
-  c = output_transform(c, P.work_to_disp);
+  c = output_transform(c, P.work_to_disp, developed);
   return vec4f(c, 1.0);
 }

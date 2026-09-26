@@ -7,9 +7,9 @@ struct DevelopParams {
   exposure: f32,             // 2^EV
   cam_to_work: mat3x3f,      // camera RGB -> linear Rec.2020, recomputed on every WB change
   work_to_disp: mat3x3f,     // linear Rec.2020 -> display primaries (sRGB or Display P3)
-  tone: vec4f,               // black EV, white EV, contrast, pivot
+  tone: vec4f,               // RAW: black EV, white EV, steepness, pivot · developed: blacks, whites, contrast, knee
   hl_strength: f32,          // highlight blend strength
-  _pad0: f32,
+  display_referred: f32,     // 0 RAW (scene-referred), 1 JPEG/HEIC/PNG/TIFF (display-referred)
   _pad1: vec2f,
   mixer: array<vec4f, 8>,    // per band: hue shift (radians), chroma gain - 1, lightness shift, unused
 }

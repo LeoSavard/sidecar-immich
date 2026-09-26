@@ -1,6 +1,7 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 <script lang="ts">
 	import Slider from './Slider.svelte';
+	import { signed } from './format';
 	import type { Band, MixerBand } from '$lib/types';
 
 	type Props = { mixer: Record<Band, MixerBand>; onchange: (band: Band, field: keyof MixerBand, v: number) => void; oncommit: () => void };
@@ -17,7 +18,6 @@
 		{ band: 'magenta', label: 'Magenta', swatch: '#b8418f' }
 	];
 	let selected = $state<Band>('orange');
-	const signed = (v: number) => (v > 0 ? `+${v}` : `${v}`);
 	const edited = (b: Band) => mixer[b].hue !== 0 || mixer[b].saturation !== 0 || mixer[b].luminance !== 0;
 </script>
 
@@ -39,8 +39,8 @@
 		{/each}
 	</div>
 	{#key selected}
-		<Slider id="mix-hue" label="{bands.find((b) => b.band === selected)?.label} hue" value={mixer[selected].hue} min={-100} max={100} defaultValue={0} bipolar format={signed} onchange={(v) => onchange(selected, 'hue', v)} {oncommit} />
-		<Slider id="mix-sat" label="Saturation" value={mixer[selected].saturation} min={-100} max={100} defaultValue={0} bipolar format={signed} onchange={(v) => onchange(selected, 'saturation', v)} {oncommit} />
-		<Slider id="mix-lum" label="Luminance" value={mixer[selected].luminance} min={-100} max={100} defaultValue={0} bipolar format={signed} onchange={(v) => onchange(selected, 'luminance', v)} {oncommit} />
+		<Slider id="mix-hue" label="{bands.find((b) => b.band === selected)?.label} hue" value={mixer[selected].hue} min={-100} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => onchange(selected, 'hue', v)} {oncommit} />
+		<Slider id="mix-sat" label="Saturation" value={mixer[selected].saturation} min={-100} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => onchange(selected, 'saturation', v)} {oncommit} />
+		<Slider id="mix-lum" label="Luminance" value={mixer[selected].luminance} min={-100} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => onchange(selected, 'luminance', v)} {oncommit} />
 	{/key}
 </div>

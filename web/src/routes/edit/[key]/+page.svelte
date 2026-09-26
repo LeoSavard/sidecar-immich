@@ -15,6 +15,7 @@
 	import ColorMixer from '$lib/ui/ColorMixer.svelte';
 	import ExportSheet from '$lib/ui/ExportSheet.svelte';
 	import Loupe from '$lib/ui/Loupe.svelte';
+	import { clean, decimals, signed } from '$lib/ui/format';
 	import type { Band, DisplaySpace, EditParams, Meta, MixerBand } from '$lib/types';
 
 	type EditState = { edit: EditParams; etag: string; readOnly: boolean; writable?: boolean; exports: unknown[] };
@@ -86,7 +87,7 @@
 	/** Resolve the edit through the colour packer — wasm, so it works with or without a GPU. */
 	function repack() {
 		const source = before ? defaults : $state.snapshot(edit!);
-		const packed = packer.pack(source, meta!.info.color, display);
+		const packed = packer.pack(source, meta!.info.color, meta!.info.sourceKind ?? 'raw', display);
 		if (!before) {
 			resolvedWb = { temperatureK: packed.temperatureK, tint: packed.tint };
 			lut = packed.lut;
@@ -475,7 +476,7 @@
 	function curveOffset(which: keyof typeof CURVE_ANCHORS): number {
 		const x = CURVE_ANCHORS[which];
 		const p = edit?.tone.curve.find((q) => Math.abs(q[0] - x) < 1e-6);
-		return p ? Math.round(((p[1] - x) / 0.15) * 100) : 0;
+		return p ? clean(((p[1] - x) / 0.15) * 100) : 0;
 	}
 	function setCurveOffset(which: keyof typeof CURVE_ANCHORS, v: number) {
 		if (!edit) return;
@@ -485,7 +486,6 @@
 		changed();
 	}
 
-	const signed = (v: number, digits = 0) => `${v > 0 ? '+' : ''}${v.toFixed(digits)}`;
 	const shutter = (s: number) => (s >= 1 ? `${s}s` : `1/${Math.round(1 / s)}`);
 
 	/** Camera line, skipping whatever this file didn't record — plenty of JPEGs carry almost no EXIF. */
@@ -519,7 +519,7 @@
 				<span class="text-fg-2">{edit.whiteBalance.mode === 'asShot' ? (developed ? 'As saved' : 'As shot') : 'Custom'}</span>
 				<button type="button" class="rounded px-2 py-1 text-fg-2 hover:bg-raised disabled:opacity-40" disabled={edit.whiteBalance.mode === 'asShot'} onclick={() => { edit!.whiteBalance.mode = 'asShot'; changed(); committed(); }}>Reset to {developed ? 'as saved' : 'as shot'}</button>
 			</div>
-			<Slider id="wb-temp" label="Temperature" value={edit.whiteBalance.mode === 'asShot' ? Math.round(resolvedWb.temperatureK) : edit.whiteBalance.temperatureK} min={2000} max={12000} step={10} defaultValue={Math.round(resolvedWb.temperatureK)} trackGradient={TEMP_TRACK} format={(v) => `${v} K`} onchange={(v) => setWb('temperatureK', v)} oncommit={committed} />
+			<Slider id="wb-temp" label="Temperature" value={edit.whiteBalance.mode === 'asShot' ? Math.round(resolvedWb.temperatureK) : edit.whiteBalance.temperatureK} min={2000} max={12000} step={10} defaultValue={Math.round(resolvedWb.temperatureK)} trackGradient={TEMP_TRACK} format={(v) => `${decimals(v)} K`} onchange={(v) => setWb('temperatureK', v)} oncommit={committed} />
 			<Slider id="wb-tint" label="Tint" value={edit.whiteBalance.mode === 'asShot' ? Math.round(resolvedWb.tint) : edit.whiteBalance.tint} min={-150} max={150} defaultValue={0} bipolar trackGradient={TINT_TRACK} format={(v) => signed(v)} onchange={(v) => setWb('tint', v)} oncommit={committed} />
 		</div>
 	{/if}
@@ -528,16 +528,17 @@
 {#snippet lightSection()}
 	{#if edit}
 		<div class="grid gap-2">
-			<Slider id="exposure" label="Exposure" value={edit.exposure.ev} min={-5} max={5} step={0.01} defaultValue={0} bipolar format={(v) => `${signed(v, 2)} EV`} onchange={(v) => { edit!.exposure.ev = v; changed(); }} oncommit={committed} />
-			<Slider id="contrast" label="Contrast" value={Math.round((edit.tone.contrast - 1) * 100)} min={-70} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => { edit!.tone.contrast = 1 + v / 100; changed(); }} oncommit={committed} />
+			<!-- A developed file has no headroom past white to recover: ±2 EV is already most of what it holds. -->
+			<Slider id="exposure" label="Exposure" value={edit.exposure.ev} min={developed ? -2 : -5} max={developed ? 2 : 5} step={0.01} defaultValue={0} bipolar format={(v) => `${signed(v, 2)} EV`} onchange={(v) => { edit!.exposure.ev = v; changed(); }} oncommit={committed} />
+			<Slider id="contrast" label="Contrast" value={clean((edit.tone.contrast - 1) * 100)} min={-70} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => { edit!.tone.contrast = 1 + v / 100; changed(); }} oncommit={committed} />
 			<Slider id="highlights" label="Highlights" value={curveOffset('highlights')} min={-100} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => setCurveOffset('highlights', v)} oncommit={committed} />
 			<Slider id="shadows" label="Shadows" value={curveOffset('shadows')} min={-100} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => setCurveOffset('shadows', v)} oncommit={committed} />
-			<Slider id="whites" label="Whites" value={Math.round(((4.5 - edit.tone.whiteEv) / 2) * 100)} min={-100} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => { edit!.tone.whiteEv = 4.5 - (v / 100) * 2; changed(); }} oncommit={committed} />
-			<Slider id="blacks" label="Blacks" value={Math.round(((-8 - edit.tone.blackEv) / 3) * 100)} min={-100} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => { edit!.tone.blackEv = -8 - (v / 100) * 3; changed(); }} oncommit={committed} />
+			<Slider id="whites" label="Whites" value={clean(((4.5 - edit.tone.whiteEv) / 2) * 100)} min={-100} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => { edit!.tone.whiteEv = 4.5 - (v / 100) * 2; changed(); }} oncommit={committed} />
+			<Slider id="blacks" label="Blacks" value={clean(((-8 - edit.tone.blackEv) / 3) * 100)} min={-100} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => { edit!.tone.blackEv = -8 - (v / 100) * 3; changed(); }} oncommit={committed} />
 			<!-- Highlight recovery reconstructs clipped sensor channels; an already-developed file has none to
 			     reconstruct, so the control would sit there doing nothing. -->
 			{#if !developed}
-				<Slider id="hl-blend" label="Highlight recovery" value={Math.round(edit.exposure.highlightBlend * 100)} min={0} max={100} defaultValue={50} format={(v) => `${v} %`} onchange={(v) => { edit!.exposure.highlightBlend = v / 100; changed(); }} oncommit={committed} />
+				<Slider id="hl-blend" label="Highlight recovery" value={clean(edit.exposure.highlightBlend * 100)} min={0} max={100} defaultValue={50} format={(v) => `${decimals(v)} %`} onchange={(v) => { edit!.exposure.highlightBlend = v / 100; changed(); }} oncommit={committed} />
 			{/if}
 		</div>
 	{/if}
@@ -557,10 +558,10 @@
 		<div class="grid gap-2">
 			<Loupe assetKey={key} edit={$state.snapshot(edit)} center={loupeCenter} colorSpace={displaySpace} />
 			<p class="text-xs text-muted">Tap the photo to move the loupe.</p>
-			<Slider id="sharpen" label="Sharpening" value={edit.detail.sharpenAmount} min={0} max={100} defaultValue={0} format={(v) => String(v)} onchange={(v) => { edit!.detail.sharpenAmount = v; changed(); }} oncommit={committed} />
-			<Slider id="sharpen-radius" label="Sharpening radius" value={edit.detail.sharpenRadius} min={0.5} max={2} step={0.1} defaultValue={1} format={(v) => `${v.toFixed(1)} px`} onchange={(v) => { edit!.detail.sharpenRadius = v; changed(); }} oncommit={committed} />
-			<Slider id="denoise-luma" label="Noise reduction" value={edit.detail.denoiseLuminance} min={0} max={100} defaultValue={0} format={(v) => String(v)} onchange={(v) => { edit!.detail.denoiseLuminance = v; changed(); }} oncommit={committed} />
-			<Slider id="denoise-chroma" label="Colour noise reduction" value={edit.detail.denoiseChroma} min={0} max={100} defaultValue={0} format={(v) => String(v)} onchange={(v) => { edit!.detail.denoiseChroma = v; changed(); }} oncommit={committed} />
+			<Slider id="sharpen" label="Sharpening" value={edit.detail.sharpenAmount} min={0} max={100} defaultValue={0} format={(v) => decimals(v)} onchange={(v) => { edit!.detail.sharpenAmount = v; changed(); }} oncommit={committed} />
+			<Slider id="sharpen-radius" label="Sharpening radius" value={edit.detail.sharpenRadius} min={0.5} max={2} step={0.1} defaultValue={1} format={(v) => `${decimals(v, 1)} px`} onchange={(v) => { edit!.detail.sharpenRadius = v; changed(); }} oncommit={committed} />
+			<Slider id="denoise-luma" label="Noise reduction" value={edit.detail.denoiseLuminance} min={0} max={100} defaultValue={0} format={(v) => decimals(v)} onchange={(v) => { edit!.detail.denoiseLuminance = v; changed(); }} oncommit={committed} />
+			<Slider id="denoise-chroma" label="Colour noise reduction" value={edit.detail.denoiseChroma} min={0} max={100} defaultValue={0} format={(v) => decimals(v)} onchange={(v) => { edit!.detail.denoiseChroma = v; changed(); }} oncommit={committed} />
 		</div>
 	{/if}
 {/snippet}

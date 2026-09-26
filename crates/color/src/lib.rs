@@ -9,4 +9,4 @@ pub mod params;
 pub mod spline;
 pub mod tone;
 
-pub use params::{DevelopParams, DisplaySpace, EditParams, Packed, pack};
+pub use params::{DevelopParams, DisplaySpace, EditParams, Packed, SourceKind, pack};

@@ -18,7 +18,7 @@
 //! image already documents for ExifTool. The published image ships no HEIF decoder and reports HEIC as
 //! unsupported; a deployment opts in by installing one.
 
-use crate::{RawInfo, SensorKind};
+use crate::{RawInfo, SensorKind, SourceKind};
 use serde::{Deserialize, Serialize};
 use sidecar_color::camera::{Calibration, CameraColor};
 use sidecar_color::mat;
@@ -122,12 +122,9 @@ enum Samples {
 /// Interleaved integer samples → linear RGBA f32. `channels` is 1 (grey), 2 (grey + alpha), 3 or 4; any
 /// alpha is dropped, see below.
 ///
-/// Alpha is **zero**, not one, and any alpha the source carried is dropped. Downstream, alpha is not opacity:
-/// it is the fraction of the pixel clipped at the sensor, and `highlight_blend` pulls those pixels toward
-/// neutral to kill the magenta cast white-balance multipliers leave on reconstructed highlights. None of
-/// that applies to an already-developed file — its blown highlights are flat white already, and its
-/// multipliers are unity — so the honest value is zero. Writing one here quietly desaturates the whole
-/// frame by the highlight-recovery strength.
+/// Alpha is **zero**, and any alpha the source carried is dropped. Downstream, alpha is not opacity: it is the
+/// fraction of the pixel clipped at the sensor, which only a RAW has. (The develop pass also turns highlight
+/// blending off for developed files, so this is the honest value rather than a load-bearing one.)
 fn to_linear_rgba(samples: &Samples, channels: usize) -> Vec<f32> {
     fn convert<T: Copy>(samples: &[T], channels: usize, levels: usize, index: impl Fn(T) -> usize) -> Vec<f32> {
         let lut = linear_lut(levels);
@@ -378,7 +375,7 @@ pub fn info(exif: &Exif) -> RawInfo {
         captured_unix: exif.captured_unix,
         color: exif.space.camera_color(),
         af_point: exif.af_point,
-        source_kind: crate::SourceKind::Developed,
+        source_kind: SourceKind::Developed,
         source_space: Some(exif.space),
     }
 }
@@ -525,9 +522,7 @@ mod tests {
         assert_eq!(flip_from_orientation(7), 7);
     }
 
-    /// Caught by reading the develop shader, not by looking at a render: alpha feeds `highlight_blend` as a
-    /// sensor-clip fraction, so a constant 1.0 desaturates every pixel by the recovery strength — about half
-    /// the colour out of the whole frame, uniformly enough that it looks like a plausible image.
+    /// Alpha is the sensor-clip fraction downstream, and nothing in a developed file was clipped at a sensor.
     #[test]
     fn alpha_is_zero_because_nothing_here_is_sensor_clipped() {
         let rgba = to_linear_rgba(&Samples::Eight(vec![255, 128, 0, 10, 20, 30]), 3);

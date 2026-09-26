@@ -1,19 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Browser entry point for the colour maths. No bindings generator: the page allocates a buffer, writes
-//! JSON `{ edit, camera, display }`, and reads back a packed result. See web/src/lib/color/pack.ts.
+//! JSON `{ edit, camera, source, display }`, and reads back a packed result. See web/src/lib/color/pack.ts.
 //!
 //! Result layout: `[u32 len][272 uniform bytes][4096 × f32 tone LUT][f64 temperature][f64 tint]`, or len 0
 //! with the error message available from `sc_last_error`.
 
 use serde::Deserialize;
 use sidecar_color::camera::CameraColor;
-use sidecar_color::{DisplaySpace, EditParams, pack};
+use sidecar_color::{DisplaySpace, EditParams, SourceKind, pack};
 use std::cell::RefCell;
 
 #[derive(Deserialize)]
 struct Request {
     edit: EditParams,
     camera: CameraColor,
+    #[serde(default)]
+    source: SourceKind,
     #[serde(default)]
     display: DisplaySpace,
 }
@@ -40,7 +42,7 @@ pub unsafe extern "C" fn sc_free(ptr: *mut u8, len: usize) {
 
 fn run(input: &[u8]) -> Result<Vec<u8>, String> {
     let req: Request = serde_json::from_slice(input).map_err(|e| e.to_string())?;
-    let p = pack(&req.edit, &req.camera, req.display);
+    let p = pack(&req.edit, &req.camera, req.source, req.display);
     let mut out = Vec::with_capacity(4 + p.uniform.len() + p.lut.len() * 4 + 16);
     out.extend_from_slice(&[0; 4]);
     out.extend_from_slice(&p.uniform);

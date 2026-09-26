@@ -390,7 +390,7 @@ pub struct Session {
     source: Arc<wgpu::Texture>,
     flip: i32,
     sigma: f32,
-    color: sidecar_color::camera::CameraColor,
+    rendering: export::Rendering,
 }
 
 const SESSION_LIMIT: usize = 2;
@@ -411,10 +411,10 @@ pub struct PreviewRequest {
 /// The develop pass the browser would have run, run here instead, over the same cached proxy and with the
 /// same parameters and shaders — so a browser without WebGPU sees the same picture, just later. See
 /// docs/ROADMAP.md, "Browsers without WebGPU".
-fn preview_jpeg(kit: &export::Kit, color: &sidecar_color::camera::CameraColor, req: &PreviewRequest, proxy: (u32, u32, Bytes)) -> Result<Vec<u8>> {
+fn preview_jpeg(kit: &export::Kit, rendering: &export::Rendering, req: &PreviewRequest, proxy: (u32, u32, Bytes)) -> Result<Vec<u8>> {
     let (width, height, bytes) = proxy;
     let source = sidecar_engine::upload_rgba16(&kit.gpu, &sidecar_engine::RgbaF32::from_f16_bytes(width, height, &bytes));
-    let packed = sidecar_color::pack(&req.edit, color, req.color_space);
+    let packed = rendering.pack(&req.edit, req.color_space);
     let developed = kit.develop.render(&kit.gpu, &source, &packed.uniform, &packed.lut)?;
     let img = sidecar_engine::read_rgba16(&kit.gpu, &developed)?;
     export::jpeg_bytes(&img, 88, req.color_space)
@@ -430,11 +430,11 @@ async fn preview(State(w): State<Arc<Worker>>, Json(req): Json<PreviewRequest>) 
         Ok(p) => p,
         Err(e) => return internal(e),
     };
-    let color = match w.cached_meta(&req.key).await {
-        Ok(m) => m.info.color,
+    let rendering = match w.cached_meta(&req.key).await {
+        Ok(m) => export::Rendering::of(&m.info),
         Err(e) => return internal(e),
     };
-    match tokio::task::spawn_blocking(move || preview_jpeg(&kit, &color, &req, proxy)).await {
+    match tokio::task::spawn_blocking(move || preview_jpeg(&kit, &rendering, &req, proxy)).await {
         Ok(Ok(jpeg)) => ([("content-type", "image/jpeg"), ("cache-control", "no-store")], jpeg).into_response(),
         Ok(Err(e)) => internal(e),
         Err(e) => internal(e.into()),
@@ -459,23 +459,23 @@ fn loupe_png(w: &Worker, kit: &export::Kit, req: &LoupeRequest) -> Result<Vec<u8
         let mut sessions = w.sessions.lock().unwrap();
         sessions.iter().position(|s| s.key == req.key).map(|i| {
             let s = sessions.remove(i);
-            let out = (s.source.clone(), s.flip, s.sigma, s.color.clone());
+            let out = (s.source.clone(), s.flip, s.sigma, s.rendering.clone());
             sessions.insert(0, s);
             out
         })
     };
-    let (source, flip, sigma, color) = match session {
+    let (source, flip, sigma, rendering) = match session {
         Some(s) => s,
         None => {
-            let (tex, flip, color) = export::full_source_for(kit, &req.path)?;
+            let (tex, flip, rendering) = export::full_source_for(kit, &req.path)?;
             let sigma = kit.detail.noise_sigma(&kit.gpu, &tex)?;
             let tex = Arc::new(tex);
             let mut sessions = w.sessions.lock().unwrap();
             // Two loupe requests on a cold photo both decode it; keep one, or the pair fills every slot.
             sessions.retain(|s| s.key != req.key);
-            sessions.insert(0, Session { key: req.key.clone(), source: tex.clone(), flip, sigma, color: color.clone() });
+            sessions.insert(0, Session { key: req.key.clone(), source: tex.clone(), flip, sigma, rendering: rendering.clone() });
             sessions.truncate(SESSION_LIMIT);
-            (tex, flip, sigma, color)
+            (tex, flip, sigma, rendering)
         }
     };
     let (sw, sh) = (source.width(), source.height());
@@ -492,7 +492,7 @@ fn loupe_png(w: &Worker, kit: &export::Kit, req: &LoupeRequest) -> Result<Vec<u8
     let (cw, ch) = ((ux + uw + m).min(sw) - cx, (uy + uh + m).min(sh) - cy);
     let tile = kit.detail.crop(&kit.gpu, &source, cx, cy, cw, ch);
     let tile = kit.detail.apply(&kit.gpu, tile, sigma, &settings);
-    let packed = sidecar_color::pack(&req.edit, &color, req.color_space);
+    let packed = rendering.pack(&req.edit, req.color_space);
     let developed = kit.develop.render(&kit.gpu, &tile, &packed.uniform, &packed.lut)?;
     let img = sidecar_engine::read_rgba16(&kit.gpu, &developed)?;
     // Cut the margin, then orient.
@@ -687,6 +687,80 @@ async fn focus_handler(State(w): State<Arc<Worker>>, Path(key): Path<String>, Qu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Develop a display-linear Display P3 test card as a developed file, in Display P3.
+    fn develop_developed(edit: &sidecar_color::EditParams, card: &sidecar_engine::RgbaF32) -> Option<sidecar_engine::RgbaF32> {
+        let gpu = sidecar_engine::Gpu::new_headless().ok()?;
+        let pass = sidecar_engine::DevelopPass::new(&gpu).unwrap();
+        let rendering = export::Rendering { color: sidecar_raw::SourceSpace::DisplayP3.camera_color(), kind: sidecar_color::SourceKind::Developed };
+        let packed = rendering.pack(edit, sidecar_color::DisplaySpace::DisplayP3);
+        Some(pass.run(&gpu, card, &packed.uniform, &packed.lut).unwrap())
+    }
+
+    /// Greys from black to white, then saturated and muted colours, all inside the file's own gamut.
+    fn test_card() -> sidecar_engine::RgbaF32 {
+        let mut data = Vec::new();
+        for i in 0..64 {
+            let v = i as f32 / 63.0;
+            data.extend([v, v, v, 0.0]);
+        }
+        for p in [[1.0, 0.0, 0.0], [0.9, 0.1, 0.05], [0.2, 0.6, 0.9], [0.05, 0.05, 0.9], [0.5, 0.45, 0.4], [1.0, 1.0, 0.0], [0.02, 0.3, 0.02], [0.95, 0.6, 0.5]] {
+            data.extend([p[0], p[1], p[2], 0.0]);
+        }
+        sidecar_engine::RgbaF32 { width: 72, height: 1, data }
+    }
+
+    fn encode(v: f32) -> f32 {
+        export::srgb_encode(v)
+    }
+
+    /// A HEIC or JPEG at default settings is shown as the file holds it: no second tone curve, no gamut
+    /// compression. The RAW path rendered its white at 82 % and desaturated its reds.
+    #[test]
+    fn a_developed_file_is_shown_as_it_is_at_default_settings() {
+        let card = test_card();
+        let Some(out) = develop_developed(&sidecar_color::EditParams::default(), &card) else { return eprintln!("skipping: no GPU") };
+        for (i, (a, b)) in card.data.chunks(4).zip(out.data.chunks(4)).enumerate() {
+            for c in 0..3 {
+                let d = (encode(a[c]) - encode(b[c])).abs() * 255.0;
+                assert!(d < 0.6, "pixel {i} channel {c}: {} → {} ({d:.2}/255)", a[c], b[c]);
+            }
+        }
+    }
+
+    /// Each tone control does what it says on a developed file, and none of them breaks monotonicity.
+    #[test]
+    fn developed_tone_controls_behave() {
+        let card = test_card();
+        let grey = |img: &sidecar_engine::RgbaF32| -> Vec<f32> { img.data.chunks(4).take(64).map(|p| encode(p[1])).collect() };
+        let run = |f: &dyn Fn(&mut sidecar_color::EditParams)| {
+            let mut e = sidecar_color::EditParams::default();
+            f(&mut e);
+            develop_developed(&e, &card).map(|o| grey(&o))
+        };
+        let Some(base) = run(&|_| {}) else { return eprintln!("skipping: no GPU") };
+        let monotone = |g: &[f32]| g.windows(2).all(|w| w[1] >= w[0] - 1e-3);
+
+        let brighter = run(&|e| e.exposure.ev = 1.0).unwrap();
+        assert!(monotone(&brighter) && brighter[32] > base[32] + 0.1, "exposure +1 brightens mid grey");
+        assert!(brighter[63] <= 1.0 && brighter[62] < brighter[63], "and rolls off rather than clipping flat");
+
+        let whites = run(&|e| e.tone.white_ev = 2.5).unwrap();
+        assert!(monotone(&whites) && (whites[55] - 1.0).abs() < 2e-3, "Whites +100 takes the top fifth to white");
+        let dim = run(&|e| e.tone.white_ev = 6.5).unwrap();
+        assert!((dim[63] - 0.8).abs() < 2e-3, "Whites −100 dims white to 80 %");
+
+        let lifted = run(&|e| e.tone.black_ev = -11.0).unwrap();
+        assert!((lifted[0] - 0.1).abs() < 2e-3, "Blacks +100 lifts black to 10 %");
+        let crushed = run(&|e| e.tone.black_ev = -5.0).unwrap();
+        for (b, c) in base.iter().zip(&crushed) {
+            assert!(if *b <= 0.1 { *c < 1e-3 } else { *c > 0.0 }, "Blacks −100 crushes the bottom tenth, and only it: {b} → {c}");
+        }
+
+        let contrast = run(&|e| e.tone.contrast = 1.5).unwrap();
+        assert!(monotone(&contrast) && contrast[10] < base[10] && contrast[55] > base[55], "Contrast + is an S around grey");
+        assert!((contrast[0] - base[0]).abs() < 2e-3 && (contrast[63] - base[63]).abs() < 2e-3, "with its ends fixed");
+    }
 
     /// The waste this was written for: opening one photo fans out into four requests that all want the same
     /// decode, and two of them used to run it at once — every photo in this server's logs was decoded twice,

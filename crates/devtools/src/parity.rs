@@ -7,7 +7,7 @@ use palette::{IntoColor, Lab, LinSrgb, color_difference::Ciede2000};
 use serde::{Deserialize, Serialize};
 use sidecar_color::camera::{Calibration, CameraColor};
 use sidecar_color::params::{EditParams, MixerBand, WhiteBalanceMode};
-use sidecar_color::{DisplaySpace, pack};
+use sidecar_color::{DisplaySpace, SourceKind, pack};
 use sidecar_engine::{DevelopPass, Gpu, RgbaF32};
 use std::path::Path;
 
@@ -77,7 +77,7 @@ fn synthetic(camera: &CameraColor, width: u32, height: u32) -> RgbaF32 {
     RgbaF32 { width, height, data }
 }
 
-fn cases() -> Vec<(String, CameraColor, EditParams, DisplaySpace)> {
+fn cases() -> Vec<(String, CameraColor, SourceKind, EditParams, DisplaySpace)> {
     let mut graded = EditParams::default();
     graded.white_balance.mode = WhiteBalanceMode::Custom;
     graded.white_balance.temperature_k = 4300.0;
@@ -96,19 +96,31 @@ fn cases() -> Vec<(String, CameraColor, EditParams, DisplaySpace)> {
     dark.tone.black_ev = -8.0;
     dark.tone.white_ev = 4.0;
 
+    // A developed file (an iPhone HEIC's Display P3): the display-referred tone path, with every control moved.
+    let mut phone = EditParams::default();
+    phone.exposure.ev = 0.6;
+    phone.tone.contrast = 1.3;
+    phone.tone.white_ev = 3.5;
+    phone.tone.black_ev = -9.0;
+    phone.tone.curve = vec![[0.0, 0.0], [0.25, 0.22], [0.75, 0.8], [1.0, 1.0]];
+    phone.mixer.orange = MixerBand { hue: 0.0, saturation: 20.0, luminance: 5.0 };
+    let heic = || sidecar_raw::SourceSpace::DisplayP3.camera_color();
+
     vec![
-        ("as-shot-srgb".into(), nikon_d850(), EditParams::default(), DisplaySpace::Srgb),
-        ("graded-p3".into(), nikon_d850(), graded, DisplaySpace::DisplayP3),
-        ("xtrans-dark".into(), fujifilm_xt4(), dark, DisplaySpace::Srgb),
+        ("as-shot-srgb".into(), nikon_d850(), SourceKind::Raw, EditParams::default(), DisplaySpace::Srgb),
+        ("graded-p3".into(), nikon_d850(), SourceKind::Raw, graded, DisplaySpace::DisplayP3),
+        ("xtrans-dark".into(), fujifilm_xt4(), SourceKind::Raw, dark, DisplaySpace::Srgb),
+        ("heic-default".into(), heic(), SourceKind::Developed, EditParams::default(), DisplaySpace::DisplayP3),
+        ("heic-graded".into(), heic(), SourceKind::Developed, phone, DisplaySpace::Srgb),
     ]
 }
 
 pub fn fixtures(dir: &Path) -> Result<()> {
     std::fs::create_dir_all(dir)?;
     let mut index = Vec::new();
-    for (name, camera, edit, display) in cases() {
+    for (name, camera, source, edit, display) in cases() {
         let src = synthetic(&camera, 512, 256);
-        let packed = pack(&edit, &camera, display);
+        let packed = pack(&edit, &camera, source, display);
         std::fs::write(dir.join(format!("{name}.src.f16")), src.to_f16_bytes())?;
         std::fs::write(dir.join(format!("{name}.uniform.bin")), &packed.uniform)?;
         std::fs::write(dir.join(format!("{name}.lut.f32")), bytemuck::cast_slice(&packed.lut))?;

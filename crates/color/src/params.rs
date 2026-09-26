@@ -150,6 +150,22 @@ impl Default for Lens {
     }
 }
 
+/// What the source pixels are, which decides how the develop pass renders them.
+///
+/// A RAW is scene-referred: sensor light, which the base tone curve renders for display. A JPEG, HEIC, PNG
+/// or TIFF is display-referred: whatever wrote it already rendered it — tone curve, white clip, gamut — and
+/// none of that can be undone. Rendering it again as scene light tone-maps it twice (white at 82 %, the top
+/// fifth of the range pressed into a tenth), so a developed file gets controls that act on the picture it
+/// is: identity at default settings, and no step that promises recovery the file can't give.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum SourceKind {
+    /// Metadata cached before this field existed is RAW.
+    #[default]
+    Raw,
+    Developed,
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum DisplaySpace {
@@ -169,13 +185,25 @@ pub struct DevelopParams {
     pub work_to_disp: [[f32; 4]; 3],
     pub tone: [f32; 4],
     pub hl_strength: f32,
-    pub _pad0: f32,
+    /// 0 for a RAW, 1 for a developed file — see `SourceKind`.
+    pub display_referred: f32,
     pub _pad1: [f32; 2],
     pub mixer: [[f32; 4]; 8],
 }
 
 /// Contrast slider value → logistic steepness.
 pub const CONTRAST_SCALE: f64 = 7.0;
+
+/// A developed file's tone settings, from the same stored fields a RAW uses so the editor's sliders need no
+/// second meaning: Blacks and Whites as −1…1 (the slider over 100), Contrast as the S-curve's exponent, and
+/// the shoulder's knee, which only drops below white once exposure pushes the picture past it.
+fn display_tone(edit: &EditParams) -> [f32; 4] {
+    let t = &edit.tone;
+    let blacks = ((-8.0 - t.black_ev) / 3.0).clamp(-1.0, 1.0);
+    let whites = ((4.5 - t.white_ev) / 2.0).clamp(-1.0, 1.0);
+    let knee = if edit.exposure.ev > 0.0 { (1.0 - 0.3 * edit.exposure.ev).clamp(0.4, 1.0) } else { 1.0 };
+    [blacks as f32, whites as f32, t.contrast.max(0.1) as f32, knee as f32]
+}
 
 pub struct Packed {
     pub uniform: Vec<u8>,
@@ -189,15 +217,20 @@ fn to_mat3(m: &M3) -> [[f32; 4]; 3] {
     [0, 1, 2].map(|j| [m[0][j] as f32, m[1][j] as f32, m[2][j] as f32, 0.0])
 }
 
-pub fn pack(edit: &EditParams, camera: &CameraColor, display: DisplaySpace) -> Packed {
+pub fn pack(edit: &EditParams, camera: &CameraColor, source: SourceKind, display: DisplaySpace) -> Packed {
     let white_xy = match edit.white_balance.mode {
         WhiteBalanceMode::AsShot => camera.as_shot_xy(),
         WhiteBalanceMode::Custom => crate::cct::temp_tint_to_xy(edit.white_balance.temperature_k, edit.white_balance.tint),
     };
     let wb = camera::resolve(camera, white_xy);
     let t = &edit.tone;
-    let k = (t.contrast * CONTRAST_SCALE).max(0.5);
-    let pivot = tone::pivot_for(t.black_ev, t.white_ev, k);
+    let developed = source == SourceKind::Developed;
+    let tone = if developed {
+        display_tone(edit)
+    } else {
+        let k = (t.contrast * CONTRAST_SCALE).max(0.5);
+        [t.black_ev as f32, t.white_ev as f32, k as f32, tone::pivot_for(t.black_ev, t.white_ev, k) as f32]
+    };
     let bands = edit.mixer.bands();
     let params = DevelopParams {
         wb_mul: wb.mul.map(|v| v as f32),
@@ -207,9 +240,11 @@ pub fn pack(edit: &EditParams, camera: &CameraColor, display: DisplaySpace) -> P
             DisplaySpace::Srgb => &mat::REC2020_TO_SRGB,
             DisplaySpace::DisplayP3 => &mat::REC2020_TO_P3,
         }),
-        tone: [t.black_ev as f32, t.white_ev as f32, k as f32, pivot as f32],
-        hl_strength: edit.exposure.highlight_blend.clamp(0.0, 1.0) as f32,
-        _pad0: 0.0,
+        tone,
+        // Highlight blending neutralises what white balance does to sensor-clipped pixels; a developed file
+        // has no sensor clipping to speak of.
+        hl_strength: if developed { 0.0 } else { edit.exposure.highlight_blend.clamp(0.0, 1.0) as f32 },
+        display_referred: if developed { 1.0 } else { 0.0 },
         _pad1: [0.0; 2],
         mixer: bands.map(|b| {
             [
@@ -226,6 +261,24 @@ pub fn pack(edit: &EditParams, camera: &CameraColor, display: DisplaySpace) -> P
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Default settings on a developed file must be the identity: every tone value at its neutral, and the
+    /// RAW-only highlight blend off whatever the stored strength says.
+    #[test]
+    fn a_developed_file_packs_neutral_at_default() {
+        let p = pack(&EditParams::default(), &crate::camera::nikon_d850(), SourceKind::Developed, DisplaySpace::Srgb);
+        let params: &DevelopParams = bytemuck::from_bytes(&p.uniform);
+        assert_eq!(params.tone, [0.0, 0.0, 1.0, 1.0]);
+        assert_eq!((params.hl_strength, params.display_referred), (0.0, 1.0));
+
+        let mut edit = EditParams::default();
+        edit.tone.white_ev = 2.5;
+        edit.tone.black_ev = -5.0;
+        edit.exposure.ev = 1.0;
+        let p = pack(&edit, &crate::camera::nikon_d850(), SourceKind::Developed, DisplaySpace::Srgb);
+        let params: &DevelopParams = bytemuck::from_bytes(&p.uniform);
+        assert_eq!(params.tone, [-1.0, 1.0, 1.0, 0.7], "Blacks −100, Whites +100, shoulder at 0.7 for +1 EV");
+    }
 
     #[test]
     fn uniform_layout_matches_wgsl() {
@@ -244,13 +297,14 @@ mod tests {
             ("work_to_disp", std::mem::offset_of!(DevelopParams, work_to_disp)),
             ("tone", std::mem::offset_of!(DevelopParams, tone)),
             ("hl_strength", std::mem::offset_of!(DevelopParams, hl_strength)),
+            ("display_referred", std::mem::offset_of!(DevelopParams, display_referred)),
             ("mixer", std::mem::offset_of!(DevelopParams, mixer)),
         ];
         for (name, off) in rust {
             let m = members.iter().find(|m| m.name.as_deref() == Some(name)).unwrap();
             assert_eq!(m.offset as usize, off, "{name}");
         }
-        let p = pack(&EditParams::default(), &crate::camera::nikon_d850(), DisplaySpace::Srgb);
+        let p = pack(&EditParams::default(), &crate::camera::nikon_d850(), SourceKind::Raw, DisplaySpace::Srgb);
         assert_eq!(p.uniform.len(), 272);
         assert_eq!(p.lut.len(), LUT_SIZE);
         // exposure sits at byte 12

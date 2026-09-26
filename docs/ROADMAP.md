@@ -65,6 +65,23 @@ histogram alongside the JPEG and drawing the overlays into it.
   Safari yet) and an HDR container: 10-bit AVIF with PQ or HLG (rav1e is BSD-2, so licence-compatible), or an
   ISO 21496-1 gain map as Apple writes. Settle the encoder question before the UI.
 
+**HDR originals keep their gain map.** An iPhone HEIC is an SDR picture plus a gain map — a small auxiliary
+image telling an HDR screen how far past SDR white to lift each area — and Photos shows it HDR. Sidecar reads
+only the SDR picture (ImageMagick and `heif-convert` decode the primary image and drop the auxiliary one) and
+exports SDR, so an edit looks flat beside its original. In order:
+
+1. *Read the gain map* at decode, with its metadata (headroom, min/max boost, gamma). `heif-convert` can write
+   auxiliary images out; check which it names the gain map, and whether Apple's pre-21496 maps (HEIC
+   `urn:com:apple:photo:2020:aux:hdrgainmap`) need their own handling. Cache it beside the proxy.
+2. *Carry it through the edit.* Edit the SDR picture as now and reapply the original map to the result, as
+   the gain-map standard intends; exposure changes the base, so the map's headroom may need scaling with it.
+   Geometry (crop, straighten, orientation) must transform the map exactly as it does the picture.
+3. *Export with it*: an Ultra HDR JPEG (ISO 21496-1 with the Adobe/Google XMP fallback) is what iOS and
+   Android both display as HDR. Google's `libultrahdr` is Apache-2.0 — check it through `cargo deny`
+   (or its C build) and add it to NOTICE before depending on it. HEIC output stays off the table (HEVC).
+4. *Show it in the editor* — last, and least certain: it needs an HDR-capable WebGPU canvas in Safari. Until
+   then the editor stays SDR and says the export will be HDR.
+
 **Editing non-RAW images — done, in `sidecar_raw::decoded`.** JPEG, PNG and TIFF decode in-process; HEIC runs
 an external decoder. They skip the RAW-only ingest stages (hot pixels, demosaic, highlight reconstruction all
 assume a mosaic) and join the pipeline where the RAW path does — linear light, own primaries — so
@@ -73,9 +90,15 @@ special case: `SourceSpace::camera_color` hands the pipeline a `CameraColor` who
 or Display P3 with unity as-shot multipliers, so `camera::resolve` returns unity multipliers and the right
 primaries matrix, and temperature and tint become relative shifts around D65.
 
+The tone curve needs its own path, though. The develop pass renders scene-referred light, and a JPEG or
+HEIC is already rendered for display; fed through the RAW curve it was tone-mapped twice — white at 82 %, the
+top fifth of the range pressed into a tenth. Developed files now take a display-referred path (DESIGN.md §7,
+"Developed files"): identity at default settings, controls that act on the picture as it is, and none of the
+RAW stages that promise recovery the file can't give (highlight blend, gamut compression, the soft clip).
+
 What's left, if it's ever wanted: Adobe RGB is treated as sRGB (its primaries would be a third matrix);
-`RawInfo.source_kind` currently only hides highlight recovery in the editor, and the white-balance slider
-still reads in kelvin rather than as an explicit relative shift.
+the white-balance slider still reads in kelvin (a D65 file shows about 6,500 K, +10 tint) rather than as an
+explicit relative shift from zero.
 
 The leeway varies a lot by format, and that shapes what the editor should offer. *TIFF* is the easy case when
 it's what it usually is (uncompressed or losslessly compressed, sometimes 16-bit): no artifact concerns, the

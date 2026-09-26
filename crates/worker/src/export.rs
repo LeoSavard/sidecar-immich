@@ -5,7 +5,8 @@
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use sidecar_color::{DisplaySpace, EditParams, pack};
+use sidecar_color::camera::CameraColor;
+use sidecar_color::{DisplaySpace, EditParams, Packed, SourceKind};
 use sidecar_engine::{MosaicInput, RgbaF32};
 use sidecar_raw::RawFile;
 use std::path::{Path, PathBuf};
@@ -74,20 +75,39 @@ pub fn detail_settings(edit: &EditParams) -> sidecar_engine::detail::DetailSetti
     }
 }
 
-/// Full-resolution linear RGB on the GPU, the orientation still to apply, and the colour model to develop it
-/// with. RAW comes from LibRaw and the demosaic; a JPEG, HEIC or TIFF was developed by whatever wrote it, so
-/// it is decoded straight to linear light and carries a colour model standing for its own primaries.
-pub fn full_source_for(kit: &Kit, path: &Path) -> Result<(wgpu::Texture, i32, sidecar_color::camera::CameraColor)> {
+/// How a photo's pixels are developed: the colour model, and whether they are sensor light or a picture
+/// something else already rendered (`SourceKind`, which picks the develop pass's tone path).
+#[derive(Clone, Debug)]
+pub struct Rendering {
+    pub color: CameraColor,
+    pub kind: SourceKind,
+}
+
+impl Rendering {
+    pub fn of(info: &sidecar_raw::RawInfo) -> Self {
+        Self { color: info.color.clone(), kind: info.source_kind }
+    }
+
+    pub fn pack(&self, edit: &EditParams, display: DisplaySpace) -> Packed {
+        sidecar_color::pack(edit, &self.color, self.kind, display)
+    }
+}
+
+/// Full-resolution linear RGB on the GPU, the orientation still to apply, and how to develop it. RAW comes
+/// from LibRaw and the demosaic; a JPEG, HEIC or TIFF was developed by whatever wrote it, so it is decoded
+/// straight to display-linear light, with a colour model standing for its own primaries.
+pub fn full_source_for(kit: &Kit, path: &Path) -> Result<(wgpu::Texture, i32, Rendering)> {
     if sidecar_raw::decoded::is_supported(path) {
         let exif = sidecar_raw::decoded::exif(path);
         let decoded = sidecar_raw::decoded::decode(path, exif.orientation_flip, exif.space)?;
         let img = RgbaF32 { width: decoded.width, height: decoded.height, data: decoded.rgba };
-        return Ok((sidecar_engine::upload_rgba16(&kit.gpu, &img), decoded.pending_flip, decoded.space.camera_color()));
+        let rendering = Rendering { color: decoded.space.camera_color(), kind: SourceKind::Developed };
+        return Ok((sidecar_engine::upload_rgba16(&kit.gpu, &img), decoded.pending_flip, rendering));
     }
     let mut raw = RawFile::open(path)?;
-    let color = raw.info().color;
+    let rendering = Rendering::of(&raw.info());
     let (texture, flip) = full_source(kit, &mut raw)?;
-    Ok((texture, flip, color))
+    Ok((texture, flip, rendering))
 }
 
 /// Full-resolution camera-native linear RGB on the GPU, and the orientation still to apply.
@@ -204,7 +224,7 @@ fn copy_metadata(raw: &Path, out: &Path, width: u32, height: u32) -> Result<()> 
 pub fn render(kit: &Kit, req: &RenderRequest, outbox: &Path, tx: &Sender<Progress>) -> Result<Progress> {
     stage(tx, "decode", 0.02);
     stage(tx, "demosaic", 0.15);
-    let (mut source, flip, color) = full_source_for(kit, &req.path)?;
+    let (mut source, flip, rendering) = full_source_for(kit, &req.path)?;
 
     let settings = detail_settings(&req.edit);
     if !settings.is_noop() {
@@ -214,7 +234,7 @@ pub fn render(kit: &Kit, req: &RenderRequest, outbox: &Path, tx: &Sender<Progres
     }
 
     stage(tx, "develop", 0.45);
-    let packed = pack(&req.edit, &color, req.color_space);
+    let packed = rendering.pack(&req.edit, req.color_space);
     let developed = kit.develop.render(&kit.gpu, &source, &packed.uniform, &packed.lut)?;
     drop(source);
     let mut img = sidecar_engine::read_rgba16(&kit.gpu, &developed)?;
