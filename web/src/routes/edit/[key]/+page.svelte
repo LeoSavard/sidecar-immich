@@ -119,17 +119,21 @@
 		markerPos = imageToScreen(meta.info.afPoint);
 	}
 
+	/** Where the photo sits on the canvas, in canvas pixels, at the current zoom and pan; `fit` is its scale at zoom 1. */
+	function imageRect() {
+		const out = develop.output!;
+		const fit = Math.min(canvas.width / out.width, canvas.height / out.height);
+		const w = out.width * fit * viewport.zoom;
+		const h = out.height * fit * viewport.zoom;
+		return { x: (canvas.width - w) / 2 + viewport.panX, y: (canvas.height - h) / 2 + viewport.panY, w, h, fit };
+	}
+
 	/** Normalized (oriented) image coordinates → CSS pixels over the canvas, or null off-screen/absent. */
 	function imageToScreen(point: { x: number; y: number } | null | undefined): { x: number; y: number } | null {
 		if (!point || !develop?.output) return null;
-		const out = develop.output;
-		const fit = Math.min(canvas.width / out.width, canvas.height / out.height);
-		const dw = out.width * fit * viewport.zoom;
-		const dh = out.height * fit * viewport.zoom;
-		const ox = (canvas.width - dw) / 2 + viewport.panX;
-		const oy = (canvas.height - dh) / 2 + viewport.panY;
-		const px = ox + point.x * dw;
-		const py = oy + point.y * dh;
+		const r = imageRect();
+		const px = r.x + point.x * r.w;
+		const py = r.y + point.y * r.h;
 		if (px < 0 || py < 0 || px > canvas.width || py > canvas.height) return null;
 		return { x: px / devicePixelRatio, y: py / devicePixelRatio };
 	}
@@ -392,16 +396,12 @@
 		const still = Math.hypot(px(e).x - downAt.x, px(e).y - downAt.y) < 8 * devicePixelRatio && now - downAt.t < 300;
 		if (still && pointers.size === 0) {
 			if (fallback || !develop?.output) return;
-			const out = develop.output;
-			const fit = Math.min(canvas.width / out.width, canvas.height / out.height);
-			const dw = out.width * fit * viewport.zoom;
-			const dh = out.height * fit * viewport.zoom;
-			const u = (px(e).x - ((canvas.width - dw) / 2 + viewport.panX)) / dw;
-			const v = (px(e).y - ((canvas.height - dh) / 2 + viewport.panY)) / dh;
+			const r = imageRect();
+			const u = (px(e).x - r.x) / r.w;
+			const v = (px(e).y - r.y) / r.h;
 			if (u >= 0 && u <= 1 && v >= 0 && v <= 1 && (section === 'detail' || detailOpen)) loupeCenter = [u, v];
 			if (now - lastTapAt < 320) {
-				const fit = Math.min(canvas.width / develop.output!.width, canvas.height / develop.output!.height);
-				zoomAt(px(e), viewport.zoom > 1.01 ? 1 : Math.max(2, 1 / fit));
+				zoomAt(px(e), viewport.zoom > 1.01 ? 1 : Math.max(2, 1 / r.fit));
 				lastTapAt = 0;
 			} else lastTapAt = now;
 		}

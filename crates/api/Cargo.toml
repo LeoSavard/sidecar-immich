@@ -11,7 +11,6 @@ base64.workspace = true
 chacha20poly1305.workspace = true
 getrandom.workspace = true
 hex.workspace = true
-sha1.workspace = true
 sidecar-color.workspace = true
 sidecar-template.workspace = true
 sidecar-xmp.workspace = true

@@ -118,7 +118,7 @@ pub struct Candidate {
 }
 
 /// `DSC_1234.NEF` → `DSC_1234`; `DSC_1234+1.NEF` → `DSC_1234` (Immich's collision suffix).
-fn stem_of(name: &str) -> &str {
+pub fn stem_of(name: &str) -> &str {
     let stem = name.rsplit_once('.').map_or(name, |(s, _)| s);
     match stem.rsplit_once('+') {
         Some((base, n)) if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => base,

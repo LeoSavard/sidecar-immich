@@ -180,9 +180,13 @@ pub fn etag_of(edit: &EditParams) -> String {
     hex::encode(sha2::Sha256::digest(serde_json::to_vec(edit).expect("edit params serialize")))
 }
 
-/// RFC 3339 UTC timestamp without external crates (days-from-civil, H. Hinnant).
+/// Now, as an RFC 3339 UTC timestamp.
 pub fn utc_now() -> String {
-    let secs = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    rfc3339(SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0))
+}
+
+/// Unix seconds as an RFC 3339 UTC timestamp, without external crates (days-from-civil, H. Hinnant).
+pub fn rfc3339(secs: i64) -> String {
     let (days, rem) = (secs.div_euclid(86400), secs.rem_euclid(86400));
     let z = days + 719468;
     let era = z.div_euclid(146097);
@@ -194,6 +198,23 @@ pub fn utc_now() -> String {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = yoe + era * 400 + (m <= 2) as i64;
     format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", rem / 3600, rem / 60 % 60, rem % 60)
+}
+
+/// The SHA-1 of a file's bytes: the asset key, and the `SourceSha1` a sidecar records. Blocking.
+pub fn sha1_file(path: &Path) -> Result<String> {
+    use sha1::Digest;
+    use std::io::Read;
+    let mut f = std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    let mut h = sha1::Sha1::new();
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let n = f.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        h.update(&buf[..n]);
+    }
+    Ok(hex::encode(h.finalize()))
 }
 
 fn stamp(path: &Path) -> Option<(u64, SystemTime)> {

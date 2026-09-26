@@ -20,6 +20,13 @@ fn fixture(dir: &Path, name: &str) -> PathBuf {
 }
 
 #[test]
+fn unix_seconds_format_as_rfc3339() {
+    assert_eq!(rfc3339(0), "1970-01-01T00:00:00Z");
+    assert_eq!(rfc3339(951868800), "2000-03-01T00:00:00Z");
+    assert_eq!(rfc3339(1785349800), "2026-07-29T18:30:00Z");
+}
+
+#[test]
 fn creates_reads_back_and_keeps_etag() {
     let tmp = tempfile::tempdir().unwrap();
     let roots = [tmp.path().canonicalize().unwrap()];

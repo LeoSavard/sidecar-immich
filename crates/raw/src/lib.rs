@@ -53,6 +53,10 @@ pub struct RawInfo {
     /// Defaults to `Raw` so metadata cached before this field existed still reads correctly.
     #[serde(default)]
     pub source_kind: SourceKind,
+    /// The primaries a developed file's pixels are in, so decoding it again needs no second EXIF read.
+    /// `None` for RAW, and in metadata cached before this field existed.
+    #[serde(default)]
+    pub source_space: Option<SourceSpace>,
 }
 
 /// Whether the pixels came off a sensor mosaic or out of a file something else already developed. The
@@ -164,12 +168,26 @@ pub struct RawFile {
 unsafe impl Send for RawFile {}
 
 impl RawFile {
+    /// Open and unpack the sensor data, ready for `mosaic` or `develop_linear`.
     pub fn open(path: &Path) -> Result<Self, RawError> {
+        Self::open_with(path, true)
+    }
+
+    /// What `open(path)?.info()` returns, without unpacking the sensor data: LibRaw has parsed everything
+    /// `info` reads by the end of `open_file`, and unpacking is the part of an open that costs — the whole
+    /// file read and decompressed, for a metadata request.
+    pub fn metadata(path: &Path) -> Result<RawInfo, RawError> {
+        Ok(Self::open_with(path, false)?.info())
+    }
+
+    fn open_with(path: &Path, unpack: bool) -> Result<Self, RawError> {
         let c = CString::new(path.as_os_str().as_encoded_bytes()).map_err(|_| RawError("path contains NUL".into()))?;
         let ptr = unsafe { sys::sc_new() };
         let mut raw = RawFile { ptr, info: unsafe { std::mem::zeroed() } };
         check(unsafe { sys::sc_open(ptr, c.as_ptr()) })?;
-        check(unsafe { sys::sc_unpack(ptr) })?;
+        if unpack {
+            check(unsafe { sys::sc_unpack(ptr) })?;
+        }
         unsafe { sys::sc_get_info(ptr, &mut raw.info) };
         Ok(raw)
     }
@@ -198,6 +216,7 @@ impl RawFile {
             color: camera_color(i),
             af_point: None,
             source_kind: SourceKind::Raw,
+            source_space: None,
         }
     }
 
@@ -227,5 +246,28 @@ impl RawFile {
 impl Drop for RawFile {
     fn drop(&mut self) {
         unsafe { sys::sc_free(self.ptr) }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `metadata` skips the unpack; it has to agree with an unpacked open on every field, for every maker in
+    /// the test set. Files are copies under testdata/cache; the test passes vacuously without them.
+    #[test]
+    fn metadata_without_unpacking_matches_a_full_open() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/cache");
+        let Ok(entries) = std::fs::read_dir(&dir) else { return };
+        let mut checked = 0;
+        for path in entries.flatten().map(|e| e.path()).filter(|p| sidecar_template::is_raw(p)) {
+            // Something LibRaw can't open at all is not what this compares.
+            let Ok(full) = RawFile::open(&path) else { continue };
+            let full = serde_json::to_value(full.info()).unwrap();
+            let quick = serde_json::to_value(RawFile::metadata(&path).unwrap()).unwrap();
+            assert_eq!(full, quick, "{}", path.display());
+            checked += 1;
+        }
+        eprintln!("compared {checked} RAW files");
     }
 }

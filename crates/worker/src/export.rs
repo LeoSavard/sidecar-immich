@@ -9,7 +9,7 @@ use sidecar_color::{DisplaySpace, EditParams, pack};
 use sidecar_engine::{MosaicInput, RgbaF32};
 use sidecar_raw::RawFile;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::Sender;
+use tokio::sync::mpsc::UnboundedSender as Sender;
 
 const SRGB_ICC: &[u8] = include_bytes!("../../../assets/icc/sRGB-v4.icc");
 const P3_ICC: &[u8] = include_bytes!("../../../assets/icc/DisplayP3-v4.icc");
@@ -80,7 +80,7 @@ pub fn detail_settings(edit: &EditParams) -> sidecar_engine::detail::DetailSetti
 pub fn full_source_for(kit: &Kit, path: &Path) -> Result<(wgpu::Texture, i32, sidecar_color::camera::CameraColor)> {
     if sidecar_raw::decoded::is_supported(path) {
         let exif = sidecar_raw::decoded::exif(path);
-        let decoded = sidecar_raw::decoded::decode(path, &exif)?;
+        let decoded = sidecar_raw::decoded::decode(path, exif.orientation_flip, exif.space)?;
         let img = RgbaF32 { width: decoded.width, height: decoded.height, data: decoded.rgba };
         return Ok((sidecar_engine::upload_rgba16(&kit.gpu, &img), decoded.pending_flip, decoded.space.camera_color()));
     }
@@ -131,7 +131,7 @@ fn tri_noise(i: u64) -> f32 {
     a - b
 }
 
-fn srgb_encode(v: f32) -> f32 {
+pub fn srgb_encode(v: f32) -> f32 {
     let v = v.clamp(0.0, 1.0);
     if v <= 0.0031308 { 12.92 * v } else { 1.055 * v.powf(1.0 / 2.4) - 0.055 }
 }
@@ -155,11 +155,11 @@ fn to_rgb8(img: &RgbaF32) -> Vec<u8> {
     rgb
 }
 
-/// A JPEG in memory, encoded exactly as an export would be. Used by the server-rendered preview that stands
-/// in for the browser's develop pass where there is no WebGPU.
+/// A JPEG in memory: the export's encoder, and the server-rendered preview that stands in for the browser's
+/// develop pass where there is no WebGPU.
 pub fn jpeg_bytes(img: &RgbaF32, quality: u8, space: DisplaySpace) -> Result<Vec<u8>> {
     if img.width > u16::MAX as u32 || img.height > u16::MAX as u32 {
-        bail!("JPEG is limited to 65,535 pixels per side");
+        bail!("JPEG is limited to 65,535 pixels per side; export a TIFF or set a long edge");
     }
     let mut out = Vec::new();
     let mut enc = jpeg_encoder::Encoder::new(&mut out, quality.clamp(1, 100));
@@ -170,23 +170,14 @@ pub fn jpeg_bytes(img: &RgbaF32, quality: u8, space: DisplaySpace) -> Result<Vec
 }
 
 fn encode(img: &RgbaF32, req: &RenderRequest, out: &Path) -> Result<()> {
-    let icc = icc_for(req.color_space);
     match req.format {
-        Format::Jpeg => {
-            if img.width > u16::MAX as u32 || img.height > u16::MAX as u32 {
-                bail!("JPEG is limited to 65,535 pixels per side; export a TIFF or set a long edge");
-            }
-            let mut enc = jpeg_encoder::Encoder::new_file(out, req.quality.clamp(1, 100))?;
-            enc.set_sampling_factor(jpeg_encoder::SamplingFactor::R_4_4_4);
-            enc.add_icc_profile(icc)?;
-            enc.encode(&to_rgb8(img), img.width as u16, img.height as u16, jpeg_encoder::ColorType::Rgb)?;
-        }
+        Format::Jpeg => std::fs::write(out, jpeg_bytes(img, req.quality, req.color_space)?)?,
         Format::Tiff => {
             use tiff::encoder::{TiffEncoder, colortype};
             let data: Vec<u16> = img.data.as_chunks::<4>().0.iter().flat_map(|p| [0, 1, 2].map(|c| (srgb_encode(p[c]) * 65535.0 + 0.5) as u16)).collect();
             let mut t = TiffEncoder::new(std::io::BufWriter::new(std::fs::File::create(out)?))?;
             let mut image = t.new_image::<colortype::RGB16>(img.width, img.height)?;
-            image.encoder().write_tag(tiff::tags::Tag::IccProfile, icc)?;
+            image.encoder().write_tag(tiff::tags::Tag::IccProfile, icc_for(req.color_space))?;
             image.write_data(&data)?;
         }
     }
@@ -245,7 +236,7 @@ pub fn render(kit: &Kit, req: &RenderRequest, outbox: &Path, tx: &Sender<Progres
     copy_metadata(&req.path, &tmp, img.width, img.height)?;
     sidecar_xmp::embed_in_image(&tmp, &req.sidecar)?;
     std::fs::rename(&tmp, &out)?;
-    let sha1 = crate::sha1_file(&out)?;
+    let sha1 = sidecar_xmp::sha1_file(&out)?;
     let bytes = std::fs::metadata(&out)?.len();
     Ok(Progress::Done { file: req.file_name.clone(), sha1, bytes, width: img.width, height: img.height })
 }

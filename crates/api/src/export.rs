@@ -234,7 +234,7 @@ async fn run(app: &Arc<App>, job: &Job, user: &crate::session::User, rec: &Asset
         job.push("progress", json!({ "stage": "upload", "overall": 0.88 }));
         let file = app.http.get(app.worker(&format!("/v1/outbox/{}/{}", job.id, file_name))).send().await?.error_for_status()?.bytes().await?;
         let meta: Value = app.http.get(app.worker(&format!("/v1/assets/{}/meta", req.asset_key))).send().await?.json().await?;
-        let captured = meta["info"]["capturedUnix"].as_i64().filter(|&t| t > 0).map(unix_to_rfc3339).unwrap_or_else(sidecar_xmp::utc_now);
+        let captured = meta["info"]["capturedUnix"].as_i64().filter(|&t| t > 0).map(sidecar_xmp::rfc3339).unwrap_or_else(sidecar_xmp::utc_now);
         let id = app.immich.upload(&user.api_key, file_name, file.to_vec(), &captured).await?;
         job.push("progress", json!({ "stage": "stack", "overall": 0.95 }));
         let raw_id = match &rec.immich_asset_id {
@@ -280,21 +280,6 @@ async fn run(app: &Arc<App>, job: &Job, user: &crate::session::User, rec: &Asset
     }
     job.push("done", json!({ "version": version, "file": file_name, "bytes": done["bytes"], "width": done["width"], "height": done["height"], "immichAssetId": immich_id, "download": download }));
     Ok(())
-}
-
-fn unix_to_rfc3339(t: i64) -> String {
-    let days = t.div_euclid(86400);
-    let rem = t.rem_euclid(86400);
-    let z = days + 719468;
-    let era = z.div_euclid(146097);
-    let doe = z - era * 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = yoe + era * 400 + (m <= 2) as i64;
-    format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}.000Z", rem / 3600, rem / 60 % 60, rem % 60)
 }
 
 fn job_for(app: &App, user: &crate::session::User, id: &str) -> Option<Arc<Job>> {

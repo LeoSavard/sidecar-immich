@@ -10,6 +10,7 @@ pub mod export;
 use anyhow::{Context, Result};
 use axum::{
     Json, Router,
+    body::Bytes,
     extract::{Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
@@ -19,7 +20,6 @@ use serde::{Deserialize, Serialize};
 use sidecar_color::params::PROCESS_VERSION;
 use sidecar_raw::{RawFile, RawInfo, proxy};
 use std::collections::HashMap;
-use std::io::Read;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -63,6 +63,10 @@ pub struct IngestRequest {
 pub struct Worker {
     cache: PathBuf,
     paths: Mutex<HashMap<String, PathBuf>>,
+    /// Asset key of each path already hashed, with the size and mtime it had then. The api re-ingests on every
+    /// `meta` request and after a worker restart; hashing the whole original each time was most of what an
+    /// open cost after the first.
+    hashed: Mutex<HashMap<PathBuf, (u64, std::time::SystemTime, String)>>,
     decode_slots: Semaphore,
     /// One decode at a time per asset — see `decode_guard`.
     decoding: Mutex<HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>>,
@@ -73,21 +77,6 @@ pub struct Worker {
     export_slot: Semaphore,
     /// Full-resolution linear buffers of recently opened photos, for loupe tiles (most recent first).
     sessions: Mutex<Vec<Session>>,
-}
-
-pub fn sha1_file(path: &std::path::Path) -> Result<String> {
-    use sha1::Digest;
-    let mut f = std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
-    let mut h = sha1::Sha1::new();
-    let mut buf = vec![0u8; 1 << 20];
-    loop {
-        let n = f.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        h.update(&buf[..n]);
-    }
-    Ok(hex::encode(h.finalize()))
 }
 
 /// The marker every cached proxy and focus mask carries in its name. Both numbers are in it because they
@@ -153,6 +142,7 @@ impl Worker {
         Ok(Arc::new(Self {
             cache,
             paths: Mutex::new(HashMap::new()),
+            hashed: Mutex::new(HashMap::new()),
             decode_slots: Semaphore::new(2),
             decoding: Mutex::new(HashMap::new()),
             gpu,
@@ -176,9 +166,18 @@ impl Worker {
     }
 
     pub async fn ingest(self: &Arc<Self>, path: PathBuf) -> Result<Meta> {
-        let key = {
-            let p = path.clone();
-            tokio::task::spawn_blocking(move || sha1_file(&p)).await??
+        let stamp = tokio::fs::metadata(&path).await.ok().and_then(|m| Some((m.len(), m.modified().ok()?)));
+        let known = stamp.and_then(|s| self.hashed.lock().unwrap().get(&path).filter(|(len, at, _)| (*len, *at) == s).map(|(_, _, key)| key.clone()));
+        let key = match known {
+            Some(key) => key,
+            None => {
+                let p = path.clone();
+                let key = tokio::task::spawn_blocking(move || sidecar_xmp::sha1_file(&p)).await??;
+                if let Some((len, at)) = stamp {
+                    self.hashed.lock().unwrap().insert(path.clone(), (len, at, key.clone()));
+                }
+                key
+            }
         };
         self.paths.lock().unwrap().insert(key.clone(), path.clone());
         let meta_path = self.meta_path(&key);
@@ -193,10 +192,9 @@ impl Worker {
         let meta = tokio::task::spawn_blocking(move || -> Result<Meta> {
             let info = if sidecar_raw::decoded::is_supported(&p) {
                 // Non-RAW: EXIF alone, without decoding the pixels — see `decoded::info`.
-                sidecar_raw::decoded::info(&p, &sidecar_raw::decoded::exif(&p))
+                sidecar_raw::decoded::info(&sidecar_raw::decoded::exif(&p))
             } else {
-                let raw = RawFile::open(&p)?;
-                let mut info = raw.info();
+                let mut info = RawFile::metadata(&p)?;
                 info.af_point = sidecar_raw::af::af_point(&p, info.orientation_flip);
                 info
             };
@@ -243,25 +241,29 @@ impl Worker {
         lock.lock_owned().await
     }
 
+    /// The proxy at `edge`, if it and its focus mask are both cached. Both must exist: a proxy built before
+    /// focus masks existed (or raced ahead of a concurrent focus request for the same edge) must not
+    /// short-circuit past building the mask.
+    async fn cached_proxy(&self, key: &str, edge: u32) -> Option<(u32, u32, Bytes)> {
+        let found = read_proxy(&self.proxy_path(key, edge)).await?;
+        tokio::fs::try_exists(self.focus_path(key, edge)).await.unwrap_or(false).then_some(found)
+    }
+
     /// Build (or reuse) the proxy at `edge`, building the preview size from the same decode.
-    pub async fn proxy(self: &Arc<Self>, key: &str, edge: u32) -> Result<(u32, u32, Vec<u8>)> {
-        let target = self.proxy_path(key, edge);
-        let focus_target = self.focus_path(key, edge);
-        // Both must exist: a proxy built before the focus mask existed (or raced ahead of a concurrent
-        // /v1/assets/{key}/focus call for the same edge) must not short-circuit past building it.
-        if let (Some(found), true) = (read_proxy(&target).await, tokio::fs::try_exists(&focus_target).await.unwrap_or(false)) {
+    pub async fn proxy(self: &Arc<Self>, key: &str, edge: u32) -> Result<(u32, u32, Bytes)> {
+        if let Some(found) = self.cached_proxy(key, edge).await {
             return Ok(found);
         }
         // Before the global slot, so waiting for this photo's turn never occupies one of the two decoders.
         let _decoding = self.decode_guard(key).await;
-        if let (Some(found), true) = (read_proxy(&target).await, tokio::fs::try_exists(&focus_target).await.unwrap_or(false)) {
+        if let Some(found) = self.cached_proxy(key, edge).await {
             return Ok(found);
         }
         let _slot = self.decode_slots.acquire().await?;
-        if let (Some(found), true) = (read_proxy(&target).await, tokio::fs::try_exists(&focus_target).await.unwrap_or(false)) {
-            return Ok(found);
-        }
         let path = self.paths.lock().unwrap().get(key).cloned().context("unknown asset; ingest it first")?;
+        // Orientation and colour space for a developed file, as ingest already read them — rather than
+        // running ExifTool again for every proxy.
+        let info = self.cached_meta(key).await.ok().map(|m| m.info);
         // `edge` is the preview size when the client asks for the first paint: build it once, not twice.
         let mut wanted = vec![edge];
         if edge != PREVIEW_EDGE {
@@ -272,7 +274,7 @@ impl Worker {
         tokio::task::spawn_blocking(move || -> Result<()> {
             let started = std::time::Instant::now();
             let largest = edges.iter().map(|(e, _, _)| *e).max().unwrap_or(edge);
-            let full = decode_full(&path, gpu.as_deref(), largest)?;
+            let full = decode_full(&path, info.as_ref(), gpu.as_deref(), largest)?;
             // Full-resolution, on the demosaiced image, before any develop setting applies (§ ingest, not §
             // develop) — so it caches like the proxy and never has to be recomputed when a slider moves.
             let focus = sidecar_engine::focus_energy(&full);
@@ -293,7 +295,7 @@ impl Worker {
             Ok(())
         })
         .await??;
-        read_proxy(&target).await.context("proxy was not written")
+        read_proxy(&self.proxy_path(key, edge)).await.context("proxy was not written")
     }
 
     async fn cached_meta(&self, key: &str) -> Result<Meta> {
@@ -312,7 +314,8 @@ impl Worker {
     }
 }
 
-/// Full-resolution linear RGBA, orientation applied, from whichever decoder this file's format needs.
+/// Full-resolution linear RGBA, orientation applied, from whichever decoder this file's format needs. `info`
+/// is the photo's cached metadata, when there is some.
 ///
 /// RAW goes through LibRaw and the GPU ingest pass (normalize, hot pixels, demosaic, highlight
 /// reconstruction). A JPEG, HEIC or TIFF has had all of that done to it already by whatever wrote it, so it
@@ -321,10 +324,16 @@ impl Worker {
 /// 48-megapixel HEIC would pay full-resolution cost in `focus_energy` and the downsample loop for a proxy
 /// that only ever needs at most 2,560 pixels on the long edge — measured at several seconds on this server's
 /// CPU for a single 12-megapixel photo, against a sub-second HEIC decode itself.
-fn decode_full(path: &std::path::Path, gpu: Option<&export::Kit>, largest: u32) -> Result<sidecar_engine::RgbaF32> {
+fn decode_full(path: &std::path::Path, info: Option<&RawInfo>, gpu: Option<&export::Kit>, largest: u32) -> Result<sidecar_engine::RgbaF32> {
     if sidecar_raw::decoded::is_supported(path) {
-        let exif = sidecar_raw::decoded::exif(path);
-        let d = sidecar_raw::decoded::decode(path, &exif)?;
+        let (flip, space) = match info.and_then(|i| Some((i.orientation_flip, i.source_space?))) {
+            Some(known) => known,
+            None => {
+                let exif = sidecar_raw::decoded::exif(path);
+                (exif.orientation_flip, exif.space)
+            }
+        };
+        let d = sidecar_raw::decoded::decode(path, flip, space)?;
         let full = sidecar_engine::RgbaF32 { width: d.width, height: d.height, data: d.rgba };
         return Ok(full.downsampled(largest).oriented(d.pending_flip));
     }
@@ -343,11 +352,13 @@ fn decode_full(path: &std::path::Path, gpu: Option<&export::Kit>, largest: u32) 
     })
 }
 
-async fn read_proxy(path: &std::path::Path) -> Option<(u32, u32, Vec<u8>)> {
-    let bytes = tokio::fs::read(path).await.ok()?;
+/// The cached proxy's size and pixels. The pixels are a view into the file's bytes past the 8-byte header,
+/// not a copy of them — 35 MB at 2,560 px, on every request.
+async fn read_proxy(path: &std::path::Path) -> Option<(u32, u32, Bytes)> {
+    let bytes = Bytes::from(tokio::fs::read(path).await.ok()?);
     let w = u32::from_le_bytes(bytes.get(0..4)?.try_into().ok()?);
     let h = u32::from_le_bytes(bytes.get(4..8)?.try_into().ok()?);
-    Some((w, h, bytes[8..].to_vec()))
+    Some((w, h, bytes.slice(8..)))
 }
 
 /// A tmp path next to `target` that won't collide with a concurrent writer of the same target: `/open`'s
@@ -400,7 +411,7 @@ pub struct PreviewRequest {
 /// The develop pass the browser would have run, run here instead, over the same cached proxy and with the
 /// same parameters and shaders — so a browser without WebGPU sees the same picture, just later. See
 /// docs/ROADMAP.md, "Browsers without WebGPU".
-fn preview_jpeg(kit: &export::Kit, color: &sidecar_color::camera::CameraColor, req: &PreviewRequest, proxy: (u32, u32, Vec<u8>)) -> Result<Vec<u8>> {
+fn preview_jpeg(kit: &export::Kit, color: &sidecar_color::camera::CameraColor, req: &PreviewRequest, proxy: (u32, u32, Bytes)) -> Result<Vec<u8>> {
     let (width, height, bytes) = proxy;
     let source = sidecar_engine::upload_rgba16(&kit.gpu, &sidecar_engine::RgbaF32::from_f16_bytes(width, height, &bytes));
     let packed = sidecar_color::pack(&req.edit, color, req.color_space);
@@ -492,14 +503,7 @@ fn loupe_png(w: &Worker, kit: &export::Kit, req: &LoupeRequest) -> Result<Vec<u8
         data.extend_from_slice(&img.data[row..row + uw as usize * 4]);
     }
     let img = sidecar_engine::RgbaF32 { width: uw, height: uh, data }.oriented(flip);
-    let mut rgb = Vec::with_capacity((img.width * img.height * 3) as usize);
-    for p in img.data.as_chunks::<4>().0.iter() {
-        for v in &p[..3] {
-            let v = v.clamp(0.0, 1.0);
-            let e = if v <= 0.0031308 { 12.92 * v } else { 1.055 * v.powf(1.0 / 2.4) - 0.055 };
-            rgb.push((e * 255.0 + 0.5) as u8);
-        }
-    }
+    let rgb: Vec<u8> = img.data.as_chunks::<4>().0.iter().flat_map(|p| [0, 1, 2].map(|c| (export::srgb_encode(p[c]) * 255.0 + 0.5) as u8)).collect();
     let mut out = Vec::new();
     {
         let mut info = png::Info::with_size(img.width, img.height);
@@ -537,15 +541,9 @@ async fn render(State(w): State<Arc<Worker>>, Json(req): Json<export::RenderRequ
     if outbox_dir(&w, &req.job_id).is_none() || req.file_name.contains('/') {
         return StatusCode::BAD_REQUEST.into_response();
     }
-    let (tx, rx) = std::sync::mpsc::channel::<export::Progress>();
-    let (atx, arx) = tokio::sync::mpsc::unbounded_channel::<Result<String, std::io::Error>>();
-    std::thread::spawn(move || {
-        for p in rx {
-            if atx.send(Ok(serde_json::to_string(&p).unwrap() + "\n")).is_err() {
-                break;
-            }
-        }
-    });
+    // The render is blocking code; an unbounded tokio sender is safe to call from it, so progress goes
+    // straight onto the response with no thread in between.
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<export::Progress>();
     let w2 = w.clone();
     tokio::spawn(async move {
         let _slot = w2.export_slot.acquire().await;
@@ -562,7 +560,9 @@ async fn render(State(w): State<Arc<Worker>>, Json(req): Json<export::RenderRequ
         }
         let _ = tx.send(last);
     });
-    ([("content-type", "application/x-ndjson")], axum::body::Body::from_stream(tokio_stream::wrappers::UnboundedReceiverStream::new(arx))).into_response()
+    use futures_util::StreamExt;
+    let lines = tokio_stream::wrappers::UnboundedReceiverStream::new(rx).map(|p| Ok::<_, std::convert::Infallible>(serde_json::to_string(&p).unwrap() + "\n"));
+    ([("content-type", "application/x-ndjson")], axum::body::Body::from_stream(lines)).into_response()
 }
 
 /// How long a rendered file stays fetchable after its job finishes. It used to be deleted the moment Immich
@@ -602,24 +602,9 @@ async fn outbox_file(State(w): State<Arc<Worker>>, Path((job, file)): Path<(Stri
         return StatusCode::NOT_FOUND.into_response();
     }
     match tokio::fs::File::open(dir.join(&file)).await {
-        Ok(f) => ([("content-type", "application/octet-stream")], axum::body::Body::from_stream(tokio_util_stream(f))).into_response(),
+        Ok(f) => ([("content-type", "application/octet-stream")], axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(f))).into_response(),
         Err(_) => StatusCode::NOT_FOUND.into_response(),
     }
-}
-
-fn tokio_util_stream(f: tokio::fs::File) -> impl futures_util::Stream<Item = std::io::Result<Vec<u8>>> {
-    futures_util::stream::unfold(f, |mut f| async move {
-        use tokio::io::AsyncReadExt;
-        let mut buf = vec![0u8; 1 << 20];
-        match f.read(&mut buf).await {
-            Ok(0) => None,
-            Ok(n) => {
-                buf.truncate(n);
-                Some((Ok(buf), f))
-            }
-            Err(e) => Some((Err(e), f)),
-        }
-    })
 }
 
 async fn outbox_delete(State(w): State<Arc<Worker>>, Path(job): Path<String>) -> Response {
@@ -740,6 +725,36 @@ mod tests {
         assert_ne!(w.proxy_path(&key, 2560), old, "the current code must not look at the old name");
         assert_ne!(w.focus_path(&key, 768), older);
         assert!(!old.exists() && !older.exists(), "and Worker::new should have swept both");
+    }
+
+    /// Re-ingesting an unchanged file must not hash it again, and a changed one must. Proved by swapping in
+    /// different bytes of the same length with the old mtime put back: the cached key still answers, which
+    /// only happens if the file wasn't read. Touching the mtime then brings the new key.
+    #[tokio::test]
+    async fn an_unchanged_file_is_not_hashed_again() {
+        let tmp = tempfile::tempdir().unwrap();
+        let w = Worker::new(tmp.path().join("cache")).unwrap();
+        let photo = tmp.path().join("a.png");
+        let png = |grey: u8| {
+            let mut out = Vec::new();
+            let mut enc = png::Encoder::new(&mut out, 1, 1);
+            enc.set_color(png::ColorType::Grayscale);
+            enc.write_header().unwrap().write_image_data(&[grey]).unwrap();
+            out
+        };
+        std::fs::write(&photo, png(10)).unwrap();
+        let first = w.ingest(photo.clone()).await.unwrap().asset_key;
+        assert_eq!(first, sidecar_xmp::sha1_file(&photo).unwrap());
+
+        let modified = std::fs::metadata(&photo).unwrap().modified().unwrap();
+        std::fs::write(&photo, png(200)).unwrap();
+        std::fs::File::options().write(true).open(&photo).unwrap().set_modified(modified).unwrap();
+        assert_eq!(w.ingest(photo.clone()).await.unwrap().asset_key, first, "same size and mtime: not re-hashed");
+
+        std::fs::File::options().write(true).open(&photo).unwrap().set_modified(modified + Duration::from_secs(1)).unwrap();
+        let second = w.ingest(photo.clone()).await.unwrap().asset_key;
+        assert_ne!(second, first, "a new mtime is a new file");
+        assert_eq!(second, sidecar_xmp::sha1_file(&photo).unwrap());
     }
 
     /// The map is keyed by asset, so it would otherwise hold one entry per photo ever opened.

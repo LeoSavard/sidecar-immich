@@ -39,8 +39,6 @@ pub struct ImmichAsset {
     #[serde(default)]
     pub local_date_time: Option<String>,
     #[serde(default)]
-    pub is_edited: bool,
-    #[serde(default)]
     pub stack: Option<AssetStack>,
 }
 

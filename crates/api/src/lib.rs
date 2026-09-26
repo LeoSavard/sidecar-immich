@@ -170,6 +170,10 @@ fn error_page(status: StatusCode, message: &str) -> Response {
         .into_response()
 }
 
+fn cant_open(file_name: &str) -> String {
+    format!("Sidecar can't open {file_name} — it edits RAW files, JPEG, HEIC, PNG and TIFF.")
+}
+
 pub(crate) fn internal(e: anyhow::Error) -> Response {
     tracing::error!("{e:#}");
     (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")).into_response()
@@ -249,7 +253,7 @@ async fn intake(State(app): State<Arc<App>>, ApiUser(user): ApiUser, mut form: a
     // The same check `/open` makes, before anything is uploaded: a file Sidecar can't edit shouldn't be put
     // into someone's library by an editor that then refuses to open it.
     if !sidecar_template::is_editable(std::path::Path::new(&file_name)) {
-        return (StatusCode::UNPROCESSABLE_ENTITY, format!("Sidecar can't open {file_name} — it edits RAW files, JPEG, HEIC, PNG and TIFF.")).into_response();
+        return (StatusCode::UNPROCESSABLE_ENTITY, cant_open(&file_name)).into_response();
     }
 
     let id = match app.immich.upload(&user.api_key, &file_name, bytes, &sidecar_xmp::utc_now()).await {
@@ -302,10 +306,7 @@ async fn open(State(app): State<Arc<App>>, PageUser(user): PageUser, Query(q): Q
     };
     let query = q.name.clone().unwrap_or_default();
     match outcome {
-        Resolved::Found(c) if !sidecar_template::is_editable(&c.path) => error_page(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            &format!("Sidecar can't open {} — it edits RAW files, JPEG, HEIC, PNG and TIFF.", c.file_name),
-        ),
+        Resolved::Found(c) if !sidecar_template::is_editable(&c.path) => error_page(StatusCode::UNPROCESSABLE_ENTITY, &cant_open(&c.file_name)),
         Resolved::Found(c) => match admit(&app, &user, c).await {
             Ok(key) => Redirect::to(&format!("/edit/{key}")).into_response(),
             Err(e) => error_page(StatusCode::UNPROCESSABLE_ENTITY, &format!("{e:#}")),
@@ -444,7 +445,7 @@ pub(crate) async fn relay(resp: reqwest::Result<reqwest::Response>) -> Response 
 
 async fn meta(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Path(key): Path<String>) -> Response {
     let Some(rec) = asset_for(&app, &user, &key).await else { return StatusCode::NOT_FOUND.into_response() };
-    // The worker forgets paths on restart; re-ingesting is cheap when the metadata is cached.
+    // The worker forgets paths on restart. Re-ingesting is cheap: it re-hashes only a file it hasn't seen.
     let _ = app.http.post(app.worker("/v1/ingest")).json(&serde_json::json!({ "path": rec.path })).send().await;
     relay(app.http.get(app.worker(&format!("/v1/assets/{key}/meta"))).send().await).await
 }
@@ -454,26 +455,26 @@ struct ProxyQuery {
     long_edge: Option<u32>,
 }
 
-/// The worker forgets which path an asset key came from when it restarts, and answers 500 — "unknown asset;
-/// ingest it first" — to every request for it until something re-ingests it, which an open editor sees as a
-/// broken photo. `meta` pays that cost up front on every open; these routes don't, because re-hashing the
-/// original is the expensive part of ingest, so they retry once and only after a failure.
-async fn relay_or_reingest(app: &Arc<App>, rec: &AssetRecord, path: &str) -> Response {
-    let resp = relay(app.http.get(app.worker(path)).send().await).await;
-    if resp.status().is_success() {
-        return resp;
+/// A proxy or focus mask from the worker, for a photo this user has opened.
+///
+/// The worker forgets which path an asset key came from when it restarts, and answers "unknown asset; ingest
+/// it first" until something re-ingests it — which an open editor would see as a broken photo. So a failure
+/// is retried once after re-ingesting. `meta` re-ingests up front instead; both are cheap once the worker has
+/// hashed the file, and cost one hash after a restart.
+///
+/// Both are keyed by content hash, so a success is cached for a day. A failure is not: the browser would
+/// go on showing a broken photo long after the worker recovered.
+async fn pixels(app: &Arc<App>, user: &User, key: &str, worker_path: String) -> Response {
+    let Some(rec) = asset_for(app, user, key).await else { return StatusCode::NOT_FOUND.into_response() };
+    let fetch = || async { relay(app.http.get(app.worker(&worker_path)).send().await).await };
+    let mut resp = fetch().await;
+    if !resp.status().is_success() {
+        let ingested = app.http.post(app.worker("/v1/ingest")).json(&serde_json::json!({ "path": rec.path })).send().await;
+        if ingested.is_ok_and(|r| r.status().is_success()) {
+            tracing::info!("re-ingested {} after the worker forgot it", rec.path.display());
+            resp = fetch().await;
+        }
     }
-    let ingested = app.http.post(app.worker("/v1/ingest")).json(&serde_json::json!({ "path": rec.path })).send().await;
-    if !ingested.map(|r| r.status().is_success()).unwrap_or(false) {
-        return resp;
-    }
-    tracing::info!("re-ingested {} after the worker forgot it", rec.path.display());
-    relay(app.http.get(app.worker(path)).send().await).await
-}
-
-/// Proxies and focus masks are keyed by content hash, so a success can be cached for a day. A failure must
-/// not be: a browser would go on showing a broken photo from its cache long after the worker recovered.
-fn cacheable(mut resp: Response) -> Response {
     if resp.status().is_success() {
         resp.headers_mut().insert(header::CACHE_CONTROL, header::HeaderValue::from_static("private, max-age=86400"));
     }
@@ -481,9 +482,8 @@ fn cacheable(mut resp: Response) -> Response {
 }
 
 async fn proxy(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Path(key): Path<String>, Query(q): Query<ProxyQuery>) -> Response {
-    let Some(rec) = asset_for(&app, &user, &key).await else { return StatusCode::NOT_FOUND.into_response() };
     let edge = q.long_edge.unwrap_or(2560);
-    cacheable(relay_or_reingest(&app, &rec, &format!("/v1/assets/{key}/proxy?long_edge={edge}")).await)
+    pixels(&app, &user, &key, format!("/v1/assets/{key}/proxy?long_edge={edge}")).await
 }
 
 #[derive(Deserialize)]
@@ -493,9 +493,8 @@ struct FocusQuery {
 
 /// Focus-peaking mask: PNG bytes at the same edge as a proxy, so the client can pair them up.
 async fn focus(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Path(key): Path<String>, Query(q): Query<FocusQuery>) -> Response {
-    let Some(rec) = asset_for(&app, &user, &key).await else { return StatusCode::NOT_FOUND.into_response() };
     let edge = q.edge.unwrap_or(2560);
-    cacheable(relay_or_reingest(&app, &rec, &format!("/v1/assets/{key}/focus?edge={edge}")).await)
+    pixels(&app, &user, &key, format!("/v1/assets/{key}/focus?edge={edge}")).await
 }
 
 #[derive(Serialize)]

@@ -336,11 +336,10 @@ fn pending_flip_for(extension: &str, orientation_flip: i32) -> i32 {
     }
 }
 
-/// Decode a non-RAW image, given the EXIF already read for it — the orientation (see `crate::af`'s notes on
-/// the numbering) and the colour space its ICC profile claims. When the decoder has already applied the
+/// Decode a non-RAW image, given what its EXIF says — the orientation (in `RgbaF32::oriented`'s numbering)
+/// and the colour space its ICC profile claims; `RawInfo` carries both once ingest has read them. When the decoder has already applied the
 /// rotation, the returned `flip` is zero so the worker doesn't rotate twice.
-pub fn decode(path: &Path, exif: &Exif) -> Result<Decoded, DecodeError> {
-    let orientation_flip = exif.orientation_flip;
+pub fn decode(path: &Path, orientation_flip: i32, space: SourceSpace) -> Result<Decoded, DecodeError> {
     let ext = extension(path);
     let (width, height, rgba) = match ext.as_str() {
         "heic" | "heif" => decode_heif(path)?,
@@ -355,13 +354,13 @@ pub fn decode(path: &Path, exif: &Exif) -> Result<Decoded, DecodeError> {
         }
     };
 
-    Ok(Decoded { width, height, rgba, pending_flip: pending_flip_for(&ext, orientation_flip), space: exif.space })
+    Ok(Decoded { width, height, rgba, pending_flip: pending_flip_for(&ext, orientation_flip), space })
 }
 
 /// Metadata for a non-RAW source, shaped like the RAW path's so the api and the editor need no special case.
 /// Read from EXIF alone — decoding a 36-megapixel HEIC just to learn its dimensions would cost seconds on
 /// every open. `width` and `height` are the visible size *after* orientation, matching `RawFile::info`.
-pub fn info(path: &Path, exif: &Exif) -> RawInfo {
+pub fn info(exif: &Exif) -> RawInfo {
     let rotated = exif.orientation_flip & 4 != 0;
     let (w, h) = (exif.width, exif.height);
     RawInfo {
@@ -378,8 +377,9 @@ pub fn info(path: &Path, exif: &Exif) -> RawInfo {
         focal_length_mm: exif.focal_length_mm,
         captured_unix: exif.captured_unix,
         color: exif.space.camera_color(),
-        af_point: crate::af::af_point(path, exif.orientation_flip),
+        af_point: exif.af_point,
         source_kind: crate::SourceKind::Developed,
+        source_space: Some(exif.space),
     }
 }
 
@@ -401,6 +401,7 @@ pub struct Exif {
     /// How the source says it should be displayed, whoever ends up doing the rotating.
     pub orientation_flip: i32,
     pub space: SourceSpace,
+    pub af_point: Option<crate::AfPoint>,
 }
 
 /// EXIF orientation (1…8) → LibRaw's flip bits, the numbering `RgbaF32::oriented` expects. The mirrored
@@ -424,6 +425,8 @@ pub fn exif(path: &Path) -> Exif {
             "-j", "-n", "-Make", "-Model", "-LensModel", "-ImageWidth", "-ImageHeight", "-ISO",
             "-ExposureTime", "-FNumber", "-FocalLength", "-DateTimeOriginal", "-Orientation", "-ProfileDescription",
         ])
+        // The AF point's tags too: one ExifTool run per photo rather than two, each paying Perl's startup.
+        .args(crate::af::TAGS)
         .arg(path)
         .output()
     else {
@@ -434,6 +437,7 @@ pub fn exif(path: &Path) -> Exif {
     let text = |key: &str| tags.get(key).and_then(|v| v.as_str()).unwrap_or_default().to_string();
     let number = |key: &str| tags.get(key).and_then(|v| v.as_f64()).unwrap_or(0.0);
 
+    let orientation_flip = flip_from_orientation(number("Orientation") as i64);
     Exif {
         make: text("Make"),
         model: text("Model"),
@@ -445,8 +449,9 @@ pub fn exif(path: &Path) -> Exif {
         aperture: number("FNumber") as f32,
         focal_length_mm: number("FocalLength") as f32,
         captured_unix: captured_unix(&text("DateTimeOriginal")),
-        orientation_flip: flip_from_orientation(number("Orientation") as i64),
+        orientation_flip,
         space: SourceSpace::from_profile(&text("ProfileDescription")),
+        af_point: crate::af::from_tags(tags, orientation_flip),
     }
 }
 

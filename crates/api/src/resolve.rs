@@ -43,13 +43,9 @@ pub enum Resolved {
     NotFound,
 }
 
+/// Compared case-insensitively: Immich's filename search is.
 fn stem(name: &str) -> String {
-    let s = name.rsplit_once('.').map_or(name, |(s, _)| s);
-    let s = match s.rsplit_once('+') {
-        Some((base, n)) if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => base,
-        _ => s,
-    };
-    s.to_ascii_lowercase()
+    sidecar_template::stem_of(name).to_ascii_lowercase()
 }
 
 pub(crate) fn from_asset(app: &App, a: &ImmichAsset) -> Option<Candidate> {
@@ -82,23 +78,7 @@ async fn narrow_by_content(list: Vec<Candidate>, sha1: Option<&str>) -> Vec<Cand
 }
 
 async fn sha1_of(path: PathBuf) -> Option<String> {
-    tokio::task::spawn_blocking(move || {
-        use sha1::Digest;
-        use std::io::Read;
-        let mut f = std::fs::File::open(path).ok()?;
-        let mut h = sha1::Sha1::new();
-        let mut buf = vec![0u8; 1 << 20];
-        loop {
-            let n = f.read(&mut buf).ok()?;
-            if n == 0 {
-                break;
-            }
-            h.update(&buf[..n]);
-        }
-        Some(hex::encode(h.finalize()))
-    })
-    .await
-    .ok()?
+    tokio::task::spawn_blocking(move || sidecar_xmp::sha1_file(&path).ok()).await.ok()?
 }
 
 pub async fn resolve(app: &App, user: &User, q: &OpenQuery) -> Result<Resolved> {
