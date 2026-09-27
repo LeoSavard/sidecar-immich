@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // The Rust colour maths (crates/color) running as WebAssembly. Same code the worker uses for export.
 import wasmUrl from './sidecar_color.wasm?url';
-import type { CameraColor, DisplaySpace, EditParams, SourceKind } from '$lib/types';
+import type { CameraColor, DisplaySpace, EditParams, Lens, LensProfile, SourceKind } from '$lib/types';
 
 type Exports = {
 	memory: WebAssembly.Memory;
 	sc_alloc(len: number): number;
 	sc_free(ptr: number, len: number): void;
 	sc_pack(ptr: number, len: number): number;
+	sc_pack_lens(ptr: number, len: number): number;
 	sc_default_edit(): number;
 	sc_last_error(): number;
 };
@@ -30,6 +31,19 @@ export class ColorPacker {
 
 	defaultEdit(): EditParams {
 		return JSON.parse(new TextDecoder().decode(this.framed(this.x.sc_default_edit())));
+	}
+
+	/**
+	 * Lens-pass uniforms for the proxy (`frame`, already oriented by `flip`), or `undefined` when the strengths
+	 * leave nothing to correct. `sensorAspect` is width ÷ height before orientation.
+	 */
+	packLens(profile: LensProfile, lens: Lens, sensorAspect: number, frame: [number, number], flip: number): Uint8Array | undefined {
+		const input = new TextEncoder().encode(JSON.stringify({ profile, lens, sensorAspect, frame, flip }));
+		const ptr = this.x.sc_alloc(input.length);
+		new Uint8Array(this.x.memory.buffer, ptr, input.length).set(input);
+		const out = this.framed(this.x.sc_pack_lens(ptr, input.length));
+		this.x.sc_free(ptr, input.length);
+		return out.length ? out : undefined;
 	}
 
 	/** `source` picks the develop pass's tone path: sensor light, or a picture a camera or app already rendered. */

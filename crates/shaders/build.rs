@@ -3,6 +3,8 @@
 use std::{env, fs, path::Path};
 
 fn walk(dir: &Path, root: &Path, out: &mut Vec<(String, String)>) {
+    // Every directory, not only the root: a file added to `shaders/client/` changes that directory, not `shaders/`.
+    println!("cargo:rerun-if-changed={}", dir.display());
     let mut entries: Vec<_> = fs::read_dir(dir).unwrap().map(|e| e.unwrap().path()).collect();
     entries.sort();
     for p in entries {

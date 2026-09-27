@@ -375,6 +375,8 @@ pub fn info(exif: &Exif) -> RawInfo {
         captured_unix: exif.captured_unix,
         color: exif.space.camera_color(),
         af_point: exif.af_point,
+        lens_profile: None,
+        lens_identity: None,
         source_kind: SourceKind::Developed,
         source_space: Some(exif.space),
     }
@@ -403,7 +405,7 @@ pub struct Exif {
 
 /// EXIF orientation (1…8) → LibRaw's flip bits, the numbering `RgbaF32::oriented` expects. The mirrored
 /// orientations (2, 4, 5, 7) used to fall through to "upright"; some front cameras and scanners write them.
-fn flip_from_orientation(orientation: i64) -> i32 {
+pub(crate) fn flip_from_orientation(orientation: i64) -> i32 {
     match orientation {
         2 => 1,
         3 => 3,

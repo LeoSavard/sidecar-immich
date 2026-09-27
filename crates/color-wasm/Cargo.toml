@@ -10,6 +10,7 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+bytemuck.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sidecar-color.workspace = true

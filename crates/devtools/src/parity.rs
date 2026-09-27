@@ -19,6 +19,26 @@ struct Case {
     name: String,
     width: u32,
     height: u32,
+    /// `<name>.lens.bin` holds lens-pass uniforms, run over the source before develop.
+    #[serde(default)]
+    lens: bool,
+}
+
+/// The ZV-1 at 9.4 mm from its own tables (sidecar_raw::lens), with a vignetting curve added so every part
+/// of the lens pass — warp, per-channel CA, gain — runs in both renderers.
+fn zv1() -> sidecar_color::lens::LensProfile {
+    use sidecar_color::lens::Curve;
+    let knots = |v: &[f64], scale: f64| Curve(v.iter().enumerate().map(|(i, &x)| [i as f64 / (v.len() - 1) as f64, 1.0 + x * scale]).collect());
+    sidecar_color::lens::LensProfile {
+        id: "sony".into(),
+        label: "From the file (Sony)".into(),
+        center: [0.5, 0.5],
+        distortion: Some(knots(&[1265.0, 1218.0, 1083.0, 860.0, 562.0, 209.0, -179.0, -580.0, -972.0, -1353.0, -1725.0], 1.0 / 16384.0)),
+        ca_red: Some(knots(&[0.0, 0.0, 128.0, 128.0, 128.0, 256.0, 384.0, 512.0, 896.0, 1152.0, 1536.0], 1.0 / 2097152.0)),
+        ca_blue: Some(knots(&[0.0, 896.0, 1024.0, 1024.0, 768.0, 512.0, 256.0, 0.0, 128.0, 0.0, 256.0], 1.0 / 2097152.0)),
+        vignetting: Some(Curve(vec![[0.0, 1.0], [0.5, 1.15], [1.0, 1.9]])),
+        required: true,
+    }
 }
 
 fn adobe(m: [f64; 9]) -> [[f64; 3]; 3] {
@@ -77,7 +97,9 @@ fn synthetic(camera: &CameraColor, width: u32, height: u32) -> RgbaF32 {
     RgbaF32 { width, height, data }
 }
 
-fn cases() -> Vec<(String, CameraColor, SourceKind, EditParams, DisplaySpace)> {
+type Fixture = (String, CameraColor, SourceKind, EditParams, DisplaySpace, Option<sidecar_color::lens::LensProfile>);
+
+fn cases() -> Vec<Fixture> {
     let mut graded = EditParams::default();
     graded.white_balance.mode = WhiteBalanceMode::Custom;
     graded.white_balance.temperature_k = 4300.0;
@@ -106,26 +128,39 @@ fn cases() -> Vec<(String, CameraColor, SourceKind, EditParams, DisplaySpace)> {
     phone.mixer.orange = MixerBand { hue: 0.0, saturation: 20.0, luminance: 5.0 };
     let heic = || sidecar_raw::SourceSpace::DisplayP3.camera_color();
 
+    let mut lens = EditParams { lens: Some(sidecar_color::params::Lens { profile: "sony".into(), ..Default::default() }), ..graded.clone() };
+    lens.lens.as_mut().unwrap().lateral_ca = 150.0;
+
     vec![
-        ("as-shot-srgb".into(), nikon_d850(), SourceKind::Raw, EditParams::default(), DisplaySpace::Srgb),
-        ("graded-p3".into(), nikon_d850(), SourceKind::Raw, graded, DisplaySpace::DisplayP3),
-        ("xtrans-dark".into(), fujifilm_xt4(), SourceKind::Raw, dark, DisplaySpace::Srgb),
-        ("heic-default".into(), heic(), SourceKind::Developed, EditParams::default(), DisplaySpace::DisplayP3),
-        ("heic-graded".into(), heic(), SourceKind::Developed, phone, DisplaySpace::Srgb),
+        ("as-shot-srgb".into(), nikon_d850(), SourceKind::Raw, EditParams::default(), DisplaySpace::Srgb, None),
+        ("graded-p3".into(), nikon_d850(), SourceKind::Raw, graded, DisplaySpace::DisplayP3, None),
+        ("xtrans-dark".into(), fujifilm_xt4(), SourceKind::Raw, dark, DisplaySpace::Srgb, None),
+        ("heic-default".into(), heic(), SourceKind::Developed, EditParams::default(), DisplaySpace::DisplayP3, None),
+        ("heic-graded".into(), heic(), SourceKind::Developed, phone, DisplaySpace::Srgb, None),
+        ("lens-zv1".into(), nikon_d850(), SourceKind::Raw, lens, DisplaySpace::Srgb, Some(zv1())),
     ]
 }
 
 pub fn fixtures(dir: &Path) -> Result<()> {
     std::fs::create_dir_all(dir)?;
     let mut index = Vec::new();
-    for (name, camera, source, edit, display) in cases() {
+    for (name, camera, source, edit, display, profile) in cases() {
         let src = synthetic(&camera, 512, 256);
         let packed = pack(&edit, &camera, source, display);
         std::fs::write(dir.join(format!("{name}.src.f16")), src.to_f16_bytes())?;
         std::fs::write(dir.join(format!("{name}.uniform.bin")), &packed.uniform)?;
         std::fs::write(dir.join(format!("{name}.lut.f32")), bytemuck::cast_slice(&packed.lut))?;
-        println!("{name}: white balance {:.0} K, tint {:+.1}", packed.temperature_k, packed.tint);
-        index.push(Case { name, width: src.width, height: src.height });
+        let lens = match (&profile, &edit.lens) {
+            (Some(p), Some(l)) => {
+                let e = sidecar_color::lens::effective(p, l, src.width as f64 / src.height as f64);
+                let u = sidecar_color::lens::pack(&e, p.center, [src.width, src.height], 0, [0.0; 2], [0.0; 2]);
+                std::fs::write(dir.join(format!("{name}.lens.bin")), bytemuck::bytes_of(&u))?;
+                true
+            }
+            _ => false,
+        };
+        println!("{name}: white balance {:.0} K, tint {:+.1}{}", packed.temperature_k, packed.tint, if lens { ", lens pass" } else { "" });
+        index.push(Case { name, width: src.width, height: src.height, lens });
     }
     std::fs::write(dir.join("index.json"), serde_json::to_vec_pretty(&index)?)?;
     Ok(())
@@ -140,11 +175,18 @@ pub fn native(dir: &Path, out: &Path) -> Result<()> {
     let gpu = Gpu::new_headless()?;
     println!("native adapter: {} ({:?})", gpu.adapter_info.name, gpu.adapter_info.backend);
     let pass = DevelopPass::new(&gpu)?;
+    let lens_pass = sidecar_engine::lens::LensPass::new(&gpu)?;
     for case in load_index(dir)? {
         let src = RgbaF32::from_f16_bytes(case.width, case.height, &std::fs::read(dir.join(format!("{}.src.f16", case.name)))?);
         let uniform = std::fs::read(dir.join(format!("{}.uniform.bin", case.name)))?;
         let lut: Vec<f32> = bytemuck::cast_slice(&std::fs::read(dir.join(format!("{}.lut.f32", case.name)))?).to_vec();
-        let img = pass.run(&gpu, &src, &uniform, &lut)?;
+        let mut tex = sidecar_engine::upload_rgba16(&gpu, &src);
+        if case.lens {
+            let bytes = std::fs::read(dir.join(format!("{}.lens.bin", case.name)))?;
+            let params: sidecar_color::lens::LensParams = bytemuck::pod_read_unaligned(&bytes);
+            tex = lens_pass.apply(&gpu, &tex, &params, [case.width, case.height]);
+        }
+        let img = sidecar_engine::read_rgba16(&gpu, &pass.render(&gpu, &tex, &uniform, &lut)?)?;
         std::fs::write(out.join(format!("{}.native.f16", case.name)), img.to_f16_bytes())?;
     }
     Ok(())

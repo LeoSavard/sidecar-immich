@@ -11,6 +11,8 @@ export class DevelopPass {
 	private layout: GPUBindGroupLayout;
 	private ubo: GPUBuffer;
 	private source?: GPUTexture;
+	/** What develop reads instead of the proxy: the lens pass's output, while a correction is on. */
+	private input?: GPUTexture;
 	private lut?: GPUTexture;
 	private target?: GPUTexture;
 	private bindGroup?: GPUBindGroup;
@@ -49,10 +51,23 @@ export class DevelopPass {
 		return this.target;
 	}
 
+	/** The proxy as uploaded, for the lens pass to read. */
+	get proxy(): GPUTexture | undefined {
+		return this.source;
+	}
+
+	/** Develop from `texture` (the proxy's size) instead of the proxy; `undefined` goes back to the proxy. */
+	setInput(texture?: GPUTexture) {
+		if (texture === this.input) return;
+		this.input = texture;
+		this.bindGroup = undefined;
+	}
+
 	/** Upload the proxy once: raw little-endian RGBA16F bytes, row-major, top-left origin. */
 	setSource(width: number, height: number, f16: ArrayBuffer | ArrayBufferView) {
 		this.source?.destroy();
 		this.target?.destroy();
+		this.input = undefined;
 		this.source = this.device.createTexture({ label: 'source', size: [width, height], format: 'rgba16float', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
 		this.device.queue.writeTexture({ texture: this.source }, f16, { bytesPerRow: width * 8 }, [width, height]);
 		this.target = this.device.createTexture({
@@ -84,7 +99,7 @@ export class DevelopPass {
 			layout: this.layout,
 			entries: [
 				{ binding: 0, resource: { buffer: this.ubo } },
-				{ binding: 1, resource: this.source.createView() },
+				{ binding: 1, resource: (this.input ?? this.source).createView() },
 				{ binding: 2, resource: this.lut.createView() }
 			]
 		});

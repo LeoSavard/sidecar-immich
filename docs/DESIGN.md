@@ -14,7 +14,7 @@ Where the code differs from the text below, the code and these notes win.
 - **Proxies (milestone 2)** use LibRaw's half-size mode (2×2 binning, no interpolation): 0.3–0.5 s for a 45 MP NEF, ~2 s for a compressed RAF. The GPU demosaic of milestone 5 replaces this.
 - **XMP field names** follow the JSON parameters in PascalCase inside `sc:Sidecar/sc:Edit` (`sc:Ev`, `sc:TemperatureK`, …). The namespace URI is `https://sidecar.ls-tech.ca/ns/1.0/` and must never change.
 - **Library root:** the external library's template starts at `/mnt/storage/Photography/Library`.
-- **Known limitation:** Lightroom-merged panorama DNGs use a compression LibRaw 0.22 can't decode; Sidecar reports them as unsupported.
+- **Lightroom-merged panorama DNGs** in JPEG XL, which LibRaw 0.22 can't decode, are read by `sidecar_raw::linear_dng` (see below).
 - **GPU ingest (milestone 5):** vkdt's highlight pyramid and RCD are ported to WGSL; RCD is split into five full-texture passes instead of vkdt's shared-memory tiles. X-Trans proxies use 3×3 binning on the GPU; full-resolution X-Trans (export, loupe) still uses LibRaw's Markesteijn on the CPU — a WGSL port of LibRaw's code is the remaining step. LibRaw is built with OpenMP (a Fuji RAF opens in 0.2 s instead of 1.7 s).
 - **Export (milestone 6):** JPEG through `jpeg-encoder` (pure Rust, MIT/Apache + IJG) rather than mozjpeg. The worker streams NDJSON progress to the api, which relays it as SSE with `Last-Event-ID` replay. The outbox is reached through worker endpoints, so the api keeps `/cache` read-only.
 - **Detail (milestone 7):** denoise and sharpening are implemented from the published methods (à-trous wavelets with square-root variance stabilization and a per-image noise estimate; Richardson–Lucy on luminance), not ported — vkdt's denoise depends on per-camera noise profiles. The worker keeps the last two full-resolution buffers for loupe tiles.
@@ -25,6 +25,34 @@ Where the code differs from the text below, the code and these notes win.
 - **Output space is a user setting** (§11), not a guess from `matchMedia`. It drives the develop uniform, the canvas, the loupe request and the export default together; the export sheet still overrides it for one export. The editor previewing in P3 while exports defaulted to sRGB was a real trap: saturated reds fit on screen and clipped in the file.
 - **Tint direction:** the slider names what happens to the *image*, as every editor does. Positive tint moves the assumed illuminant toward green so the photo goes magenta. It shipped inverted and is fixed; `positive_tint_moves_the_illuminant_toward_green` pins it.
 - **Tone curve, measured:** the logistic base curve starts shouldering immediately above middle grey — log-log slope 0.80 at +1 EV, 0.57 at +2 EV, 0.40 at +2.5 EV. Raising exposure therefore costs upper-midtone texture (0.73× the local contrast of the unedited render in one real case, measured as mean |∇ log Y|). The underlying constraint is headroom: sRGB holds 2.47 stops above grey while the default `whiteEv` asks the curve to fit 4.5. Lowering Whites is the working answer; replacing the curve is on the roadmap, with a candidate patch measured and rejected for regressing shadow contrast.
+- **Lens correction (§15), from the file first:** a survey of this library found who writes what. Sony ARW
+  (ZV-1, ILCE-7RM4) carries distortion, CA and vignetting tables; Fujifilm RAF (X100F) carries CA and
+  vignetting; Lightroom's DNGs carry `WarpRectilinear`/`FixVignetteRadial` opcodes; Nikon DSLRs, Canon, Olympus
+  and Panasonic carry only on/off flags or unverified tables, and phones only `GainMap` shading. Each reading
+  was checked against a second source rather than assumed — Sony distortion and CA against Lightroom's opcodes
+  for the same exposures (within a pixel) and against the camera's own JPEG (`sidecar-dev camera-jpeg`: 36 of
+  36 frames align better through the table), Fujifilm vignetting against Lightroom's to 0.3 %. Sony's
+  vignetting table is left unused: the ZV-1 writes shading-corrected sensor data (its JPEG adds 0.00 EV at the
+  corners where the table asks for 0.3–0.8), so applying it would correct twice. Everything converts into
+  one radial model (`sidecar_color::lens`), sampled into 64 knots for a separate lens pass
+  (`shaders/client/lens.wgsl`, bicubic reads) that runs before develop — in the browser only when a lens
+  setting changes, on the server after denoise and sharpening, with loupe tiles cropping only the source the
+  tile reads. A zoom about the optical centre keeps blank edges out of the frame. ExifTool reads the tags in
+  the same run as the AF point; `META_REVISION` re-reads cached metadata without rebuilding proxies.
+- **lensfun for the rest:** the api fetches the database files from lensfun's repository on first start and
+  monthly (`[lensfun]` in `sidecar.toml`) and hands them to the worker, which has no internet route; cached
+  metadata is re-matched when a newer database arrives. Lenses are matched on ExifTool's `LensID` among
+  lenses that fit the body's mount, requiring the same focal range and maximum aperture. The crop factor is
+  lensfun's for the body, not ExifTool's: a ZV-1 writes a rounded "24 mm" equivalent, and that 6 % showed up
+  as the profile's radius being off against the camera's own JPEG. Only sensor mosaics get lensfun: a linear
+  DNG a program made (Lightroom's merges) was corrected by it already.
+- **JPEG XL linear DNGs:** Lightroom's panoramas since 2023 store linear RGB as JPEG XL tiles, which LibRaw
+  0.22 can't open; `sidecar_raw::linear_dng` reads the DNG structure and decodes them with `jxl-oxide`, a row
+  of tiles at a time in parallel, averaged down to the size asked for (a 40 MP merge: 2.7 s). The tiles are
+  tagged BT.2100 with the sRGB curve and must be rendered with a linear transfer to get the DNG's values back.
+  Every other Lightroom-made DNG in the library (deflate float HDR merges, lossy-JPEG panoramas, Enhanced
+  CFA) already decodes through LibRaw. Exports of merges wider than the GPU's texture limit are rendered at
+  that limit.
 - **Machine learning (`sidecar-ml`, in progress):** its own program, not part of the worker, so a
   machine without the GPU for it never loads it and GPU memory comes back when it exits — burn only releases
   memory with its process. The worker will start it on demand with one end of a Unix socket pair as its
@@ -893,11 +921,11 @@ After V1: lens correction, then crop and straighten, then local masks (§15).
 
 | Feature | Preview (phone) | Export (server) | Stored as |
 |---|---|---|---|
-| Lens correction — distortion, lateral CA, vignetting | Vignetting as a gain before WB; distortion and CA as a coordinate remap when sampling `sourceTex`, from a displacement texture | Same WGSL, after denoise and before develop | `sc:Lens` — profile, per-correction amounts |
+| Lens correction — distortion, lateral CA, vignetting | A lens pass over the proxy, run when a lens setting changes: bicubic remap per channel and a vignetting gain, into the texture develop reads | Same WGSL, after denoise and before develop | `sc:Lens` — profile, per-correction amounts |
 | Crop and straighten | Composed into the view pass `geometry` matrix; the histogram counts only pixels inside the crop | Before resampling to `longEdge` | `sc:Crop` — angle and edges, normalized to the lens-corrected image. An existing Immich crop on the RAW can be offered once as a starting point. |
 | Local masks — linear and radial gradients, brush, subject/sky | Second bind group in the develop pass: each module's inputs blend by mask weight | Same shaders at full resolution | `sc:Masks` — shapes plus adjustments named like the global ones |
 
-**Lens correction.** Profiles come from DNG opcodes when the file carries them (iPhone ProRAW does), otherwise from the lensfun database, matched on the EXIF lens model. The models are reimplemented from lensfun's documentation, and the database (CC BY-SA 3.0) is downloaded on first use, not shipped (§12). Absent `sc:Lens` means off, so photos edited in V1 render unchanged; new edits default to on.
+**Lens correction.** Profiles come from the file when it carries one — DNG opcodes (iPhone ProRAW and Lightroom's DNGs), Sony's and Fujifilm's own tables, each verified as the build log describes — otherwise from the lensfun database, matched on the lens ExifTool identifies. The models are reimplemented from lensfun's documentation, and the database (CC BY-SA 3.0) is downloaded on first use, not shipped (§12). Absent `sc:Lens` means off, so photos edited in V1 render unchanged; new edits default to on.
 
 **Masks.**
 

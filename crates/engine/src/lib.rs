@@ -9,6 +9,7 @@ pub mod detail;
 pub mod develop;
 pub mod focus;
 pub mod ingest;
+pub mod lens;
 pub use develop::DevelopPass;
 pub use focus::focus_energy;
 pub use ingest::{Ingest, MosaicInput};

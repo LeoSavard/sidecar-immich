@@ -64,11 +64,13 @@ export function describeChanges(from: EditParams, to: EditParams): string[] {
 	}
 	if (ownCurve(from) !== ownCurve(to)) out.push('Curve edited');
 	if (!!from.lens !== !!to.lens) out.push(to.lens ? 'Lens correction on' : 'Lens correction off');
+	else if (from.lens && to.lens && JSON.stringify(from.lens) !== JSON.stringify(to.lens)) out.push('Lens correction adjusted');
 	return out;
 }
 
 /** Sections one version can take from another, as the editor groups its tools. */
 export const PICKS: { id: string; label: string; take: (into: EditParams, from: EditParams) => void }[] = [
+	{ id: 'lens', label: 'Lens correction', take: (e, f) => (e.lens = structuredClone(f.lens ?? null)) },
 	{ id: 'wb', label: 'White balance', take: (e, f) => (e.whiteBalance = structuredClone(f.whiteBalance)) },
 	{
 		id: 'light',

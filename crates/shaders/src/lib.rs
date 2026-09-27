@@ -8,7 +8,7 @@ use anyhow::{Context, Result, bail};
 include!(concat!(env!("OUT_DIR"), "/files.rs"));
 
 /// Entry points that the browser needs, composed into `web/src/lib/gpu/wgsl/`.
-pub const WEB_ENTRIES: &[&str] = &["client/develop.wgsl", "client/view.wgsl", "client/histogram.wgsl"];
+pub const WEB_ENTRIES: &[&str] = &["client/develop.wgsl", "client/view.wgsl", "client/histogram.wgsl", "client/lens.wgsl"];
 
 pub fn source(path: &str) -> Result<&'static str> {
     FILES.iter().find(|(p, _)| *p == path).map(|(_, s)| *s).with_context(|| format!("unknown shader {path}"))

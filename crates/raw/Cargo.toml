@@ -7,6 +7,10 @@ version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+base64.workspace = true
+roxmltree.workspace = true
+jxl-oxide.workspace = true
+rayon.workspace = true
 png.workspace = true
 serde.workspace = true
 serde_json.workspace = true

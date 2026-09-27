@@ -9,6 +9,9 @@ use std::path::Path;
 
 pub mod af;
 pub mod decoded;
+pub mod lens;
+pub mod lensfun;
+pub mod linear_dng;
 pub mod proxy;
 pub use af::AfPoint;
 pub use decoded::SourceSpace;
@@ -48,9 +51,15 @@ pub struct RawInfo {
     pub focal_length_mm: f32,
     pub captured_unix: i64,
     pub color: CameraColor,
-    /// Set separately by `af::af_point()`, which needs the file path for ExifTool; `None` until then.
+    /// Set separately by `read_extras`, which needs the file path for ExifTool; `None` until then.
     #[serde(default)]
     pub af_point: Option<AfPoint>,
+    /// The lens correction the file carries itself (DNG opcodes, the maker's tables), from `read_extras`.
+    #[serde(default)]
+    pub lens_profile: Option<sidecar_color::lens::LensProfile>,
+    /// What ExifTool identifies the lens as, from `read_extras`: the key into lensfun.
+    #[serde(default)]
+    pub lens_identity: Option<lens::LensIdentity>,
     /// Scene-referred sensor data or an already-developed picture: decides how the develop pass renders it
     /// (`sidecar_color::SourceKind`) and which controls the editor offers. Distinct from `SensorKind`, which
     /// also says `Other` for real RAW files with no colour-filter mosaic.
@@ -71,7 +80,7 @@ pub enum SensorKind {
 }
 
 /// EXIF LightSource → correlated colour temperature, for DNG calibration illuminants.
-fn illuminant_temperature(code: u16) -> Option<f64> {
+pub(crate) fn illuminant_temperature(code: u16) -> Option<f64> {
     Some(match code {
         17 | 3 => 2856.0,
         24 => 3200.0,
@@ -158,6 +167,25 @@ pub struct RawFile {
 // A LibRaw instance may move between threads, but must not be shared.
 unsafe impl Send for RawFile {}
 
+impl RawInfo {
+    /// Width and height before orientation: the frame the sensor data, and every lens radius, is in.
+    pub fn sensor_size(&self) -> [u32; 2] {
+        if self.orientation_flip & 4 != 0 { [self.height, self.width] } else { [self.width, self.height] }
+    }
+}
+
+/// Everything read from ExifTool rather than LibRaw — the AF point, the lens correction the file carries and
+/// what the lens is — in one run of it. Leaves `info` as it was if ExifTool is missing or fails.
+pub fn read_extras(path: &Path, info: &mut RawInfo) {
+    let out = std::process::Command::new("exiftool").arg("-j").args(lens::TAGS).args(af::TAGS).arg(path).output();
+    let Some(tags) = out.ok().and_then(|o| serde_json::from_slice::<serde_json::Value>(&o.stdout).ok()).and_then(|v| v.get(0).cloned()) else {
+        return;
+    };
+    info.af_point = af::from_tags(&lens::ungrouped(&tags), info.orientation_flip);
+    info.lens_profile = lens::from_tags(&tags, info.sensor_size());
+    info.lens_identity = Some(lens::identity(&tags));
+}
+
 impl RawFile {
     /// Open and unpack the sensor data, ready for `mosaic` or `develop_linear`.
     pub fn open(path: &Path) -> Result<Self, RawError> {
@@ -206,6 +234,8 @@ impl RawFile {
             captured_unix: i.timestamp,
             color: camera_color(i),
             af_point: None,
+            lens_profile: None,
+            lens_identity: None,
             source_kind: SourceKind::Raw,
             source_space: None,
         }
