@@ -64,6 +64,7 @@ pub struct Kit {
     pub develop: sidecar_engine::DevelopPass,
     pub detail: sidecar_engine::detail::Detail,
     pub lens: sidecar_engine::lens::LensPass,
+    pub lensfun: std::sync::Arc<crate::lensfun::Lensfun>,
 }
 
 pub fn detail_settings(edit: &EditParams) -> sidecar_engine::detail::DetailSettings {
@@ -144,9 +145,21 @@ pub fn full_source_for(kit: &Kit, path: &Path) -> Result<(wgpu::Texture, i32, Re
         let rendering = Rendering::developed(decoded.space.camera_color());
         return Ok((sidecar_engine::upload_rgba16(&kit.gpu, &img), decoded.pending_flip, rendering));
     }
+    if sidecar_raw::linear_dng::is_supported(path) {
+        // Held to the largest texture the GPU takes: a merged panorama can be several times wider.
+        let mut info = sidecar_raw::linear_dng::info(path, &sidecar_raw::decoded::exif(path))?;
+        sidecar_raw::read_extras(path, &mut info);
+        info.lens_profile = kit.lensfun.profile_for(&info);
+        let mut rendering = Rendering::of(&info);
+        rendering.lens_flip = 0;
+        let d = sidecar_raw::linear_dng::decode(path, kit.gpu.device.limits().max_texture_dimension_2d)?;
+        let img = RgbaF32 { width: d.width, height: d.height, data: d.rgba };
+        return Ok((sidecar_engine::upload_rgba16(&kit.gpu, &img), info.orientation_flip, rendering));
+    }
     let mut raw = RawFile::open(path)?;
     let mut info = raw.info();
     sidecar_raw::read_extras(path, &mut info);
+    info.lens_profile = kit.lensfun.profile_for(&info);
     let mut rendering = Rendering::of(&info);
     let (texture, flip) = full_source(kit, &mut raw)?;
     // `full_source` either leaves the orientation to apply (the GPU demosaic) or has applied it (LibRaw).

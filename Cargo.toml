@@ -27,7 +27,7 @@ tiff = "0.11"
 zune-jpeg = "0.5"
 tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["io"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "multipart"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "multipart", "rustls-tls-native-roots"] }
 sha1 = "0.10"
 tokio = { version = "1", features = ["full"] }
 toml = "0.8"
@@ -38,6 +38,9 @@ bytemuck = { version = "1", features = ["derive"] }
 naga = { version = "30", features = ["wgsl-in"] }
 half = { version = "2", features = ["bytemuck"] }
 palette = "0.7"
+roxmltree = "0.20"
+jxl-oxide = "0.12"
+rayon = "1"
 png = "0.18"
 pollster = "0.4"
 serde = { version = "1", features = ["derive"] }

@@ -12,6 +12,8 @@ THIRD_PARTY_NOTICES.md, which ships in the Docker image at /usr/share/doc/sideca
 - OKLab — Björn Ottosson.
 - Adobe XMP Toolkit — Adobe (BSD-3-Clause), via xmp_toolkit (MIT OR Apache-2.0).
 - ExifTool — Phil Harvey (Perl licence: Artistic or GPL), run as a separate program.
+- lensfun database — the lensfun contributors (CC BY-SA 3.0): lens calibrations downloaded at run time for
+  lenses whose files carry no correction; not shipped in the image. The lensfun library is not used.
 - libheif — Dirk Farin (LGPL-3.0-or-later), only in images built with `--build-arg HEIF=1`, never linked:
   Sidecar runs a HEIF decoder as a separate program. The published image ships none.
 - mozjpeg and libjpeg-turbo — this software is based in part on the work of the Independent JPEG Group.

@@ -13,6 +13,26 @@ pub struct Config {
     pub immich: Immich,
     #[serde(default)]
     pub roots: Vec<Root>,
+    #[serde(default)]
+    pub lensfun: Lensfun,
+}
+
+/// The lensfun database, fetched for lenses whose files carry no correction (DESIGN.md §15). Not shipped in
+/// the image: downloaded at run time, CC BY-SA 3.0, credited in the notices.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+pub struct Lensfun {
+    pub enabled: bool,
+    /// A listing of the database files in the shape of GitHub's contents API.
+    pub index: String,
+    /// Fetch again when the worker's copy is older than this.
+    pub refresh_days: u64,
+}
+
+impl Default for Lensfun {
+    fn default() -> Self {
+        Self { enabled: true, index: "https://api.github.com/repos/lensfun/lensfun/contents/data/db".into(), refresh_days: 30 }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -129,7 +149,7 @@ mod tests {
             moves_files: false,
             per_user: false,
         };
-        let config = Config { server: Server::default(), immich: Immich::default(), roots: vec![root.clone()] };
+        let config = Config { server: Server::default(), immich: Immich::default(), roots: vec![root.clone()], lensfun: Lensfun::default() };
         assert_eq!(config.immich_path(&root, &link.join("2026/a.NEF")).as_deref(), Some("/data/library/2026/a.NEF"));
         assert_eq!(config.immich_path(&root, &real.join("2026/a.NEF")).as_deref(), Some("/data/library/2026/a.NEF"));
     }

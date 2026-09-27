@@ -34,6 +34,25 @@ fn main() -> Result<()> {
             write_png(&img, out.as_ref())
         }
         ["radial", list] => radial(list.as_ref()),
+        ["linear-dng", input, out, rest @ ..] => {
+            let input: &std::path::Path = input.as_ref();
+            let edge: u32 = rest.first().map_or(Ok(1600), |v| v.parse())?;
+            let t0 = std::time::Instant::now();
+            let info = sidecar_raw::linear_dng::info(input, &sidecar_raw::decoded::exif(input))?;
+            let img = sidecar_raw::linear_dng::decode(input, edge)?;
+            let t_decode = t0.elapsed();
+            let src = sidecar_engine::RgbaF32 { width: img.width, height: img.height, data: img.rgba }.oriented(info.orientation_flip);
+            let gpu = sidecar_engine::Gpu::new_headless()?;
+            let pass = sidecar_engine::DevelopPass::new(&gpu)?;
+            let packed = sidecar_color::pack(&Default::default(), &info.color, info.source_kind, sidecar_color::DisplaySpace::Srgb);
+            let out_img = pass.run(&gpu, &src, &packed.uniform, &packed.lut)?;
+            write_png(&out_img, out.as_ref())?;
+            println!(
+                "{} {} · {}×{} → {}×{} · as shot {:.0} K {:+.0} · decode {:.1} s",
+                info.make, info.model, info.width, info.height, out_img.width, out_img.height, packed.temperature_k, packed.tint, t_decode.as_secs_f64()
+            );
+            Ok(())
+        }
         ["lens", files @ ..] => {
             for f in files {
                 let mut info = match sidecar_raw::RawFile::metadata(f.as_ref()) {
@@ -155,14 +174,27 @@ fn radial(list: &std::path::Path) -> Result<()> {
 /// profile and without it, the zoom that aligns best, and the measured gain per ring, in stops.
 fn camera_jpeg(list: &std::path::Path) -> Result<()> {
     const RINGS: usize = 20;
+    // With SIDECAR_LENSFUN set to a directory of lensfun XML, check lensfun's profile instead of the file's.
+    let lensfun = std::env::var("SIDECAR_LENSFUN").ok().map(|d| sidecar_raw::lensfun::Database::load(d.as_ref()));
     for path in std::fs::read_to_string(list)?.lines().filter(|l| !l.trim().is_empty()) {
         let out = std::process::Command::new("exiftool").arg("-j").args(sidecar_raw::lens::TAGS).arg(path).output()?;
         let Some(tags) = serde_json::from_slice::<serde_json::Value>(&out.stdout).ok().and_then(|v| v.get(0).cloned()) else { continue };
-        let preview = std::process::Command::new("exiftool").args(["-b", "-PreviewImage"]).arg(path).output()?.stdout;
+        // The largest rendering the camera embedded: Nikon's full-size JpgFromRaw, else the preview.
+        let mut preview = std::process::Command::new("exiftool").args(["-b", "-JpgFromRaw"]).arg(path).output()?.stdout;
+        if preview.len() < 1000 {
+            preview = std::process::Command::new("exiftool").args(["-b", "-PreviewImage"]).arg(path).output()?.stdout;
+        }
         let Ok(mut raw) = sidecar_raw::RawFile::open(path.as_ref()) else { continue };
-        let info = raw.info();
+        let mut info = raw.info();
         let size = if info.orientation_flip & 4 != 0 { [info.height, info.width] } else { [info.width, info.height] };
-        let Some(profile) = sidecar_raw::lens::from_tags(&tags, size) else { continue };
+        let profile = match &lensfun {
+            Some(db) => {
+                sidecar_raw::read_extras(path.as_ref(), &mut info);
+                db.profile(&info, info.lens_identity.as_ref().unwrap_or(&Default::default()))
+            }
+            None => sidecar_raw::lens::from_tags(&tags, size),
+        };
+        let Some(profile) = profile else { continue };
         let Some(dist) = profile.distortion.clone() else { continue };
         let Ok(img) = raw.develop_linear(true) else { continue };
         let Ok(jpeg) = zune_jpeg::JpegDecoder::new(std::io::Cursor::new(&preview)).decode() else { continue };
@@ -187,13 +219,15 @@ fn camera_jpeg(list: &std::path::Path) -> Result<()> {
             if s <= 0.04045 { s / 12.92 } else { ((s + 0.055) / 1.055).powf(2.4) }
         };
         let jhd = ((jw * jw + jh * jh) as f64).sqrt() / 2.0;
+        // About 200,000 samples whatever the size: a full-size 24 MP JpgFromRaw at every other pixel is 30× that.
+        let step = ((jw * jh) as f64 / 200_000.0).sqrt().ceil().max(1.0) as usize;
         let rhd = ((rw * rw + rh * rh) as f64).sqrt() / 2.0;
         // Sample JPEG pixel → (radius in half-diagonals, log2 JPEG linear, log2 RAW green), for a distortion
         // curve and zoom.
         let samples = |curve: &dyn Fn(f64) -> f64, zoom: f64| -> Vec<(f64, f64, f64)> {
             let mut v = Vec::new();
-            for y in (0..jh).step_by(2) {
-                for x in (0..jw).step_by(2) {
+            for y in (0..jh).step_by(step) {
+                for x in (0..jw).step_by(step) {
                     let u = [((x as f64 + 0.5) - jw as f64 / 2.0) / jhd * zoom, ((y as f64 + 0.5) - jh as f64 / 2.0) / jhd * zoom];
                     let r = (u[0] * u[0] + u[1] * u[1]).sqrt();
                     let s = curve(r);
@@ -227,6 +261,12 @@ fn camera_jpeg(list: &std::path::Path) -> Result<()> {
         };
         let (zoom, with) = best(&|r| dist.eval(r));
         let (_, without) = best(&|_| 1.0);
+        // How far off the profile's radius scale is: the best-aligning stretch of its radius axis (1 = as read).
+        let stretch = (0..=16)
+            .map(|i| 0.84 + i as f64 * 0.02)
+            .map(|k| (k, best(&|r| dist.eval(r * k)).1))
+            .fold((1.0, -1.0), |a, b| if b.1 > a.1 { b } else { a })
+            .0;
         // The camera's tone curve from the centre: median JPEG value per RAW-brightness bin.
         let s = samples(&|r| dist.eval(r), zoom);
         let lo = s.iter().map(|p| p.2).fold(f64::MAX, f64::min);
@@ -262,7 +302,7 @@ fn camera_jpeg(list: &std::path::Path) -> Result<()> {
             }
         }
         let gain: Vec<Option<f64>> = rings.iter_mut().map(|v| if v.len() >= 50 { median(v) } else { None }).collect();
-        println!("{}", serde_json::json!({ "path": path, "ncc": with, "nccWithout": without, "zoom": zoom, "gainEv": gain }));
+        println!("{}", serde_json::json!({ "path": path, "profile": profile.id, "ncc": with, "nccWithout": without, "zoom": zoom, "stretch": stretch, "gainEv": gain }));
     }
     Ok(())
 }

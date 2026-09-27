@@ -10,6 +10,8 @@ use std::path::Path;
 pub mod af;
 pub mod decoded;
 pub mod lens;
+pub mod lensfun;
+pub mod linear_dng;
 pub mod proxy;
 pub use af::AfPoint;
 pub use decoded::SourceSpace;
@@ -78,7 +80,7 @@ pub enum SensorKind {
 }
 
 /// EXIF LightSource → correlated colour temperature, for DNG calibration illuminants.
-fn illuminant_temperature(code: u16) -> Option<f64> {
+pub(crate) fn illuminant_temperature(code: u16) -> Option<f64> {
     Some(match code {
         17 | 3 => 2856.0,
         24 => 3200.0,

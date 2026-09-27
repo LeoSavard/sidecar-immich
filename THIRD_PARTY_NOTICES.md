@@ -54,6 +54,14 @@ Jarzynski & Olano, "Hash Functions for GPU Rendering", JCGT 9(3), 2020. `shaders
 ## Krystek's Planckian locus approximation; Fritsch–Carlson monotone interpolation
 Published algorithms; implemented in `crates/color`.
 
+## Lens correction models and data
+- **lensfun database** — the lensfun contributors, CC BY-SA 3.0 (https://github.com/lensfun/lensfun, `data/db`).
+  Downloaded by the api at run time into the worker's cache and never shipped in the image. The distortion
+  (PTLens, poly3, poly5), lateral CA (poly3, linear) and vignetting (Pablo D'Angelo) models are implemented in
+  `crates/raw/src/lensfun.rs` from lensfun's published documentation; the LGPL-3.0 library is not used.
+- **PanoTools normalized radius** — the PanoTools wiki's definition of the lens correction model's radius.
+- **DNG opcodes** — `WarpRectilinear`, `FixVignetteRadial`, per Adobe's DNG Specification 1.7 (`crates/raw/src/lens.rs`).
+
 ## ExifTool — Perl licence (Artistic or GPL)
 Copyright Phil Harvey. Runs as a separate program in the image.
 

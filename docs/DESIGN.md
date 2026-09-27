@@ -14,7 +14,7 @@ Where the code differs from the text below, the code and these notes win.
 - **Proxies (milestone 2)** use LibRaw's half-size mode (2×2 binning, no interpolation): 0.3–0.5 s for a 45 MP NEF, ~2 s for a compressed RAF. The GPU demosaic of milestone 5 replaces this.
 - **XMP field names** follow the JSON parameters in PascalCase inside `sc:Sidecar/sc:Edit` (`sc:Ev`, `sc:TemperatureK`, …). The namespace URI is `https://sidecar.ls-tech.ca/ns/1.0/` and must never change.
 - **Library root:** the external library's template starts at `/mnt/storage/Photography/Library`.
-- **Known limitation:** Lightroom-merged panorama DNGs use a compression LibRaw 0.22 can't decode; Sidecar reports them as unsupported.
+- **Lightroom-merged panorama DNGs** in JPEG XL, which LibRaw 0.22 can't decode, are read by `sidecar_raw::linear_dng` (see below).
 - **GPU ingest (milestone 5):** vkdt's highlight pyramid and RCD are ported to WGSL; RCD is split into five full-texture passes instead of vkdt's shared-memory tiles. X-Trans proxies use 3×3 binning on the GPU; full-resolution X-Trans (export, loupe) still uses LibRaw's Markesteijn on the CPU — a WGSL port of LibRaw's code is the remaining step. LibRaw is built with OpenMP (a Fuji RAF opens in 0.2 s instead of 1.7 s).
 - **Export (milestone 6):** JPEG through `jpeg-encoder` (pure Rust, MIT/Apache + IJG) rather than mozjpeg. The worker streams NDJSON progress to the api, which relays it as SSE with `Last-Event-ID` replay. The outbox is reached through worker endpoints, so the api keeps `/cache` read-only.
 - **Detail (milestone 7):** denoise and sharpening are implemented from the published methods (à-trous wavelets with square-root variance stabilization and a per-image noise estimate; Richardson–Lucy on luminance), not ported — vkdt's denoise depends on per-camera noise profiles. The worker keeps the last two full-resolution buffers for loupe tiles.
@@ -39,6 +39,20 @@ Where the code differs from the text below, the code and these notes win.
   setting changes, on the server after denoise and sharpening, with loupe tiles cropping only the source the
   tile reads. A zoom about the optical centre keeps blank edges out of the frame. ExifTool reads the tags in
   the same run as the AF point; `META_REVISION` re-reads cached metadata without rebuilding proxies.
+- **lensfun for the rest:** the api fetches the database files from lensfun's repository on first start and
+  monthly (`[lensfun]` in `sidecar.toml`) and hands them to the worker, which has no internet route; cached
+  metadata is re-matched when a newer database arrives. Lenses are matched on ExifTool's `LensID` among
+  lenses that fit the body's mount, requiring the same focal range and maximum aperture. The crop factor is
+  lensfun's for the body, not ExifTool's: a ZV-1 writes a rounded "24 mm" equivalent, and that 6 % showed up
+  as the profile's radius being off against the camera's own JPEG. Only sensor mosaics get lensfun: a linear
+  DNG a program made (Lightroom's merges) was corrected by it already.
+- **JPEG XL linear DNGs:** Lightroom's panoramas since 2023 store linear RGB as JPEG XL tiles, which LibRaw
+  0.22 can't open; `sidecar_raw::linear_dng` reads the DNG structure and decodes them with `jxl-oxide`, a row
+  of tiles at a time in parallel, averaged down to the size asked for (a 40 MP merge: 2.7 s). The tiles are
+  tagged BT.2100 with the sRGB curve and must be rendered with a linear transfer to get the DNG's values back.
+  Every other Lightroom-made DNG in the library (deflate float HDR merges, lossy-JPEG panoramas, Enhanced
+  CFA) already decodes through LibRaw. Exports of merges wider than the GPU's texture limit are rendered at
+  that limit.
 - **Interaction:** slider rows allow vertical panning and claim a touch only after 4 px of sideways travel, so the tool panel scrolls. Holding a slider no longer hides the editor chrome — the histogram is exactly what you want to watch while dragging.
 
 ## 0. Summary

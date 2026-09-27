@@ -4,6 +4,7 @@
 pub mod config;
 pub mod export;
 pub mod immich;
+mod lensfun;
 pub mod resolve;
 pub mod session;
 pub mod store;
@@ -731,6 +732,7 @@ async fn preview(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Path(key):
 
 pub fn router(app: Arc<App>) -> Router {
     app.start_housekeeping();
+    app.start_lensfun_sync();
     let web = &app.config.server.web_root;
     let spa = ServeDir::new(web).fallback(ServeFile::new(web.join("index.html")));
     Router::new()
