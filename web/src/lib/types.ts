@@ -22,9 +22,27 @@ export type EditParams = {
 		denoiseLuminance: number;
 		denoiseChroma: number;
 	};
-	/** Absent or null means off (DESIGN.md §15); the editor has no lens controls yet, but carries it through. */
-	lens?: Record<string, unknown> | null;
+	/** Absent or null means off (DESIGN.md §15). */
+	lens?: Lens | null;
 };
+
+/** Mirrors `sidecar_color::params::Lens`: strengths 0…200, 100 being the profile's full correction. */
+export type Lens = { profile: string; distortion: number; lateralCa: number; vignetting: number };
+
+/** Mirrors `sidecar_color::lens::LensProfile`. Curves are `[radius, value]` points; radius 1 = half-diagonal. */
+export type LensProfile = {
+	id: string;
+	label: string;
+	center: [number, number];
+	distortion?: [number, number][] | null;
+	caRed?: [number, number][] | null;
+	caBlue?: [number, number][] | null;
+	vignetting?: [number, number][] | null;
+	required?: boolean;
+};
+
+/** Mirrors `sidecar_raw::lens::LensIdentity`. */
+export type LensIdentity = { lensId?: string | null; lensModel?: string | null; lensMake?: string | null; cropFactor?: number | null; focusDistanceM?: number | null };
 
 /** Mirrors `sidecar_xmp::history::Node`, plus the full edit and the exports made from it (`GET …/history`). */
 export type HistoryNode = {
@@ -65,6 +83,11 @@ export type Meta = {
 		color: CameraColor;
 		/** Where the camera aimed autofocus, normalized to the oriented image; absent if unknown. */
 		afPoint?: { x: number; y: number } | null;
+		/** Orientation LibRaw applies (bit set: 4 transpose, 2 flip vertically, 1 flip horizontally). */
+		orientationFlip?: number;
+		/** The lens correction the file carries itself, or the matched lensfun profile. */
+		lensProfile?: LensProfile | null;
+		lensIdentity?: LensIdentity | null;
 		/**
 		 * `developed` means a JPEG, HEIC, PNG or TIFF: already tone-mapped by something else, so it is developed
 		 * display-referred (identity at default settings), there is no clipped sensor data to recover, and white

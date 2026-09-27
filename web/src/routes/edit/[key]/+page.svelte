@@ -4,6 +4,7 @@
 	import { DevelopPass, requestDevice } from '$lib/gpu/develop';
 	import { CLIP_HIGHS, CLIP_LOWS, PEAKING, ViewPass, type Viewport } from '$lib/gpu/view';
 	import { HistogramPass, type HistogramData } from '$lib/gpu/histogram';
+	import { LensPass, correctedPoint } from '$lib/gpu/lens';
 	import { ColorPacker } from '$lib/color/pack';
 	import { api } from '$lib/api';
 	import { settings, SPACE_LABELS } from '$lib/settings';
@@ -18,10 +19,10 @@
 	import HistoryPanel from '$lib/ui/HistoryPanel.svelte';
 	import { CURVE_ANCHORS, PICKS, curveOffset, view as sliders, type Anchor } from '$lib/state/edit-view';
 	import { decimals, signed } from '$lib/ui/format';
-	import type { Band, DisplaySpace, EditParams, HistoryState, Meta, MixerBand } from '$lib/types';
+	import type { Band, DisplaySpace, EditParams, HistoryState, Lens, Meta, MixerBand } from '$lib/types';
 
 	type EditState = { edit: EditParams; etag: string; head: string; readOnly: boolean; writable?: boolean; exports: unknown[]; forked?: boolean };
-	type Section = 'wb' | 'light' | 'curve' | 'color' | 'detail' | 'history';
+	type Section = 'lens' | 'wb' | 'light' | 'curve' | 'color' | 'detail' | 'history';
 
 	const key = page.params.key!;
 	let canvas: HTMLCanvasElement;
@@ -92,6 +93,18 @@
 	let develop: DevelopPass;
 	let view: ViewPass;
 	let hist: HistogramPass;
+	let lensPass: LensPass;
+	/** The lens pass's outputs at proxy size — the photo and its focus mask — and what they were made from. */
+	let corrected: GPUTexture | undefined;
+	let correctedMask: GPUTexture | undefined;
+	let lensMadeFrom = '';
+	/** The uniforms the corrected proxy was made with: they also move markers set in sensor geometry. */
+	let lensUniform: Uint8Array | undefined;
+	/**
+	 * Lens correction switched on by default for a photo never edited, without counting as a change: opening a
+	 * photo must not write a sidecar. It is saved with the first real change, or before an export.
+	 */
+	let lensDefaulted = false;
 	let packer: ColorPacker;
 	let display: DisplaySpace = 'srgb';
 	let developDirty = true;
@@ -128,6 +141,7 @@
 		}
 		if (!develop?.output) return;
 		if (developDirty) {
+			correctLens();
 			const packed = repack();
 			develop.setUniforms(packed.uniform);
 			develop.setToneLut(packed.lut);
@@ -136,7 +150,55 @@
 			hist.run(develop.output, histStride, (h) => (histogram = h));
 		}
 		view.render(develop.output, canvas, viewport, (clipHigh ? CLIP_HIGHS : 0) | (clipLow ? CLIP_LOWS : 0) | (peaking ? PEAKING : 0));
-		markerPos = imageToScreen(meta.info.afPoint);
+		markerPos = imageToScreen(afPoint());
+	}
+
+	/** Width ÷ height before orientation: where the photo's edges are for the lens pass. */
+	const sensorAspect = (info: Meta['info']) => ((info.orientationFlip ?? 0) & 4 ? info.height / info.width : info.width / info.height);
+
+	/**
+	 * Run the lens pass over the proxy and its focus mask when the correction on screen changed — a lens
+	 * setting, the version being compared, a new proxy — and point develop and the view at the results. Cheap
+	 * to call on every develop: it does nothing unless something it depends on moved.
+	 */
+	function correctLens() {
+		const proxy = develop.proxy;
+		const profile = meta?.info.lensProfile;
+		const lens = before ? compareEdit().lens : edit?.lens;
+		const mask = view.focusMaskSource;
+		const madeFrom = JSON.stringify([lens, proxy?.width, proxy?.height, mask.width, mask.height, profile?.id]);
+		if (madeFrom === lensMadeFrom) return;
+		lensMadeFrom = madeFrom;
+		const flip = meta!.info.orientationFlip ?? 0;
+		lensUniform = proxy && profile && lens ? packer.packLens(profile, $state.snapshot(lens), sensorAspect(meta!.info), [proxy.width, proxy.height], flip) : undefined;
+		if (!proxy || !lensUniform) {
+			develop.setInput(undefined);
+			view.useFocusMask(undefined);
+			return;
+		}
+		if (corrected?.width !== proxy.width || corrected?.height !== proxy.height) {
+			corrected?.destroy();
+			corrected = lensPass.target(proxy, 'lens corrected');
+		}
+		lensPass.run(proxy, corrected, lensUniform);
+		develop.setInput(corrected);
+		// The mask moves with the picture, but isn't a brightness: no vignetting gain on it.
+		const maskUniform = mask.width > 1 ? packer.packLens(profile!, { ...$state.snapshot(lens!), vignetting: 0 }, sensorAspect(meta!.info), [mask.width, mask.height], flip) : undefined;
+		if (maskUniform) {
+			if (correctedMask?.width !== mask.width || correctedMask?.height !== mask.height) {
+				correctedMask?.destroy();
+				correctedMask = lensPass.target(mask, 'lens corrected focus mask');
+			}
+			lensPass.run(mask, correctedMask, maskUniform);
+			view.useFocusMask(correctedMask);
+		} else view.useFocusMask(undefined);
+	}
+
+	/** The AF point where it sits in the picture on screen — moved by the lens correction when one is on. */
+	function afPoint() {
+		const p = meta?.info.afPoint;
+		const proxy = develop?.proxy;
+		return p && proxy ? correctedPoint(lensUniform, proxy.width, proxy.height, p) : p;
 	}
 
 	/** Where the photo sits on the canvas, in canvas pixels, at the current zoom and pan; `fit` is its scale at zoom 1. */
@@ -160,7 +222,7 @@
 
 	/** Move the loupe to the AF point and make sure it's visible. */
 	function jumpToAfPoint() {
-		const point = meta?.info.afPoint;
+		const point = afPoint();
 		if (!point) return;
 		loupeCenter = [point.x, point.y];
 		section = 'detail';
@@ -261,6 +323,7 @@
 			etag = state.etag;
 			head = state.head;
 			forked ||= !!state.forked;
+			lensDefaulted = false;
 			// Only what was sent is saved. A slider moved while the request was out used to be marked saved
 			// here, and its draft cleared, so the change was lost without a word.
 			if (JSON.stringify($state.snapshot(edit)) === sent) {
@@ -281,6 +344,8 @@
 	/** Save if needed and return the ETag an export should pin, or null when saving failed. */
 	async function prepareExport(): Promise<string | null> {
 		if (readOnly) return etag;
+		// What's on screen is what gets exported: a correction switched on by default is saved first.
+		if (lensDefaulted && edit?.lens) dirty = true;
 		// Always through the queue: a save already out has to land before its ETag is the one to pin.
 		await commit();
 		return dirty ? null : etag;
@@ -393,6 +458,12 @@
 				dirty = true;
 				restoredDraft = true;
 			}
+			// A photo never edited starts with the correction its file (or lensfun) provides (DESIGN.md §15).
+			const profile = meta!.info.lensProfile;
+			if (profile && !edit!.lens && head === 'original' && !restoredDraft && !readOnly) {
+				edit!.lens = { profile: profile.id, distortion: 100, lateralCa: 100, vignetting: 100 };
+				lensDefaulted = true;
+			}
 			history = new History($state.snapshot(edit));
 			const prefs = await settings();
 			display = prefs.outputSpace;
@@ -405,7 +476,7 @@
 				status = '';
 				return;
 			}
-			[develop, view, hist] = await Promise.all([DevelopPass.create(device), ViewPass.create(device, canvas, display === 'display-p3'), HistogramPass.create(device)]);
+			[develop, view, hist, lensPass] = await Promise.all([DevelopPass.create(device), ViewPass.create(device, canvas, display === 'display-p3'), HistogramPass.create(device), LensPass.create(device)]);
 			device.lost.then((info) => (error = `The GPU was reset (${info.reason}). Reload to continue — your edits are kept as a draft.`));
 			const phone = matchMedia('(pointer: coarse)').matches;
 			histStride = phone ? 2 : 1;
@@ -568,6 +639,20 @@
 		changed();
 	}
 
+	function setLens(on: boolean) {
+		const profile = meta?.info.lensProfile;
+		if (!edit || !profile) return;
+		edit.lens = on ? { profile: profile.id, distortion: 100, lateralCa: 100, vignetting: 100 } : null;
+		changed();
+		committed();
+	}
+
+	function setLensStrength(field: keyof Omit<Lens, 'profile'>, v: number) {
+		if (!edit?.lens) return;
+		edit.lens[field] = v;
+		changed();
+	}
+
 	const shutter = (s: number) => (s >= 1 ? `${s}s` : `1/${Math.round(1 / s)}`);
 
 	/** Camera line, skipping whatever this file didn't record — plenty of JPEGs carry almost no EXIF. */
@@ -583,6 +668,7 @@
 	const TEMP_TRACK = 'linear-gradient(90deg,#5f7fb6,#9aa0a6 45%,#c9a15f)';
 	const TINT_TRACK = 'linear-gradient(90deg,#6f9f6f,#9aa0a6 50%,#b07aa6)';
 	const sections: { id: Section; label: string; short: string }[] = [
+		{ id: 'lens', label: 'Lens', short: 'Lens' },
 		{ id: 'wb', label: 'White balance', short: 'WB' },
 		{ id: 'light', label: 'Light', short: 'Light' },
 		{ id: 'curve', label: 'Curve', short: 'Curve' },
@@ -594,6 +680,40 @@
 
 <svelte:head><title>{meta?.fileName ?? 'Sidecar'}</title></svelte:head>
 <svelte:window onkeydown={keydown} />
+
+{#snippet lensSection()}
+	{#if edit && meta}
+		{@const profile = meta.info.lensProfile}
+		{@const name = meta.info.lensIdentity?.lensId ?? meta.info.lensIdentity?.lensModel ?? meta.info.lens}
+		<div class="grid gap-2">
+			{#if name}<p class="text-xs text-fg-2">{name}</p>{/if}
+			{#if !profile}
+				<p class="text-xs text-fg-2">
+					{developed ? 'This picture was already developed, lens and all.' : 'No correction for this lens: the file carries none, and no lens database profile matches it yet.'}
+				</p>
+			{:else}
+				<div class="flex items-center justify-between text-xs">
+					<span class="text-fg-2">{profile.label}</span>
+					<button type="button" aria-pressed={!!edit.lens} class="rounded-full px-3 py-1 {edit.lens ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" onclick={() => setLens(!edit!.lens)}>{edit.lens ? 'On' : 'Off'}</button>
+				</div>
+				{#if profile.required && !edit.lens}
+					<p class="text-xs text-warning">This lens is designed to be corrected in software. Without it the frame shows distortion the camera never showed.</p>
+				{/if}
+				{#if edit.lens}
+					{#if profile.distortion}
+						<Slider id="lens-distortion" label="Distortion" value={edit.lens.distortion} min={0} max={200} defaultValue={100} format={(v) => `${decimals(v)} %`} onchange={(v) => setLensStrength('distortion', v)} oncommit={committed} />
+					{/if}
+					{#if profile.caRed || profile.caBlue}
+						<Slider id="lens-ca" label="Chromatic aberration" value={edit.lens.lateralCa} min={0} max={200} defaultValue={100} format={(v) => `${decimals(v)} %`} onchange={(v) => setLensStrength('lateralCa', v)} oncommit={committed} />
+					{/if}
+					{#if profile.vignetting}
+						<Slider id="lens-vignetting" label="Vignetting" value={edit.lens.vignetting} min={0} max={200} defaultValue={100} format={(v) => `${decimals(v)} %`} onchange={(v) => setLensStrength('vignetting', v)} oncommit={committed} />
+					{/if}
+				{/if}
+			{/if}
+		</div>
+	{/if}
+{/snippet}
 
 {#snippet wbSection()}
 	{#if edit}
@@ -777,7 +897,7 @@
 			</nav>
 
 			<div class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-6 pt-1">
-				{#if section === 'wb'}{@render wbSection()}{:else if section === 'light'}{@render lightSection()}{:else if section === 'curve'}{@render curveSection()}{:else if section === 'color'}{@render colorSection()}{:else if section === 'history'}{@render historySection()}{:else}{@render detailSection()}{/if}
+				{#if section === 'lens'}{@render lensSection()}{:else if section === 'wb'}{@render wbSection()}{:else if section === 'light'}{@render lightSection()}{:else if section === 'curve'}{@render curveSection()}{:else if section === 'color'}{@render colorSection()}{:else if section === 'history'}{@render historySection()}{:else}{@render detailSection()}{/if}
 			</div>
 
 			{/if}
@@ -787,7 +907,7 @@
 					<details class="border-t border-line py-2" open={s.id === 'wb' || s.id === 'light'} ontoggle={(e) => s.id === 'detail' && (detailOpen = (e.currentTarget as HTMLDetailsElement).open)}>
 						<summary class="cursor-pointer py-1 text-xs font-medium">{s.label}</summary>
 						<div class="pt-2">
-							{#if s.id === 'wb'}{@render wbSection()}{:else if s.id === 'light'}{@render lightSection()}{:else if s.id === 'curve'}{@render curveSection()}{:else if s.id === 'color'}{@render colorSection()}{:else if s.id === 'history'}{@render historySection()}{:else if detailOpen}{@render detailSection()}{/if}
+							{#if s.id === 'lens'}{@render lensSection()}{:else if s.id === 'wb'}{@render wbSection()}{:else if s.id === 'light'}{@render lightSection()}{:else if s.id === 'curve'}{@render curveSection()}{:else if s.id === 'color'}{@render colorSection()}{:else if s.id === 'history'}{@render historySection()}{:else if detailOpen}{@render detailSection()}{/if}
 						</div>
 					</details>
 				{/each}

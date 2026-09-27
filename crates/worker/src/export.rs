@@ -6,6 +6,7 @@
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use sidecar_color::camera::CameraColor;
+use sidecar_color::lens::{LensParams, LensProfile};
 use sidecar_color::{DisplaySpace, EditParams, Packed, SourceKind};
 use sidecar_engine::{MosaicInput, RgbaF32};
 use sidecar_raw::RawFile;
@@ -62,6 +63,7 @@ pub struct Kit {
     pub ingest: sidecar_engine::Ingest,
     pub develop: sidecar_engine::DevelopPass,
     pub detail: sidecar_engine::detail::Detail,
+    pub lens: sidecar_engine::lens::LensPass,
 }
 
 pub fn detail_settings(edit: &EditParams) -> sidecar_engine::detail::DetailSettings {
@@ -75,21 +77,59 @@ pub fn detail_settings(edit: &EditParams) -> sidecar_engine::detail::DetailSetti
     }
 }
 
-/// How a photo's pixels are developed: the colour model, and whether they are sensor light or a picture
-/// something else already rendered (`SourceKind`, which picks the develop pass's tone path).
+/// How a photo's pixels are developed: the colour model, whether they are sensor light or a picture
+/// something else already rendered (`SourceKind`, which picks the develop pass's tone path), and the lens
+/// correction the file carries.
 #[derive(Clone, Debug)]
 pub struct Rendering {
     pub color: CameraColor,
     pub kind: SourceKind,
+    pub lens: Option<LensProfile>,
+    /// Width ÷ height before orientation: where the frame's edges are for the lens pass's zoom.
+    pub sensor_aspect: f64,
+    /// The orientation the texture being corrected already has, relative to the sensor: the RAW path's
+    /// full-resolution texture is unoriented (0), a proxy or LibRaw's X-Trans decode is oriented.
+    pub lens_flip: i32,
 }
 
 impl Rendering {
+    /// For a texture oriented as the file says — a proxy.
     pub fn of(info: &sidecar_raw::RawInfo) -> Self {
-        Self { color: info.color.clone(), kind: info.source_kind }
+        let [w, h] = info.sensor_size();
+        Self {
+            color: info.color.clone(),
+            kind: info.source_kind,
+            lens: info.lens_profile.clone(),
+            sensor_aspect: if h > 0 { w as f64 / h as f64 } else { 1.5 },
+            lens_flip: info.orientation_flip,
+        }
+    }
+
+    /// A picture something else rendered: no sensor data and nothing about its lens left to correct.
+    pub fn developed(color: CameraColor) -> Self {
+        Self { color, kind: SourceKind::Developed, lens: None, sensor_aspect: 1.5, lens_flip: 0 }
     }
 
     pub fn pack(&self, edit: &EditParams, display: DisplaySpace) -> Packed {
         sidecar_color::pack(edit, &self.color, self.kind, display)
+    }
+
+    /// The lens pass's uniforms for this edit over a texture holding the whole frame at `frame` pixels, with
+    /// the output and input textures placed at `out_offset` and `in_offset` in it. `None` when there is no
+    /// profile, the edit leaves lens correction off, or every strength is zero.
+    pub fn lens_params(&self, edit: &EditParams, frame: [u32; 2], out_offset: [f64; 2], in_offset: [f64; 2]) -> Option<LensParams> {
+        let (profile, lens) = (self.lens.as_ref()?, edit.lens.as_ref()?);
+        let e = sidecar_color::lens::effective(profile, lens, self.sensor_aspect);
+        (e.flags != 0).then(|| sidecar_color::lens::pack(&e, profile.center, frame, self.lens_flip, out_offset, in_offset))
+    }
+
+    /// Correct a whole-frame texture, if the edit asks for it.
+    pub fn correct(&self, kit: &Kit, edit: &EditParams, source: wgpu::Texture) -> wgpu::Texture {
+        let frame = [source.width(), source.height()];
+        match self.lens_params(edit, frame, [0.0; 2], [0.0; 2]) {
+            Some(p) => kit.lens.apply(&kit.gpu, &source, &p, frame),
+            None => source,
+        }
     }
 }
 
@@ -101,12 +141,16 @@ pub fn full_source_for(kit: &Kit, path: &Path) -> Result<(wgpu::Texture, i32, Re
         let exif = sidecar_raw::decoded::exif(path);
         let decoded = sidecar_raw::decoded::decode(path, exif.orientation_flip, exif.space)?;
         let img = RgbaF32 { width: decoded.width, height: decoded.height, data: decoded.rgba };
-        let rendering = Rendering { color: decoded.space.camera_color(), kind: SourceKind::Developed };
+        let rendering = Rendering::developed(decoded.space.camera_color());
         return Ok((sidecar_engine::upload_rgba16(&kit.gpu, &img), decoded.pending_flip, rendering));
     }
     let mut raw = RawFile::open(path)?;
-    let rendering = Rendering::of(&raw.info());
+    let mut info = raw.info();
+    sidecar_raw::read_extras(path, &mut info);
+    let mut rendering = Rendering::of(&info);
     let (texture, flip) = full_source(kit, &mut raw)?;
+    // `full_source` either leaves the orientation to apply (the GPU demosaic) or has applied it (LibRaw).
+    rendering.lens_flip = if flip == 0 { info.orientation_flip } else { 0 };
     Ok((texture, flip, rendering))
 }
 
@@ -231,6 +275,10 @@ pub fn render(kit: &Kit, req: &RenderRequest, outbox: &Path, tx: &Sender<Progres
         stage(tx, "detail", 0.35);
         let sigma = kit.detail.noise_sigma(&kit.gpu, &source)?;
         source = kit.detail.apply(&kit.gpu, source, sigma, &settings);
+    }
+    if req.edit.lens.is_some() {
+        stage(tx, "lens", 0.42);
+        source = rendering.correct(kit, &req.edit, source);
     }
 
     stage(tx, "develop", 0.45);

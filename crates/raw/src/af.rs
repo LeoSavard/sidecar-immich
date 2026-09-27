@@ -10,7 +10,6 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::path::Path;
 
 /// Normalized to the oriented image, 0…1, top-left origin — the same space as the loupe's `center`
 /// (DESIGN.md §5). The tag says where the camera *aimed*, not whether it succeeded.
@@ -24,14 +23,9 @@ pub struct AfPoint {
 /// The ExifTool tags the AF point is read from, for a caller already running ExifTool to ask for as well.
 pub const TAGS: [&str; 4] = ["-FocusLocation", "-FocusPixel", "-ExifImageWidth", "-ExifImageHeight"];
 
-/// `None` for manual focus, focus-and-recompose, an adapted lens, or a maker/tag this doesn't cover.
-pub fn af_point(path: &Path, orientation_flip: i32) -> Option<AfPoint> {
-    let output = std::process::Command::new("exiftool").arg("-j").args(TAGS).arg(path).output().ok()?;
-    let json: Value = serde_json::from_slice(&output.stdout).ok()?;
-    from_tags(json.as_array()?.first()?, orientation_flip)
-}
-
-/// The AF point from one file's ExifTool JSON object, `-n` or not (checked: these tags print the same).
+/// The AF point from one file's ExifTool JSON object, `-n` or not (checked: these tags print the same). `None`
+/// for manual focus, focus-and-recompose, an adapted lens, or a maker/tag this doesn't cover. Read by
+/// `crate::read_extras`, in the same ExifTool run as the lens tags.
 pub fn from_tags(tags: &Value, orientation_flip: i32) -> Option<AfPoint> {
     let (u, v) = sony_focus_location(tags).or_else(|| fujifilm_focus_pixel(tags))?;
     Some(oriented_point(u, v, orientation_flip))

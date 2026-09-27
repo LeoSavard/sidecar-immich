@@ -12,6 +12,7 @@ half.workspace = true
 pollster.workspace = true
 wgpu.workspace = true
 sidecar-shaders.workspace = true
+sidecar-color.workspace = true
 
 [dev-dependencies]
 naga.workspace = true

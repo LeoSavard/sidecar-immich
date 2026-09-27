@@ -41,6 +41,11 @@ pub const DEFAULT_EDGE: u32 = 2560;
 /// mirrored EXIF orientations (2, 4, 5, 7), which every earlier generation left upright.
 pub const INGEST_GENERATION: u32 = 3;
 
+/// What cached metadata was *read* by, apart from the pixels: bump when `Meta` gains something a re-read of
+/// the same file would now fill in, so it is read again without rebuilding a single proxy. 1 adds the lens
+/// correction the file carries and the lens's identity.
+pub const META_REVISION: u32 = 1;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Meta {
@@ -52,6 +57,9 @@ pub struct Meta {
     /// cached before this field existed read as 0 and are re-read once.
     #[serde(default)]
     pub generation: u32,
+    /// `META_REVISION` when this was read; 0 in metadata cached before it existed.
+    #[serde(default)]
+    pub revision: u32,
     pub info: RawInfo,
 }
 
@@ -127,7 +135,8 @@ impl Worker {
             let ingest = sidecar_engine::Ingest::new(&gpu)?;
             let develop = sidecar_engine::DevelopPass::new(&gpu)?;
             let detail = sidecar_engine::detail::Detail::new(&gpu)?;
-            Ok(export::Kit { gpu, ingest, develop, detail })
+            let lens = sidecar_engine::lens::LensPass::new(&gpu)?;
+            Ok(export::Kit { gpu, ingest, develop, detail, lens })
         });
         let gpu = match kit {
             Ok(k) => {
@@ -184,6 +193,7 @@ impl Worker {
         if let Ok(bytes) = tokio::fs::read(&meta_path).await
             && let Ok(meta) = serde_json::from_slice::<Meta>(&bytes)
             && meta.generation == INGEST_GENERATION
+            && meta.revision == META_REVISION
         {
             return Ok(meta);
         }
@@ -195,7 +205,7 @@ impl Worker {
                 sidecar_raw::decoded::info(&sidecar_raw::decoded::exif(&p))
             } else {
                 let mut info = RawFile::metadata(&p)?;
-                info.af_point = sidecar_raw::af::af_point(&p, info.orientation_flip);
+                sidecar_raw::read_extras(&p, &mut info);
                 info
             };
             Ok(Meta {
@@ -203,6 +213,7 @@ impl Worker {
                 file_name: p.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default(),
                 process_version: PROCESS_VERSION,
                 generation: INGEST_GENERATION,
+                revision: META_REVISION,
                 info,
             })
         })
@@ -414,6 +425,7 @@ pub struct PreviewRequest {
 fn preview_jpeg(kit: &export::Kit, rendering: &export::Rendering, req: &PreviewRequest, proxy: (u32, u32, Bytes)) -> Result<Vec<u8>> {
     let (width, height, bytes) = proxy;
     let source = sidecar_engine::upload_rgba16(&kit.gpu, &sidecar_engine::RgbaF32::from_f16_bytes(width, height, &bytes));
+    let source = rendering.correct(kit, &req.edit, source);
     let packed = rendering.pack(&req.edit, req.color_space);
     let developed = kit.develop.render(&kit.gpu, &source, &packed.uniform, &packed.lut)?;
     let img = sidecar_engine::read_rgba16(&kit.gpu, &developed)?;
@@ -488,20 +500,42 @@ fn loupe_png(w: &Worker, kit: &export::Kit, req: &LoupeRequest) -> Result<Vec<u8
     let (ux, uy, uw, uh) = sidecar_engine::source_rect(flip, sw, sh, (ox, oy, tw, th));
     let settings = export::detail_settings(&req.edit);
     let m = settings.margin();
-    let (cx, cy) = (ux.saturating_sub(m), uy.saturating_sub(m));
-    let (cw, ch) = ((ux + uw + m).min(sw) - cx, (uy + uh + m).min(sh) - cy);
-    let tile = kit.detail.crop(&kit.gpu, &source, cx, cy, cw, ch);
-    let tile = kit.detail.apply(&kit.gpu, tile, sigma, &settings);
     let packed = rendering.pack(&req.edit, req.color_space);
-    let developed = kit.develop.render(&kit.gpu, &tile, &packed.uniform, &packed.lut)?;
-    let img = sidecar_engine::read_rgba16(&kit.gpu, &developed)?;
-    // Cut the margin, then orient.
-    let (mx, my) = (ux - cx, uy - cy);
-    let mut data = Vec::with_capacity((uw * uh * 4) as usize);
-    for y in 0..uh {
-        let row = ((my + y) * cw + mx) as usize * 4;
-        data.extend_from_slice(&img.data[row..row + uw as usize * 4]);
-    }
+    let data = match rendering.lens_params(&req.edit, [sw, sh], [ux as f64, uy as f64], [0.0; 2]) {
+        // The tile reads a region of the source the lens decides: find it, cut it with the detail filters'
+        // margin and the bicubic read's reach around it, denoise and sharpen that, then correct it into the
+        // tile — the order export uses, on less of the image.
+        Some(frame) => {
+            let (x0, y0, x1, y1) = sidecar_color::lens::source_bounds(&frame, (ux, uy, uw, uh));
+            let reach = m as f64 + 3.0;
+            let cx = (x0.floor() - reach).clamp(0.0, (sw - 1) as f64) as u32;
+            let cy = (y0.floor() - reach).clamp(0.0, (sh - 1) as f64) as u32;
+            let cw = ((x1.ceil() + reach).clamp(1.0, sw as f64) as u32).max(cx + 1) - cx;
+            let ch = ((y1.ceil() + reach).clamp(1.0, sh as f64) as u32).max(cy + 1) - cy;
+            let region = kit.detail.crop(&kit.gpu, &source, cx, cy, cw, ch);
+            let region = kit.detail.apply(&kit.gpu, region, sigma, &settings);
+            let params = rendering.lens_params(&req.edit, [sw, sh], [ux as f64, uy as f64], [cx as f64, cy as f64]).unwrap_or(frame);
+            let tile = kit.lens.apply(&kit.gpu, &region, &params, [uw, uh]);
+            let developed = kit.develop.render(&kit.gpu, &tile, &packed.uniform, &packed.lut)?;
+            sidecar_engine::read_rgba16(&kit.gpu, &developed)?.data
+        }
+        None => {
+            let (cx, cy) = (ux.saturating_sub(m), uy.saturating_sub(m));
+            let (cw, ch) = ((ux + uw + m).min(sw) - cx, (uy + uh + m).min(sh) - cy);
+            let tile = kit.detail.crop(&kit.gpu, &source, cx, cy, cw, ch);
+            let tile = kit.detail.apply(&kit.gpu, tile, sigma, &settings);
+            let developed = kit.develop.render(&kit.gpu, &tile, &packed.uniform, &packed.lut)?;
+            let img = sidecar_engine::read_rgba16(&kit.gpu, &developed)?;
+            // Cut the margin.
+            let (mx, my) = (ux - cx, uy - cy);
+            let mut data = Vec::with_capacity((uw * uh * 4) as usize);
+            for y in 0..uh {
+                let row = ((my + y) * cw + mx) as usize * 4;
+                data.extend_from_slice(&img.data[row..row + uw as usize * 4]);
+            }
+            data
+        }
+    };
     let img = sidecar_engine::RgbaF32 { width: uw, height: uh, data }.oriented(flip);
     let rgb: Vec<u8> = img.data.as_chunks::<4>().0.iter().flat_map(|p| [0, 1, 2].map(|c| (export::srgb_encode(p[c]) * 255.0 + 0.5) as u8)).collect();
     let mut out = Vec::new();
@@ -692,7 +726,7 @@ mod tests {
     fn develop_developed(edit: &sidecar_color::EditParams, card: &sidecar_engine::RgbaF32) -> Option<sidecar_engine::RgbaF32> {
         let gpu = sidecar_engine::Gpu::new_headless().ok()?;
         let pass = sidecar_engine::DevelopPass::new(&gpu).unwrap();
-        let rendering = export::Rendering { color: sidecar_raw::SourceSpace::DisplayP3.camera_color(), kind: sidecar_color::SourceKind::Developed };
+        let rendering = export::Rendering::developed(sidecar_raw::SourceSpace::DisplayP3.camera_color());
         let packed = rendering.pack(edit, sidecar_color::DisplaySpace::DisplayP3);
         Some(pass.run(&gpu, card, &packed.uniform, &packed.lut).unwrap())
     }

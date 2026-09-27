@@ -21,3 +21,4 @@ sidecar-color.workspace = true
 sidecar-engine.workspace = true
 sidecar-raw = { path = "../raw" }
 sidecar-shaders.workspace = true
+zune-jpeg.workspace = true

@@ -1982,6 +1982,7 @@ dependencies = [
 name = "sidecar-color-wasm"
 version = "0.3.0"
 dependencies = [
+ "bytemuck",
  "serde",
  "serde_json",
  "sidecar-color",
@@ -2001,6 +2002,7 @@ dependencies = [
  "sidecar-engine",
  "sidecar-raw",
  "sidecar-shaders",
+ "zune-jpeg",
 ]
 
 [[package]]
@@ -2012,6 +2014,7 @@ dependencies = [
  "half",
  "naga",
  "pollster",
+ "sidecar-color",
  "sidecar-shaders",
  "wgpu",
 ]
@@ -2028,6 +2031,7 @@ name = "sidecar-raw"
 version = "0.3.0"
 dependencies = [
  "anyhow",
+ "base64",
  "png",
  "serde",
  "serde_json",

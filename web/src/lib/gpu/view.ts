@@ -25,6 +25,8 @@ export class ViewPass {
 	private boundTexture?: GPUTexture;
 	private boundFocusMask?: GPUTexture;
 	private focusMask: GPUTexture;
+	/** The mask as decoded, before any lens correction; `focusMask` is what the view samples. */
+	private focusSource: GPUTexture;
 	private params = new ArrayBuffer(80);
 
 	private constructor(
@@ -39,6 +41,17 @@ export class ViewPass {
 		// Placeholder until loadFocusMask() lands the real one; never triggers peaking (0 < any threshold > 0).
 		this.focusMask = device.createTexture({ label: 'focus mask placeholder', size: [1, 1], format: 'r8unorm', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
 		device.queue.writeTexture({ texture: this.focusMask }, new Uint8Array([0]), {}, [1, 1]);
+		this.focusSource = this.focusMask;
+	}
+
+	/** The focus mask in sensor geometry, for the lens pass to warp. */
+	get focusMaskSource(): GPUTexture {
+		return this.focusSource;
+	}
+
+	/** Sample `texture` (a lens-corrected copy of the mask) as the focus mask; `undefined` restores the original. */
+	useFocusMask(texture?: GPUTexture) {
+		this.focusMask = texture ?? this.focusSource;
 	}
 
 	/** Decode a focus_mask PNG (grayscale, from `/api/assets/{key}/focus`) and upload it as `r8unorm`. */
@@ -53,9 +66,10 @@ export class ViewPass {
 		// Grayscale PNGs decode to RGBA with R = G = B; take the one channel we need.
 		const gray = new Uint8Array(width * height);
 		for (let i = 0; i < gray.length; i++) gray[i] = data[i * 4];
-		this.focusMask.destroy();
-		this.focusMask = this.device.createTexture({ label: 'focus mask', size: [width, height], format: 'r8unorm', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
-		this.device.queue.writeTexture({ texture: this.focusMask }, gray, { bytesPerRow: width }, [width, height]);
+		this.focusSource.destroy();
+		this.focusSource = this.device.createTexture({ label: 'focus mask', size: [width, height], format: 'r8unorm', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+		this.device.queue.writeTexture({ texture: this.focusSource }, gray, { bytesPerRow: width }, [width, height]);
+		this.focusMask = this.focusSource;
 	}
 
 	static async create(device: GPUDevice, canvas: HTMLCanvasElement, displayP3: boolean): Promise<ViewPass> {

@@ -25,6 +25,20 @@ Where the code differs from the text below, the code and these notes win.
 - **Output space is a user setting** (§11), not a guess from `matchMedia`. It drives the develop uniform, the canvas, the loupe request and the export default together; the export sheet still overrides it for one export. The editor previewing in P3 while exports defaulted to sRGB was a real trap: saturated reds fit on screen and clipped in the file.
 - **Tint direction:** the slider names what happens to the *image*, as every editor does. Positive tint moves the assumed illuminant toward green so the photo goes magenta. It shipped inverted and is fixed; `positive_tint_moves_the_illuminant_toward_green` pins it.
 - **Tone curve, measured:** the logistic base curve starts shouldering immediately above middle grey — log-log slope 0.80 at +1 EV, 0.57 at +2 EV, 0.40 at +2.5 EV. Raising exposure therefore costs upper-midtone texture (0.73× the local contrast of the unedited render in one real case, measured as mean |∇ log Y|). The underlying constraint is headroom: sRGB holds 2.47 stops above grey while the default `whiteEv` asks the curve to fit 4.5. Lowering Whites is the working answer; replacing the curve is on the roadmap, with a candidate patch measured and rejected for regressing shadow contrast.
+- **Lens correction (§15), from the file first:** a survey of this library found who writes what. Sony ARW
+  (ZV-1, ILCE-7RM4) carries distortion, CA and vignetting tables; Fujifilm RAF (X100F) carries CA and
+  vignetting; Lightroom's DNGs carry `WarpRectilinear`/`FixVignetteRadial` opcodes; Nikon DSLRs, Canon, Olympus
+  and Panasonic carry only on/off flags or unverified tables, and phones only `GainMap` shading. Each reading
+  was checked against a second source rather than assumed — Sony distortion and CA against Lightroom's opcodes
+  for the same exposures (within a pixel) and against the camera's own JPEG (`sidecar-dev camera-jpeg`: 36 of
+  36 frames align better through the table), Fujifilm vignetting against Lightroom's to 0.3 %. Sony's
+  vignetting table is left unused: the ZV-1 writes shading-corrected sensor data (its JPEG adds 0.00 EV at the
+  corners where the table asks for 0.3–0.8), so applying it would correct twice. Everything converts into
+  one radial model (`sidecar_color::lens`), sampled into 64 knots for a separate lens pass
+  (`shaders/client/lens.wgsl`, bicubic reads) that runs before develop — in the browser only when a lens
+  setting changes, on the server after denoise and sharpening, with loupe tiles cropping only the source the
+  tile reads. A zoom about the optical centre keeps blank edges out of the frame. ExifTool reads the tags in
+  the same run as the AF point; `META_REVISION` re-reads cached metadata without rebuilding proxies.
 - **Interaction:** slider rows allow vertical panning and claim a touch only after 4 px of sideways travel, so the tool panel scrolls. Holding a slider no longer hides the editor chrome — the histogram is exactly what you want to watch while dragging.
 
 ## 0. Summary
@@ -882,11 +896,11 @@ After V1: lens correction, then crop and straighten, then local masks (§15).
 
 | Feature | Preview (phone) | Export (server) | Stored as |
 |---|---|---|---|
-| Lens correction — distortion, lateral CA, vignetting | Vignetting as a gain before WB; distortion and CA as a coordinate remap when sampling `sourceTex`, from a displacement texture | Same WGSL, after denoise and before develop | `sc:Lens` — profile, per-correction amounts |
+| Lens correction — distortion, lateral CA, vignetting | A lens pass over the proxy, run when a lens setting changes: bicubic remap per channel and a vignetting gain, into the texture develop reads | Same WGSL, after denoise and before develop | `sc:Lens` — profile, per-correction amounts |
 | Crop and straighten | Composed into the view pass `geometry` matrix; the histogram counts only pixels inside the crop | Before resampling to `longEdge` | `sc:Crop` — angle and edges, normalized to the lens-corrected image. An existing Immich crop on the RAW can be offered once as a starting point. |
 | Local masks — linear and radial gradients, brush, subject/sky | Second bind group in the develop pass: each module's inputs blend by mask weight | Same shaders at full resolution | `sc:Masks` — shapes plus adjustments named like the global ones |
 
-**Lens correction.** Profiles come from DNG opcodes when the file carries them (iPhone ProRAW does), otherwise from the lensfun database, matched on the EXIF lens model. The models are reimplemented from lensfun's documentation, and the database (CC BY-SA 3.0) is downloaded on first use, not shipped (§12). Absent `sc:Lens` means off, so photos edited in V1 render unchanged; new edits default to on.
+**Lens correction.** Profiles come from the file when it carries one — DNG opcodes (iPhone ProRAW and Lightroom's DNGs), Sony's and Fujifilm's own tables, each verified as the build log describes — otherwise from the lensfun database, matched on the lens ExifTool identifies. The models are reimplemented from lensfun's documentation, and the database (CC BY-SA 3.0) is downloaded on first use, not shipped (§12). Absent `sc:Lens` means off, so photos edited in V1 render unchanged; new edits default to on.
 
 **Masks.**
 

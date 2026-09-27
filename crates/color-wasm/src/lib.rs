@@ -81,6 +81,55 @@ pub unsafe extern "C" fn sc_pack(ptr: *const u8, len: usize) -> *const u8 {
     }
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LensRequest {
+    profile: sidecar_color::lens::LensProfile,
+    lens: sidecar_color::params::Lens,
+    /// Width ÷ height before orientation.
+    sensor_aspect: f64,
+    /// The proxy's size, and the orientation it already has.
+    frame: [u32; 2],
+    flip: i32,
+}
+
+/// Lens-pass uniforms for the proxy: `[u32 len][1,072 bytes]`, len 0 when nothing is to be corrected (no
+/// profile curve survives the strengths), or len 0 with an error from `sc_last_error`.
+///
+/// # Safety
+/// `ptr` must point to `len` readable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sc_pack_lens(ptr: *const u8, len: usize) -> *const u8 {
+    let input = unsafe { std::slice::from_raw_parts(ptr, len) };
+    let out = serde_json::from_slice::<LensRequest>(input).map_err(|e| e.to_string()).map(|req| {
+        let e = sidecar_color::lens::effective(&req.profile, &req.lens, req.sensor_aspect);
+        if e.flags == 0 {
+            return Vec::new();
+        }
+        let p = sidecar_color::lens::pack(&e, req.profile.center, req.frame, req.flip, [0.0; 2], [0.0; 2]);
+        bytemuck::bytes_of(&p).to_vec()
+    });
+    let body = match out {
+        Ok(b) => b,
+        Err(msg) => {
+            ERROR.with(|e| {
+                let mut e = e.borrow_mut();
+                e.clear();
+                e.extend_from_slice(&(msg.len() as u32).to_le_bytes());
+                e.extend_from_slice(msg.as_bytes());
+            });
+            Vec::new()
+        }
+    };
+    RESULT.with(|r| {
+        let mut r = r.borrow_mut();
+        r.clear();
+        r.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        r.extend_from_slice(&body);
+        r.as_ptr()
+    })
+}
+
 /// Default edit parameters as length-prefixed JSON, so the web app never duplicates them.
 #[unsafe(no_mangle)]
 pub extern "C" fn sc_default_edit() -> *const u8 {

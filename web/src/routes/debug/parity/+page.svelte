@@ -1,8 +1,9 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 <script lang="ts">
 	import { DevelopPass, requestDevice } from '$lib/gpu/develop';
+	import { LensPass } from '$lib/gpu/lens';
 
-	type Case = { name: string; width: number; height: number };
+	type Case = { name: string; width: number; height: number; lens?: boolean };
 	type Result = { name: string; status: string };
 
 	let results = $state<Result[]>([]);
@@ -22,10 +23,16 @@
 			const info = device.adapterInfo;
 			adapterName = [info?.vendor, info?.architecture, info?.description].filter(Boolean).join(' · ') || 'WebGPU adapter';
 			const pass = await DevelopPass.create(device);
+			const lens = await LensPass.create(device);
 			const cases: Case[] = await (await fetch('/parity/index.json')).json();
 			for (const c of cases) {
 				const get = async (suffix: string) => (await fetch(`/parity/${c.name}.${suffix}`)).arrayBuffer();
 				pass.setSource(c.width, c.height, await get('src.f16'));
+				if (c.lens) {
+					const target = lens.target(pass.proxy!, 'lens corrected');
+					lens.run(pass.proxy!, target, new Uint8Array(await get('lens.bin')));
+					pass.setInput(target);
+				}
 				pass.setUniforms(await get('uniform.bin'));
 				pass.setToneLut(new Float32Array(await get('lut.f32')));
 				pass.render();

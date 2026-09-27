@@ -3,6 +3,7 @@
 //! is cheaper to compute once per edit than once per pixel lives here.
 
 pub mod cct;
+pub mod lens;
 pub mod mat;
 pub mod camera;
 pub mod params;

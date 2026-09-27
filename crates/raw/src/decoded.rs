@@ -375,6 +375,8 @@ pub fn info(exif: &Exif) -> RawInfo {
         captured_unix: exif.captured_unix,
         color: exif.space.camera_color(),
         af_point: exif.af_point,
+        lens_profile: None,
+        lens_identity: None,
         source_kind: SourceKind::Developed,
         source_space: Some(exif.space),
     }
