@@ -1,4 +1,33 @@
+# syntax=docker/dockerfile:1
 # Sidecar — one image, two commands: `sidecar api` (public HTTP, sidecar writer) and `sidecar worker` (RAW, GPU).
+# `--target ml` builds the same image plus `sidecar-ml` and its models, published with a `-ml` tag suffix.
+# The models sidecar-ml runs, pinned by SHA-256, converted to ONNX that burn-onnx imports. Two need a Python
+# tool each; `dev/ml-models` builds `ml-onnx` from here too, so there is one list of what the models are.
+FROM scratch AS ml-sources
+ADD --checksum=sha256:8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4 \
+    https://media.githubusercontent.com/media/opencv/opencv_zoo/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx /w/yunet.onnx
+ADD --checksum=sha256:5600024376f572a557870a5eb0afb1e5961636bef4e1e22132025467d0f03333 \
+    https://huggingface.co/onnx-community/BiRefNet_lite-ONNX/resolve/main/onnx/model.onnx /w/birefnet_lite_dynamic.onnx
+ADD --checksum=sha256:c6748b1253a99067ef71f7e26ca71096cd449baefa8f101900ea23016507e0e0 \
+    https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_multiclass_256x256/float32/latest/selfie_multiclass_256x256.tflite /w/multiclass.tflite
+
+# BiRefNet lite, simplified at its fixed 1024² input: that resolves the dynamic shapes burn-onnx can't import.
+FROM python:3.12-slim AS ml-birefnet
+RUN pip install --no-cache-dir --root-user-action=ignore onnx==1.23.0 onnxsim==0.7.3
+COPY --from=ml-sources /w/birefnet_lite_dynamic.onnx /w/
+RUN cd /w && onnxsim birefnet_lite_dynamic.onnx birefnet.onnx --overwrite-input-shape 1,3,1024,1024
+
+# MediaPipe's multi-class model ships as TFLite.
+FROM python:3.12-slim AS ml-multiclass
+RUN pip install --no-cache-dir --root-user-action=ignore onnx==1.23.0 tf2onnx==1.17.0 tensorflow-cpu==2.21.0
+COPY --from=ml-sources /w/multiclass.tflite /w/
+RUN cd /w && python -m tf2onnx.convert --tflite multiclass.tflite --output multiclass.onnx --opset 17
+
+FROM scratch AS ml-onnx
+COPY --from=ml-sources /w/yunet.onnx /
+COPY --from=ml-birefnet /w/birefnet.onnx /
+COPY --from=ml-multiclass /w/multiclass.onnx /
+
 FROM rust:1-trixie AS build
 RUN apt-get update && apt-get install -y --no-install-recommends zlib1g-dev libjpeg62-turbo-dev pkg-config \
  && rm -rf /var/lib/apt/lists/* && rustup target add wasm32-unknown-unknown
@@ -15,7 +44,16 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry --mount=type=cache,targe
  && cp target/wasm32-unknown-unknown/release/sidecar_color_wasm.wasm web/src/lib/color/sidecar_color.wasm
 RUN --mount=type=cache,target=/root/.npm cd web && npm ci --no-audit --no-fund && npm run build
 
-FROM debian:trixie-slim
+# sidecar-ml and its weights: the import tool writes <model>.bpk beside the ONNX it reads.
+FROM build AS build-ml
+COPY --from=ml-onnx / /models/src/
+RUN --mount=type=cache,target=/usr/local/cargo/registry --mount=type=cache,target=/src/target \
+    cargo build --release -p sidecar-ml --features import \
+ && ./target/release/sidecar-ml-import /models \
+ && cp target/release/sidecar-ml /usr/local/bin/sidecar-ml \
+ && rm -r /models/src
+
+FROM debian:trixie-slim AS runtime
 ARG VERSION=dev
 ARG REVISION=unknown
 # `image.source` is what links the package to its repository on GHCR, including its visibility.
@@ -51,3 +89,14 @@ ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics
 USER sidecar
 ENTRYPOINT ["sidecar"]
 CMD ["api", "--config", "/etc/sidecar.toml"]
+
+# The same image with the models, for subject masks, faces, hair and skin, on a GPU with the memory for them
+# (about 4 GB). sidecar-ml runs as its own process, started for a task and gone when idle; the editor tools
+# that ask for it are on the roadmap, so for now this image behaves like the plain one.
+FROM runtime AS ml
+COPY --from=build-ml /usr/local/bin/sidecar-ml /usr/local/bin/sidecar-ml
+COPY --from=build-ml /models /usr/share/sidecar/models
+LABEL org.opencontainers.image.description="A RAW editor beside Immich, with its machine-learning models"
+
+# The default target is the image without them.
+FROM runtime

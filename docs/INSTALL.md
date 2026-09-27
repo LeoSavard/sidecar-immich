@@ -1,7 +1,8 @@
 # Installing Sidecar
 
 Sidecar runs as two containers — `sidecar-api` and `sidecar-worker` — from one image. There are two ways to
-get that image, depending on whether your library has HEIC photos in it.
+get that image, depending on whether your library has HEIC photos in it, and each comes with or without the
+machine-learning models.
 
 ## Option 1: the published image
 
@@ -38,6 +39,20 @@ that account write access to the tree (`chown -R 1000:1000`, or a group both acc
 Your browser doesn't need WebGPU to use Sidecar: Safari 26 and current Chromium edit live in the browser;
 anything else — Firefox, older Safari — falls back to the server developing each change and sending back a
 JPEG. Slower per change, same result, no separate setup.
+
+### With or without the machine-learning models
+
+Every release is published twice. The plain tags (`latest`, `v0.4.0`) are the editor. The `-ml` tags
+(`latest-ml`, `v0.4.0-ml`) are the same editor plus `sidecar-ml` and its models, about 260 MB more: BiRefNet
+for subject masks, MediaPipe's multi-class model for hair and skin, YuNet for faces. They run on the worker's
+GPU through Vulkan — no CUDA — and want about 4 GB of free GPU memory while they work. `sidecar-ml` is its
+own process, started when a task needs it and gone after five idle minutes, so the memory comes back.
+
+Pick the plain image for a small GPU or an integrated one; you lose nothing that exists today. The tools that
+use the models — skin and subject masks, subject-aware focus peaking — are on the [roadmap](ROADMAP.md), so for
+now both images behave the same. Switching later is a change of tag in `compose.yaml`.
+
+To build the `-ml` image yourself, add `--target ml` to the `docker build` below.
 
 ## Option 2: build locally, with HEIC
 

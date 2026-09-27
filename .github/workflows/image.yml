@@ -27,8 +27,10 @@ jobs:
         run: |
           repo="ghcr.io/${GITHUB_REPOSITORY,,}"
           tags="$repo:${GITHUB_REF_NAME}"
-          case "$GITHUB_REF_NAME" in *-*) ;; *) tags="$tags,$repo:latest" ;; esac
+          ml="$repo:${GITHUB_REF_NAME}-ml"
+          case "$GITHUB_REF_NAME" in *-*) ;; *) tags="$tags,$repo:latest"; ml="$ml,$repo:latest-ml" ;; esac
           echo "tags=$tags" >> "$GITHUB_OUTPUT"
+          echo "ml=$ml" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-buildx-action@v4
       - uses: docker/login-action@v4
         with: { registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}" }
@@ -40,5 +42,18 @@ jobs:
             VERSION=${{ github.ref_name }}
             REVISION=${{ github.sha }}
           tags: ${{ steps.tags.outputs.tags }}
+          sbom: true
+          provenance: mode=max
+      # The same image plus sidecar-ml and its models (`v0.4.0-ml`, `latest-ml`), for anyone with the GPU for
+      # them. Built second so it reuses every layer the plain image just built.
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: ml
+          push: true
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            REVISION=${{ github.sha }}
+          tags: ${{ steps.tags.outputs.ml }}
           sbom: true
           provenance: mode=max

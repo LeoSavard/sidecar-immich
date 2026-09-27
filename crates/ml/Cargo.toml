@@ -1,0 +1,35 @@
+[package]
+name = "sidecar-ml"
+description = "Subject masks, face and hair/skin segmentation on the GPU, as a separate program the worker starts when needed"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+publish = false
+
+[[bin]]
+name = "sidecar-ml"
+path = "src/main.rs"
+
+# Regenerates src/models/ and the weights from ONNX; run through `dev/ml-models`.
+[[bin]]
+name = "sidecar-ml-import"
+path = "src/bin/import.rs"
+required-features = ["import"]
+
+[features]
+import = ["dep:burn-onnx"]
+
+# burn is a pre-release: pinned exactly, because the code burn-onnx generates in src/models/ is written against
+# one version's API. Bump all four together and rerun `dev/ml-models`.
+[dependencies]
+anyhow.workspace = true
+burn = { version = "=0.22.0-pre.4", default-features = false, features = ["std", "vulkan", "store", "autotune"] }
+burn-pack = "=0.22.0-pre.4"
+burn-store = "=0.22.0-pre.4"
+burn-onnx = { version = "=0.22.0-pre.4", optional = true }
+clap.workspace = true
+cubecl-runtime = "=0.11.0-pre.4"
+png.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+zune-jpeg.workspace = true

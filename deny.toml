@@ -2,7 +2,7 @@
 [licenses]
 allow = [
   "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "MIT", "MIT-0", "BSD-2-Clause", "BSD-3-Clause",
-  "ISC", "Zlib", "Unicode-3.0", "IJG", "CC0-1.0",
+  "ISC", "Zlib", "Unicode-3.0", "IJG", "CC0-1.0", "BSL-1.0",
 ]
 confidence-threshold = 0.9
 
@@ -10,6 +10,17 @@ confidence-threshold = 0.9
 [[licenses.exceptions]]
 crate = "sidecar-libraw-sys"
 allow = ["CDDL-1.0"]
+
+# MPL-2.0 is copyleft per file: it covers these crates' own files, used unmodified from crates.io, and nothing
+# that links them. Both reach sidecar-ml through burn: buildid through cubecl's kernel cache, colored through
+# burn-tensor's reports. Named one by one so no other MPL crate slips in unreviewed.
+[[licenses.exceptions]]
+crate = "buildid"
+allow = ["MPL-2.0"]
+
+[[licenses.exceptions]]
+crate = "colored"
+allow = ["MPL-2.0"]
 
 [bans]
 multiple-versions = "allow"

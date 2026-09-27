@@ -173,10 +173,15 @@ sky, the subject.
   OKLCh like the mixer, so evening out redness doesn't move perceived brightness. Several ranges per photo
   (two people, skin and sky). A live mask overlay shows what's affected. A develop module after the mixer, in
   the shared WGSL; neutral settings are the identity, and an edit that uses it bumps `ProcessVersion`.
-- *Subject and skin masks from a model*, so a skin range doesn't also catch a pink wall: range × mask. Needs a
-  segmentation model whose **weights** are permissively licensed (check face-parsing and person-segmentation
-  candidates one by one), run in the worker through ONNX Runtime (`ort`, MIT/Apache-2.0) on the Vulkan
-  device it already has; masks cache per asset like the focus mask.
+- *Subject and skin masks from a model*, so a skin range doesn't also catch a pink wall: range × mask. The
+  models run in `sidecar-ml` (DESIGN.md build log), a separate program on burn over Vulkan: BiRefNet lite for
+  the subject, MediaPipe's multi-class model for hair and skin, YuNet for faces — MIT, Apache-2.0 and MIT
+  weights. Done: the crate, its socket protocol and the weights pipeline. Next: the worker starts it on demand
+  and caches masks per asset like the focus mask; then the edge refinement below.
+- *Hair-accurate edges*: the part masks come from a 256² model, so they're right about what is hair but
+  blocky about where it ends. Refine at full resolution rather than tiling the model, which would lose the
+  whole-image context segmentation needs: a guided filter or a matting model, driven by the coarse mask and
+  the photo, tile by tile.
 - *Focus peaking, refined*: weight the focus measure by the subject mask so peaking answers "is the subject
   sharp?" rather than "where is anything sharp?"; make it noise-aware (normalise by the estimated noise σ the
   detail module already computes, so high-ISO grain stops lighting up); and rank eyes and faces first, next to

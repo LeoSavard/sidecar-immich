@@ -1,0 +1,377 @@
+// SPDX-License-Identifier: Apache-2.0
+//! The machine-learning models behind Sidecar's subject-aware tools, run on the GPU through burn over Vulkan (or
+//! Metal): no vendor runtime, and nothing proprietary in the image.
+//!
+//! - **Faces** — YuNet: boxes and five landmarks per face.
+//! - **Subject** — BiRefNet lite: a soft mask of the main subject, at 1024² model resolution.
+//! - **Parts** — MediaPipe multi-class: hair, face skin, body skin, clothes, other, background, at 256².
+//!
+//! It runs as its own program (`sidecar-ml`), which the worker starts when a task needs it and which exits after
+//! a while idle, since burn only hands GPU memory back when the process ends. A machine without the GPU for it
+//! simply never starts it. Models load on first use; weights come from `dev/ml-models`.
+//!
+//! BiRefNet's generated forward pass is one very long function: call these from a thread with at least
+//! [`STACK`] of stack, not a default 2 MB one.
+
+#![recursion_limit = "256"]
+
+#[allow(clippy::all, unused)]
+mod models {
+    pub mod birefnet;
+    pub mod multiclass;
+    pub mod yunet;
+}
+pub mod resample;
+
+use anyhow::{Result, anyhow, ensure};
+use burn::prelude::*;
+use burn::tensor::{DType, FloatDType};
+use burn_store::{BurnpackStore, ModuleSnapshot};
+use models::{birefnet, multiclass, yunet};
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+
+/// An 8-bit sRGB picture, RGB interleaved, rows top to bottom — what the models were trained on.
+#[derive(Clone, Copy)]
+pub struct Picture<'a> {
+    pub width: u32,
+    pub height: u32,
+    pub rgb: &'a [u8],
+}
+
+impl Picture<'_> {
+    fn size(&self) -> Result<(usize, usize)> {
+        let (w, h) = (self.width as usize, self.height as usize);
+        ensure!(
+            w > 0 && h > 0 && self.rgb.len() == w * h * 3,
+            "a {w} × {h} picture needs {} bytes, got {}",
+            w * h * 3,
+            self.rgb.len()
+        );
+        Ok((w, h))
+    }
+
+    fn samples(&self) -> Vec<f32> {
+        self.rgb.iter().map(|&v| v as f32).collect()
+    }
+}
+
+/// One face. Positions are fractions of the picture's width and height.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Face {
+    pub score: f32,
+    /// x, y, width, height.
+    pub bounds: [f32; 4],
+    /// The subject's right eye, left eye, nose tip, right and left mouth corners.
+    pub landmarks: [[f32; 2]; 5],
+}
+
+/// Per-pixel values at the picture's aspect ratio, `channels` interleaved, 0–255.
+#[derive(Clone, Debug)]
+pub struct Planes {
+    pub width: u32,
+    pub height: u32,
+    pub channels: u32,
+    pub data: Vec<u8>,
+}
+
+/// Stack for a thread that runs the models.
+pub const STACK: usize = 64 << 20;
+
+/// The channels of [`Ml::parts`], in order.
+pub const PARTS: [&str; 6] = [
+    "background",
+    "hair",
+    "body-skin",
+    "face-skin",
+    "clothes",
+    "other",
+];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Precision {
+    /// f16 where the GPU supports it: BiRefNet in half the time, masks within 1/255 on 99.8 % of pixels.
+    Auto,
+    F32,
+}
+
+/// Where burn keeps what it learns about this GPU (autotune results): on the cache volume, so the tuning at
+/// first run happens once per install. Must be called before [`Ml::new`].
+pub fn keep_tuning_in(dir: &Path) {
+    use cubecl_runtime::config::{CubeClRuntimeConfig, RuntimeConfig, cache::CacheConfig};
+    let mut config = CubeClRuntimeConfig::default();
+    config.environment.path = CacheConfig::Directory(dir.to_path_buf());
+    CubeClRuntimeConfig::try_set(config);
+}
+
+pub struct Ml {
+    device: Device,
+    dir: PathBuf,
+    half: bool,
+    yunet: Option<yunet::Model>,
+    birefnet: Option<birefnet::Model>,
+    multiclass: Option<multiclass::Model>,
+}
+
+impl Ml {
+    /// Opens the GPU; models load from `dir` when first used.
+    pub fn new(dir: &Path, precision: Precision) -> Result<Self> {
+        let mut device: Device = burn::backend::wgpu::WgpuDevice::default().into();
+        if precision == Precision::Auto {
+            // Refused when the GPU lacks f16, and when the device was configured before (a second `Ml`).
+            let _ = device.configure(FloatDType::F16);
+        }
+        // What floats actually are on this device decides how weights load: f32 weights meeting f16
+        // activations give garbage, not an error. The probe also surfaces a missing GPU as an error here
+        // rather than as a panic in the first task.
+        let probe = device.clone();
+        let dtype = std::panic::catch_unwind(move || Tensor::<1>::zeros([1], &probe).dtype())
+            .map_err(|_| anyhow!("no GPU burn can use (Vulkan or Metal)"))?;
+        let half = dtype == DType::F16;
+        Ok(Self {
+            device,
+            dir: dir.to_path_buf(),
+            half,
+            yunet: None,
+            birefnet: None,
+            multiclass: None,
+        })
+    }
+
+    pub fn half(&self) -> bool {
+        self.half
+    }
+
+    /// Faces with a score of at least 0.6, best first.
+    pub fn faces(&mut self, picture: Picture) -> Result<Vec<Face>> {
+        const SIZE: usize = 640;
+        let (w, h) = picture.size()?;
+        // Letterboxed: scaled so the long edge fills the input, padded with black at the right and bottom, so
+        // faces keep their shape.
+        let scale = SIZE as f32 / w.max(h) as f32;
+        let (rw, rh) = (
+            (w as f32 * scale).round().clamp(1.0, SIZE as f32) as usize,
+            (h as f32 * scale).round().clamp(1.0, SIZE as f32) as usize,
+        );
+        let small = resample::resize(&picture.samples(), (w, h), 3, (rw, rh));
+        let mut input = vec![0f32; 3 * SIZE * SIZE];
+        for y in 0..rh {
+            for x in 0..rw {
+                for c in 0..3 {
+                    // YuNet reads BGR at 0–255.
+                    input[(2 - c) * SIZE * SIZE + y * SIZE + x] = small[(y * rw + x) * 3 + c];
+                }
+            }
+        }
+        let input = self.tensor(input, [1, 3, SIZE, SIZE]);
+        let o = self.yunet()?.forward(input);
+        let outs = [o.0, o.1, o.2, o.3, o.4, o.5, o.6, o.7, o.8, o.9, o.10, o.11].map(read);
+        let outs: Vec<Vec<f32>> = outs.into_iter().collect::<Result<_>>()?;
+        let faces = decode_yunet(&outs, SIZE, 0.6);
+        Ok(faces
+            .into_iter()
+            .map(|f| Face {
+                score: f.score,
+                bounds: [
+                    f.bounds[0] / rw as f32,
+                    f.bounds[1] / rh as f32,
+                    f.bounds[2] / rw as f32,
+                    f.bounds[3] / rh as f32,
+                ],
+                landmarks: f.landmarks.map(|[x, y]| [x / rw as f32, y / rh as f32]),
+            })
+            .collect())
+    }
+
+    /// The main subject as a soft mask, `long_edge` at most (never larger than the picture).
+    pub fn subject(&mut self, picture: Picture, long_edge: u32) -> Result<Planes> {
+        const SIZE: usize = 1024;
+        let (w, h) = picture.size()?;
+        let small = resample::resize(&picture.samples(), (w, h), 3, (SIZE, SIZE));
+        // RGB with ImageNet's normalisation.
+        let (mean, std) = ([0.485f32, 0.456, 0.406], [0.229f32, 0.224, 0.225]);
+        let mut input = vec![0f32; 3 * SIZE * SIZE];
+        for (i, px) in small.as_chunks::<3>().0.iter().enumerate() {
+            for c in 0..3 {
+                input[c * SIZE * SIZE + i] = (px[c] / 255.0 - mean[c]) / std[c];
+            }
+        }
+        let input = self.tensor(input, [1, 3, SIZE, SIZE]);
+        let logits = read(self.birefnet()?.forward(input))?;
+        let alpha: Vec<f32> = logits.iter().map(|l| 1.0 / (1.0 + (-l).exp())).collect();
+        Ok(planes(&alpha, SIZE, 1, (w, h), long_edge))
+    }
+
+    /// Hair, skin and clothing: one channel per [`PARTS`] entry, summing to 255, `long_edge` at most.
+    pub fn parts(&mut self, picture: Picture, long_edge: u32) -> Result<Planes> {
+        const SIZE: usize = 256;
+        let (w, h) = picture.size()?;
+        // NHWC RGB at −1…1.
+        let input: Vec<f32> = resample::resize(&picture.samples(), (w, h), 3, (SIZE, SIZE))
+            .iter()
+            .map(|v| v / 127.5 - 1.0)
+            .collect();
+        let input = self.tensor(input, [1, SIZE, SIZE, 3]);
+        let mut scores = read(self.multiclass()?.forward(input))?;
+        for px in scores.as_chunks_mut::<{ PARTS.len() }>().0 {
+            let max = px.iter().copied().fold(f32::MIN, f32::max);
+            px.iter_mut().for_each(|v| *v = (*v - max).exp());
+            let sum: f32 = px.iter().sum();
+            px.iter_mut().for_each(|v| *v /= sum);
+        }
+        Ok(planes(&scores, SIZE, PARTS.len(), (w, h), long_edge))
+    }
+
+    /// Loads every model and runs it once, so the kernels are compiled and tuned before anyone waits on them.
+    pub fn warm(&mut self) -> Result<()> {
+        let grey = vec![128u8; 64 * 48 * 3];
+        let picture = Picture {
+            width: 64,
+            height: 48,
+            rgb: &grey,
+        };
+        self.faces(picture)?;
+        self.parts(picture, 64)?;
+        self.subject(picture, 64)?;
+        Ok(())
+    }
+
+    fn tensor<const D: usize>(&self, data: Vec<f32>, shape: [usize; D]) -> Tensor<D> {
+        Tensor::from_data(TensorData::new(data, shape), &self.device)
+    }
+
+    fn load<M: ModuleSnapshot>(&self, mut model: M, name: &str) -> Result<M> {
+        let path = self.dir.join(format!("{name}.bpk"));
+        ensure!(
+            path.is_file(),
+            "{} is missing: run dev/ml-models",
+            path.display()
+        );
+        let mut store = BurnpackStore::from_file(&path);
+        if self.half {
+            store = store.with_from_adapter(HalfExceptLayerNorm);
+        }
+        model
+            .load_from(&mut store)
+            .map_err(|e| anyhow!("loading {}: {e:?}", path.display()))?;
+        Ok(model)
+    }
+
+    fn yunet(&mut self) -> Result<&yunet::Model> {
+        if self.yunet.is_none() {
+            self.yunet = Some(self.load(yunet::Model::new(&self.device), "yunet")?);
+        }
+        Ok(self.yunet.as_ref().expect("just loaded"))
+    }
+
+    fn birefnet(&mut self) -> Result<&birefnet::Model> {
+        if self.birefnet.is_none() {
+            self.birefnet = Some(self.load(birefnet::Model::new(&self.device), "birefnet")?);
+        }
+        Ok(self.birefnet.as_ref().expect("just loaded"))
+    }
+
+    fn multiclass(&mut self) -> Result<&multiclass::Model> {
+        if self.multiclass.is_none() {
+            self.multiclass = Some(self.load(multiclass::Model::new(&self.device), "multiclass")?);
+        }
+        Ok(self.multiclass.as_ref().expect("just loaded"))
+    }
+}
+
+fn read<const D: usize>(t: Tensor<D>) -> Result<Vec<f32>> {
+    t.into_data()
+        .convert::<f32>()
+        .try_to_vec::<f32>()
+        .map_err(|e| anyhow!("reading a result back: {e:?}"))
+}
+
+/// A square model output stretched back to the picture's aspect ratio, at `long_edge` at most.
+fn planes(
+    values: &[f32],
+    size: usize,
+    channels: usize,
+    picture: (usize, usize),
+    long_edge: u32,
+) -> Planes {
+    let (w, h) = resample::fit(picture, long_edge as usize);
+    let data = resample::resize(values, (size, size), channels, (w, h))
+        .iter()
+        .map(|v| (v * 255.0).round().clamp(0.0, 255.0) as u8)
+        .collect();
+    Planes {
+        width: w as u32,
+        height: h as u32,
+        channels: channels as u32,
+        data,
+    }
+}
+
+/// YuNet's twelve outputs — class and objectness scores, boxes, landmarks, each at strides 8, 16 and 32 —
+/// decoded to faces in input pixels and thinned by non-maximum suppression.
+fn decode_yunet(outs: &[Vec<f32>], size: usize, min_score: f32) -> Vec<Face> {
+    let mut faces = Vec::new();
+    for (s, stride) in [8usize, 16, 32].into_iter().enumerate() {
+        let (cls, obj, bbox, kps) = (&outs[s], &outs[3 + s], &outs[6 + s], &outs[9 + s]);
+        let cols = size / stride;
+        for (i, (c, o)) in cls.iter().zip(obj).enumerate() {
+            let score = (c.clamp(0.0, 1.0) * o.clamp(0.0, 1.0)).sqrt();
+            if score < min_score {
+                continue;
+            }
+            let (col, row) = ((i % cols) as f32, (i / cols) as f32);
+            let st = stride as f32;
+            let b = &bbox[i * 4..i * 4 + 4];
+            let (cx, cy) = ((col + b[0]) * st, (row + b[1]) * st);
+            let (bw, bh) = (b[2].exp() * st, b[3].exp() * st);
+            let k = &kps[i * 10..i * 10 + 10];
+            faces.push(Face {
+                score,
+                bounds: [cx - bw / 2.0, cy - bh / 2.0, bw, bh],
+                landmarks: std::array::from_fn(|n| {
+                    [(col + k[2 * n]) * st, (row + k[2 * n + 1]) * st]
+                }),
+            });
+        }
+    }
+    faces.sort_by(|a, b| b.score.total_cmp(&a.score));
+    let mut kept: Vec<Face> = Vec::new();
+    for face in faces {
+        if kept.iter().all(|k| iou(&k.bounds, &face.bounds) < 0.3) {
+            kept.push(face);
+        }
+    }
+    kept
+}
+
+fn iou(a: &[f32; 4], b: &[f32; 4]) -> f32 {
+    let w = (a[0] + a[2]).min(b[0] + b[2]) - a[0].max(b[0]);
+    let h = (a[1] + a[3]).min(b[1] + b[3]) - a[1].max(b[1]);
+    let inter = w.max(0.0) * h.max(0.0);
+    inter / (a[2] * a[3] + b[2] * b[3] - inter)
+}
+
+/// Loads weights as f16 except LayerNorm's: burn-onnx runs LayerNorm in f32, because its variance overflows
+/// f16, and f32 activations meeting f16 weights give garbage rather than an error.
+#[derive(Clone)]
+struct HalfExceptLayerNorm;
+
+impl burn_store::ModuleAdapter for HalfExceptLayerNorm {
+    fn adapt(
+        &self,
+        tensor: burn_pack::Tensor,
+        ctx: burn_store::ModuleContext<'_>,
+    ) -> burn_pack::Tensor {
+        if ctx.module_type() == Some("Struct:LayerNorm") {
+            return tensor;
+        }
+        burn_store::FloatCastAdapter::to(DType::F16).adapt(tensor, ctx)
+    }
+
+    fn clone_box(&self) -> Box<dyn burn_store::ModuleAdapter> {
+        Box::new(self.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests;

@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Fetch the models sidecar-ml runs, convert them for burn, and write their weights.
+#   ./dev/ml-models [dir]        default dir: target/ml-models
+#
+# The downloads (pinned by SHA-256) and the two conversions that need Python are the Dockerfile's `ml-onnx`
+# stages, the same ones the `-ml` image is built from. Then `sidecar-ml-import` generates the Rust for each
+# graph into crates/ml/src/models/ (committed, so builds never need Python) and writes the weights, which are
+# not committed, as <dir>/<model>.bpk. Rerun after bumping burn.
+set -euo pipefail
+here="$(cd "$(dirname "$0")/.." && pwd)"
+dir="${1:-target/ml-models}"
+docker build --target ml-onnx --output "type=local,dest=$here/$dir/src" "$here"
+"$here/dev/run" cargo run -q --release -p sidecar-ml --features import --bin sidecar-ml-import -- "/src/$dir"

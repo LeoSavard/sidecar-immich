@@ -23,6 +23,8 @@ services:
     restart: unless-stopped
 
   sidecar-worker:
+    # `latest-ml` adds the machine-learning models (about 4 GB of GPU memory while they run); docs/INSTALL.md.
+    # Keep api and worker on the same version.
     image: ghcr.io/leosavard/sidecar-immich:latest
     command: ["worker", "--listen", "0.0.0.0:8081", "--cache", "/cache"]
     read_only: true

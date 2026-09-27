@@ -3,6 +3,7 @@ resolver = "3"
 members = [
   "crates/shaders", "crates/color", "crates/color-wasm", "crates/engine", "crates/devtools",
   "crates/libraw-sys", "crates/raw", "crates/template", "crates/xmp", "crates/worker", "crates/api", "crates/sidecar",
+  "crates/ml",
 ]
 
 [workspace.package]
