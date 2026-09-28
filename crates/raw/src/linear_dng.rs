@@ -143,11 +143,6 @@ fn read_head(path: &Path, n: usize) -> std::io::Result<Vec<u8>> {
     Ok(buf)
 }
 
-/// EXIF LightSource → correlated colour temperature, as the RAW path reads DNG calibration illuminants.
-fn illuminant(code: f64) -> Option<f64> {
-    crate::illuminant_temperature(code as u16)
-}
-
 fn matrix(tags: &Tags, tag: u16) -> Option<[[f64; 3]; 3]> {
     let v = &tags.get(&tag)?.values;
     (v.len() >= 9).then(|| [[v[0], v[1], v[2]], [v[3], v[4], v[5]], [v[6], v[7], v[8]]])
@@ -157,7 +152,7 @@ fn matrix(tags: &Tags, tag: u16) -> Option<[[f64; 3]; 3]> {
 fn color(ifd0: &Tags) -> CameraColor {
     let mut calibrations = Vec::new();
     for (m, i) in [(50721, 50778), (50722, 50779)] {
-        if let (Some(m), Some(t)) = (matrix(ifd0, m), first(ifd0, i).and_then(illuminant)) {
+        if let (Some(m), Some(t)) = (matrix(ifd0, m), first(ifd0, i).and_then(|code| crate::illuminant_temperature(code as u16))) {
             calibrations.push(Calibration { temperature_k: t, xyz_to_camera: m });
         }
     }

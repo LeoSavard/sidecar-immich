@@ -127,7 +127,7 @@ impl Database {
         for f in files {
             match std::fs::read_to_string(&f).map_err(|e| e.to_string()).and_then(|xml| db.add(&xml)) {
                 Ok(()) => {}
-                Err(e) => tracing_warn(&format!("lensfun: skipping {}: {e}", f.display())),
+                Err(e) => tracing::warn!("lensfun: skipping {}: {e}", f.display()),
             }
         }
         db
@@ -242,10 +242,6 @@ impl Database {
         let crop = camera.map(|c| c.crop).or(id.crop_factor).unwrap_or(lens.crop);
         lens.profile(crop, info.focal_length_mm as f64, info.aperture as f64, id.focus_distance_m.unwrap_or(1000.0))
     }
-}
-
-fn tracing_warn(msg: &str) {
-    eprintln!("{msg}");
 }
 
 fn norm(s: &str) -> String {

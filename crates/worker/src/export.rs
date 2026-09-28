@@ -147,9 +147,7 @@ pub fn full_source_for(kit: &Kit, path: &Path) -> Result<(wgpu::Texture, i32, Re
     }
     if sidecar_raw::linear_dng::is_supported(path) {
         // Held to the largest texture the GPU takes: a merged panorama can be several times wider.
-        let mut info = sidecar_raw::linear_dng::info(path, &sidecar_raw::decoded::exif(path))?;
-        sidecar_raw::read_extras(path, &mut info);
-        info.lens_profile = kit.lensfun.profile_for(&info);
+        let info = kit.lensfun.described(path, sidecar_raw::linear_dng::info(path, &sidecar_raw::decoded::exif(path))?);
         let mut rendering = Rendering::of(&info);
         rendering.lens_flip = 0;
         let d = sidecar_raw::linear_dng::decode(path, kit.gpu.device.limits().max_texture_dimension_2d)?;
@@ -157,9 +155,7 @@ pub fn full_source_for(kit: &Kit, path: &Path) -> Result<(wgpu::Texture, i32, Re
         return Ok((sidecar_engine::upload_rgba16(&kit.gpu, &img), info.orientation_flip, rendering));
     }
     let mut raw = RawFile::open(path)?;
-    let mut info = raw.info();
-    sidecar_raw::read_extras(path, &mut info);
-    info.lens_profile = kit.lensfun.profile_for(&info);
+    let info = kit.lensfun.described(path, raw.info());
     let mut rendering = Rendering::of(&info);
     let (texture, flip) = full_source(kit, &mut raw)?;
     // `full_source` either leaves the orientation to apply (the GPU demosaic) or has applied it (LibRaw).
@@ -178,17 +174,10 @@ pub fn full_source(kit: &Kit, raw: &mut RawFile) -> Result<(wgpu::Texture, i32)>
             (kit.ingest.demosaic(&kit.gpu, &input, wb, true)?, m.flip)
         }
         _ => {
-            // X-Trans and non-mosaic files: LibRaw on the CPU (Markesteijn 3-pass for X-Trans), orientation applied.
+            // X-Trans and non-mosaic files: LibRaw on the CPU (Markesteijn 3-pass for X-Trans), orientation
+            // applied. Clipping is flagged as the proxy flags it, so the two agree on what was clipped.
             let linear = raw.develop_linear(false)?;
-            let data: Vec<f32> = linear
-                .rgb
-                .as_chunks::<3>().0.iter()
-                .flat_map(|p| {
-                    let clip = p.iter().any(|&v| v >= 64880) as u8 as f32;
-                    [p[0] as f32 / 65535.0, p[1] as f32 / 65535.0, p[2] as f32 / 65535.0, clip]
-                })
-                .collect();
-            (sidecar_engine::upload_rgba16(&kit.gpu, &RgbaF32 { width: linear.width, height: linear.height, data }), 0)
+            (sidecar_engine::upload_rgba16(&kit.gpu, &RgbaF32 { width: linear.width, height: linear.height, data: linear.rgba() }), 0)
         }
     })
 }

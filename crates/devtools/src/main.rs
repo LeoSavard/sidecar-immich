@@ -110,7 +110,7 @@ fn develop(input: &std::path::Path, out: &std::path::Path, long_edge: u32) -> Re
     let t_open = t0.elapsed();
     let linear = raw.develop_linear(true)?;
     let t_demosaic = t0.elapsed();
-    let proxy = sidecar_raw::proxy::build(&linear, long_edge);
+    let proxy = sidecar_engine::RgbaF32 { width: linear.width, height: linear.height, data: linear.rgba() }.downsampled(long_edge);
     let t_proxy = t0.elapsed();
     let gpu = sidecar_engine::Gpu::new_headless()?;
     let pass = sidecar_engine::DevelopPass::new(&gpu)?;
@@ -119,7 +119,7 @@ fn develop(input: &std::path::Path, out: &std::path::Path, long_edge: u32) -> Re
         Err(_) => Default::default(),
     };
     let packed = sidecar_color::pack(&edit, &info.color, info.source_kind, sidecar_color::DisplaySpace::Srgb);
-    let src = sidecar_engine::RgbaF32 { width: proxy.width, height: proxy.height, data: proxy.rgba };
+    let src = proxy;
     let t_gpu0 = std::time::Instant::now();
     let img = pass.run(&gpu, &src, &packed.uniform, &packed.lut)?;
     let t_gpu = t_gpu0.elapsed();

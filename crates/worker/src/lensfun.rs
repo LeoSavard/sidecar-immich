@@ -71,6 +71,14 @@ impl Lensfun {
         Ok(())
     }
 
+    /// `info` completed with what only ExifTool reads — the AF point, the file's own lens correction, what the
+    /// lens is — and the lens profile to use.
+    pub fn described(&self, path: &std::path::Path, mut info: RawInfo) -> RawInfo {
+        sidecar_raw::read_extras(path, &mut info);
+        info.lens_profile = self.profile_for(&info);
+        info
+    }
+
     /// The file's own correction when it has one; lensfun's otherwise — but only for sensor data. lensfun's
     /// calibrations describe what a lens does to an uncorrected sensor image; a linear DNG some program made
     /// (a Lightroom panorama or HDR merge) was corrected by it already, and still names the lens it came from.

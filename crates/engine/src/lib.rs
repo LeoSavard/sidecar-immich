@@ -268,6 +268,15 @@ mod tests {
         RgbaF32 { width: 3, height: 2, data: (0..6).flat_map(|i| [i as f32; 4]).collect() }
     }
 
+    /// The area filter keeps the mean, and turns per-pixel clip flags in alpha into the fraction clipped.
+    #[test]
+    fn downsampling_averages_and_turns_clip_flags_into_coverage() {
+        let img = RgbaF32 { width: 4, height: 2, data: [[1.0, 0.0, 0.0, 1.0], [0.5, 0.5, 0.5, 0.0]].concat().repeat(4) };
+        let small = img.downsampled(2);
+        assert_eq!((small.width, small.height), (2, 1));
+        assert!((small.data[0] - 0.75).abs() < 1e-6 && (small.data[3] - 0.5).abs() < 1e-6, "{:?}", &small.data[..4]);
+    }
+
     #[test]
     fn rotations_and_mirrors_land_where_exif_says() {
         let rows = |img: RgbaF32| -> Vec<Vec<u32>> {

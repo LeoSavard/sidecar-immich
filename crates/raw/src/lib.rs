@@ -12,7 +12,6 @@ pub mod decoded;
 pub mod lens;
 pub mod lensfun;
 pub mod linear_dng;
-pub mod proxy;
 pub use af::AfPoint;
 pub use decoded::SourceSpace;
 pub use sidecar_color::SourceKind;
@@ -69,6 +68,13 @@ pub struct RawInfo {
     /// `None` for RAW, and in metadata cached before this field existed.
     #[serde(default)]
     pub source_space: Option<SourceSpace>,
+}
+
+impl RawInfo {
+    /// Width and height before orientation: the frame the sensor data, and every lens radius, is in.
+    pub fn sensor_size(&self) -> [u32; 2] {
+        if self.orientation_flip & 4 != 0 { [self.height, self.width] } else { [self.width, self.height] }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -138,6 +144,29 @@ pub struct LinearImage {
     pub rgb: Vec<u16>,
 }
 
+impl LinearImage {
+    /// Linear RGBA f32, alpha 1 where any channel reached sensor saturation — the shape every proxy has,
+    /// ready for `RgbaF32::downsampled`, whose area filter turns the flags into clip coverage.
+    pub fn rgba(&self) -> Vec<f32> {
+        let saturated = saturation_threshold(&self.rgb);
+        let mut out = Vec::with_capacity(self.rgb.len() / 3 * 4);
+        for p in self.rgb.as_chunks::<3>().0 {
+            let clip = p.iter().any(|&v| v >= saturated);
+            out.extend(p.iter().map(|&v| v as f32 / 65535.0));
+            out.push(clip as u8 as f32);
+        }
+        out
+    }
+}
+
+/// Saturation threshold. LibRaw scales the declared white level to 65535, but some cameras saturate below
+/// it; when the brightest sample is well up the range, treat anything within 2 % of it as clipped too.
+fn saturation_threshold(rgb: &[u16]) -> u16 {
+    let max = rgb.iter().copied().max().unwrap_or(0);
+    let declared = (65535u32 * 99 / 100) as u16;
+    if max >= 32768 { declared.min((max as u32 * 98 / 100) as u16) } else { declared }
+}
+
 /// The visible sensor mosaic, before orientation. `color_at(y, x)` is 0 R, 1 G, 2 B, 3 G2.
 pub struct Mosaic {
     pub width: u32,
@@ -166,13 +195,6 @@ pub struct RawFile {
 
 // A LibRaw instance may move between threads, but must not be shared.
 unsafe impl Send for RawFile {}
-
-impl RawInfo {
-    /// Width and height before orientation: the frame the sensor data, and every lens radius, is in.
-    pub fn sensor_size(&self) -> [u32; 2] {
-        if self.orientation_flip & 4 != 0 { [self.height, self.width] } else { [self.width, self.height] }
-    }
-}
 
 /// Everything read from ExifTool rather than LibRaw — the AF point, the lens correction the file carries and
 /// what the lens is — in one run of it. Leaves `info` as it was if ExifTool is missing or fails.
@@ -250,9 +272,7 @@ impl RawFile {
         unsafe { sys::sc_image_free(&mut img) };
         Ok(LinearImage { width: img.width as u32, height: img.height as u32, rgb })
     }
-}
 
-impl RawFile {
     /// The raw mosaic for GPU processing, or an error for files without a single-channel CFA.
     pub fn mosaic(&self) -> Result<Mosaic, RawError> {
         let mut m: sys::sc_mosaic = unsafe { std::mem::zeroed() };
@@ -273,6 +293,15 @@ impl Drop for RawFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saturated_samples_are_flagged_in_alpha() {
+        let img = LinearImage { width: 2, height: 1, rgb: vec![65535, 0, 0, 32768, 32768, 32768] };
+        let rgba = img.rgba();
+        assert_eq!(rgba.len(), 8);
+        assert_eq!((rgba[0], rgba[3], rgba[7]), (1.0, 1.0, 0.0));
+        assert!((rgba[4] - 0.5).abs() < 1e-4);
+    }
 
     /// `metadata` skips the unpack; it has to agree with an unpacked open on every field, for every maker in
     /// the test set. Files are copies under testdata/cache; the test passes vacuously without them.

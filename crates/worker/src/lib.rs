@@ -19,7 +19,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use sidecar_color::params::PROCESS_VERSION;
-use sidecar_raw::{RawFile, RawInfo, proxy};
+use sidecar_raw::{RawFile, RawInfo};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -225,15 +225,9 @@ impl Worker {
                 sidecar_raw::decoded::info(&sidecar_raw::decoded::exif(&p))
             } else if sidecar_raw::linear_dng::is_supported(&p) {
                 // A JPEG XL linear DNG LibRaw can't open: colour from its own tags, the rest from ExifTool.
-                let mut info = sidecar_raw::linear_dng::info(&p, &sidecar_raw::decoded::exif(&p))?;
-                sidecar_raw::read_extras(&p, &mut info);
-                info.lens_profile = lf.profile_for(&info);
-                info
+                lf.described(&p, sidecar_raw::linear_dng::info(&p, &sidecar_raw::decoded::exif(&p))?)
             } else {
-                let mut info = RawFile::metadata(&p)?;
-                sidecar_raw::read_extras(&p, &mut info);
-                info.lens_profile = lf.profile_for(&info);
-                info
+                lf.described(&p, RawFile::metadata(&p)?)
             };
             Ok(Meta {
                 asset_key: k,
@@ -393,8 +387,7 @@ fn decode_full(path: &std::path::Path, info: Option<&RawInfo>, gpu: Option<&expo
         }
         _ => {
             let linear = raw.develop_linear(true)?;
-            let p = proxy::build(&linear, largest);
-            sidecar_engine::RgbaF32 { width: p.width, height: p.height, data: p.rgba }
+            sidecar_engine::RgbaF32 { width: linear.width, height: linear.height, data: linear.rgba() }.downsampled(largest)
         }
     })
 }
