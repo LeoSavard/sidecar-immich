@@ -44,6 +44,12 @@ Thumb-first slider:
 	/** Caught in the default's detent, and how far the finger has pushed against it since. */
 	let caught = false;
 	let push = 0;
+	/**
+	 * How far the finger is ahead of the thumb, in value units: the travel a detent consumed. Repaid by moving
+	 * the thumb a little faster than the finger until it is under it again, so leaving a detent neither jumps
+	 * nor leaves the thumb trailing for the rest of the drag.
+	 */
+	let lag = 0;
 
 	/** Sideways travel that turns a touch into a slider drag rather than a scroll. */
 	const ENGAGE_PX = 4;
@@ -99,6 +105,7 @@ Thumb-first slider:
 		held = false;
 		caught = false;
 		slack = 0;
+		lag = 0;
 		active = true;
 		clearTimeout(holdTimer);
 		holdTimer = setTimeout(() => {
@@ -112,21 +119,28 @@ Thumb-first slider:
 		if (!active) return;
 		// The row allows vertical panning, so a drag only counts as a slider drag once it has travelled far
 		// enough sideways; until then the browser can still take the gesture and scroll the panel.
+		let dx = e.clientX - lastX;
+		lastX = e.clientX;
 		if (!engaged) {
-			slack += e.clientX - lastX;
-			lastX = e.clientX;
+			slack += dx;
 			if (Math.abs(slack) < ENGAGE_PX) return;
 			engaged = true;
 			clearTimeout(holdTimer);
+			// The travel spent deciding this was a drag counts, or the thumb trails the finger by it.
+			dx = slack;
 		}
 		const rect = row.getBoundingClientRect();
 		const above = Math.max(0, rect.top - e.clientY);
 		const gain = above < 44 ? 1 : above < 88 ? 0.5 : 0.25;
-		const dx = e.clientX - lastX;
-		lastX = e.clientX;
 		if (dx === 0) return;
 		moved = true;
-		const delta = (dx / rect.width) * span * gain;
+		let delta = (dx / rect.width) * span * gain;
+		// Catching up after a detent: up to half as much again as the finger moved, until the lag is repaid.
+		if (lag !== 0 && !caught) {
+			const repay = Math.sign(lag) * Math.min(Math.abs(lag), Math.abs(delta) * 0.5);
+			delta += repay;
+			lag -= repay;
+		}
 		// The detent: `push` is travel spent against it. Leaving costs that travel but never jumps the value,
 		// so the first step off the default is one step — not the width of the magnetic zone, as it was.
 		const zone = span * 0.02;
@@ -135,13 +149,15 @@ Thumb-first slider:
 			if (Math.abs(push) <= zone) return;
 			caught = false;
 			raw = defaultValue + push - Math.sign(push) * zone;
+			lag = Math.sign(push) * zone;
 		} else {
 			const next = clamp(raw + delta, min, max);
 			const from = raw - defaultValue;
 			const to = next - defaultValue;
 			if (from !== 0 && (to === 0 || Math.sign(to) !== Math.sign(from))) {
 				caught = true;
-				push = 0;
+				// What the finger travelled past the default in this step already pushes against it.
+				push = to;
 				raw = defaultValue;
 				flash = true;
 				setTimeout(() => (flash = false), 180);
@@ -199,7 +215,8 @@ Thumb-first slider:
 
 	const fillLeft = $derived(bipolar ? Math.min(pct(value), pct(defaultValue)) : 0);
 	const fillWidth = $derived(bipolar ? Math.abs(pct(value) - pct(defaultValue)) : pct(value));
-	const showDefaultTick = $derived(bipolar && defaultValue >= lo && defaultValue <= lo + span);
+	// Every slider catches at its default, so every slider marks it — unless it is an end of the track.
+	const showDefaultTick = $derived(defaultValue > lo && defaultValue < lo + span);
 </script>
 
 <div bind:this={root} class="grid gap-0.5 select-none {disabled ? 'opacity-40' : ''}">

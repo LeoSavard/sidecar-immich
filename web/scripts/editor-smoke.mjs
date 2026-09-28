@@ -21,9 +21,20 @@ async function run(name, viewport, isMobile) {
 	await slider.waitFor({ timeout: 60_000 });
 	await page.waitForTimeout(1500);
 	const box = await slider.boundingBox();
+	const thumbAt = async () => {
+		const t = await slider.locator('div.size-7').last().boundingBox();
+		return t ? t.x + t.width / 2 : NaN;
+	};
+	const thumbBefore = await thumbAt();
 	await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
 	await page.mouse.down();
 	await page.mouse.move(box.x + box.width / 2 + box.width * 0.08, box.y + box.height / 2, { steps: 8 });
+	// The thumb moves as far as the finger: it trailed by 14 px once (engage threshold plus an unrepaid detent).
+	// Unless it hit the end of the track.
+	const moved = (await thumbAt()) - thumbBefore;
+	const expected = box.width * 0.08;
+	const atEnd = (await slider.getAttribute('aria-valuenow')) === (await slider.getAttribute('aria-valuemax'));
+	if (!atEnd && !(Math.abs(moved - expected) <= 3)) errors.push(`${name}: thumb moved ${moved.toFixed(1)} px for ${expected.toFixed(1)} px of drag`);
 	await page.mouse.up();
 	const valueText = await slider.getAttribute('aria-valuetext');
 	await page.waitForTimeout(600);
