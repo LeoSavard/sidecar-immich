@@ -259,9 +259,12 @@ only it is unaffected.
   to its base just moves the head there.
 - **Checkpoints.** The editor saves four seconds after a gesture ends. A checkpoint folds into the head
   instead of adding a node when the head is this session's own checkpoint, under three minutes old,
-  unlabelled, not exported, childless, and the new changes only touch controls that checkpoint already
-  moved — so dragging exposure three times is one step, exposure then contrast two. A fold that leaves the
-  node equal to its parent (an undo) removes the step.
+  unlabelled, not exported, childless, and the new changes go on adjusting a setting that checkpoint already
+  adjusted (Temperature, Tint and as-shot count as one white balance; the lens strengths as one lens
+  correction). Whatever else changed in the same pause folds in with it: white balance tweaked three times
+  with exposure nudged in between is one step, while exposure then contrast alone is two. The three minutes
+  run from the step's first checkpoint, so a step can't grow forever. A fold that leaves the node equal to
+  its parent (an undo) removes the step.
 - **Other operations.** `GET …/history` returns every node with its full edit and the exports made from it;
   `POST …/history/checkout { node }` makes a version (or the original) current; `PUT …/history/{node}/label`
   names one. Opening another version saves unsaved changes first.

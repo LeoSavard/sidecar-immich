@@ -312,6 +312,32 @@ mod history {
         assert_eq!((h.nodes.len(), h.head.as_str()), (2, before_contrast.as_str()), "undoing the contrast step removes it");
     }
 
+    /// The sequence from a real session: white balance, then white balance again with exposure in the same
+    /// pause, then only tint, then highlights and shadows. The white balance tweaks are one step, not three.
+    #[test]
+    fn going_on_with_a_setting_folds_in_whatever_came_with_it() {
+        let mut h = History::begin(&EditParams::default());
+        let auto = |h: &mut History, e: &EditParams| {
+            let base = h.head.clone();
+            h.commit(&Commit { edit: e, base: &base, checkpoint: true, session: Some("tab"), user: None }, &[]).unwrap();
+        };
+        let wb = sidecar_color::params::WhiteBalance { mode: sidecar_color::params::WhiteBalanceMode::Custom, temperature_k: 5460.0, tint: 15.0 };
+        let mut e = EditParams { white_balance: wb, ..Default::default() };
+        auto(&mut h, &e);
+        e.white_balance.temperature_k = 4130.0;
+        e.exposure.ev = 1.8;
+        auto(&mut h, &e);
+        assert_eq!(h.nodes.len(), 2, "more white balance, with exposure alongside, is the same step");
+        e.white_balance.tint = 10.0;
+        auto(&mut h, &e);
+        assert_eq!(h.nodes.len(), 2, "tint is the same setting as temperature");
+        e.tone.curve = vec![[0.0, 0.0], [0.25, 0.3], [0.75, 0.7], [1.0, 1.0]];
+        auto(&mut h, &e);
+        assert_eq!(h.nodes.len(), 3, "a setting the step never touched starts the next one");
+        assert_eq!(h.edit_of(&h.nodes[1].id).unwrap().white_balance.temperature_k, 4130.0);
+        assert_eq!(h.edit_of(&h.head).unwrap(), e);
+    }
+
     #[test]
     fn a_checkpoint_that_was_exported_or_is_old_is_not_amended() {
         let mut h = History::begin(&EditParams::default());

@@ -36,6 +36,15 @@ fn touched(delta: &Value, removed: &[String]) -> Vec<String> {
     out
 }
 
+/// The setting a changed path belongs to, as the editor presents it: Temperature, Tint and the as-shot switch
+/// are one white balance; the lens strengths are one lens correction. Everything else is its own control.
+fn setting(path: &str) -> &str {
+    ["whiteBalance", "lens"]
+        .into_iter()
+        .find(|group| path.strip_prefix(group).is_some_and(|rest| rest.is_empty() || rest.starts_with('.')))
+        .unwrap_or(path)
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum NodeKind {
@@ -319,13 +328,17 @@ impl History {
             && unix_of(&head.created).is_some_and(|t| now_unix() - t < AMEND_WINDOW_S)
     }
 
-    /// Does this save only go on moving what the head checkpoint already moved? Exposure dragged three times
-    /// is one step; exposure and then contrast are two, so the history reads the way the photo was edited.
+    /// Does this save go on adjusting a setting the head checkpoint already adjusted? Then it belongs to that
+    /// step, with whatever else changed in the same pause: white balance tweaked three times, with exposure
+    /// nudged in between, is one step. A save that only touches settings the step never did starts the next
+    /// one, so the history still reads the way the photo was edited. (Requiring *only* the head's controls
+    /// split every tweak that came with anything else into a step of its own.)
     fn same_controls(&self, c: &Commit) -> Result<bool> {
         let head = self.node(&self.head).expect("amendable checked it");
         let (delta, removed) = self.delta_from(&head.id, c.edit)?;
         let before = touched(&head.delta, &head.removed);
-        Ok(touched(&delta, &removed).iter().all(|p| before.contains(p)))
+        let before: Vec<&str> = before.iter().map(|p| setting(p)).collect();
+        Ok(touched(&delta, &removed).iter().any(|p| before.contains(&setting(p))))
     }
 
     /// Move the head to `id`, and return the edit it holds.
