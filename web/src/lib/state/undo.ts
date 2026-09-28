@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-// Undo history of edit snapshots. A snapshot is taken when a gesture ends, not on every input event.
-export class History<T> {
+// Undo and redo within this page: edit snapshots, one per completed gesture, not per input event. Separate from
+// the version history the sidecar keeps (xmp/history.rs), which outlives the page.
+export class UndoStack<T> {
 	private past: string[] = [];
 	private future: string[] = [];
 	private current: string;

@@ -3,7 +3,7 @@
 // and the WGSL is the same composed file, so the parity harness can compare the two renders directly.
 import developWgsl from './wgsl/client_develop.wgsl?raw';
 
-export const DEVELOP_UNIFORM_BYTES = 272;
+const DEVELOP_UNIFORM_BYTES = 272;
 
 export class DevelopPass {
 	readonly device: GPUDevice;

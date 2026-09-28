@@ -9,7 +9,7 @@
 	import { api, HttpError } from '$lib/api';
 	import { settings, SPACE_LABELS } from '$lib/settings';
 	import { clearDraft, loadDraft, saveDraft } from '$lib/state/drafts';
-	import { History } from '$lib/state/history';
+	import { UndoStack } from '$lib/state/undo';
 	import Slider from '$lib/ui/Slider.svelte';
 	import Histogram from '$lib/ui/Histogram.svelte';
 	import CurveEditor from '$lib/ui/CurveEditor.svelte';
@@ -76,7 +76,7 @@
 	let restoredDraft = $state(false);
 	let draftTimer: ReturnType<typeof setTimeout> | undefined;
 	/** In-session undo: every gesture. The saved history below is coarser — saves and checkpoints. */
-	let history: History<EditParams>;
+	let undo: UndoStack<EditParams>;
 	let canUndo = $state(false);
 	let canRedo = $state(false);
 
@@ -274,7 +274,7 @@
 
 	/** A gesture ended: one undo step, and in fallback mode the moment to ask for a new render. */
 	function committed() {
-		if (edit) history.commit($state.snapshot(edit));
+		if (edit) undo.commit($state.snapshot(edit));
 		syncUndo();
 		if (fallback) renderPreview();
 		scheduleCheckpoint();
@@ -286,8 +286,8 @@
 	}
 
 	function syncUndo() {
-		canUndo = history.canUndo;
-		canRedo = history.canRedo;
+		canUndo = undo.canUndo;
+		canRedo = undo.canRedo;
 	}
 
 	function restore(state: EditParams | null) {
@@ -391,7 +391,7 @@
 			dirty = false;
 			restoredDraft = false;
 			await clearDraft(key);
-			history.reset($state.snapshot(edit));
+			undo.reset($state.snapshot(edit));
 			syncUndo();
 			schedule(true);
 			if (fallback) renderPreview();
@@ -482,7 +482,7 @@
 				edit!.lens = { profile: profile.id, distortion: 100, lateralCa: 100, vignetting: 100 };
 				lensDefaulted = true;
 			}
-			history = new History($state.snapshot(edit));
+			undo = new UndoStack($state.snapshot(edit));
 			const prefs = await settings();
 			display = prefs.outputSpace;
 			displaySpace = display;
@@ -595,7 +595,7 @@
 		if ((e.target as HTMLElement)?.tagName === 'INPUT') return;
 		if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') {
 			e.preventDefault();
-			restore(e.shiftKey ? history.redo() : history.undo());
+			restore(e.shiftKey ? undo.redo() : undo.undo());
 		} else if (e.key === '\\') setBefore(!before);
 		else if (e.key.toLowerCase() === 'e' && !e.metaKey && !e.ctrlKey) exporting = true;
 		else if (e.key.toLowerCase() === 'z' && !e.metaKey && !e.ctrlKey) {
@@ -859,10 +859,10 @@
 					<p class="truncate">{cameraLine(meta.info)}</p>
 				</div>
 				<div class="flex shrink-0 gap-2">
-					<button type="button" class="grid size-9 place-items-center rounded bg-raised text-fg-2 disabled:opacity-40" aria-label="Undo" disabled={!canUndo || readOnly} onclick={() => restore(history.undo())}>
+					<button type="button" class="grid size-9 place-items-center rounded bg-raised text-fg-2 disabled:opacity-40" aria-label="Undo" disabled={!canUndo || readOnly} onclick={() => restore(undo.undo())}>
 						<svg viewBox="0 0 16 16" class="size-4" aria-hidden="true"><path d="M6 3 2 7l4 4M2.5 7H10a4 4 0 0 1 0 8H8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></svg>
 					</button>
-					<button type="button" class="grid size-9 place-items-center rounded bg-raised text-fg-2 disabled:opacity-40" aria-label="Redo" disabled={!canRedo || readOnly} onclick={() => restore(history.redo())}>
+					<button type="button" class="grid size-9 place-items-center rounded bg-raised text-fg-2 disabled:opacity-40" aria-label="Redo" disabled={!canRedo || readOnly} onclick={() => restore(undo.redo())}>
 						<svg viewBox="0 0 16 16" class="size-4 -scale-x-100" aria-hidden="true"><path d="M6 3 2 7l4 4M2.5 7H10a4 4 0 0 1 0 8H8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></svg>
 					</button>
 					<button type="button" class="h-9 rounded bg-raised px-3 text-sm" onclick={() => (exporting = true)}>Export</button>

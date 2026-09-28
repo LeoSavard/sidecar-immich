@@ -5,7 +5,7 @@
 // per frame.
 import lensWgsl from './wgsl/client_lens.wgsl?raw';
 
-export const LENS_UNIFORM_BYTES = 1072;
+const LENS_UNIFORM_BYTES = 1072;
 
 export class LensPass {
 	private constructor(
