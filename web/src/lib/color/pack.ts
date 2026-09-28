@@ -13,7 +13,8 @@ type Exports = {
 	sc_last_error(): number;
 };
 
-export type Packed = { uniform: Uint8Array; lut: Float32Array; temperatureK: number; tint: number };
+/** `masks` are the develop pass's mask uniforms (`DevelopPass.setMasks`), texture `i` being `edit.masks[i]`'s. */
+export type Packed = { uniform: Uint8Array; lut: Float32Array; temperatureK: number; tint: number; masks: Uint8Array };
 
 export class ColorPacker {
 	private constructor(private x: Exports) {}
@@ -60,7 +61,8 @@ export class ColorPacker {
 			uniform: out.slice(0, 272),
 			lut: new Float32Array(out.slice(272, 272 + lutBytes).buffer),
 			temperatureK: view.getFloat64(272 + lutBytes, true),
-			tint: view.getFloat64(280 + lutBytes, true)
+			tint: view.getFloat64(280 + lutBytes, true),
+			masks: out.slice(288 + lutBytes, 288 + lutBytes + 288)
 		};
 	}
 }

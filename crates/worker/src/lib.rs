@@ -4,9 +4,12 @@
 //! `POST /v1/ingest { path }`                 hash, read metadata, cache it, pre-build proxies
 //! `GET  /v1/assets/{key}/meta`               cached metadata
 //! `GET  /v1/assets/{key}/proxy?long_edge=N`  RGBA16F proxy bytes; `X-Width`, `X-Height` headers
+//! `GET  /v1/assets/{key}/masks[/{name}]`     masks from the models (`masks.rs`)
 
 pub mod export;
 pub mod lensfun;
+pub mod masks;
+pub mod ml;
 
 use anyhow::{Context, Result};
 use axum::{
@@ -91,6 +94,8 @@ pub struct Worker {
     /// Full-resolution linear buffers of recently opened photos, for loupe tiles (most recent first).
     sessions: Mutex<Vec<Session>>,
     lensfun: Arc<lensfun::Lensfun>,
+    /// `sidecar-ml`, in the `-ml` image only; masks are unavailable without it.
+    ml: Option<Arc<ml::Ml>>,
 }
 
 /// The marker every cached proxy and focus mask carries in its name. Both numbers are in it because they
@@ -106,7 +111,7 @@ fn cache_generation() -> String {
 fn sweep_stale_cache(cache: &std::path::Path) {
     let marker = format!("-{}-", cache_generation());
     let (mut removed, mut bytes) = (0u64, 0u64);
-    for dir in ["proxies", "focus"] {
+    for dir in ["proxies", "focus", "masks"] {
         let Ok(entries) = std::fs::read_dir(cache.join(dir)) else { continue };
         for entry in entries.flatten() {
             let name = entry.file_name();
@@ -136,6 +141,7 @@ impl Worker {
         std::fs::create_dir_all(cache.join("proxies"))?;
         std::fs::create_dir_all(cache.join("focus"))?;
         std::fs::create_dir_all(cache.join("outbox"))?;
+        std::fs::create_dir_all(cache.join("masks"))?;
         sweep_stale_cache(&cache);
         let lensfun = Arc::new(lensfun::Lensfun::open(cache.join("lensfun")));
         let kit = sidecar_engine::Gpu::new_headless().and_then(|gpu| {
@@ -155,6 +161,7 @@ impl Worker {
                 None
             }
         };
+        let ml = ml::Ml::discover(&cache.join("ml")).map(Arc::new);
         Ok(Arc::new(Self {
             cache,
             paths: Mutex::new(HashMap::new()),
@@ -165,6 +172,7 @@ impl Worker {
             export_slot: Semaphore::new(1),
             sessions: Mutex::new(Vec::new()),
             lensfun,
+            ml,
         }))
     }
 
@@ -451,12 +459,14 @@ pub struct PreviewRequest {
 /// The develop pass the browser would have run, run here instead, over the same cached proxy and with the
 /// same parameters and shaders — so a browser without WebGPU sees the same picture, just later. See
 /// docs/ROADMAP.md, "Browsers without WebGPU".
-fn preview_jpeg(kit: &export::Kit, rendering: &export::Rendering, req: &PreviewRequest, proxy: (u32, u32, Bytes)) -> Result<Vec<u8>> {
+fn preview_jpeg(kit: &export::Kit, rendering: &export::Rendering, req: &PreviewRequest, proxy: (u32, u32, Bytes), masks: &[Option<sidecar_engine::RgbaF32>]) -> Result<Vec<u8>> {
     let (width, height, bytes) = proxy;
     let source = sidecar_engine::upload_rgba16(&kit.gpu, &sidecar_engine::RgbaF32::from_f16_bytes(width, height, &bytes));
     let source = rendering.correct(kit, &req.edit, source);
     let packed = rendering.pack(&req.edit, req.color_space);
-    let developed = kit.develop.render(&kit.gpu, &source, &packed.uniform, &packed.lut)?;
+    // The proxy is oriented already, as the masks are.
+    let mask_textures = rendering.mask_textures(kit, &req.edit, masks, 0);
+    let developed = kit.develop.render(&kit.gpu, &source, &packed.uniform, &packed.lut, &export::masks_for(&packed, &mask_textures, [0.0; 4]))?;
     let img = sidecar_engine::read_rgba16(&kit.gpu, &developed)?;
     export::jpeg_bytes(&img, 88, req.color_space)
 }
@@ -475,7 +485,8 @@ async fn preview(State(w): State<Arc<Worker>>, Json(req): Json<PreviewRequest>) 
         Ok(m) => export::Rendering::of(&m.info),
         Err(e) => return internal(e),
     };
-    match tokio::task::spawn_blocking(move || preview_jpeg(&kit, &rendering, &req, proxy)).await {
+    let masks = w.mask_images(&req.key, &req.edit).await;
+    match tokio::task::spawn_blocking(move || preview_jpeg(&kit, &rendering, &req, proxy, &masks)).await {
         Ok(Ok(jpeg)) => ([("content-type", "image/jpeg"), ("cache-control", "no-store")], jpeg).into_response(),
         Ok(Err(e)) => internal(e),
         Err(e) => internal(e.into()),
@@ -495,7 +506,7 @@ pub struct LoupeRequest {
     pub color_space: sidecar_color::DisplaySpace,
 }
 
-fn loupe_png(w: &Worker, kit: &export::Kit, req: &LoupeRequest) -> Result<Vec<u8>> {
+fn loupe_png(w: &Worker, kit: &export::Kit, req: &LoupeRequest, masks: &[Option<sidecar_engine::RgbaF32>]) -> Result<Vec<u8>> {
     let session = {
         let mut sessions = w.sessions.lock().unwrap();
         sessions.iter().position(|s| s.key == req.key).map(|i| {
@@ -530,6 +541,9 @@ fn loupe_png(w: &Worker, kit: &export::Kit, req: &LoupeRequest) -> Result<Vec<u8
     let settings = export::detail_settings(&req.edit);
     let m = settings.margin();
     let packed = rendering.pack(&req.edit, req.color_space);
+    // Masks cover the whole frame; each develop below says where its tile sits in it.
+    let mask_textures = rendering.mask_textures(kit, &req.edit, masks, flip);
+    let masks_at = |x: u32, y: u32| export::masks_for(&packed, &mask_textures, [x as f32, y as f32, sw as f32, sh as f32]);
     let data = match rendering.lens_params(&req.edit, [sw, sh], [ux as f64, uy as f64], [0.0; 2]) {
         // The tile reads a region of the source the lens decides: find it, cut it with the detail filters'
         // margin and the bicubic read's reach around it, denoise and sharpen that, then correct it into the
@@ -545,7 +559,7 @@ fn loupe_png(w: &Worker, kit: &export::Kit, req: &LoupeRequest) -> Result<Vec<u8
             let region = kit.detail.apply(&kit.gpu, region, sigma, &settings);
             let params = rendering.lens_params(&req.edit, [sw, sh], [ux as f64, uy as f64], [cx as f64, cy as f64]).unwrap_or(frame);
             let tile = kit.lens.apply(&kit.gpu, &region, &params, [uw, uh]);
-            let developed = kit.develop.render(&kit.gpu, &tile, &packed.uniform, &packed.lut)?;
+            let developed = kit.develop.render(&kit.gpu, &tile, &packed.uniform, &packed.lut, &masks_at(ux, uy))?;
             sidecar_engine::read_rgba16(&kit.gpu, &developed)?.data
         }
         None => {
@@ -553,7 +567,7 @@ fn loupe_png(w: &Worker, kit: &export::Kit, req: &LoupeRequest) -> Result<Vec<u8
             let (cw, ch) = ((ux + uw + m).min(sw) - cx, (uy + uh + m).min(sh) - cy);
             let tile = kit.detail.crop(&kit.gpu, &source, cx, cy, cw, ch);
             let tile = kit.detail.apply(&kit.gpu, tile, sigma, &settings);
-            let developed = kit.develop.render(&kit.gpu, &tile, &packed.uniform, &packed.lut)?;
+            let developed = kit.develop.render(&kit.gpu, &tile, &packed.uniform, &packed.lut, &masks_at(cx, cy))?;
             let img = sidecar_engine::read_rgba16(&kit.gpu, &developed)?;
             // Cut the margin.
             let (mx, my) = (ux - cx, uy - cy);
@@ -585,7 +599,8 @@ async fn loupe(State(w): State<Arc<Worker>>, Json(req): Json<LoupeRequest>) -> R
         return (StatusCode::SERVICE_UNAVAILABLE, "This worker has no GPU; the loupe needs one.").into_response();
     };
     let w2 = w.clone();
-    match tokio::task::spawn_blocking(move || loupe_png(&w2, &kit, &req)).await {
+    let masks = w.mask_images(&req.key, &req.edit).await;
+    match tokio::task::spawn_blocking(move || loupe_png(&w2, &kit, &req, &masks)).await {
         Ok(Ok(png)) => ([("content-type", "image/png"), ("cache-control", "no-store")], png).into_response(),
         Ok(Err(e)) => internal(e),
         Err(e) => internal(e.into()),
@@ -612,7 +627,8 @@ async fn render(State(w): State<Arc<Worker>>, Json(req): Json<export::RenderRequ
         let _slot = w2.export_slot.acquire().await;
         let outbox = w2.cache.join("outbox");
         let tx2 = tx.clone();
-        let result = tokio::task::spawn_blocking(move || export::render(&kit, &req, &outbox, &tx2)).await;
+        let masks = w2.mask_images(&req.key, &req.edit).await;
+        let result = tokio::task::spawn_blocking(move || export::render(&kit, &req, &masks, &outbox, &tx2)).await;
         let last = match result {
             Ok(Ok(done)) => done,
             Ok(Err(e)) => export::Progress::Failed { message: format!("{e:#}") },
@@ -689,6 +705,8 @@ pub fn router(worker: Arc<Worker>) -> Router {
         .route("/v1/assets/{key}/meta", get(meta))
         .route("/v1/assets/{key}/proxy", get(proxy_handler))
         .route("/v1/assets/{key}/focus", get(focus_handler))
+        .route("/v1/assets/{key}/masks", get(masks_handler))
+        .route("/v1/assets/{key}/masks/{name}", get(mask_handler))
         .route("/v1/lensfun", get(lensfun_status))
         .route("/v1/lensfun/done", post(lensfun_done))
         .route("/v1/lensfun/{name}", axum::routing::put(lensfun_put))
@@ -764,6 +782,21 @@ struct FocusQuery {
     edge: Option<u32>,
 }
 
+async fn masks_handler(State(w): State<Arc<Worker>>, Path(key): Path<String>) -> Response {
+    match w.masks(&key).await {
+        Ok(set) => Json(set).into_response(),
+        Err(e) => internal(e),
+    }
+}
+
+async fn mask_handler(State(w): State<Arc<Worker>>, Path((key, name)): Path<(String, String)>) -> Response {
+    match w.mask(&key, &name).await {
+        Ok(Some(png)) => ([("content-type", "image/png")], png).into_response(),
+        Ok(None) => (StatusCode::NOT_FOUND, "no such mask here").into_response(),
+        Err(e) => internal(e),
+    }
+}
+
 async fn focus_handler(State(w): State<Arc<Worker>>, Path(key): Path<String>, Query(q): Query<FocusQuery>) -> Response {
     let edge = q.edge.unwrap_or(DEFAULT_EDGE).clamp(256, 8192);
     match w.focus(&key, edge).await {
@@ -777,7 +810,13 @@ mod tests {
     use super::*;
 
     /// Develop a display-linear Display P3 test card as a developed file, in Display P3.
+    /// One test at a time holds a GPU device. Creating and destroying several at once in one process
+    /// crashes NVIDIA's Vulkan driver now and then (a segfault in about a third of parallel runs, none in
+    /// serial ones); the worker itself only ever makes one.
+    static GPU_TURN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     fn develop_developed(edit: &sidecar_color::EditParams, card: &sidecar_engine::RgbaF32) -> Option<sidecar_engine::RgbaF32> {
+        let _turn = GPU_TURN.blocking_lock();
         let gpu = sidecar_engine::Gpu::new_headless().ok()?;
         let pass = sidecar_engine::DevelopPass::new(&gpu).unwrap();
         let rendering = export::Rendering::developed(sidecar_raw::SourceSpace::DisplayP3.camera_color());
@@ -856,6 +895,7 @@ mod tests {
     #[tokio::test]
     async fn one_decode_per_asset_at_a_time() {
         let tmp = tempfile::tempdir().unwrap();
+        let _turn = GPU_TURN.lock().await;
         let w = Worker::new(tmp.path().to_path_buf()).unwrap();
         let wait = Duration::from_millis(100);
 
@@ -883,6 +923,7 @@ mod tests {
         std::fs::write(&old, b"upside down").unwrap();
         std::fs::write(&older, b"upside down").unwrap();
 
+        let _turn = GPU_TURN.blocking_lock();
         let w = Worker::new(tmp.path().to_path_buf()).unwrap();
         assert_ne!(w.proxy_path(&key, 2560), old, "the current code must not look at the old name");
         assert_ne!(w.focus_path(&key, 768), older);
@@ -895,6 +936,7 @@ mod tests {
     #[tokio::test]
     async fn an_unchanged_file_is_not_hashed_again() {
         let tmp = tempfile::tempdir().unwrap();
+        let _turn = GPU_TURN.lock().await;
         let w = Worker::new(tmp.path().join("cache")).unwrap();
         let photo = tmp.path().join("a.png");
         let png = |grey: u8| {
@@ -923,6 +965,7 @@ mod tests {
     #[tokio::test]
     async fn finished_decodes_leave_nothing_behind() {
         let tmp = tempfile::tempdir().unwrap();
+        let _turn = GPU_TURN.lock().await;
         let w = Worker::new(tmp.path().to_path_buf()).unwrap();
         for i in 0..32 {
             drop(w.decode_guard(&format!("key{i}")).await);

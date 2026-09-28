@@ -4,6 +4,9 @@
 import developWgsl from './wgsl/client_develop.wgsl?raw';
 
 const DEVELOP_UNIFORM_BYTES = 272;
+/** `MaskParams` (shaders/develop/masks.wgsl), and the texture slots it describes. */
+const MASK_UNIFORM_BYTES = 288;
+const MAX_MASKS = 8;
 
 export class DevelopPass {
 	readonly device: GPUDevice;
@@ -16,12 +19,24 @@ export class DevelopPass {
 	private lut?: GPUTexture;
 	private target?: GPUTexture;
 	private bindGroup?: GPUBindGroup;
+	private maskLayout: GPUBindGroupLayout;
+	private maskUbo: GPUBuffer;
+	private maskSampler: GPUSampler;
+	/** What an unused mask slot binds: 1×1, zero. */
+	private noMask: GPUTexture;
+	private maskTextures: (GPUTexture | undefined)[] = [];
+	private maskBind?: GPUBindGroup;
 
-	private constructor(device: GPUDevice, pipeline: GPURenderPipeline, layout: GPUBindGroupLayout) {
+	private constructor(device: GPUDevice, pipeline: GPURenderPipeline, layout: GPUBindGroupLayout, maskLayout: GPUBindGroupLayout) {
 		this.device = device;
 		this.pipeline = pipeline;
 		this.layout = layout;
+		this.maskLayout = maskLayout;
 		this.ubo = device.createBuffer({ label: 'develop params', size: DEVELOP_UNIFORM_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+		// Zeroed on creation: no masks until `setMasks` says otherwise.
+		this.maskUbo = device.createBuffer({ label: 'develop masks', size: MASK_UNIFORM_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+		this.maskSampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
+		this.noMask = device.createTexture({ label: 'no mask', size: [1, 1], format: 'r8unorm', usage: GPUTextureUsage.TEXTURE_BINDING });
 	}
 
 	static async create(device: GPUDevice): Promise<DevelopPass> {
@@ -37,14 +52,23 @@ export class DevelopPass {
 				{ binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '1d' } }
 			]
 		});
+		// Mirrors crates/engine/src/develop.rs: the mask uniforms, a linear sampler, a texture per slot.
+		const maskLayout = device.createBindGroupLayout({
+			label: 'develop masks',
+			entries: [
+				{ binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+				{ binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+				...Array.from({ length: MAX_MASKS }, (_, i) => ({ binding: 2 + i, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' as const, viewDimension: '2d' as const } }))
+			]
+		});
 		const pipeline = await device.createRenderPipelineAsync({
 			label: 'develop',
-			layout: device.createPipelineLayout({ bindGroupLayouts: [layout] }),
+			layout: device.createPipelineLayout({ bindGroupLayouts: [layout, maskLayout] }),
 			vertex: { module, entryPoint: 'vs' },
 			fragment: { module, entryPoint: 'fs', targets: [{ format: 'rgba16float' }] },
 			primitive: { topology: 'triangle-list' }
 		});
-		return new DevelopPass(device, pipeline, layout);
+		return new DevelopPass(device, pipeline, layout, maskLayout);
 	}
 
 	get output(): GPUTexture | undefined {
@@ -93,6 +117,19 @@ export class DevelopPass {
 		this.device.queue.writeTexture({ texture: this.lut }, lut, {}, [lut.length]);
 	}
 
+	/**
+	 * The edit's masks: `params` from the packer (`Packed.masks`), and a texture per mask in the frame being
+	 * developed — `undefined` for one not loaded yet, which then weighs nothing.
+	 */
+	setMasks(params: Uint8Array, textures: (GPUTexture | undefined)[]) {
+		if (params.byteLength !== MASK_UNIFORM_BYTES) throw new Error(`mask uniforms must be ${MASK_UNIFORM_BYTES} bytes`);
+		this.device.queue.writeBuffer(this.maskUbo, 0, params);
+		if (textures.length !== this.maskTextures.length || textures.some((t, i) => t !== this.maskTextures[i])) {
+			this.maskTextures = textures.slice(0, MAX_MASKS);
+			this.maskBind = undefined;
+		}
+	}
+
 	render() {
 		if (!this.source || !this.lut || !this.target) throw new Error('develop pass needs a source and a tone LUT');
 		this.bindGroup ??= this.device.createBindGroup({
@@ -106,7 +143,16 @@ export class DevelopPass {
 		const encoder = this.device.createCommandEncoder();
 		const pass = encoder.beginRenderPass({ colorAttachments: [{ view: this.target.createView(), loadOp: 'clear', storeOp: 'store', clearValue: [0, 0, 0, 1] }] });
 		pass.setPipeline(this.pipeline);
+		this.maskBind ??= this.device.createBindGroup({
+			layout: this.maskLayout,
+			entries: [
+				{ binding: 0, resource: { buffer: this.maskUbo } },
+				{ binding: 1, resource: this.maskSampler },
+				...Array.from({ length: MAX_MASKS }, (_, i) => ({ binding: 2 + i, resource: (this.maskTextures[i] ?? this.noMask).createView() }))
+			]
+		});
 		pass.setBindGroup(0, this.bindGroup);
+		pass.setBindGroup(1, this.maskBind);
 		pass.draw(3);
 		pass.end();
 		this.device.queue.submit([encoder.finish()]);

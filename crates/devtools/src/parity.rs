@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 use palette::{IntoColor, Lab, LinSrgb, color_difference::Ciede2000};
 use serde::{Deserialize, Serialize};
 use sidecar_color::camera::{Calibration, CameraColor};
-use sidecar_color::params::{EditParams, MixerBand, WhiteBalanceMode};
+use sidecar_color::params::{EditParams, MaskAdjustment, MixerBand, WhiteBalanceMode};
 use sidecar_color::{DisplaySpace, SourceKind, pack};
 use sidecar_engine::{DevelopPass, Gpu, RgbaF32};
 use std::path::Path;
@@ -15,6 +15,7 @@ pub const MEAN_LIMIT: f32 = 0.5;
 pub const P99_LIMIT: f32 = 2.0;
 
 #[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct Case {
     name: String,
     width: u32,
@@ -22,6 +23,23 @@ struct Case {
     /// `<name>.lens.bin` holds lens-pass uniforms, run over the source before develop.
     #[serde(default)]
     lens: bool,
+    /// `<name>.mask<i>.u8`, one byte a pixel at `mask_size`, and `<name>.masks.bin` their uniforms.
+    #[serde(default)]
+    masks: u32,
+    #[serde(default)]
+    mask_size: [u32; 2],
+}
+
+/// Masks for the parity case, at half the image's size so both renderers interpolate them: a soft disc and a
+/// diagonal ramp.
+const MASK_SIZE: [u32; 2] = [256, 128];
+
+fn synthetic_masks() -> [Vec<u8>; 2] {
+    let [w, h] = MASK_SIZE;
+    let at = |f: &dyn Fn(f64, f64) -> f64| (0..h).flat_map(|y| (0..w).map(move |x| (x, y))).map(|(x, y)| (f((x as f64 + 0.5) / w as f64, (y as f64 + 0.5) / h as f64).clamp(0.0, 1.0) * 255.0).round() as u8).collect::<Vec<u8>>();
+    let disc = at(&|u, v| 1.0 - (((u - 0.4) * 2.0).hypot(v - 0.5) * 3.0 - 0.6).clamp(0.0, 1.0));
+    let ramp = at(&|u, v| u * 0.7 + v * 0.3);
+    [disc, ramp]
 }
 
 /// The ZV-1 at 9.4 mm from its own tables (sidecar_raw::lens), with a vignetting curve added so every part
@@ -128,6 +146,13 @@ fn cases() -> Vec<Fixture> {
     phone.mixer.orange = MixerBand { hue: 0.0, saturation: 20.0, luminance: 5.0 };
     let heic = || sidecar_raw::SourceSpace::DisplayP3.camera_color();
 
+    // Two masks, one inverted, every control moved: the mask stage in both renderers.
+    let mut masked = graded.clone();
+    masked.masks = vec![
+        MaskAdjustment { mask: "subject".into(), exposure: 1.0, contrast: 30.0, saturation: -40.0, temperature: 40.0, ..Default::default() },
+        MaskAdjustment { mask: "skin".into(), invert: true, amount: 70.0, exposure: -0.7, tint: -30.0, saturation: 25.0, ..Default::default() },
+    ];
+
     let mut lens = EditParams { lens: Some(sidecar_color::params::Lens { profile: "sony".into(), ..Default::default() }), ..graded.clone() };
     lens.lens.as_mut().unwrap().lateral_ca = 150.0;
 
@@ -138,6 +163,7 @@ fn cases() -> Vec<Fixture> {
         ("heic-default".into(), heic(), SourceKind::Developed, EditParams::default(), DisplaySpace::DisplayP3, None),
         ("heic-graded".into(), heic(), SourceKind::Developed, phone, DisplaySpace::Srgb, None),
         ("lens-zv1".into(), nikon_d850(), SourceKind::Raw, lens, DisplaySpace::Srgb, Some(zv1())),
+        ("masks".into(), nikon_d850(), SourceKind::Raw, masked, DisplaySpace::Srgb, None),
     ]
 }
 
@@ -159,8 +185,15 @@ pub fn fixtures(dir: &Path) -> Result<()> {
             }
             _ => false,
         };
-        println!("{name}: white balance {:.0} K, tint {:+.1}{}", packed.temperature_k, packed.tint, if lens { ", lens pass" } else { "" });
-        index.push(Case { name, width: src.width, height: src.height, lens });
+        let masks = edit.masks.len().min(2) as u32;
+        if masks > 0 {
+            for (i, m) in synthetic_masks().iter().take(masks as usize).enumerate() {
+                std::fs::write(dir.join(format!("{name}.mask{i}.u8")), m)?;
+            }
+            std::fs::write(dir.join(format!("{name}.masks.bin")), bytemuck::bytes_of(&packed.masks))?;
+        }
+        println!("{name}: white balance {:.0} K, tint {:+.1}{}{}", packed.temperature_k, packed.tint, if lens { ", lens pass" } else { "" }, if masks > 0 { format!(", {masks} masks") } else { String::new() });
+        index.push(Case { name, width: src.width, height: src.height, lens, masks, mask_size: if masks > 0 { MASK_SIZE } else { [0; 2] } });
     }
     std::fs::write(dir.join("index.json"), serde_json::to_vec_pretty(&index)?)?;
     Ok(())
@@ -186,7 +219,19 @@ pub fn native(dir: &Path, out: &Path) -> Result<()> {
             let params: sidecar_color::lens::LensParams = bytemuck::pod_read_unaligned(&bytes);
             tex = lens_pass.apply(&gpu, &tex, &params, [case.width, case.height]);
         }
-        let img = sidecar_engine::read_rgba16(&gpu, &pass.render(&gpu, &tex, &uniform, &lut)?)?;
+        let mut mask_textures = Vec::new();
+        for i in 0..case.masks {
+            let bytes = std::fs::read(dir.join(format!("{}.mask{i}.u8", case.name)))?;
+            let img = RgbaF32 { width: case.mask_size[0], height: case.mask_size[1], data: bytes.iter().flat_map(|&v| [v as f32 / 255.0; 4]).collect() };
+            mask_textures.push(Some(sidecar_engine::upload_rgba16(&gpu, &img)));
+        }
+        let masks = if case.masks > 0 {
+            let params: sidecar_color::params::MaskParams = bytemuck::pod_read_unaligned(&std::fs::read(dir.join(format!("{}.masks.bin", case.name)))?);
+            sidecar_engine::Masks { params, textures: mask_textures.iter().map(Option::as_ref).collect() }
+        } else {
+            sidecar_engine::Masks::none()
+        };
+        let img = sidecar_engine::read_rgba16(&gpu, &pass.render(&gpu, &tex, &uniform, &lut, &masks)?)?;
         std::fs::write(out.join(format!("{}.native.f16", case.name)), img.to_f16_bytes())?;
     }
     Ok(())

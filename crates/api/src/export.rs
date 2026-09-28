@@ -202,6 +202,7 @@ async fn run(app: &Arc<App>, job: &Job, user: &crate::session::User, rec: &Asset
     let body = json!({
         "jobId": job.id, "path": rec.path, "fileName": file_name, "edit": edit, "format": req.format,
         "colorSpace": req.color_space, "quality": req.quality, "longEdge": req.long_edge, "sidecar": sidecar,
+        "key": req.asset_key,
     });
     let resp = app.http.post(app.worker("/v1/render")).json(&body).send().await.context("reaching the worker")?;
     if !resp.status().is_success() {

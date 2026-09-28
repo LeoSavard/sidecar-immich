@@ -46,6 +46,24 @@ fn an_export_carries_its_edit() {
     assert_eq!(serde_json::from_value::<EditParams>(back["edit"].clone()).unwrap(), edit);
 }
 
+/// Masks go through the file and come back, and removing the last one removes it from the file.
+#[test]
+fn masks_round_trip_and_can_be_removed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let roots = [tmp.path().canonicalize().unwrap()];
+    let original = fixture(tmp.path(), "DSC_2.NEF");
+    let mut edit = EditParams::default();
+    edit.masks.push(sidecar_color::params::MaskAdjustment { mask: "subject".into(), invert: true, exposure: 0.5, contrast: -20.0, ..Default::default() });
+    edit.masks.push(sidecar_color::params::MaskAdjustment { mask: "skin".into(), temperature: 15.0, amount: 60.0, ..Default::default() });
+    update(&original, &roots, |d| d.set_edit(&edit, "x")).unwrap();
+    assert_eq!(SidecarDoc::load(&original).unwrap().edit(), edit);
+    edit.masks.clear();
+    update(&original, &roots, |d| d.set_edit(&edit, "x")).unwrap();
+    let doc = SidecarDoc::load(&original).unwrap();
+    assert_eq!(doc.edit(), edit);
+    assert!(doc.sidecar["edit"].get("masks").is_none());
+}
+
 #[test]
 fn unix_seconds_format_as_rfc3339() {
     assert_eq!(rfc3339(0), "1970-01-01T00:00:00Z");
@@ -116,12 +134,15 @@ fn keeps_fields_from_a_newer_sidecar_and_exports() {
         Ok(())
     })
     .unwrap();
-    let mut edit = EditParams::default();
+    // Edited here the way the editor edits: loaded, changed, saved.
+    let mut edit = SidecarDoc::load(&original).unwrap().edit();
+    assert!(!edit.masks[0].renders(), "a mask of a kind this version doesn't know is carried, not rendered");
     edit.exposure.ev = -1.0;
     update(&original, &roots, |d| d.set_edit(&edit, "x")).unwrap();
     let doc = SidecarDoc::load(&original).unwrap();
     assert_eq!(doc.edit().exposure.ev, -1.0);
     assert_eq!(doc.sidecar["edit"]["masks"][0]["kind"], "radial");
+    assert_eq!(doc.sidecar["edit"]["masks"][0]["exposure"], 0.5);
     assert_eq!(doc.exports()[0]["editEtag"], "123456", "all-digit ETags stay strings");
 }
 

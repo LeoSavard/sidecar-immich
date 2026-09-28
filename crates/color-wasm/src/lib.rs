@@ -2,8 +2,8 @@
 //! Browser entry point for the colour maths. No bindings generator: the page allocates a buffer, writes
 //! JSON `{ edit, camera, source, display }`, and reads back a packed result. See web/src/lib/color/pack.ts.
 //!
-//! Result layout: `[u32 len][272 uniform bytes][4096 × f32 tone LUT][f64 temperature][f64 tint]`, or len 0
-//! with the error message available from `sc_last_error`.
+//! Result layout: `[u32 len][272 uniform bytes][4096 × f32 tone LUT][f64 temperature][f64 tint][288 mask
+//! uniform bytes]`, or len 0 with the error message available from `sc_last_error`.
 
 use serde::Deserialize;
 use sidecar_color::camera::CameraColor;
@@ -81,6 +81,7 @@ pub unsafe extern "C" fn sc_pack(ptr: *const u8, len: usize) -> *const u8 {
         p.lut.iter().for_each(|v| out.extend_from_slice(&v.to_le_bytes()));
         out.extend_from_slice(&p.temperature_k.to_le_bytes());
         out.extend_from_slice(&p.tint.to_le_bytes());
+        out.extend_from_slice(bytemuck::bytes_of(&p.masks));
         out
     }))
 }

@@ -21,6 +21,10 @@ pub struct EditParams {
     pub detail: Detail,
     /// Absent means off: photos edited before this field existed render unchanged. See DESIGN.md §15.
     pub lens: Option<Lens>,
+    /// Adjustments through masks, at most `MAX_MASKS`. Left out of the serialized edit when empty, so an edit
+    /// without masks keeps the ETag — and the history ids and export records keyed by it — it always had.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub masks: Vec<MaskAdjustment>,
 }
 
 impl Default for EditParams {
@@ -33,6 +37,7 @@ impl Default for EditParams {
             mixer: Mixer::default(),
             detail: Detail::default(),
             lens: None,
+            masks: Vec::new(),
         }
     }
 }
@@ -155,6 +160,88 @@ impl Default for Lens {
     }
 }
 
+/// Masks the develop pass takes at once: texture bindings, and the uniform array's length.
+pub const MAX_MASKS: usize = 8;
+
+/// An adjustment applied through a mask (DESIGN.md §15): each value is added, weighted by the mask, to what
+/// the global edit does there — `ev = global.ev + Σ wₖ · maskₖ.ev`.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct MaskAdjustment {
+    /// Which mask, by name: `subject`, `skin`, `face-skin`, `body-skin`, `hair`, `clothes`. The raster is
+    /// cached by the worker, never stored here.
+    pub mask: String,
+    /// Apply to everything the mask leaves out: the background, for `subject`.
+    pub invert: bool,
+    /// How much of the mask applies, 0…100.
+    pub amount: f64,
+    /// Stops, added to the global exposure.
+    pub exposure: f64,
+    /// −100…100 each.
+    pub contrast: f64,
+    pub saturation: f64,
+    /// Warmer (+) or cooler (−), and more magenta (+) or green (−), relative to the global white balance.
+    pub temperature: f64,
+    pub tint: f64,
+    /// Fields a newer Sidecar wrote (another kind of mask, a shape), kept as they are so saving here doesn't
+    /// lose them. An entry this version can't render is carried along and skipped (`renders`).
+    #[serde(flatten)]
+    pub other: serde_json::Map<String, serde_json::Value>,
+}
+
+impl Default for MaskAdjustment {
+    fn default() -> Self {
+        Self { mask: String::new(), invert: false, amount: 100.0, exposure: 0.0, contrast: 0.0, saturation: 0.0, temperature: 0.0, tint: 0.0, other: Default::default() }
+    }
+}
+
+/// The masks the models make, which an adjustment can name. Kept in step with the worker's `masks::NAMES`.
+pub const MASK_NAMES: [&str; 6] = ["subject", "skin", "face-skin", "body-skin", "hair", "clothes"];
+
+impl MaskAdjustment {
+    /// Whether this version knows how to render it: a mask it knows by name, and nothing a newer version
+    /// added to say it is something else.
+    pub fn renders(&self) -> bool {
+        MASK_NAMES.contains(&self.mask.as_str()) && self.other.is_empty()
+    }
+}
+
+/// One mask's adjustment as the shader takes it. Mirrors `struct MaskAdjust` in shaders/develop/masks.wgsl.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct MaskAdjust {
+    /// rgb: white-balance gains in camera space at full weight; w: exposure in stops.
+    pub gain: [f32; 4],
+    /// x: contrast, y: saturation (each −1…1), z: amount (0…1), w: 1 to invert.
+    pub tone: [f32; 4],
+}
+
+/// Byte-for-byte mirror of `struct MaskParams` in shaders/develop/masks.wgsl (288 bytes); checked by naga.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct MaskParams {
+    /// xy: where the texture being developed sits in the frame the masks cover, in its pixels; zw: that
+    /// frame's size (0 for the texture's own size — a whole image). A loupe tile sets both.
+    pub frame: [f32; 4],
+    pub count: u32,
+    pub _pad: [u32; 3],
+    pub adjust: [MaskAdjust; MAX_MASKS],
+}
+
+/// Relative white balance for a mask: gains in camera space that move the global white point `(t, tint)` by
+/// the mask's temperature and tint. Temperature ±100 is ±40 mired, tint ±100 is ±30 tint units. The matrix
+/// is kept from the global white balance; a local shift is small enough for that to hold.
+fn mask_gains(camera: &CameraColor, global: &camera::ResolvedWhiteBalance, m: &MaskAdjustment) -> [f64; 3] {
+    if m.temperature == 0.0 && m.tint == 0.0 {
+        return [1.0; 3];
+    }
+    // Warmer means assuming a bluer light: a higher temperature, a lower mired value.
+    let mired = (1e6 / global.temperature_k - 0.4 * m.temperature.clamp(-100.0, 100.0)).clamp(20.0, 1000.0);
+    let tint = global.tint + 0.3 * m.tint.clamp(-100.0, 100.0);
+    let local = camera::resolve(camera, crate::cct::temp_tint_to_xy(1e6 / mired, tint));
+    [0, 1, 2].map(|i| local.mul[i] / global.mul[i])
+}
+
 /// What the source pixels are, which decides how the develop pass renders them.
 ///
 /// A RAW is scene-referred: sensor light, which the base tone curve renders for display. A JPEG, HEIC, PNG
@@ -215,6 +302,8 @@ pub struct Packed {
     pub lut: Vec<f32>,
     pub temperature_k: f64,
     pub tint: f64,
+    /// `MaskParams` for the edit's masks, frame left at the whole image; texture `i` is `edit.masks[i]`'s.
+    pub masks: MaskParams,
 }
 
 /// Row-major 3×3 → WGSL `mat3x3f` columns.
@@ -260,7 +349,21 @@ pub fn pack(edit: &EditParams, camera: &CameraColor, source: SourceKind, display
             ]
         }),
     };
-    Packed { uniform: bytemuck::bytes_of(&params).to_vec(), lut: monotone_lut(&t.curve, LUT_SIZE), temperature_k: wb.temperature_k, tint: wb.tint }
+    let mut masks = MaskParams { frame: [0.0; 4], count: 0, _pad: [0; 3], adjust: [MaskAdjust::default(); MAX_MASKS] };
+    for (slot, m) in masks.adjust.iter_mut().zip(edit.masks.iter().take(MAX_MASKS)) {
+        masks.count += 1;
+        // Kept in its slot, so texture `i` stays `edit.masks[i]`'s, at no weight.
+        if !m.renders() {
+            continue;
+        }
+        let g = mask_gains(camera, &wb, m);
+        let unit = |v: f64| (v.clamp(-100.0, 100.0) / 100.0) as f32;
+        *slot = MaskAdjust {
+            gain: [g[0] as f32, g[1] as f32, g[2] as f32, m.exposure.clamp(-5.0, 5.0) as f32],
+            tone: [unit(m.contrast), unit(m.saturation), (m.amount.clamp(0.0, 100.0) / 100.0) as f32, if m.invert { 1.0 } else { 0.0 }],
+        };
+    }
+    Packed { uniform: bytemuck::bytes_of(&params).to_vec(), lut: monotone_lut(&t.curve, LUT_SIZE), temperature_k: wb.temperature_k, tint: wb.tint, masks }
 }
 
 #[cfg(test)]
@@ -314,6 +417,46 @@ mod tests {
         assert_eq!(p.lut.len(), LUT_SIZE);
         // exposure sits at byte 12
         assert_eq!(f32::from_le_bytes(p.uniform[12..16].try_into().unwrap()), 1.0);
+    }
+
+    /// An edit without masks serializes as it did before masks existed: its ETag, and everything keyed by it,
+    /// must not change.
+    #[test]
+    fn an_edit_without_masks_serializes_as_before() {
+        let json = serde_json::to_value(EditParams::default()).unwrap();
+        assert!(json.get("masks").is_none());
+        let mut e = EditParams::default();
+        e.masks.push(MaskAdjustment { mask: "subject".into(), exposure: 0.5, ..Default::default() });
+        let back: EditParams = serde_json::from_value(serde_json::to_value(&e).unwrap()).unwrap();
+        assert_eq!(back, e);
+    }
+
+    #[test]
+    fn masks_pack_their_gains_and_weights() {
+        let cam = crate::camera::nikon_d850();
+        let mut e = EditParams::default();
+        e.masks.push(MaskAdjustment { mask: "subject".into(), exposure: 1.0, contrast: 50.0, amount: 50.0, invert: true, ..Default::default() });
+        e.masks.push(MaskAdjustment { mask: "skin".into(), temperature: 50.0, ..Default::default() });
+        let m = pack(&e, &cam, SourceKind::Raw, DisplaySpace::Srgb).masks;
+        assert_eq!(m.count, 2);
+        assert_eq!(m.adjust[0].gain, [1.0, 1.0, 1.0, 1.0]);
+        assert_eq!(m.adjust[0].tone, [0.5, 0.0, 0.5, 1.0]);
+        let [r, g, b, _] = m.adjust[1].gain;
+        assert!(r > 1.0 && b < 1.0 && (g - 1.0).abs() < 1e-6, "warmer: more red, less blue, green fixed: {:?}", m.adjust[1].gain);
+    }
+
+    #[test]
+    fn mask_layout_matches_wgsl() {
+        let src = sidecar_shaders::compose("develop/masks.wgsl").unwrap();
+        let module = naga::front::wgsl::parse_str(&src).unwrap();
+        let (_, ty) = module.types.iter().find(|(_, t)| t.name.as_deref() == Some("MaskParams")).unwrap();
+        let naga::TypeInner::Struct { members, span } = &ty.inner else { panic!("not a struct") };
+        assert_eq!(*span as usize, std::mem::size_of::<MaskParams>());
+        assert_eq!(std::mem::size_of::<MaskParams>(), 288);
+        let off = |n: &str| members.iter().find(|m| m.name.as_deref() == Some(n)).unwrap().offset as usize;
+        assert_eq!(off("frame"), std::mem::offset_of!(MaskParams, frame));
+        assert_eq!(off("count"), std::mem::offset_of!(MaskParams, count));
+        assert_eq!(off("adjust"), std::mem::offset_of!(MaskParams, adjust));
     }
 
     #[test]

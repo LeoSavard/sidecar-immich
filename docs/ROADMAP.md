@@ -173,11 +173,13 @@ sky, the subject.
   OKLCh like the mixer, so evening out redness doesn't move perceived brightness. Several ranges per photo
   (two people, skin and sky). A live mask overlay shows what's affected. A develop module after the mixer, in
   the shared WGSL; neutral settings are the identity, and an edit that uses it bumps `ProcessVersion`.
-- *Subject and skin masks from a model*, so a skin range doesn't also catch a pink wall: range × mask. The
-  models run in `sidecar-ml` (DESIGN.md build log), a separate program on burn over Vulkan: BiRefNet lite for
-  the subject, MediaPipe's multi-class model for hair and skin, YuNet for faces — MIT, Apache-2.0 and MIT
-  weights. Done: the crate, its socket protocol and the weights pipeline. Next: the worker starts it on demand
-  and caches masks per asset like the focus mask; then the edge refinement below.
+- *Subject and skin masks from a model* — **done**: `sidecar-ml` (BiRefNet lite for the subject, MediaPipe's
+  multi-class model for hair and skin, YuNet for faces) runs on the worker's GPU on demand; masks are cached
+  per photo and served by name, and the editor's Masks section applies exposure, contrast, saturation and
+  white balance through any of them, inverted or not, identically in the browser and on export (a parity
+  case covers it). What builds on it: the skin colour range (range × skin mask), focus peaking weighted by the
+  subject, faces for eye-first peaking — each asks `$lib/masks` (browser) or `Worker::mask_images` (server)
+  for a mask by name.
 - *Hair-accurate edges*: the part masks come from a 256² model, so they're right about what is hair but
   blocky about where it ends. Refine at full resolution rather than tiling the model, which would lose the
   whole-image context segmentation needs: a guided filter or a matting model, driven by the coarse mask and

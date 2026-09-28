@@ -2,7 +2,8 @@
 <script lang="ts">
 	import { page } from '$app/state';
 	import { DevelopPass, requestDevice } from '$lib/gpu/develop';
-	import { CLIP_HIGHS, CLIP_LOWS, PEAKING, ViewPass, type Viewport } from '$lib/gpu/view';
+	import { CLIP_HIGHS, CLIP_LOWS, MASK_INVERTED, PEAKING, SHOW_MASK, ViewPass, type Viewport } from '$lib/gpu/view';
+	import { MaskLibrary, type MaskSet } from '$lib/masks';
 	import { HistogramPass, type HistogramData } from '$lib/gpu/histogram';
 	import { LensPass, correctedPoint } from '$lib/gpu/lens';
 	import { ColorPacker } from '$lib/color/pack';
@@ -17,12 +18,13 @@
 	import ExportSheet from '$lib/ui/ExportSheet.svelte';
 	import Loupe from '$lib/ui/Loupe.svelte';
 	import HistoryPanel from '$lib/ui/HistoryPanel.svelte';
+	import MasksPanel from '$lib/ui/MasksPanel.svelte';
 	import { CURVE_ANCHORS, PICKS, curveOffset, view as sliders, type Anchor } from '$lib/state/edit-view';
 	import { decimals, signed } from '$lib/ui/format';
-	import type { Band, DisplaySpace, EditParams, HistoryState, Lens, Meta, MixerBand } from '$lib/types';
+	import type { Band, DisplaySpace, EditParams, HistoryState, Lens, MaskAdjustment, Meta, MixerBand } from '$lib/types';
 
 	type EditState = { edit: EditParams; etag: string; head: string; readOnly: boolean; writable?: boolean; exports: unknown[]; forked?: boolean };
-	type Section = 'lens' | 'wb' | 'light' | 'curve' | 'color' | 'detail' | 'history';
+	type Section = 'lens' | 'wb' | 'light' | 'curve' | 'color' | 'masks' | 'detail' | 'history';
 
 	const key = page.params.key!;
 	let canvas: HTMLCanvasElement;
@@ -103,6 +105,13 @@
 	let corrected: GPUTexture | undefined;
 	let correctedMask: GPUTexture | undefined;
 	let lensMadeFrom = '';
+	/** The masks the models made for this photo, fetched when a mask is first needed (`$lib/masks`). */
+	let maskLibrary: MaskLibrary | undefined;
+	let maskSet = $state<MaskSet | null>(null);
+	/** The adjustment whose mask is shown over the photo. */
+	let maskShown = $state<number | null>(null);
+	/** Masks lens-corrected as the picture is, and the correction each was made with. */
+	const correctedMasks = new Map<string, { madeFrom: string; texture: GPUTexture }>();
 	/** The uniforms the corrected proxy was made with: they also move markers set in sensor geometry. */
 	let lensUniform: Uint8Array | undefined;
 	/**
@@ -147,11 +156,16 @@
 			const packed = repack();
 			develop.setUniforms(packed.uniform);
 			develop.setToneLut(packed.lut);
+			develop.setMasks(packed.masks, ((before ? compareEdit() : edit).masks ?? []).map((m) => maskTexture(m.mask)));
 			develop.render();
 			developDirty = false;
 			hist.run(develop.output, histStride, (h) => (histogram = h));
 		}
-		view.render(develop.output, canvas, viewport, (clipHigh ? CLIP_HIGHS : 0) | (clipLow ? CLIP_LOWS : 0) | (peaking ? PEAKING : 0));
+		const showing = maskShown === null ? undefined : edit.masks?.[maskShown];
+		const overlay = showing && maskTexture(showing.mask);
+		view.useOverlay(overlay);
+		const maskFlags = overlay ? SHOW_MASK | (showing.invert ? MASK_INVERTED : 0) : 0;
+		view.render(develop.output, canvas, viewport, (clipHigh ? CLIP_HIGHS : 0) | (clipLow ? CLIP_LOWS : 0) | (peaking ? PEAKING : 0) | maskFlags);
 		markerPos = imageToScreen(afPoint());
 	}
 
@@ -194,6 +208,66 @@
 			lensPass.run(mask, correctedMask, maskUniform);
 			view.useFocusMask(correctedMask);
 		} else view.useFocusMask(undefined);
+	}
+
+	/**
+	 * A mask in the frame being developed: loaded, and lens-corrected as the picture is (without vignetting,
+	 * which would change its values rather than move them). `undefined` until it has loaded — it then weighs
+	 * nothing — and loading it redraws.
+	 */
+	function maskTexture(name: string): GPUTexture | undefined {
+		if (!maskLibrary) return undefined;
+		const raw = maskLibrary.ready(name);
+		if (!raw) {
+			maskLibrary.load(name).then(() => schedule(true), () => {});
+			return undefined;
+		}
+		const profile = meta?.info.lensProfile;
+		const lens = before ? compareEdit().lens : edit?.lens;
+		const uniform = profile && lens ? packer.packLens(profile, { ...$state.snapshot(lens), vignetting: 0 }, sensorAspect(meta!.info), [raw.width, raw.height], meta!.info.orientationFlip ?? 0) : undefined;
+		if (!uniform) return raw;
+		const madeFrom = JSON.stringify([lens, profile!.id]);
+		const hit = correctedMasks.get(name);
+		if (hit?.madeFrom === madeFrom) return hit.texture;
+		const texture = hit?.texture ?? lensPass.target(raw, `lens corrected ${name}`);
+		lensPass.run(raw, texture, uniform);
+		correctedMasks.set(name, { madeFrom, texture });
+		return texture;
+	}
+
+	/** Ask the worker which masks this photo has — the first time for a photo, that computes them. */
+	function loadMaskSet() {
+		if (!maskLibrary || maskSet) return;
+		maskLibrary.manifest().then((set) => {
+			maskSet = set;
+			schedule(true);
+		});
+	}
+
+	function addMask(name: string) {
+		if (!edit) return;
+		const m: MaskAdjustment = { mask: name, invert: false, amount: 100, exposure: 0, contrast: 0, saturation: 0, temperature: 0, tint: 0 };
+		edit.masks = [...(edit.masks ?? []), m];
+		maskShown = edit.masks.length - 1;
+		changed();
+		committed();
+	}
+
+	function removeMask(index: number) {
+		if (!edit?.masks) return;
+		const rest = edit.masks.filter((_, i) => i !== index);
+		// No masks is no field at all: the edit then serializes exactly as one made before masks existed.
+		if (rest.length) edit.masks = rest;
+		else delete edit.masks;
+		maskShown = null;
+		changed();
+		committed();
+	}
+
+	function setMask(index: number, patch: Partial<MaskAdjustment>) {
+		if (!edit?.masks?.[index]) return;
+		Object.assign(edit.masks[index], patch);
+		changed();
 	}
 
 	/** The AF point where it sits in the picture on screen — moved by the lens correction when one is on. */
@@ -431,6 +505,12 @@
 		}
 	}
 
+	// Masks are asked for when a tool needs them — the section is opened, or the edit has some — not with
+	// every photo: the first ask computes them.
+	$effect(() => {
+		if (section === 'masks' || wide || (edit?.masks?.length ?? 0) > 0) loadMaskSet();
+	});
+
 	// The history loads when it's first looked at, not with every photo.
 	$effect(() => {
 		if ((section === 'history' || wide) && edit && !versions) loadVersions();
@@ -495,6 +575,8 @@
 				return;
 			}
 			[develop, view, hist, lensPass] = await Promise.all([DevelopPass.create(device), ViewPass.create(device, canvas, display === 'display-p3'), HistogramPass.create(device), LensPass.create(device)]);
+			maskLibrary = new MaskLibrary(device, key);
+			if (section === 'masks' || wide || (edit?.masks?.length ?? 0) > 0) loadMaskSet();
 			device.lost.then((info) => (error = `The GPU was reset (${info.reason}). Reload to continue — your edits are kept as a draft.`));
 			const phone = matchMedia('(pointer: coarse)').matches;
 			histStride = phone ? 2 : 1;
@@ -691,6 +773,7 @@
 		{ id: 'light', label: 'Light', short: 'Light' },
 		{ id: 'curve', label: 'Curve', short: 'Curve' },
 		{ id: 'color', label: 'Color', short: 'Color' },
+		{ id: 'masks', label: 'Masks', short: 'Masks' },
 		{ id: 'detail', label: 'Detail', short: 'Detail' },
 		{ id: 'history', label: 'History', short: 'History' }
 	];
@@ -784,6 +867,12 @@
 			<Slider id="denoise-luma" label="Noise reduction" value={edit.detail.denoiseLuminance} min={0} max={100} defaultValue={0} format={(v) => decimals(v)} onchange={(v) => { edit!.detail.denoiseLuminance = v; changed(); }} oncommit={committed} />
 			<Slider id="denoise-chroma" label="Colour noise reduction" value={edit.detail.denoiseChroma} min={0} max={100} defaultValue={0} format={(v) => decimals(v)} onchange={(v) => { edit!.detail.denoiseChroma = v; changed(); }} oncommit={committed} />
 		</div>
+	{/if}
+{/snippet}
+
+{#snippet masksSection()}
+	{#if edit}
+		<MasksPanel masks={edit.masks ?? []} set={maskSet} shown={maskShown} disabled={readOnly} onadd={addMask} onremove={removeMask} onchange={setMask} oncommit={committed} onshow={(i) => { maskShown = i; schedule(); }} />
 	{/if}
 {/snippet}
 
@@ -915,7 +1004,7 @@
 			</nav>
 
 			<div class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-6 pt-1">
-				{#if section === 'lens'}{@render lensSection()}{:else if section === 'wb'}{@render wbSection()}{:else if section === 'light'}{@render lightSection()}{:else if section === 'curve'}{@render curveSection()}{:else if section === 'color'}{@render colorSection()}{:else if section === 'history'}{@render historySection()}{:else}{@render detailSection()}{/if}
+				{#if section === 'lens'}{@render lensSection()}{:else if section === 'wb'}{@render wbSection()}{:else if section === 'light'}{@render lightSection()}{:else if section === 'curve'}{@render curveSection()}{:else if section === 'color'}{@render colorSection()}{:else if section === 'masks'}{@render masksSection()}{:else if section === 'history'}{@render historySection()}{:else}{@render detailSection()}{/if}
 			</div>
 
 			{/if}
@@ -925,7 +1014,7 @@
 					<details class="border-t border-line py-2" open={s.id === 'wb' || s.id === 'light'} ontoggle={(e) => s.id === 'detail' && (detailOpen = (e.currentTarget as HTMLDetailsElement).open)}>
 						<summary class="cursor-pointer py-1 text-xs font-medium">{s.label}</summary>
 						<div class="pt-2">
-							{#if s.id === 'lens'}{@render lensSection()}{:else if s.id === 'wb'}{@render wbSection()}{:else if s.id === 'light'}{@render lightSection()}{:else if s.id === 'curve'}{@render curveSection()}{:else if s.id === 'color'}{@render colorSection()}{:else if s.id === 'history'}{@render historySection()}{:else if detailOpen}{@render detailSection()}{/if}
+							{#if s.id === 'lens'}{@render lensSection()}{:else if s.id === 'wb'}{@render wbSection()}{:else if s.id === 'light'}{@render lightSection()}{:else if s.id === 'curve'}{@render curveSection()}{:else if s.id === 'color'}{@render colorSection()}{:else if s.id === 'masks'}{@render masksSection()}{:else if s.id === 'history'}{@render historySection()}{:else if detailOpen}{@render detailSection()}{/if}
 						</div>
 					</details>
 				{/each}

@@ -1,10 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // View pass: developedTex → canvas with pan/zoom, clip overlays and dither. Mirrors shaders/client/view.wgsl.
 import viewWgsl from './wgsl/client_view.wgsl?raw';
+import { greyTexture } from '$lib/masks';
 
 export const CLIP_HIGHS = 1;
 export const CLIP_LOWS = 2;
 export const PEAKING = 4;
+/** Show a mask: desaturate and dim what it leaves out (DESIGN.md §15), red and blue stay for clipping. */
+export const SHOW_MASK = 8;
+/** With SHOW_MASK: the mask is inverted, as its adjustment is. */
+export const MASK_INVERTED = 16;
 
 /**
  * Threshold (0…1) on the worker's focus_mask that counts as sharp. The mask is a Laplacian energy over
@@ -24,6 +29,10 @@ export class ViewPass {
 	private bindGroup?: GPUBindGroup;
 	private boundTexture?: GPUTexture;
 	private boundFocusMask?: GPUTexture;
+	private boundOverlay?: GPUTexture;
+	/** The mask SHOW_MASK shows, in the developed texture's frame; a 1×1 placeholder when none. */
+	private overlay: GPUTexture;
+	private noOverlay: GPUTexture;
 	private focusMask: GPUTexture;
 	/** The mask as decoded, before any lens correction; `focusMask` is what the view samples. */
 	private focusSource: GPUTexture;
@@ -42,6 +51,8 @@ export class ViewPass {
 		this.focusMask = device.createTexture({ label: 'focus mask placeholder', size: [1, 1], format: 'r8unorm', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
 		device.queue.writeTexture({ texture: this.focusMask }, new Uint8Array([0]), {}, [1, 1]);
 		this.focusSource = this.focusMask;
+		this.noOverlay = device.createTexture({ label: 'no mask', size: [1, 1], format: 'r8unorm', usage: GPUTextureUsage.TEXTURE_BINDING });
+		this.overlay = this.noOverlay;
 	}
 
 	/** The focus mask in sensor geometry, for the lens pass to warp. */
@@ -56,20 +67,15 @@ export class ViewPass {
 
 	/** Decode a focus_mask PNG (grayscale, from `/api/assets/{key}/focus`) and upload it as `r8unorm`. */
 	async loadFocusMask(pngBytes: ArrayBuffer) {
-		const bitmap = await createImageBitmap(new Blob([pngBytes], { type: 'image/png' }));
-		const { width, height } = bitmap; // bitmap.close() below zeroes these, so capture them first
-		const canvas = new OffscreenCanvas(width, height);
-		const ctx = canvas.getContext('2d')!;
-		ctx.drawImage(bitmap, 0, 0);
-		const { data } = ctx.getImageData(0, 0, width, height);
-		bitmap.close();
-		// Grayscale PNGs decode to RGBA with R = G = B; take the one channel we need.
-		const gray = new Uint8Array(width * height);
-		for (let i = 0; i < gray.length; i++) gray[i] = data[i * 4];
+		const texture = await greyTexture(this.device, pngBytes, 'focus mask');
 		this.focusSource.destroy();
-		this.focusSource = this.device.createTexture({ label: 'focus mask', size: [width, height], format: 'r8unorm', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
-		this.device.queue.writeTexture({ texture: this.focusSource }, gray, { bytesPerRow: width }, [width, height]);
+		this.focusSource = texture;
 		this.focusMask = this.focusSource;
+	}
+
+	/** The mask to show with SHOW_MASK, lens-corrected like the picture; `undefined` for none. */
+	useOverlay(texture?: GPUTexture) {
+		this.overlay = texture ?? this.noOverlay;
 	}
 
 	static async create(device: GPUDevice, canvas: HTMLCanvasElement, displayP3: boolean): Promise<ViewPass> {
@@ -105,18 +111,20 @@ export class ViewPass {
 		dv.setFloat32(60, 0x16 / 255, true);
 		dv.setFloat32(64, PEAK_THRESHOLD, true);
 		this.device.queue.writeBuffer(this.ubo, 0, this.params);
-		if (this.boundTexture !== developed || this.boundFocusMask !== this.focusMask) {
+		if (this.boundTexture !== developed || this.boundFocusMask !== this.focusMask || this.boundOverlay !== this.overlay) {
 			this.bindGroup = this.device.createBindGroup({
 				layout: this.pipeline.getBindGroupLayout(0),
 				entries: [
 					{ binding: 0, resource: { buffer: this.ubo } },
 					{ binding: 1, resource: developed.createView() },
 					{ binding: 2, resource: this.sampler },
-					{ binding: 3, resource: this.focusMask.createView() }
+					{ binding: 3, resource: this.focusMask.createView() },
+					{ binding: 4, resource: this.overlay.createView() }
 				]
 			});
 			this.boundTexture = developed;
 			this.boundFocusMask = this.focusMask;
+			this.boundOverlay = this.overlay;
 		}
 		const encoder = this.device.createCommandEncoder();
 		const pass = encoder.beginRenderPass({

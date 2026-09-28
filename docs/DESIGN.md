@@ -67,6 +67,19 @@ Where the code differs from the text below, the code and these notes win.
   random parameter ids stripped from the weight files) and pinned by hash, and the image compiles sidecar-ml
   after importing. burn is a pre-release, pinned exactly. Tuned kernels and the driver's shader cache must live on a
   volume (`--cache`): without them each start recompiles for 30–90 s; with them it is ready in 1–6 s.
+- **Masks (§15), the model-made kind:** the worker starts `sidecar-ml` when a photo's masks are first asked
+  for (`crates/worker/src/ml.rs`), develops the proxy at default settings — a normal-looking photo, what the
+  models were trained on — and caches `subject`, `skin`, `face-skin`, `body-skin`, `hair`, `clothes` and the
+  faces beside the photo's proxies, in the proxy's frame (oriented, before lens correction), keyed like the
+  focus mask. `GET /api/assets/{key}/masks` lists them; `…/masks/{name}` is one as a PNG. In the browser,
+  `$lib/masks` loads one as a texture and the editor lens-corrects it as it does the focus mask; the worker
+  un-orients and corrects it to match the frame export, preview and loupe develop in. An adjustment names its
+  mask (`EditParams.masks`, at most 8): the develop pass samples each mask and adds `wₖ ×` its exposure (in
+  stops, before the tone map), white balance (camera-space gains), contrast and saturation (after the tone
+  map). An edit without masks serializes as before, so no ETag, history id or export record moves, and no
+  `ProcessVersion` bump was needed: an older Sidecar keeps masks it can't render, and entries a newer one adds
+  (a `kind`) are carried and skipped here. The first masks on a new install take minutes while burn tunes
+  itself to the GPU; after that a photo's masks take seconds, once.
 - **Interaction:** slider rows allow vertical panning and claim a touch only after 4 px of sideways travel, so the tool panel scrolls. Holding a slider no longer hides the editor chrome — the histogram is exactly what you want to watch while dragging.
 
 ## 0. Summary
@@ -943,7 +956,7 @@ After V1: lens correction, then crop and straighten, then local masks (§15).
 **Masks.**
 
 - Weights: gradients are analytic in the shader. Brush strokes — normalized points, radius, feather, flow — are rasterized by a WGSL compute pass into an `r8unorm` texture array, at proxy size on the phone and full size on the server, so both sides share the rasterizer.
-- Subject and sky masks run on the RTX card in the worker. The sidecar stores their inputs (model version, tap points); the raster lives in `/cache` and is recomputed if the cache is gone, so nothing binary lands beside the RAW.
+- Model masks (subject, skin, hair, clothes; sky is still to come) run on the worker's GPU through `sidecar-ml`. The sidecar stores only the mask's name; the raster lives in `/cache` and is recomputed if the cache is gone, so nothing binary lands beside the RAW. See the build log.
 - Blending: `ev = global.ev + Σ wₖ · maskₖ.ev`, and likewise for WB multipliers, contrast, saturation and mixer values. Up to 8 masks per photo in the first release, in a fixed-size uniform array.
 - Display: the selected mask shows as desaturation outside it, which keeps red and blue reserved for clipping.
 

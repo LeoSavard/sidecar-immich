@@ -3,7 +3,8 @@
 // plain-language list of what differs between two edits, and the sections one edit can take from another.
 // The sliders and the history both read through here, so "Whites −12" in the history is the number the
 // Whites slider showed.
-import type { EditParams, MixerBand } from '$lib/types';
+import type { EditParams, MaskAdjustment, MixerBand } from '$lib/types';
+import { MASK_LABELS } from '$lib/masks';
 import { clean, decimals, signed } from '$lib/ui/format';
 
 /** Shadows and Highlights move the curve points at 25 % and 75 % — the same curve the curve editor shows. */
@@ -65,6 +66,31 @@ export function describeChanges(from: EditParams, to: EditParams): string[] {
 	if (ownCurve(from) !== ownCurve(to)) out.push('Curve edited');
 	if (!!from.lens !== !!to.lens) out.push(to.lens ? 'Lens correction on' : 'Lens correction off');
 	else if (from.lens && to.lens && JSON.stringify(from.lens) !== JSON.stringify(to.lens)) out.push('Lens correction adjusted');
+	out.push(...describeMasks(from.masks ?? [], to.masks ?? []));
+	return out;
+}
+
+const MASK_CONTROLS: { label: string; get: (m: MaskAdjustment) => number; show: (v: number) => string }[] = [
+	{ label: 'amount', get: (m) => m.amount, show: (v) => `${decimals(v)} %` },
+	{ label: 'exposure', get: (m) => m.exposure, show: (v) => `${signed(v, 2)} EV` },
+	{ label: 'contrast', get: (m) => m.contrast, show: (v) => signed(v) },
+	{ label: 'saturation', get: (m) => m.saturation, show: (v) => signed(v) },
+	{ label: 'temperature', get: (m) => m.temperature, show: (v) => signed(v) },
+	{ label: 'tint', get: (m) => m.tint, show: (v) => signed(v) }
+];
+
+/** "Subject exposure +0.50 EV", "Skin mask added": a mask adjustment is named by what its mask covers. */
+function describeMasks(from: MaskAdjustment[], to: MaskAdjustment[]): string[] {
+	const out: string[] = [];
+	const name = (m: MaskAdjustment) => `${m.invert ? 'not ' : ''}${(MASK_LABELS[m.mask] ?? m.mask).toLowerCase()}`;
+	const cap = (s: string) => s[0].toUpperCase() + s.slice(1);
+	to.forEach((m, i) => {
+		const was = from[i];
+		if (!was || was.mask !== m.mask) return out.push(`${cap(name(m))} mask added`);
+		if (was.invert !== m.invert) out.push(`${cap(name(m))} mask inverted`);
+		for (const c of MASK_CONTROLS) if (Math.abs(c.get(was) - c.get(m)) > 1e-9) out.push(`${cap(name(m))} ${c.label} ${c.show(c.get(m))}`);
+	});
+	if (from.length > to.length) out.push(from.length - to.length === 1 ? 'Mask removed' : `${from.length - to.length} masks removed`);
 	return out;
 }
 
@@ -87,5 +113,13 @@ export const PICKS: { id: string; label: string; take: (into: EditParams, from: 
 	},
 	{ id: 'curve', label: 'Curve', take: (e, f) => (e.tone.curve = structuredClone(f.tone.curve)) },
 	{ id: 'color', label: 'Color mixer', take: (e, f) => (e.mixer = structuredClone(f.mixer)) },
-	{ id: 'detail', label: 'Detail', take: (e, f) => (e.detail = structuredClone(f.detail)) }
+	{ id: 'detail', label: 'Detail', take: (e, f) => (e.detail = structuredClone(f.detail)) },
+	{
+		id: 'masks',
+		label: 'Masks',
+		take: (e, f) => {
+			if (f.masks?.length) e.masks = structuredClone(f.masks);
+			else delete e.masks;
+		}
+	}
 ];

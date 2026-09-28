@@ -10,7 +10,7 @@ pub mod develop;
 pub mod focus;
 pub mod ingest;
 pub mod lens;
-pub use develop::DevelopPass;
+pub use develop::{DevelopPass, Masks};
 pub use focus::focus_energy;
 pub use ingest::{Ingest, MosaicInput};
 
@@ -110,6 +110,16 @@ impl RgbaF32 {
     pub fn from_f16_bytes(width: u32, height: u32, bytes: &[u8]) -> Self {
         let half: &[half::f16] = bytemuck::cast_slice(bytes);
         Self { width, height, data: half.iter().map(|v| v.to_f32()).collect() }
+    }
+}
+
+/// The orientation that undoes `oriented(flip)`: the mirrors and 180° are their own inverse; the two
+/// quarter turns (5 and 6) undo each other.
+pub fn inverse_flip(flip: i32) -> i32 {
+    match flip & 7 {
+        5 => 6,
+        6 => 5,
+        f => f,
     }
 }
 
@@ -295,6 +305,15 @@ mod tests {
     }
 
     /// The loupe cuts its tile out of the unoriented image with this, then orients it: the two must agree.
+    #[test]
+    fn inverse_flip_undoes_every_orientation() {
+        let img = RgbaF32 { width: 3, height: 2, data: (0..6).flat_map(|i| [i as f32; 4]).collect() };
+        for flip in 0..8 {
+            let back = img.clone().oriented(flip).oriented(inverse_flip(flip));
+            assert_eq!((back.width, back.height, &back.data), (img.width, img.height, &img.data), "flip {flip}");
+        }
+    }
+
     #[test]
     fn source_rect_is_the_inverse_of_oriented() {
         for flip in 0..8 {

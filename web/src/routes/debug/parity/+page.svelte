@@ -3,7 +3,7 @@
 	import { DevelopPass, requestDevice } from '$lib/gpu/develop';
 	import { LensPass } from '$lib/gpu/lens';
 
-	type Case = { name: string; width: number; height: number; lens?: boolean };
+	type Case = { name: string; width: number; height: number; lens?: boolean; masks?: number; maskSize?: [number, number] };
 	type Result = { name: string; status: string };
 
 	let results = $state<Result[]>([]);
@@ -33,6 +33,15 @@
 					lens.run(pass.proxy!, target, new Uint8Array(await get('lens.bin')));
 					pass.setInput(target);
 				}
+				// Masks as the editor holds them: one byte a pixel, in r8unorm textures.
+				const masks: GPUTexture[] = [];
+				for (let i = 0; i < (c.masks ?? 0); i++) {
+					const [w, h] = c.maskSize!;
+					const t = device.createTexture({ size: [w, h], format: 'r8unorm', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+					device.queue.writeTexture({ texture: t }, await get(`mask${i}.u8`), { bytesPerRow: w }, [w, h]);
+					masks.push(t);
+				}
+				pass.setMasks(masks.length ? new Uint8Array(await get('masks.bin')) : new Uint8Array(288), masks);
 				pass.setUniforms(await get('uniform.bin'));
 				pass.setToneLut(new Float32Array(await get('lut.f32')));
 				pass.render();

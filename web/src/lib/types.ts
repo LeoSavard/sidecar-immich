@@ -24,6 +24,20 @@ export type EditParams = {
 	};
 	/** Absent or null means off (DESIGN.md §15). */
 	lens?: Lens | null;
+	/** Adjustments through masks, at most 8; absent when there are none. */
+	masks?: MaskAdjustment[];
+};
+
+/** Mirrors `sidecar_color::params::MaskAdjustment`. Values −100…100 except `amount` (0…100) and `exposure` (stops). */
+export type MaskAdjustment = {
+	mask: string;
+	invert: boolean;
+	amount: number;
+	exposure: number;
+	contrast: number;
+	saturation: number;
+	temperature: number;
+	tint: number;
 };
 
 /** Mirrors `sidecar_color::params::Lens`: strengths 0…200, 100 being the profile's full correction. */

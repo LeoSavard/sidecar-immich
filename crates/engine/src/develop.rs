@@ -6,10 +6,28 @@ use anyhow::{Result, bail};
 use wgpu::util::DeviceExt;
 
 use crate::{Gpu, RgbaF32};
+use sidecar_color::params::MAX_MASKS;
 
 pub struct DevelopPass {
     pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
+    mask_layout: wgpu::BindGroupLayout,
+    mask_sampler: wgpu::Sampler,
+    /// What an unused mask slot binds: 1×1, zero.
+    no_mask: wgpu::Texture,
+}
+
+/// The masks one develop takes: their uniforms, and a texture per adjustment in the frame `params.frame`
+/// describes — `None` for a slot whose mask isn't there (it then weighs nothing).
+pub struct Masks<'a> {
+    pub params: sidecar_color::params::MaskParams,
+    pub textures: Vec<Option<&'a wgpu::Texture>>,
+}
+
+impl Masks<'_> {
+    pub fn none() -> Self {
+        Self { params: bytemuck::Zeroable::zeroed(), textures: Vec::new() }
+    }
 }
 
 impl DevelopPass {
@@ -54,9 +72,27 @@ impl DevelopPass {
                 },
             ],
         });
+        // Mirrors web/src/lib/gpu/develop.ts: the mask uniforms, a linear sampler, and a texture per slot.
+        let texture = |binding: u32| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
+            count: None,
+        };
+        let mut mask_entries = vec![
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), count: None },
+        ];
+        mask_entries.extend((0..MAX_MASKS as u32).map(|i| texture(2 + i)));
+        let mask_layout = gpu.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("develop masks"), entries: &mask_entries });
         let pipeline_layout = gpu.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("develop"),
-            bind_group_layouts: &[Some(&layout)],
+            bind_group_layouts: &[Some(&layout), Some(&mask_layout)],
             ..Default::default()
         });
         let pipeline = gpu.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -84,18 +120,25 @@ impl DevelopPass {
             multiview_mask: None,
             cache: None,
         });
-        Ok(Self { pipeline, layout })
+        let mask_sampler = gpu.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("masks"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let no_mask = crate::upload_rgba16(gpu, &RgbaF32 { width: 1, height: 1, data: vec![0.0; 4] });
+        Ok(Self { pipeline, layout, mask_layout, mask_sampler, no_mask })
     }
 
-    /// Run the develop pass once and read the result back.
+    /// Run the develop pass once, without masks, and read the result back.
     pub fn run(&self, gpu: &Gpu, source: &RgbaF32, uniform: &[u8], lut: &[f32]) -> Result<RgbaF32> {
         let src_tex = crate::upload_rgba16(gpu, source);
-        let out = self.render(gpu, &src_tex, uniform, lut)?;
+        let out = self.render(gpu, &src_tex, uniform, lut, &Masks::none())?;
         crate::read_rgba16(gpu, &out)
     }
 
     /// Develop a source texture into a new RGBA16F texture (display-linear).
-    pub fn render(&self, gpu: &Gpu, src_tex: &wgpu::Texture, uniform: &[u8], lut: &[f32]) -> Result<wgpu::Texture> {
+    pub fn render(&self, gpu: &Gpu, src_tex: &wgpu::Texture, uniform: &[u8], lut: &[f32], masks: &Masks) -> Result<wgpu::Texture> {
         if uniform.len() != 272 {
             bail!("develop uniform must be 272 bytes, got {}", uniform.len());
         }
@@ -147,6 +190,19 @@ impl DevelopPass {
                 },
             ],
         });
+        let mask_ubo = d.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("develop masks"),
+            contents: bytemuck::bytes_of(&masks.params),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let views: Vec<wgpu::TextureView> =
+            (0..MAX_MASKS).map(|i| masks.textures.get(i).copied().flatten().unwrap_or(&self.no_mask).create_view(&Default::default())).collect();
+        let mut entries = vec![
+            wgpu::BindGroupEntry { binding: 0, resource: mask_ubo.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.mask_sampler) },
+        ];
+        entries.extend(views.iter().enumerate().map(|(i, v)| wgpu::BindGroupEntry { binding: 2 + i as u32, resource: wgpu::BindingResource::TextureView(v) }));
+        let mask_bind = d.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("develop masks"), layout: &self.mask_layout, entries: &entries });
         let mut enc = d.create_command_encoder(&Default::default());
         {
             let out_view = out.create_view(&Default::default());
@@ -162,6 +218,7 @@ impl DevelopPass {
             });
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &bind, &[]);
+            pass.set_bind_group(1, &mask_bind, &[]);
             pass.draw(0..3, 0..1);
         }
         gpu.queue.submit([enc.finish()]);

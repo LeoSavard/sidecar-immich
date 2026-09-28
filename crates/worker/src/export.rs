@@ -45,6 +45,9 @@ pub struct RenderRequest {
     pub long_edge: Option<u32>,
     /// Written into the export's XMP.
     pub sidecar: serde_json::Value,
+    /// The asset key, for the masks the edit names.
+    #[serde(default)]
+    pub key: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -132,6 +135,31 @@ impl Rendering {
             None => source,
         }
     }
+
+    /// The edit's masks as textures covering the same frame as a source this rendering corrects. A mask comes
+    /// in the proxy's frame, oriented as the photo is shown; `flip` is the orientation the source still has
+    /// to have applied, which the mask has undone, and the lens correction moves it as it moves the source —
+    /// without vignetting, whose gain would change the mask's values rather than where they are.
+    pub fn mask_textures(&self, kit: &Kit, edit: &EditParams, masks: &[Option<RgbaF32>], flip: i32) -> Vec<Option<wgpu::Texture>> {
+        let mut geometry = edit.clone();
+        if let Some(lens) = &mut geometry.lens {
+            lens.vignetting = 0.0;
+        }
+        masks
+            .iter()
+            .map(|m| {
+                let m = m.clone()?.oriented(sidecar_engine::inverse_flip(flip));
+                Some(self.correct(kit, &geometry, sidecar_engine::upload_rgba16(&kit.gpu, &m)))
+            })
+            .collect()
+    }
+}
+
+/// `pack`'s mask uniforms and the textures for them, ready for `DevelopPass::render`.
+pub fn masks_for<'a>(packed: &Packed, textures: &'a [Option<wgpu::Texture>], frame: [f32; 4]) -> sidecar_engine::Masks<'a> {
+    let mut params = packed.masks;
+    params.frame = frame;
+    sidecar_engine::Masks { params, textures: textures.iter().map(Option::as_ref).collect() }
 }
 
 /// Full-resolution linear RGB on the GPU, the orientation still to apply, and how to develop it. RAW comes
@@ -267,7 +295,8 @@ fn copy_metadata(raw: &Path, out: &Path, width: u32, height: u32) -> Result<()> 
     Ok(())
 }
 
-pub fn render(kit: &Kit, req: &RenderRequest, outbox: &Path, tx: &Sender<Progress>) -> Result<Progress> {
+/// `masks` are the edit's masks from the cache, in the order it names them (`Worker::mask_images`).
+pub fn render(kit: &Kit, req: &RenderRequest, masks: &[Option<RgbaF32>], outbox: &Path, tx: &Sender<Progress>) -> Result<Progress> {
     stage(tx, "decode", 0.02);
     stage(tx, "demosaic", 0.15);
     let (mut source, flip, rendering) = full_source_for(kit, &req.path)?;
@@ -285,7 +314,8 @@ pub fn render(kit: &Kit, req: &RenderRequest, outbox: &Path, tx: &Sender<Progres
 
     stage(tx, "develop", 0.45);
     let packed = rendering.pack(&req.edit, req.color_space);
-    let developed = kit.develop.render(&kit.gpu, &source, &packed.uniform, &packed.lut)?;
+    let mask_textures = rendering.mask_textures(kit, &req.edit, masks, flip);
+    let developed = kit.develop.render(&kit.gpu, &source, &packed.uniform, &packed.lut, &masks_for(&packed, &mask_textures, [0.0; 4]))?;
     drop(source);
     let mut img = sidecar_engine::read_rgba16(&kit.gpu, &developed)?;
     drop(developed);
