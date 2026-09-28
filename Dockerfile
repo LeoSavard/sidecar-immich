@@ -3,6 +3,9 @@
 # `--target ml` builds the same image plus `sidecar-ml` and its models, published with a `-ml` tag suffix.
 # The models sidecar-ml runs, pinned by SHA-256, converted to ONNX that burn-onnx imports. Two need a Python
 # tool each; `dev/ml-models` builds `ml-onnx` from here too, so there is one list of what the models are.
+# The conversions are pinned by hash as well: the code in crates/ml/src/models/ is generated from exactly
+# these files, and a converter that starts writing something else must stop the build, not ship weights the
+# code can't load.
 FROM scratch AS ml-sources
 ADD --checksum=sha256:8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4 \
     https://media.githubusercontent.com/media/opencv/opencv_zoo/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx /w/yunet.onnx
@@ -15,13 +18,19 @@ ADD --checksum=sha256:c6748b1253a99067ef71f7e26ca71096cd449baefa8f101900ea230165
 FROM python:3.12-slim AS ml-birefnet
 RUN pip install --no-cache-dir --root-user-action=ignore onnx==1.23.0 onnxsim==0.7.3
 COPY --from=ml-sources /w/birefnet_lite_dynamic.onnx /w/
-RUN cd /w && onnxsim birefnet_lite_dynamic.onnx birefnet.onnx --overwrite-input-shape 1,3,1024,1024
+RUN cd /w && onnxsim birefnet_lite_dynamic.onnx birefnet.onnx --overwrite-input-shape 1,3,1024,1024 \
+ && echo "d46e8e42a87b10478f3b7c710e1903cc45b4cd749de802ef0d53714b101cd952  birefnet.onnx" | sha256sum -c
 
 # MediaPipe's multi-class model ships as TFLite.
 FROM python:3.12-slim AS ml-multiclass
 RUN pip install --no-cache-dir --root-user-action=ignore onnx==1.23.0 tf2onnx==1.17.0 tensorflow-cpu==2.21.0
 COPY --from=ml-sources /w/multiclass.tflite /w/
-RUN cd /w && python -m tf2onnx.convert --tflite multiclass.tflite --output multiclass.onnx --opset 17
+COPY dev/ml/canonical_names.py /w/
+# tf2onnx names folded constants in an order that changes between runs; renamed by first use, the conversion
+# is the same file every time, which the committed generated code depends on.
+RUN cd /w && python -m tf2onnx.convert --tflite multiclass.tflite --output converted.onnx --opset 17 \
+ && python canonical_names.py converted.onnx multiclass.onnx \
+ && echo "68cd929ca26e76743337685f155708672495032037277eee35af2fcaaf6a5f05  multiclass.onnx" | sha256sum -c
 
 FROM scratch AS ml-onnx
 COPY --from=ml-sources /w/yunet.onnx /
@@ -44,12 +53,16 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry --mount=type=cache,targe
  && cp target/wasm32-unknown-unknown/release/sidecar_color_wasm.wasm web/src/lib/color/sidecar_color.wasm
 RUN --mount=type=cache,target=/root/.npm cd web && npm ci --no-audit --no-fund && npm run build
 
-# sidecar-ml and its weights: the import tool writes <model>.bpk beside the ONNX it reads.
+# sidecar-ml and its weights. The import runs first and sidecar-ml is compiled after it, so the program is
+# always built from the same conversion as the weights it ships with: weights are looked up by the names the
+# generated code gives them. (Compiled the other way round, a conversion that numbered its constants
+# differently from the committed code shipped weights that failed to load.)
 FROM build AS build-ml
 COPY --from=ml-onnx / /models/src/
 RUN --mount=type=cache,target=/usr/local/cargo/registry --mount=type=cache,target=/src/target \
-    cargo build --release -p sidecar-ml --features import \
+    cargo build --release -p sidecar-ml --features import --bin sidecar-ml-import \
  && ./target/release/sidecar-ml-import /models \
+ && cargo build --release -p sidecar-ml --features import --bin sidecar-ml \
  && cp target/release/sidecar-ml /usr/local/bin/sidecar-ml \
  && rm -r /models/src
 

@@ -6510,6 +6510,7 @@ dependencies = [
  "burn-store",
  "clap",
  "cubecl-runtime",
+ "libc",
  "png",
  "serde",
  "serde_json",

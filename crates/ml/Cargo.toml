@@ -29,6 +29,7 @@ burn-store = "=0.22.0-pre.4"
 burn-onnx = { version = "=0.22.0-pre.4", optional = true }
 clap.workspace = true
 cubecl-runtime = "=0.11.0-pre.4"
+libc = "0.2"
 png.workspace = true
 serde.workspace = true
 serde_json.workspace = true

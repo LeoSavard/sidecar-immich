@@ -118,16 +118,37 @@ fn main() -> Result<()> {
     std::thread::Builder::new()
         .stack_size(sidecar_ml::STACK)
         .spawn(move || {
-            let precision = if cli.f32 { Precision::F32 } else { Precision::Auto };
-            let mut ml = Ml::new(&cli.models, precision)?;
-            eprintln!("sidecar-ml: GPU ready, {}", if ml.half() { "f16" } else { "f32" });
-            match cli.command {
-                Command::Serve { idle } => serve(&mut ml, Duration::from_secs(idle)),
-                Command::Run { task, picture, out, long_edge } => run(&mut ml, task, &picture, out.as_deref(), long_edge),
-            }
+            let result = (|| {
+                let precision = if cli.f32 { Precision::F32 } else { Precision::Auto };
+                let mut ml = Ml::new(&cli.models, precision)?;
+                eprintln!("sidecar-ml: GPU ready, {}", if ml.half() { "f16" } else { "f32" });
+                match cli.command {
+                    Command::Serve { idle } => serve(&mut ml, Duration::from_secs(idle)),
+                    Command::Run { task, picture, out, long_edge } => run(&mut ml, task, &picture, out.as_deref(), long_edge),
+                }
+            })();
+            leave(result)
         })?
         .join()
-        .unwrap_or_else(|e| std::panic::resume_unwind(e))
+        .unwrap_or_else(|e| std::panic::resume_unwind(e));
+    unreachable!("the model thread ends the process")
+}
+
+/// Ends the process without dropping the models or running exit handlers. At exit, the GPU driver's
+/// handlers ran while burn's device threads were still alive, and about every other process then died with
+/// glibc's "corrupted double-linked list" after its last reply had already gone out. Nothing is left that
+/// the kernel doesn't reclaim.
+fn leave(result: Result<()>) -> ! {
+    let code = match result {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("Error: {e:?}");
+            1
+        }
+    };
+    let _ = std::io::stdout().flush();
+    // SAFETY: `_exit` only ends the process; stdout is flushed above and replies are written unbuffered.
+    unsafe { libc::_exit(code) }
 }
 
 /// Tuned kernels and the GPU driver's compiled shaders both live under `dir`. Without the second, every start
