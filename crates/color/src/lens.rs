@@ -20,8 +20,9 @@ pub const KNOTS: usize = 64;
 /// shows more than the frame, and pincushion's outward reach all read a little past it.
 pub const R_MAX: f64 = 1.5;
 
-/// A function of radius through `(r, value)` points, `r` ascending. Evaluated with Fritsch–Carlson monotone
-/// cubic interpolation, so it never overshoots between a table's knots; held flat past either end.
+/// A function of radius through `(r, value)` points, `r` ascending. Evaluated with the same monotone cubic as
+/// the tone curve (`spline::Monotone`), so it never overshoots between a table's knots; held flat past either
+/// end.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Curve(pub Vec<[f64; 2]>);
 
@@ -32,35 +33,11 @@ impl Curve {
     }
 
     pub fn eval(&self, r: f64) -> f64 {
-        let p = &self.0;
-        match p.len() {
-            0 => return 1.0,
-            1 => return p[0][1],
-            _ => {}
+        match self.0.as_slice() {
+            [] => 1.0,
+            [only] => only[1],
+            points => crate::spline::Monotone::new(points).map_or(points[0][1], |c| c.eval(r)),
         }
-        if r <= p[0][0] {
-            return p[0][1];
-        }
-        let n = p.len();
-        if r >= p[n - 1][0] {
-            return p[n - 1][1];
-        }
-        let k = p.windows(2).position(|w| r < w[1][0]).unwrap_or(n - 2);
-        let slope = |i: usize| (p[i + 1][1] - p[i][1]) / (p[i + 1][0] - p[i][0]);
-        let tangent = |i: usize| -> f64 {
-            if i == 0 {
-                return slope(0);
-            }
-            if i == n - 1 {
-                return slope(n - 2);
-            }
-            let (a, b) = (slope(i - 1), slope(i));
-            if a * b <= 0.0 { 0.0 } else { 2.0 / (1.0 / a + 1.0 / b) }
-        };
-        let h = p[k + 1][0] - p[k][0];
-        let t = (r - p[k][0]) / h;
-        let (t2, t3) = (t * t, t * t * t);
-        (2.0 * t3 - 3.0 * t2 + 1.0) * p[k][1] + (t3 - 2.0 * t2 + t) * h * tangent(k) + (-2.0 * t3 + 3.0 * t2) * p[k + 1][1] + (t3 - t2) * h * tangent(k + 1)
     }
 }
 

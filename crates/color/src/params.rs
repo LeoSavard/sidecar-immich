@@ -82,9 +82,14 @@ pub struct Tone {
     pub curve: Vec<[f64; 2]>,
 }
 
+/// Where the default tone curve puts black and white, in stops from middle grey. The Blacks and Whites sliders
+/// are offsets from these (the web app's `view.blacks` / `view.whites` mirror them).
+pub const DEFAULT_BLACK_EV: f64 = -8.0;
+pub const DEFAULT_WHITE_EV: f64 = 4.5;
+
 impl Default for Tone {
     fn default() -> Self {
-        Self { black_ev: -8.0, white_ev: 4.5, contrast: 1.0, curve: vec![[0.0, 0.0], [1.0, 1.0]] }
+        Self { black_ev: DEFAULT_BLACK_EV, white_ev: DEFAULT_WHITE_EV, contrast: 1.0, curve: vec![[0.0, 0.0], [1.0, 1.0]] }
     }
 }
 
@@ -131,14 +136,14 @@ impl Default for Detail {
     }
 }
 
-/// Distortion, lateral CA and vignetting from a matched profile. Not yet applied by `pack`; the shader and
-/// worker wiring lands separately (DESIGN.md §15).
+/// Distortion, lateral CA and vignetting from the photo's profile, applied by the lens pass before develop
+/// (`crate::lens`, DESIGN.md §15).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Lens {
-    /// The matched profile: a DNG opcode marker, or `"maker/model"` from the lensfun database.
+    /// `LensProfile::id` of the profile it was set against: `dng`, `sony`, `fujifilm` or `lensfun:<maker>/<model>`.
     pub profile: String,
-    /// Correction strength, 0…100; 100 is the full profile-modeled correction.
+    /// Correction strength, 0…200; 100 is the profile's full correction.
     pub distortion: f64,
     pub lateral_ca: f64,
     pub vignetting: f64,
@@ -199,8 +204,8 @@ pub const CONTRAST_SCALE: f64 = 7.0;
 /// the shoulder's knee, which only drops below white once exposure pushes the picture past it.
 fn display_tone(edit: &EditParams) -> [f32; 4] {
     let t = &edit.tone;
-    let blacks = ((-8.0 - t.black_ev) / 3.0).clamp(-1.0, 1.0);
-    let whites = ((4.5 - t.white_ev) / 2.0).clamp(-1.0, 1.0);
+    let blacks = ((DEFAULT_BLACK_EV - t.black_ev) / 3.0).clamp(-1.0, 1.0);
+    let whites = ((DEFAULT_WHITE_EV - t.white_ev) / 2.0).clamp(-1.0, 1.0);
     let knee = if edit.exposure.ev > 0.0 { (1.0 - 0.3 * edit.exposure.ev).clamp(0.4, 1.0) } else { 1.0 };
     [blacks as f32, whites as f32, t.contrast.max(0.1) as f32, knee as f32]
 }

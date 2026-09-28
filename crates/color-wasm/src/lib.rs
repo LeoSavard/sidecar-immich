@@ -40,20 +40,33 @@ pub unsafe extern "C" fn sc_free(ptr: *mut u8, len: usize) {
     drop(unsafe { Vec::from_raw_parts(ptr, 0, len) });
 }
 
-fn run(input: &[u8]) -> Result<Vec<u8>, String> {
-    let req: Request = serde_json::from_slice(input).map_err(|e| e.to_string())?;
-    let p = pack(&req.edit, &req.camera, req.source, req.display);
-    let mut out = Vec::with_capacity(4 + p.uniform.len() + p.lut.len() * 4 + 16);
-    out.extend_from_slice(&[0; 4]);
-    out.extend_from_slice(&p.uniform);
-    for v in &p.lut {
-        out.extend_from_slice(&v.to_le_bytes());
+/// Hands `body` to the page as `[u32 len][body]`, valid until the next call.
+fn framed(body: &[u8]) -> *const u8 {
+    RESULT.with(|r| {
+        let mut r = r.borrow_mut();
+        r.clear();
+        r.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        r.extend_from_slice(body);
+        r.as_ptr()
+    })
+}
+
+/// An empty result, with `msg` waiting in `sc_last_error`.
+fn failed(msg: &str) -> *const u8 {
+    ERROR.with(|e| {
+        let mut e = e.borrow_mut();
+        e.clear();
+        e.extend_from_slice(&(msg.len() as u32).to_le_bytes());
+        e.extend_from_slice(msg.as_bytes());
+    });
+    framed(&[])
+}
+
+fn respond(result: Result<Vec<u8>, String>) -> *const u8 {
+    match result {
+        Ok(body) => framed(&body),
+        Err(msg) => failed(&msg),
     }
-    out.extend_from_slice(&p.temperature_k.to_le_bytes());
-    out.extend_from_slice(&p.tint.to_le_bytes());
-    let len = (out.len() - 4) as u32;
-    out[..4].copy_from_slice(&len.to_le_bytes());
-    Ok(out)
 }
 
 /// # Safety
@@ -61,24 +74,15 @@ fn run(input: &[u8]) -> Result<Vec<u8>, String> {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sc_pack(ptr: *const u8, len: usize) -> *const u8 {
     let input = unsafe { std::slice::from_raw_parts(ptr, len) };
-    match run(input) {
-        Ok(out) => RESULT.with(|r| {
-            *r.borrow_mut() = out;
-            r.borrow().as_ptr()
-        }),
-        Err(msg) => {
-            ERROR.with(|e| {
-                let mut e = e.borrow_mut();
-                e.clear();
-                e.extend_from_slice(&(msg.len() as u32).to_le_bytes());
-                e.extend_from_slice(msg.as_bytes());
-            });
-            RESULT.with(|r| {
-                *r.borrow_mut() = vec![0; 4];
-                r.borrow().as_ptr()
-            })
-        }
-    }
+    respond(serde_json::from_slice::<Request>(input).map_err(|e| e.to_string()).map(|req| {
+        let p = pack(&req.edit, &req.camera, req.source, req.display);
+        let mut out = Vec::with_capacity(p.uniform.len() + p.lut.len() * 4 + 16);
+        out.extend_from_slice(&p.uniform);
+        p.lut.iter().for_each(|v| out.extend_from_slice(&v.to_le_bytes()));
+        out.extend_from_slice(&p.temperature_k.to_le_bytes());
+        out.extend_from_slice(&p.tint.to_le_bytes());
+        out
+    }))
 }
 
 #[derive(Deserialize)]
@@ -101,46 +105,20 @@ struct LensRequest {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sc_pack_lens(ptr: *const u8, len: usize) -> *const u8 {
     let input = unsafe { std::slice::from_raw_parts(ptr, len) };
-    let out = serde_json::from_slice::<LensRequest>(input).map_err(|e| e.to_string()).map(|req| {
+    respond(serde_json::from_slice::<LensRequest>(input).map_err(|e| e.to_string()).map(|req| {
         let e = sidecar_color::lens::effective(&req.profile, &req.lens, req.sensor_aspect);
         if e.flags == 0 {
             return Vec::new();
         }
         let p = sidecar_color::lens::pack(&e, req.profile.center, req.frame, req.flip, [0.0; 2], [0.0; 2]);
         bytemuck::bytes_of(&p).to_vec()
-    });
-    let body = match out {
-        Ok(b) => b,
-        Err(msg) => {
-            ERROR.with(|e| {
-                let mut e = e.borrow_mut();
-                e.clear();
-                e.extend_from_slice(&(msg.len() as u32).to_le_bytes());
-                e.extend_from_slice(msg.as_bytes());
-            });
-            Vec::new()
-        }
-    };
-    RESULT.with(|r| {
-        let mut r = r.borrow_mut();
-        r.clear();
-        r.extend_from_slice(&(body.len() as u32).to_le_bytes());
-        r.extend_from_slice(&body);
-        r.as_ptr()
-    })
+    }))
 }
 
 /// Default edit parameters as length-prefixed JSON, so the web app never duplicates them.
 #[unsafe(no_mangle)]
 pub extern "C" fn sc_default_edit() -> *const u8 {
-    let json = serde_json::to_vec(&EditParams::default()).unwrap();
-    RESULT.with(|r| {
-        let mut r = r.borrow_mut();
-        r.clear();
-        r.extend_from_slice(&(json.len() as u32).to_le_bytes());
-        r.extend_from_slice(&json);
-        r.as_ptr()
-    })
+    framed(&serde_json::to_vec(&EditParams::default()).expect("edit params serialize"))
 }
 
 #[unsafe(no_mangle)]

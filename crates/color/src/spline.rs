@@ -5,53 +5,71 @@
 
 pub const LUT_SIZE: usize = 4096;
 
+/// A monotone cubic through points, tangents computed once. Held flat past either end.
+pub struct Monotone {
+    pts: Vec<[f64; 2]>,
+    m: Vec<f64>,
+}
+
+impl Monotone {
+    /// Through `points` in order of `x`, duplicates of an `x` dropped; `None` below two distinct points.
+    pub fn new(points: &[[f64; 2]]) -> Option<Self> {
+        let mut pts = points.to_vec();
+        pts.sort_by(|a, b| a[0].total_cmp(&b[0]));
+        pts.dedup_by(|a, b| (a[0] - b[0]).abs() < 1e-9);
+        let n = pts.len();
+        if n < 2 {
+            return None;
+        }
+        let d: Vec<f64> = (0..n - 1).map(|k| (pts[k + 1][1] - pts[k][1]) / (pts[k + 1][0] - pts[k][0])).collect();
+        let mut m = vec![0.0; n];
+        m[0] = d[0];
+        m[n - 1] = d[n - 2];
+        for k in 1..n - 1 {
+            m[k] = if d[k - 1] * d[k] <= 0.0 { 0.0 } else { (d[k - 1] + d[k]) / 2.0 };
+        }
+        for k in 0..n - 1 {
+            if d[k] == 0.0 {
+                m[k] = 0.0;
+                m[k + 1] = 0.0;
+                continue;
+            }
+            let (a, b) = (m[k] / d[k], m[k + 1] / d[k]);
+            let s = a * a + b * b;
+            if s > 9.0 {
+                let tau = 3.0 / s.sqrt();
+                m[k] = tau * a * d[k];
+                m[k + 1] = tau * b * d[k];
+            }
+        }
+        Some(Self { pts, m })
+    }
+
+    pub fn eval(&self, x: f64) -> f64 {
+        let (pts, m, n) = (&self.pts, &self.m, self.pts.len());
+        if x <= pts[0][0] {
+            return pts[0][1];
+        }
+        if x >= pts[n - 1][0] {
+            return pts[n - 1][1];
+        }
+        let k = pts.windows(2).position(|w| x < w[1][0]).expect("x is inside the points");
+        let h = pts[k + 1][0] - pts[k][0];
+        let t = (x - pts[k][0]) / h;
+        let (t2, t3) = (t * t, t * t * t);
+        (2.0 * t3 - 3.0 * t2 + 1.0) * pts[k][1] + (t3 - 2.0 * t2 + t) * h * m[k] + (-2.0 * t3 + 3.0 * t2) * pts[k + 1][1] + (t3 - t2) * h * m[k + 1]
+    }
+}
+
+/// The tone curve's lookup table: `size` samples over 0…1 of the monotone cubic through `points` (clamped to
+/// the unit square), or the identity when there aren't two points.
 pub fn monotone_lut(points: &[[f64; 2]], size: usize) -> Vec<f32> {
-    let mut pts: Vec<[f64; 2]> = points.iter().map(|p| [p[0].clamp(0.0, 1.0), p[1].clamp(0.0, 1.0)]).collect();
-    pts.sort_by(|a, b| a[0].total_cmp(&b[0]));
-    pts.dedup_by(|a, b| (a[0] - b[0]).abs() < 1e-9);
-    if pts.len() < 2 {
-        return (0..size).map(|i| (i as f64 / (size - 1) as f64) as f32).collect();
-    }
-    let n = pts.len();
-    let d: Vec<f64> = (0..n - 1).map(|k| (pts[k + 1][1] - pts[k][1]) / (pts[k + 1][0] - pts[k][0])).collect();
-    let mut m = vec![0.0; n];
-    m[0] = d[0];
-    m[n - 1] = d[n - 2];
-    for k in 1..n - 1 {
-        m[k] = if d[k - 1] * d[k] <= 0.0 { 0.0 } else { (d[k - 1] + d[k]) / 2.0 };
-    }
-    for k in 0..n - 1 {
-        if d[k] == 0.0 {
-            m[k] = 0.0;
-            m[k + 1] = 0.0;
-            continue;
-        }
-        let (a, b) = (m[k] / d[k], m[k + 1] / d[k]);
-        let s = a * a + b * b;
-        if s > 9.0 {
-            let tau = 3.0 / s.sqrt();
-            m[k] = tau * a * d[k];
-            m[k + 1] = tau * b * d[k];
-        }
-    }
+    let clamped: Vec<[f64; 2]> = points.iter().map(|p| [p[0].clamp(0.0, 1.0), p[1].clamp(0.0, 1.0)]).collect();
+    let curve = Monotone::new(&clamped);
     (0..size)
         .map(|i| {
             let x = i as f64 / (size - 1) as f64;
-            let y = if x <= pts[0][0] {
-                pts[0][1]
-            } else if x >= pts[n - 1][0] {
-                pts[n - 1][1]
-            } else {
-                let k = pts.windows(2).position(|w| x < w[1][0]).unwrap();
-                let h = pts[k + 1][0] - pts[k][0];
-                let t = (x - pts[k][0]) / h;
-                let (t2, t3) = (t * t, t * t * t);
-                (2.0 * t3 - 3.0 * t2 + 1.0) * pts[k][1]
-                    + (t3 - 2.0 * t2 + t) * h * m[k]
-                    + (-2.0 * t3 + 3.0 * t2) * pts[k + 1][1]
-                    + (t3 - t2) * h * m[k + 1]
-            };
-            y.clamp(0.0, 1.0) as f32
+            curve.as_ref().map_or(x, |c| c.eval(x).clamp(0.0, 1.0)) as f32
         })
         .collect()
 }

@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::cct::{temp_tint_to_xy, xy_to_temp_tint};
+use crate::cct::xy_to_temp_tint;
 use crate::mat::{self, M3, V3};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -79,9 +79,6 @@ pub fn resolve(camera: &CameraColor, white_xy: [f64; 2]) -> ResolvedWhiteBalance
     ResolvedWhiteBalance { temperature_k: t, tint, mul, cam_to_rec2020: m }
 }
 
-pub fn resolve_temp_tint(camera: &CameraColor, temperature_k: f64, tint: f64) -> ResolvedWhiteBalance {
-    resolve(camera, temp_tint_to_xy(temperature_k, tint))
-}
 
 #[cfg(test)]
 pub(crate) fn nikon_d850() -> CameraColor {
