@@ -43,8 +43,9 @@ JPEG. Slower per change, same result, no separate setup.
 ### With or without the machine-learning models
 
 Every release is published twice. The plain tags (`latest`, `v0.4.0`) are the editor. The `-ml` tags
-(`latest-ml`, `v0.4.0-ml`) are the same editor plus `sidecar-ml` and its models, about 260 MB more: BiRefNet
-for subject masks, MediaPipe's multi-class model for hair and skin, YuNet for faces. They run on the worker's
+(`latest-ml`, `v0.4.0-ml`) are the same editor plus `sidecar-ml` and its models, about 600 MB more (1.15 GB
+rather than 550 MB): BiRefNet for subject masks, MediaPipe's multi-class model for hair and skin, YuNet for
+faces. They run on the worker's
 GPU through Vulkan — no CUDA — and want about 4 GB of free GPU memory while they work. `sidecar-ml` is its
 own process, started when a task needs it and gone after five idle minutes, so the memory comes back.
 

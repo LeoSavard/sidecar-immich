@@ -749,12 +749,19 @@ sidecar/
     detail/           atrous_denoise · rl_deconvolve
     client/           develop · view · histogram
   crates/
-    api/              axum · open/resolve · XMP writer · versions · jobs · SSE · Immich client
-    worker/           LibRaw FFI · wgpu · ingest · loupe · export · tiling
-    color/            WB/temperature, DNG matrix interpolation, spline → LUT (native + wasm32)
+    sidecar/          the one binary: `sidecar api`, `sidecar worker`, `sidecar dev`
+    api/              axum · open/resolve · XMP writer · history · jobs · SSE · Immich client · lensfun sync
+    worker/           caches · ingest · loupe · export · preview · outbox
+    engine/           wgpu device and passes: ingest, develop, detail, lens, focus
+    shaders/          WGSL composition (`//! requires:`) for the worker and the browser
+    raw/              LibRaw wrapper, developed files, JPEG XL linear DNGs, lens tables, lensfun, AF point
     libraw-sys/       bindings to third_party/libraw, adapted from libraw-rs (MIT OR Apache-2.0)
-    xmp/              sc:Sidecar schema on top of xmp_toolkit
+    color/            WB/temperature, DNG matrix interpolation, tone curve, lens model, uniform packing
+    color-wasm/       `color` for the browser, as wasm32
+    xmp/              sc:Sidecar schema on top of xmp_toolkit, and the edit history
     template/         storage-template rendering and date/name lookup
+    ml/               sidecar-ml: subject, face and hair/skin models on burn (the `-ml` image)
+    devtools/         sidecar-dev: shader composition, parity fixtures, lens checks
   web/                SvelteKit app
   ios/                Edit in Sidecar.shortcut + setup notes
   deploy/             compose.yaml · Caddyfile · sidecar.toml
