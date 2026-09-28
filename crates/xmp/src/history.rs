@@ -171,6 +171,12 @@ fn new_id(parent: &str, etag: &str) -> String {
     hex::encode(&sha2::Sha256::digest(seed.as_bytes())[..6])
 }
 
+/// The id of the edit a sidecar held before it had a history: a function of that edit alone.
+fn imported_id(etag: &str) -> String {
+    use sha2::Digest;
+    hex::encode(&sha2::Sha256::digest(format!("imported:{etag}").as_bytes())[..6])
+}
+
 impl History {
     /// A new history: the original, and — when the sidecar already holds an edit — that edit as its child.
     pub fn begin(current: &EditParams) -> Self {
@@ -189,8 +195,13 @@ impl History {
         };
         let mut h = History { head: ORIGINAL.into(), nodes: vec![root] };
         if etag_of(current) != h.nodes[0].etag {
-            let id = h.push(ORIGINAL, current, NodeKind::Imported, None, None).expect("the root exists");
-            h.head = id;
+            h.push(ORIGINAL, current, NodeKind::Imported, None, None).expect("the root exists");
+            // Until the first save stores it, this history is rebuilt on every read, so the node's id must come
+            // out the same each time: the editor sends it back as the base of its save, and a random id would
+            // be gone by then ("this photo's history has no version …" on every photo edited before 0.3.0).
+            let stable = imported_id(&h.nodes[1].etag);
+            h.nodes[1].id = stable.clone();
+            h.head = stable;
         }
         h
     }

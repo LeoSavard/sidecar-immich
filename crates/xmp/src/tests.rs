@@ -341,6 +341,31 @@ mod history {
         assert_eq!(History::begin(&EditParams::default()).nodes.len(), 1, "an unedited photo is just the original");
     }
 
+    /// The editor opens a photo edited before 0.3.0, then saves with the head it was shown as its base. That
+    /// history isn't stored until this first save, so it's rebuilt on each read and must name its nodes the
+    /// same way every time.
+    #[test]
+    fn a_sidecar_from_before_history_takes_a_save_based_on_what_was_shown() {
+        let tmp = tempfile::tempdir().unwrap();
+        let roots = [tmp.path().canonicalize().unwrap()];
+        let original = fixture(tmp.path(), "DSC_1.ARW");
+        update(&original, &roots, |d| d.set_edit(&ev(0.7), "sha")).unwrap();
+
+        let shown = SidecarDoc::load(&original).unwrap().history().head;
+        assert_eq!(SidecarDoc::load(&original).unwrap().history().head, shown, "the same id on every read");
+        assert_ne!(shown, ORIGINAL);
+        update(&original, &roots, |d| {
+            d.commit(&Commit { edit: &ev(1.2), base: &shown, checkpoint: false, session: None, user: None }, "sha")?;
+            Ok(())
+        })
+        .unwrap();
+
+        let h = SidecarDoc::load(&original).unwrap().history();
+        assert_eq!(h.nodes.len(), 3, "the original, the edit from before history, the save");
+        assert_eq!(h.edit_of(&shown).unwrap(), ev(0.7));
+        assert_eq!(h.edit_of(&h.head).unwrap(), ev(1.2));
+    }
+
     #[test]
     fn pruning_keeps_the_head_labels_and_exports_exact() {
         let mut h = History::begin(&EditParams::default());
