@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Sidecar's state inside an XMP sidecar: one `sc:Sidecar` struct holding `ProcessVersion`, `SourceSha1`,
-//! `Modified`, `Edit` (the develop parameters) and `Exports` (version history).
+//! `Modified`, `Edit` (the current develop parameters), `History` (every version of the edit, `history.rs`)
+//! and `Exports` (the files made from it).
 //!
 //! Everything else in the file — other namespaces, and `sc:` fields written by a newer Sidecar — is kept.
 //! Writes go through a guarded, atomic path: temp file beside the target, fsync, re-check that nobody (Immich)
@@ -13,6 +14,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use xmp_toolkit::{IterOptions, OpenFileOptions, ToStringOptions, XmpFile, XmpMeta, XmpValue};
+
+pub mod history;
+pub use history::{Commit, Committed, History, Node, NodeKind};
 
 /// Sidecar's XMP namespace. Never change it once sidecars exist.
 pub const NS: &str = "https://sidecar.ls-tech.ca/ns/1.0/";
@@ -228,9 +232,6 @@ fn stamp(path: &Path) -> Option<(u64, SystemTime)> {
     Some((md.len(), md.modified().ok()?))
 }
 
-pub mod history;
-pub use history::{Commit, Committed, History, Node, NodeKind};
-
 pub struct SidecarDoc {
     pub path: PathBuf,
     meta: XmpMeta,
@@ -373,15 +374,6 @@ pub fn embed_in_image(path: &Path, sidecar: &Value) -> Result<()> {
     file.put_xmp(&meta)?;
     file.try_close()?;
     Ok(())
-}
-
-/// Read `sc:Sidecar` from an image's embedded XMP (tests, and re-opening an export's edit later).
-pub fn read_from_image(path: &Path) -> Result<Value> {
-    register()?;
-    let mut file = XmpFile::new()?;
-    file.open_file(path, OpenFileOptions::default().for_read().use_smart_handler())?;
-    let meta = file.xmp().context("no XMP in image")?;
-    Ok(read_node(&meta, ROOT, "sidecar"))
 }
 
 #[cfg(test)]

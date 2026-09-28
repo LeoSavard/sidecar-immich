@@ -19,6 +19,33 @@ fn fixture(dir: &Path, name: &str) -> PathBuf {
     original
 }
 
+/// `sc:Sidecar` from an image's embedded XMP.
+fn read_from_image(path: &Path) -> Result<Value> {
+    register()?;
+    let mut file = XmpFile::new()?;
+    file.open_file(path, OpenFileOptions::default().for_read().use_smart_handler())?;
+    let meta = file.xmp().context("no XMP in image")?;
+    Ok(read_node(&meta, ROOT, "sidecar"))
+}
+
+/// An export carries the edit that made it, in the same shape the sidecar stores, beside whatever XMP the
+/// file already had.
+#[test]
+fn an_export_carries_its_edit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let jpeg = tmp.path().join("DSC_1234-v1.jpg");
+    let mut bytes = Vec::new();
+    jpeg_encoder::Encoder::new(&mut bytes, 90).encode(&[128u8; 8 * 8 * 3], 8, 8, jpeg_encoder::ColorType::Rgb).unwrap();
+    std::fs::write(&jpeg, bytes).unwrap();
+    let mut edit = EditParams::default();
+    edit.exposure.ev = 0.65;
+    let sidecar = serde_json::json!({ "edit": serde_json::to_value(&edit).unwrap(), "source": { "file": "DSC_1234.NEF" } });
+    embed_in_image(&jpeg, &sidecar).unwrap();
+    let back = read_from_image(&jpeg).unwrap();
+    assert_eq!(back["source"]["file"], "DSC_1234.NEF");
+    assert_eq!(serde_json::from_value::<EditParams>(back["edit"].clone()).unwrap(), edit);
+}
+
 #[test]
 fn unix_seconds_format_as_rfc3339() {
     assert_eq!(rfc3339(0), "1970-01-01T00:00:00Z");

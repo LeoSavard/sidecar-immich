@@ -6535,6 +6535,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.20",
  "tiff",
+ "tracing",
  "zune-jpeg",
 ]
 
@@ -6585,6 +6586,7 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "hex",
+ "jpeg-encoder",
  "rustix 1.1.4",
  "serde",
  "serde_json",

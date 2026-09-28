@@ -67,6 +67,13 @@ impl App {
         format!("{}{}", self.config.server.worker_url.trim_end_matches('/'), path)
     }
 
+    /// Hand the worker a photo's path; it answers with the photo's metadata. It forgets paths when it
+    /// restarts, so anything that asks it about a photo may need to do this again first. Cheap after the
+    /// first time: the worker only hashes a file it hasn't seen.
+    pub(crate) async fn ingest(&self, path: &std::path::Path) -> reqwest::Result<reqwest::Response> {
+        self.http.post(self.worker("/v1/ingest")).json(&serde_json::json!({ "path": path })).send().await
+    }
+
     /// Hourly: drop finished export jobs, picker tokens nobody came back to, and sessions past their cookie's
     /// one-year lifetime. None of these were ever removed otherwise.
     fn start_housekeeping(self: &Arc<Self>) {
@@ -183,7 +190,7 @@ pub(crate) fn internal(e: anyhow::Error) -> Response {
 
 /// Ingest a resolved original, remember that this user may open it, add it to Recent.
 async fn admit(app: &Arc<App>, user: &User, c: Candidate) -> Result<String> {
-    let resp = app.http.post(app.worker("/v1/ingest")).json(&serde_json::json!({ "path": c.path })).send().await?;
+    let resp = app.ingest(&c.path).await?;
     if !resp.status().is_success() {
         anyhow::bail!("{}", resp.text().await.unwrap_or_default());
     }
@@ -447,8 +454,7 @@ pub(crate) async fn relay(resp: reqwest::Result<reqwest::Response>) -> Response 
 
 async fn meta(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Path(key): Path<String>) -> Response {
     let Some(rec) = asset_for(&app, &user, &key).await else { return StatusCode::NOT_FOUND.into_response() };
-    // The worker forgets paths on restart. Re-ingesting is cheap: it re-hashes only a file it hasn't seen.
-    let _ = app.http.post(app.worker("/v1/ingest")).json(&serde_json::json!({ "path": rec.path })).send().await;
+    let _ = app.ingest(&rec.path).await;
     relay(app.http.get(app.worker(&format!("/v1/assets/{key}/meta"))).send().await).await
 }
 
@@ -471,7 +477,7 @@ async fn pixels(app: &Arc<App>, user: &User, key: &str, worker_path: String) -> 
     let fetch = || async { relay(app.http.get(app.worker(&worker_path)).send().await).await };
     let mut resp = fetch().await;
     if !resp.status().is_success() {
-        let ingested = app.http.post(app.worker("/v1/ingest")).json(&serde_json::json!({ "path": rec.path })).send().await;
+        let ingested = app.ingest(&rec.path).await;
         if ingested.is_ok_and(|r| r.status().is_success()) {
             tracing::info!("re-ingested {} after the worker forgot it", rec.path.display());
             resp = fetch().await;

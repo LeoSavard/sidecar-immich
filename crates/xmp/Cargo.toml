@@ -19,4 +19,5 @@ xmp_toolkit = "1.12"
 sidecar-color.workspace = true
 
 [dev-dependencies]
+jpeg-encoder.workspace = true
 tempfile = "3"
