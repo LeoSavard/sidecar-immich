@@ -6,7 +6,7 @@
 	import { HistogramPass, type HistogramData } from '$lib/gpu/histogram';
 	import { LensPass, correctedPoint } from '$lib/gpu/lens';
 	import { ColorPacker } from '$lib/color/pack';
-	import { api } from '$lib/api';
+	import { api, HttpError } from '$lib/api';
 	import { settings, SPACE_LABELS } from '$lib/settings';
 	import { clearDraft, loadDraft, saveDraft } from '$lib/state/drafts';
 	import { History } from '$lib/state/history';
@@ -315,12 +315,26 @@
 		saving = true;
 		try {
 			const sent = JSON.stringify($state.snapshot(edit));
-			const r = await api(`/api/assets/${key}/edit`, {
-				method: 'PUT',
-				keepalive,
-				headers: { 'content-type': 'application/json' },
-				body: JSON.stringify({ edit: JSON.parse(sent), base: head, checkpoint, session })
-			});
+			const put = (base: string) =>
+				api(`/api/assets/${key}/edit`, {
+					method: 'PUT',
+					keepalive,
+					headers: { 'content-type': 'application/json' },
+					body: JSON.stringify({ edit: JSON.parse(sent), base, checkpoint, session })
+				});
+			let r: Response;
+			try {
+				r = await put(head);
+			} catch (e) {
+				// The version this page was built on isn't in the history any more: typically a page opened
+				// before the server was updated, holding an id the new server never gave out. Save on top of
+				// the current version instead of failing until a reload.
+				if (!(e instanceof HttpError) || e.status !== 404) throw e;
+				const current: EditState = await (await api(`/api/assets/${key}/edit`)).json();
+				if (current.head === head) throw e;
+				head = current.head;
+				r = await put(head);
+			}
 			const state: EditState = await r.json();
 			etag = state.etag;
 			head = state.head;
