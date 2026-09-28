@@ -31,7 +31,12 @@
 	let defaults: EditParams;
 	let status = $state('Opening…');
 	let error = $state('');
-	let resolvedWb = $state({ temperatureK: 5000, tint: 0 });
+	/**
+	 * The white balance the camera recorded, resolved once per photo. It is the Temperature slider's detent, so
+	 * it must not follow the edit: it did (from each repack), and the detent then sat under the thumb, catching
+	 * it every few pixels of a drag.
+	 */
+	let asShotWb = $state({ temperatureK: 5000, tint: 0 });
 	let lut = $state<Float32Array | null>(null);
 	let histogram = $state<HistogramData | null>(null);
 	let clipHigh = $state(false);
@@ -120,10 +125,7 @@
 	function repack() {
 		const source = before ? compareEdit() : $state.snapshot(edit!);
 		const packed = packer.pack(source, meta!.info.color, meta!.info.sourceKind ?? 'raw', display);
-		if (!before) {
-			resolvedWb = { temperatureK: packed.temperatureK, tint: packed.tint };
-			lut = packed.lut;
-		}
+		if (!before) lut = packed.lut;
 		return packed;
 	}
 
@@ -447,6 +449,8 @@
 			fallback = device === null;
 			packer = p;
 			defaults = packer.defaultEdit();
+			const asShot = packer.pack(defaults, meta!.info.color, meta!.info.sourceKind ?? 'raw', display);
+			asShotWb = { temperatureK: asShot.temperatureK, tint: asShot.tint };
 			edit = state.edit;
 			etag = state.etag;
 			head = state.head;
@@ -623,8 +627,8 @@
 	function setWb(field: 'temperatureK' | 'tint', value: number) {
 		if (!edit) return;
 		if (edit.whiteBalance.mode === 'asShot') {
-			edit.whiteBalance.temperatureK = Math.round(resolvedWb.temperatureK);
-			edit.whiteBalance.tint = Math.round(resolvedWb.tint);
+			edit.whiteBalance.temperatureK = Math.round(asShotWb.temperatureK);
+			edit.whiteBalance.tint = Math.round(asShotWb.tint);
 			edit.whiteBalance.mode = 'custom';
 		}
 		edit.whiteBalance[field] = value;
@@ -722,8 +726,8 @@
 				<span class="text-fg-2">{edit.whiteBalance.mode === 'asShot' ? (developed ? 'As saved' : 'As shot') : 'Custom'}</span>
 				<button type="button" class="rounded px-2 py-1 text-fg-2 hover:bg-raised disabled:opacity-40" disabled={edit.whiteBalance.mode === 'asShot'} onclick={() => { edit!.whiteBalance.mode = 'asShot'; changed(); committed(); }}>Reset to {developed ? 'as saved' : 'as shot'}</button>
 			</div>
-			<Slider id="wb-temp" label="Temperature" value={edit.whiteBalance.mode === 'asShot' ? Math.round(resolvedWb.temperatureK) : edit.whiteBalance.temperatureK} min={2000} max={12000} step={10} defaultValue={Math.round(resolvedWb.temperatureK)} trackGradient={TEMP_TRACK} format={(v) => `${decimals(v)} K`} onchange={(v) => setWb('temperatureK', v)} oncommit={committed} />
-			<Slider id="wb-tint" label="Tint" value={edit.whiteBalance.mode === 'asShot' ? Math.round(resolvedWb.tint) : edit.whiteBalance.tint} min={-150} max={150} defaultValue={0} bipolar trackGradient={TINT_TRACK} format={(v) => signed(v)} onchange={(v) => setWb('tint', v)} oncommit={committed} />
+			<Slider id="wb-temp" label="Temperature" value={edit.whiteBalance.mode === 'asShot' ? Math.round(asShotWb.temperatureK) : edit.whiteBalance.temperatureK} min={2000} max={12000} step={10} defaultValue={Math.round(asShotWb.temperatureK)} trackGradient={TEMP_TRACK} format={(v) => `${decimals(v)} K`} onchange={(v) => setWb('temperatureK', v)} oncommit={committed} />
+			<Slider id="wb-tint" label="Tint" value={edit.whiteBalance.mode === 'asShot' ? Math.round(asShotWb.tint) : edit.whiteBalance.tint} min={-150} max={150} defaultValue={0} bipolar trackGradient={TINT_TRACK} format={(v) => signed(v)} onchange={(v) => setWb('tint', v)} oncommit={committed} />
 		</div>
 	{/if}
 {/snippet}
