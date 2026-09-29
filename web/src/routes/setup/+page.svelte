@@ -64,6 +64,6 @@
 	</ol>
 
 	<p class="mt-6 rounded bg-panel p-3 text-xs text-fg-2">
-		Tailscale has to be connected on the iPhone — Sidecar is only reachable inside your VPN. If the date can't be read, Sidecar still finds the photo by its name and fingerprint.
+		If Sidecar is only reachable over a VPN such as Tailscale, that VPN has to be connected on the iPhone. If the date can't be read, Sidecar still finds the photo by its name and fingerprint.
 	</p>
 </main>

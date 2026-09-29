@@ -1,15 +1,16 @@
-# This server: Immich in docker (network immich_default), libraries on /mnt/storage, HTTPS via a Caddy
-# reverse proxy on a proxy host dialing this host's VPN address directly.
+# Worked example: Immich in Docker (network immich_default), photo libraries on the host, HTTPS through a
+# reverse proxy on another machine that reaches this one directly (over a VPN, say). To use it, copy this
+# directory to deploy/local/ (git-ignored) and edit it for your machine.
 #
-# This library is mostly HEIC and JPEG, so the image is built with a HEIF decoder:
+# If the library is mostly HEIC and JPEG, build the image with a HEIF decoder:
 #   docker build --build-arg HEIF=1 -t sidecar:local .
 # Without it everything still works except HEIC, which reports what's missing. See the Dockerfile for why
 # that decoder isn't in the published image.
 
 # Pinned, because the default is the directory's name and the named volumes below are prefixed with it:
-# renaming this directory would otherwise start a second stack on empty `sidecar-state` and `sidecar-cache`
-# volumes -- every session signed out, Recent empty, every proxy decoded again -- while the old one kept the
-# port. Which is exactly what the rename of deploy/remote-proxy to deploy/remote-proxy did.
+# renaming or moving this directory would otherwise start a second stack on empty `sidecar-state` and
+# `sidecar-cache` volumes -- every session signed out, Recent empty, every proxy decoded again -- while the
+# old one kept the port.
 name: sidecar
 services:
   sidecar-api:
@@ -23,7 +24,7 @@ services:
       - /mnt/storage/immich_library:/data:rw
       - sidecar-cache:/cache:ro
       - sidecar-state:/state
-    ports: ["8090:8080"]                                 # reachable on the VPN interface, not just loopback
+    ports: ["8090:8080"]                                 # reachable from the proxy host, not just loopback
     security_opt: ["label=disable"]
     networks: [immich, sidecar]
     restart: unless-stopped

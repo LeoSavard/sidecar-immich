@@ -7,3 +7,5 @@ node_modules
 /testdata/cache
 /testdata/parity-out
 /web/src/lib/color/sidecar_color.wasm
+# A machine's own deployment files (real hosts, volumes, keys): copy deploy/remote-proxy/ here and edit.
+/deploy/local/

@@ -109,7 +109,7 @@ impl Config {
     }
 
     /// Map a mounted path back to the `originalPath` Immich uses. Both sides are resolved first: a mount
-    /// reached through a symlink (`/mnt/storage` → `/mnt/volume` on the dev host) otherwise never shares a
+    /// reached through a symlink (say `/mnt/photos`, pointing at another volume) otherwise never shares a
     /// prefix with its own canonical form, and every file under it maps to nothing.
     pub fn immich_path(&self, root: &Root, mounted: &Path) -> Option<String> {
         let rest = mounted.canonicalize().ok()?.strip_prefix(root.mount.canonicalize().ok()?).ok()?.to_path_buf();

@@ -208,4 +208,5 @@ the new `DisplaySpace`, then `schedule(true)`.
 
 - The Rust sources are hand-wrapped well past rustfmt's comfort at any `max_width`; either adopt a formatter
   and take the one-time diff, or leave it deliberately and say so.
-- `deploy/remote-proxy/` is one machine's configuration, kept in the repo as a worked example.
+- `deploy/remote-proxy/` is a worked example of one setup: a reverse proxy on another host reaching this one
+  over a VPN. A real deployment's copy lives in the git-ignored `deploy/local/`.

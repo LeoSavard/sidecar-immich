@@ -16,7 +16,7 @@ name          = "external"
 # Sidecar's — because it's how Immich's reported originalPath gets translated into Sidecar's local `mount`.
 # The two fields don't have to be the same string; check your Immich compose file's volumes for this value,
 # don't assume it matches whatever Sidecar itself mounts at.
-immich_prefix = "/mnt/volume/Photography/Library"
+immich_prefix = "/srv/photos/Library"
 mount         = "/mnt/storage/Photography/Library"
 template      = "{{y}}/{{MM}}.{{MMMM}}/{{y}}-{{MM}}-{{dd}}/{{filename}}"
 month_locale  = "en"
