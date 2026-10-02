@@ -64,6 +64,37 @@ fn masks_round_trip_and_can_be_removed() {
     assert!(doc.sidecar["edit"].get("masks").is_none());
 }
 
+/// Geometry and mask layers with strokes, curves and a mixer go through the file and come back exactly — points
+/// are arrays inside structs inside an array — and a geometry reset removes it from the file.
+#[test]
+fn geometry_and_brushed_layers_round_trip() {
+    use sidecar_color::geometry::{Crop, Geometry};
+    use sidecar_color::params::{MaskAdjustment, Stroke};
+    let tmp = tempfile::tempdir().unwrap();
+    let roots = [tmp.path().canonicalize().unwrap()];
+    let original = fixture(tmp.path(), "DSC_3.NEF");
+    let mut edit = EditParams {
+        geometry: Some(Geometry { rotate: 1, angle: -2.5, vertical: 30.0, crop: Crop { left: 0.1, top: 0.05, right: 0.9, bottom: 0.95 }, ratio: 0.8, ..Default::default() }),
+        ..Default::default()
+    };
+    let mut layer = MaskAdjustment { mask: "brush".into(), whites: -20.0, curve: vec![[0.0, 0.0], [0.75, 0.8], [1.0, 1.0]], ..Default::default() };
+    layer.mixer.blue.saturation = 40.0;
+    layer.strokes = vec![
+        Stroke { radius: 0.03, feather: 0.5, flow: 1.0, points: vec![[0.1234, 0.5], [0.2, 0.55], [0.31, 0.6]], ..Default::default() },
+        Stroke { erase: true, radius: 0.01, feather: 0.0, flow: 0.4, points: vec![[0.25, 0.5]] },
+    ];
+    edit.masks.push(layer);
+    update(&original, &roots, |d| d.set_edit(&edit, "x")).unwrap();
+    let doc = SidecarDoc::load(&original).unwrap();
+    assert_eq!(doc.edit(), edit);
+    assert_eq!(doc.etag(), etag_of(&edit));
+    edit.geometry = None;
+    update(&original, &roots, |d| d.set_edit(&edit, "x")).unwrap();
+    let doc = SidecarDoc::load(&original).unwrap();
+    assert_eq!(doc.edit(), edit);
+    assert!(doc.sidecar["edit"].get("geometry").is_none());
+}
+
 #[test]
 fn unix_seconds_format_as_rfc3339() {
     assert_eq!(rfc3339(0), "1970-01-01T00:00:00Z");

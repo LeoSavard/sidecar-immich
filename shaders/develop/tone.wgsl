@@ -26,8 +26,9 @@ const WHITES_RANGE = 0.2;
 // Module 4, for a developed file (JPEG, HEIC, PNG, TIFF): its luminance is already display-linear — the camera
 // or app that wrote it chose the tone curve — so nothing here re-renders it, and at default settings every
 // step is the identity. Worked on sRGB-encoded luminance, the space the file's own tones were chosen in; RGB
-// is scaled by the luminance ratio, as for a RAW, so hue is kept.
-fn tone_display(c: vec3f, tone: vec4f, lut: texture_1d<f32>) -> vec3f {
+// is scaled by the luminance ratio, as for a RAW, so hue is kept. This returns the encoded value the user's
+// curve then takes; `tone_apply` finishes.
+fn tone_display_curve_in(c: vec3f, tone: vec4f) -> f32 {
   let y = max(dot(c, LUMA_2020), 0.0);
   // Not `srgb_encode1`, which clamps at white: exposure can take values past it, and the shoulder below is
   // what brings them back.
@@ -53,19 +54,37 @@ fn tone_display(c: vec3f, tone: vec4f, lut: texture_1d<f32>) -> vec3f {
   } else {
     e = 1.0 - (1.0 - GREY_ENC) * pow(max(1.0 - e, 0.0) / (1.0 - GREY_ENC), g);
   }
-  let y_out = srgb_decode1(lut_sample(lut, e));
-  // Black has no hue to keep, and a ratio can't lift it: Blacks + raises it to a neutral grey.
-  if (y <= 1e-10) { return vec3f(y_out); }
-  return c * (y_out / y);
+  return e;
 }
 
-fn tone_map(c: vec3f, tone: vec4f, lut: texture_1d<f32>) -> vec3f {
+// Module 4 for a RAW, up to the user's curve: the encoded value the logistic gives this luminance.
+fn tone_map_curve_in(c: vec3f, tone: vec4f) -> f32 {
   let y = dot(c, LUMA_2020);
-  if (y <= 1e-10) { return vec3f(0.0); }
+  if (y <= 1e-10) { return 0.0; }
   let x = clamp((log2(y / 0.18) - tone.x) / (tone.y - tone.x), 0.0, 1.0);
   let s0 = logistic(0.0, tone.z, tone.w);
   let s1 = logistic(1.0, tone.z, tone.w);
-  let s = (logistic(x, tone.z, tone.w) - s0) / (s1 - s0);
-  let y_out = srgb_decode1(lut_sample(lut, s));
+  return (logistic(x, tone.z, tone.w) - s0) / (s1 - s0);
+}
+
+// Scale `c` to the luminance the curves settled on, `e` display-encoded.
+fn tone_apply(c: vec3f, e: f32, developed: bool) -> vec3f {
+  let y_out = srgb_decode1(e);
+  if (developed) {
+    let y = max(dot(c, LUMA_2020), 0.0);
+    // Black has no hue to keep, and a ratio can't lift it: Blacks + raises it to a neutral grey.
+    if (y <= 1e-10) { return vec3f(y_out); }
+    return c * (y_out / y);
+  }
+  let y = dot(c, LUMA_2020);
+  if (y <= 1e-10) { return vec3f(0.0); }
   return c * (y_out / y);
+}
+
+fn tone_display(c: vec3f, tone: vec4f, lut: texture_1d<f32>) -> vec3f {
+  return tone_apply(c, lut_sample(lut, tone_display_curve_in(c, tone)), true);
+}
+
+fn tone_map(c: vec3f, tone: vec4f, lut: texture_1d<f32>) -> vec3f {
+  return tone_apply(c, lut_sample(lut, tone_map_curve_in(c, tone)), false);
 }

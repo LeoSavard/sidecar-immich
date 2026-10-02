@@ -5,8 +5,10 @@ import developWgsl from './wgsl/client_develop.wgsl?raw';
 
 const DEVELOP_UNIFORM_BYTES = 272;
 /** `MaskParams` (shaders/develop/masks.wgsl), and the texture slots it describes. */
-const MASK_UNIFORM_BYTES = 288;
+const MASK_UNIFORM_BYTES = 1568;
 const MAX_MASKS = 8;
+/** Each layer's curve: a row of this many entries. */
+const LUT = 4096;
 
 export class DevelopPass {
 	readonly device: GPUDevice;
@@ -26,6 +28,8 @@ export class DevelopPass {
 	private noMask: GPUTexture;
 	private maskTextures: (GPUTexture | undefined)[] = [];
 	private maskBind?: GPUBindGroup;
+	/** The layers' curves, `MAX_MASKS` rows. */
+	private layerCurves: GPUTexture;
 
 	private constructor(device: GPUDevice, pipeline: GPURenderPipeline, layout: GPUBindGroupLayout, maskLayout: GPUBindGroupLayout) {
 		this.device = device;
@@ -37,6 +41,9 @@ export class DevelopPass {
 		this.maskUbo = device.createBuffer({ label: 'develop masks', size: MASK_UNIFORM_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 		this.maskSampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
 		this.noMask = device.createTexture({ label: 'no mask', size: [1, 1], format: 'r8unorm', usage: GPUTextureUsage.TEXTURE_BINDING });
+		this.layerCurves = device.createTexture({ label: 'layer curves', size: [LUT, MAX_MASKS], format: 'r32float', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+		const identity = new Float32Array(LUT * MAX_MASKS).map((_, i) => (i % LUT) / (LUT - 1));
+		device.queue.writeTexture({ texture: this.layerCurves }, identity, { bytesPerRow: LUT * 4 }, [LUT, MAX_MASKS]);
 	}
 
 	static async create(device: GPUDevice): Promise<DevelopPass> {
@@ -58,7 +65,8 @@ export class DevelopPass {
 			entries: [
 				{ binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
 				{ binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
-				...Array.from({ length: MAX_MASKS }, (_, i) => ({ binding: 2 + i, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' as const, viewDimension: '2d' as const } }))
+				...Array.from({ length: MAX_MASKS }, (_, i) => ({ binding: 2 + i, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' as const, viewDimension: '2d' as const } })),
+				{ binding: 2 + MAX_MASKS, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } }
 			]
 		});
 		const pipeline = await device.createRenderPipelineAsync({
@@ -118,12 +126,14 @@ export class DevelopPass {
 	}
 
 	/**
-	 * The edit's masks: `params` from the packer (`Packed.masks`), and a texture per mask in the frame being
-	 * developed — `undefined` for one not loaded yet, which then weighs nothing.
+	 * The edit's masks: `params` and `curves` from the packer (`Packed.masks`, `Packed.maskCurves`), and a
+	 * texture per mask in the frame being developed — `undefined` for one not loaded yet, which then weighs
+	 * nothing.
 	 */
-	setMasks(params: Uint8Array, textures: (GPUTexture | undefined)[]) {
+	setMasks(params: Uint8Array, textures: (GPUTexture | undefined)[], curves?: Float32Array) {
 		if (params.byteLength !== MASK_UNIFORM_BYTES) throw new Error(`mask uniforms must be ${MASK_UNIFORM_BYTES} bytes`);
 		this.device.queue.writeBuffer(this.maskUbo, 0, params);
+		if (curves?.length === LUT * MAX_MASKS) this.device.queue.writeTexture({ texture: this.layerCurves }, curves, { bytesPerRow: LUT * 4 }, [LUT, MAX_MASKS]);
 		if (textures.length !== this.maskTextures.length || textures.some((t, i) => t !== this.maskTextures[i])) {
 			this.maskTextures = textures.slice(0, MAX_MASKS);
 			this.maskBind = undefined;
@@ -148,7 +158,8 @@ export class DevelopPass {
 			entries: [
 				{ binding: 0, resource: { buffer: this.maskUbo } },
 				{ binding: 1, resource: this.maskSampler },
-				...Array.from({ length: MAX_MASKS }, (_, i) => ({ binding: 2 + i, resource: (this.maskTextures[i] ?? this.noMask).createView() }))
+				...Array.from({ length: MAX_MASKS }, (_, i) => ({ binding: 2 + i, resource: (this.maskTextures[i] ?? this.noMask).createView() })),
+				{ binding: 2 + MAX_MASKS, resource: this.layerCurves.createView() }
 			]
 		});
 		pass.setBindGroup(0, this.bindGroup);

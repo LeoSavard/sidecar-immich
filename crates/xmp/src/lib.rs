@@ -289,12 +289,15 @@ impl SidecarDoc {
         obj.insert("modified".into(), Value::from(utc_now()));
         let stored = obj.entry("edit").or_insert(Value::Object(Map::new()));
         merge(stored, serde_json::to_value(edit)?);
-        // The merge keeps what the new edit leaves out, which is how an edit without masks is written (so its
-        // ETag stays what it was): the last mask removed has to be removed here.
-        if edit.masks.is_empty()
-            && let Some(o) = stored.as_object_mut()
-        {
-            o.remove("masks");
+        // The merge keeps what the new edit leaves out, which is how an edit without masks or geometry is written
+        // (so its ETag stays what it was): the last mask removed, or a geometry reset, has to be removed here.
+        if let Some(o) = stored.as_object_mut() {
+            if edit.masks.is_empty() {
+                o.remove("masks");
+            }
+            if edit.geometry.is_none() {
+                o.remove("geometry");
+            }
         }
         Ok(())
     }

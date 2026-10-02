@@ -21,8 +21,21 @@ export const MASK_LABELS: Record<string, string> = {
 	'face-skin': 'Face skin',
 	'body-skin': 'Body skin',
 	hair: 'Hair',
-	clothes: 'Clothes'
+	clothes: 'Clothes',
+	brush: 'Brush'
 };
+
+/** A layer painted from nothing, which needs no models. */
+export const BRUSH = 'brush';
+
+export type BrushMode = 'off' | 'paint' | 'erase';
+/** The brush as the panel sets it: size, feather and flow on 0…100 sliders (`brushStroke` turns them into a stroke). */
+export type BrushSettings = { mode: BrushMode; size: number; feather: number; flow: number };
+
+/** A stroke's settings from the panel's: size 0…100 is a radius from 0.3 % to 25 % of the long edge, evenly in ratio. */
+export function brushStroke(b: BrushSettings) {
+	return { erase: b.mode === 'erase', radius: 0.003 * (0.25 / 0.003) ** (b.size / 100), feather: b.feather / 100, flow: b.flow / 100 };
+}
 
 const NONE: MaskSet = { available: false, names: [], faces: [] };
 

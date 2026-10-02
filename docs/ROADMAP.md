@@ -136,9 +136,17 @@ passes might hit, and that needs checking with pictures, not assumed from the dr
 
 ## Features after V1
 
-Lens correction, then crop and straighten, then local masks — in that order, and for the reason given in
-[§15 of the design](DESIGN.md#15-after-v1-lens-correction-crop-local-masks): lens correction redefines the
-geometry that crops and masks are stored in.
+Lens correction, crop and straighten (with keystone and turns), and mask layers — model masks, brush strokes,
+and every light and colour control per layer — have all shipped, in the order
+[§15 of the design](DESIGN.md#15-after-v1-lens-correction-crop-local-masks) gives. What §15 still lists and
+hasn't been built:
+
+- **Gradients.** Linear and radial masks, analytic in the shader: a third kind of layer beside model masks and
+  brushes, with handles drawn over the photo like the crop's.
+- **Sky.** A sky model, to join the subject, skin and hair ones.
+- **Detail per layer.** Sharpening and noise reduction through a mask: they run on the worker at full
+  resolution, so a layer's value has to reach the detail passes, not just the develop pass.
+- **Upright.** Keystone found automatically from the photo's lines; today Vertical and Horizontal are set by eye.
 
 ## Specialised tools worth integrating
 

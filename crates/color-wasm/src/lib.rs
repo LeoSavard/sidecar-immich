@@ -2,8 +2,9 @@
 //! Browser entry point for the colour maths. No bindings generator: the page allocates a buffer, writes
 //! JSON `{ edit, camera, source, display }`, and reads back a packed result. See web/src/lib/color/pack.ts.
 //!
-//! Result layout: `[u32 len][272 uniform bytes][4096 × f32 tone LUT][f64 temperature][f64 tint][288 mask
-//! uniform bytes]`, or len 0 with the error message available from `sc_last_error`.
+//! Result layout: `[u32 len][272 uniform bytes][4096 × f32 tone LUT][f64 temperature][f64 tint][1,568 mask
+//! uniform bytes][8 × 4096 × f32 layer curves]`, or len 0 with the error message available from `sc_last_error`.
+//! Geometry calls take and return JSON.
 
 use serde::Deserialize;
 use sidecar_color::camera::CameraColor;
@@ -82,7 +83,44 @@ pub unsafe extern "C" fn sc_pack(ptr: *const u8, len: usize) -> *const u8 {
         out.extend_from_slice(&p.temperature_k.to_le_bytes());
         out.extend_from_slice(&p.tint.to_le_bytes());
         out.extend_from_slice(bytemuck::bytes_of(&p.masks));
+        out.extend_from_slice(bytemuck::cast_slice(&p.mask_curves));
         out
+    }))
+}
+
+#[derive(Deserialize)]
+struct GeometryRequest {
+    geometry: sidecar_color::geometry::Geometry,
+    /// The picture's size in pixels (its proportions are what matter).
+    size: [u32; 2],
+    /// For `sc_geometry_fit`: the geometry before the change.
+    #[serde(default)]
+    before: Option<sidecar_color::geometry::Geometry>,
+}
+
+/// `{ geometry, size }` → `geometry::Frame` as JSON.
+///
+/// # Safety
+/// `ptr` must point to `len` readable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sc_geometry(ptr: *const u8, len: usize) -> *const u8 {
+    let input = unsafe { std::slice::from_raw_parts(ptr, len) };
+    respond(serde_json::from_slice::<GeometryRequest>(input).map_err(|e| e.to_string()).and_then(|req| {
+        serde_json::to_vec(&sidecar_color::geometry::frame(&req.geometry, req.size)).map_err(|e| e.to_string())
+    }))
+}
+
+/// `{ geometry, before, size }` → the geometry with its crop fitted after the change (`geometry::fit`), as JSON.
+///
+/// # Safety
+/// `ptr` must point to `len` readable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sc_geometry_fit(ptr: *const u8, len: usize) -> *const u8 {
+    let input = unsafe { std::slice::from_raw_parts(ptr, len) };
+    respond(serde_json::from_slice::<GeometryRequest>(input).map_err(|e| e.to_string()).and_then(|req| {
+        let a = req.size[0] as f64 / req.size[1].max(1) as f64;
+        let before = req.before.unwrap_or_default();
+        serde_json::to_vec(&sidecar_color::geometry::fit(&req.geometry, &before, a)).map_err(|e| e.to_string())
     }))
 }
 

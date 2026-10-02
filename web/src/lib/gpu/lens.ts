@@ -99,3 +99,21 @@ export function correctedPoint(uniform: Uint8Array | undefined, width: number, h
 	const s = lo / rs;
 	return { x: (cx + vx * s * hd) / width, y: (cy + vy * s * hd) / height };
 }
+
+/**
+ * Where a point of the corrected image reads from in the uncorrected one — the lens pass's own map (green
+ * channel), for placing what is drawn on screen in the photo's frame before lens correction, as brush strokes
+ * are stored. Both points normalized to the image (0…1); unchanged when `uniform` is empty.
+ */
+export function sourcePoint(uniform: Uint8Array | undefined, width: number, height: number, p: { x: number; y: number }) {
+	if (!uniform || uniform.byteLength !== LENS_UNIFORM_BYTES) return p;
+	const f = new Float32Array(uniform.buffer, uniform.byteOffset, LENS_UNIFORM_BYTES / 4);
+	const [cx, cy, , , , , hd, zoom, rScale] = f;
+	const ux = ((p.x * width - cx) / hd) * zoom;
+	const uy = ((p.y * height - cy) / hd) * zoom;
+	const x = Math.min(Math.max(Math.hypot(ux, uy) * rScale, 0), 63);
+	const i = Math.min(Math.floor(x), 62);
+	const t = x - i;
+	const k = f[12 + i * 4] * (1 - t) + f[12 + (i + 1) * 4] * t;
+	return { x: (cx + ux * k * hd) / width, y: (cy + uy * k * hd) / height };
+}

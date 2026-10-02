@@ -149,7 +149,9 @@ impl Worker {
             let develop = sidecar_engine::DevelopPass::new(&gpu)?;
             let detail = sidecar_engine::detail::Detail::new(&gpu)?;
             let lens = sidecar_engine::lens::LensPass::new(&gpu)?;
-            Ok(export::Kit { gpu, ingest, develop, detail, lens, lensfun: lensfun.clone() })
+            let warp = sidecar_engine::warp::WarpPass::new(&gpu)?;
+            let brush = sidecar_engine::brush::Brush::new(&gpu)?;
+            Ok(export::Kit { gpu, ingest, develop, detail, lens, warp, brush, lensfun: lensfun.clone() })
         });
         let gpu = match kit {
             Ok(k) => {
@@ -465,8 +467,9 @@ fn preview_jpeg(kit: &export::Kit, rendering: &export::Rendering, req: &PreviewR
     let source = rendering.correct(kit, &req.edit, source);
     let packed = rendering.pack(&req.edit, req.color_space);
     // The proxy is oriented already, as the masks are.
-    let mask_textures = rendering.mask_textures(kit, &req.edit, masks, 0);
+    let mask_textures = rendering.mask_textures(kit, &req.edit, masks, 0, [width, height]);
     let developed = kit.develop.render(&kit.gpu, &source, &packed.uniform, &packed.lut, &export::masks_for(&packed, &mask_textures, [0.0; 4]))?;
+    let developed = rendering.warp(kit, &req.edit, &developed, 0).unwrap_or(developed);
     let img = sidecar_engine::read_rgba16(&kit.gpu, &developed)?;
     export::jpeg_bytes(&img, 88, req.color_space)
 }
@@ -476,7 +479,14 @@ async fn preview(State(w): State<Arc<Worker>>, Json(req): Json<PreviewRequest>) 
         return (StatusCode::SERVICE_UNAVAILABLE, "This worker has no GPU; the fallback preview needs one.").into_response();
     };
     w.paths.lock().unwrap().insert(req.key.clone(), req.path.clone());
-    let edge = req.long_edge.unwrap_or(1600).clamp(256, 4096);
+    let mut edge = req.long_edge.unwrap_or(1600).clamp(256, 4096);
+    // A crop keeps part of the proxy: develop a larger one so what is kept still fills the screen. Rounded up
+    // to a few sizes, since each new size is a decode of its own.
+    if let Some(g) = req.edit.geometry.as_ref().filter(|g| !g.is_identity()) {
+        let kept = (g.crop.right - g.crop.left).max(g.crop.bottom - g.crop.top).clamp(0.1, 1.0);
+        let wanted = (edge as f64 / kept) as u32;
+        edge = [edge, 2048, 2560, 3072, 4096].into_iter().find(|&e| e >= wanted).unwrap_or(4096);
+    }
     let proxy = match w.proxy(&req.key, edge).await {
         Ok(p) => p,
         Err(e) => return internal(e),
@@ -498,7 +508,7 @@ async fn preview(State(w): State<Arc<Worker>>, Json(req): Json<PreviewRequest>) 
 pub struct LoupeRequest {
     pub key: String,
     pub path: PathBuf,
-    /// Centre in the oriented image, 0–1.
+    /// Centre in the oriented image, 0–1 — in the output, cropped and turned, when the edit has geometry.
     pub center: [f32; 2],
     pub size: [u32; 2],
     pub edit: sidecar_color::EditParams,
@@ -532,54 +542,81 @@ fn loupe_png(w: &Worker, kit: &export::Kit, req: &LoupeRequest, masks: &[Option<
     };
     let (sw, sh) = (source.width(), source.height());
     let (ow, oh) = if flip & 4 != 0 { (sh, sw) } else { (sw, sh) };
-    let (tw, th) = (req.size[0].clamp(64, 1024).min(ow), req.size[1].clamp(64, 1024).min(oh));
-    // Tile rectangle in oriented pixels, kept inside the image.
-    let ox = ((req.center[0].clamp(0.0, 1.0) * ow as f32) as i64 - tw as i64 / 2).clamp(0, (ow - tw) as i64) as u32;
-    let oy = ((req.center[1].clamp(0.0, 1.0) * oh as f32) as i64 - th as i64 / 2).clamp(0, (oh - th) as i64) as u32;
-    // Same rectangle in sensor (unoriented) pixels.
-    let (ux, uy, uw, uh) = sidecar_engine::source_rect(flip, sw, sh, (ox, oy, tw, th));
     let settings = export::detail_settings(&req.edit);
     let m = settings.margin();
     let packed = rendering.pack(&req.edit, req.color_space);
     // Masks cover the whole frame; each develop below says where its tile sits in it.
-    let mask_textures = rendering.mask_textures(kit, &req.edit, masks, flip);
+    let mask_textures = rendering.mask_textures(kit, &req.edit, masks, flip, [sw, sh]);
     let masks_at = |x: u32, y: u32| export::masks_for(&packed, &mask_textures, [x as f32, y as f32, sw as f32, sh as f32]);
-    let data = match rendering.lens_params(&req.edit, [sw, sh], [ux as f64, uy as f64], [0.0; 2]) {
-        // The tile reads a region of the source the lens decides: find it, cut it with the detail filters'
-        // margin and the bicubic read's reach around it, denoise and sharpen that, then correct it into the
-        // tile — the order export uses, on less of the image.
-        Some(frame) => {
-            let (x0, y0, x1, y1) = sidecar_color::lens::source_bounds(&frame, (ux, uy, uw, uh));
-            let reach = m as f64 + 3.0;
-            let cx = (x0.floor() - reach).clamp(0.0, (sw - 1) as f64) as u32;
-            let cy = (y0.floor() - reach).clamp(0.0, (sh - 1) as f64) as u32;
-            let cw = ((x1.ceil() + reach).clamp(1.0, sw as f64) as u32).max(cx + 1) - cx;
-            let ch = ((y1.ceil() + reach).clamp(1.0, sh as f64) as u32).max(cy + 1) - cy;
-            let region = kit.detail.crop(&kit.gpu, &source, cx, cy, cw, ch);
-            let region = kit.detail.apply(&kit.gpu, region, sigma, &settings);
-            let params = rendering.lens_params(&req.edit, [sw, sh], [ux as f64, uy as f64], [cx as f64, cy as f64]).unwrap_or(frame);
-            let tile = kit.lens.apply(&kit.gpu, &region, &params, [uw, uh]);
-            let developed = kit.develop.render(&kit.gpu, &tile, &packed.uniform, &packed.lut, &masks_at(ux, uy))?;
-            sidecar_engine::read_rgba16(&kit.gpu, &developed)?.data
+    // A rectangle of the picture (oriented pixels), developed as export develops it: denoised, sharpened,
+    // lens-corrected, through the masks.
+    let region = |ox: u32, oy: u32, tw: u32, th: u32| -> Result<sidecar_engine::RgbaF32> {
+        // Same rectangle in sensor (unoriented) pixels.
+        let (ux, uy, uw, uh) = sidecar_engine::source_rect(flip, sw, sh, (ox, oy, tw, th));
+        let data = match rendering.lens_params(&req.edit, [sw, sh], [ux as f64, uy as f64], [0.0; 2]) {
+            // The tile reads a region of the source the lens decides: find it, cut it with the detail filters'
+            // margin and the bicubic read's reach around it, denoise and sharpen that, then correct it into the
+            // tile — the order export uses, on less of the image.
+            Some(frame) => {
+                let (x0, y0, x1, y1) = sidecar_color::lens::source_bounds(&frame, (ux, uy, uw, uh));
+                let reach = m as f64 + 3.0;
+                let cx = (x0.floor() - reach).clamp(0.0, (sw - 1) as f64) as u32;
+                let cy = (y0.floor() - reach).clamp(0.0, (sh - 1) as f64) as u32;
+                let cw = ((x1.ceil() + reach).clamp(1.0, sw as f64) as u32).max(cx + 1) - cx;
+                let ch = ((y1.ceil() + reach).clamp(1.0, sh as f64) as u32).max(cy + 1) - cy;
+                let region = kit.detail.crop(&kit.gpu, &source, cx, cy, cw, ch);
+                let region = kit.detail.apply(&kit.gpu, region, sigma, &settings);
+                let params = rendering.lens_params(&req.edit, [sw, sh], [ux as f64, uy as f64], [cx as f64, cy as f64]).unwrap_or(frame);
+                let tile = kit.lens.apply(&kit.gpu, &region, &params, [uw, uh]);
+                let developed = kit.develop.render(&kit.gpu, &tile, &packed.uniform, &packed.lut, &masks_at(ux, uy))?;
+                sidecar_engine::read_rgba16(&kit.gpu, &developed)?.data
+            }
+            None => {
+                let (cx, cy) = (ux.saturating_sub(m), uy.saturating_sub(m));
+                let (cw, ch) = ((ux + uw + m).min(sw) - cx, (uy + uh + m).min(sh) - cy);
+                let tile = kit.detail.crop(&kit.gpu, &source, cx, cy, cw, ch);
+                let tile = kit.detail.apply(&kit.gpu, tile, sigma, &settings);
+                let developed = kit.develop.render(&kit.gpu, &tile, &packed.uniform, &packed.lut, &masks_at(cx, cy))?;
+                let img = sidecar_engine::read_rgba16(&kit.gpu, &developed)?;
+                // Cut the margin.
+                let (mx, my) = (ux - cx, uy - cy);
+                let mut data = Vec::with_capacity((uw * uh * 4) as usize);
+                for y in 0..uh {
+                    let row = ((my + y) * cw + mx) as usize * 4;
+                    data.extend_from_slice(&img.data[row..row + uw as usize * 4]);
+                }
+                data
+            }
+        };
+        Ok(sidecar_engine::RgbaF32 { width: uw, height: uh, data }.oriented(flip))
+    };
+    // A tile `size` big about `center` (0…1) in an image `frame` pixels big, kept inside it.
+    let tile_at = |frame: [u32; 2]| {
+        let (tw, th) = (req.size[0].clamp(64, 1024).min(frame[0]), req.size[1].clamp(64, 1024).min(frame[1]));
+        let x = ((req.center[0].clamp(0.0, 1.0) * frame[0] as f32) as i64 - tw as i64 / 2).clamp(0, (frame[0] - tw) as i64) as u32;
+        let y = ((req.center[1].clamp(0.0, 1.0) * frame[1] as f32) as i64 - th as i64 / 2).clamp(0, (frame[1] - th) as i64) as u32;
+        (x, y, tw, th)
+    };
+    let img = match req.edit.geometry.as_ref().filter(|g| !g.is_identity()) {
+        // The centre is in the output, as the editor shows it: develop the part of the picture the tile reads,
+        // then warp it into the tile as export warps the whole.
+        Some(g) => {
+            let frame_out = sidecar_color::geometry::output_size(g, [ow, oh]);
+            let tile = tile_at(frame_out);
+            let (x0, y0, x1, y1) = sidecar_color::geometry::warp_bounds(g, [ow, oh], 0, frame_out, tile);
+            let rx = (x0.floor() - 2.0).clamp(0.0, (ow - 1) as f64) as u32;
+            let ry = (y0.floor() - 2.0).clamp(0.0, (oh - 1) as f64) as u32;
+            let rw = ((x1.ceil() + 2.0).clamp(1.0, ow as f64) as u32).max(rx + 1) - rx;
+            let rh = ((y1.ceil() + 2.0).clamp(1.0, oh as f64) as u32).max(ry + 1) - ry;
+            let picture = sidecar_engine::upload_rgba16(&kit.gpu, &region(rx, ry, rw, rh)?);
+            let params = sidecar_color::geometry::warp_params(g, [ow, oh], 0, frame_out, [tile.0 as f64, tile.1 as f64], [tile.2, tile.3], [rx as f64, ry as f64]);
+            sidecar_engine::read_rgba16(&kit.gpu, &kit.warp.apply(&kit.gpu, &picture, &params))?
         }
         None => {
-            let (cx, cy) = (ux.saturating_sub(m), uy.saturating_sub(m));
-            let (cw, ch) = ((ux + uw + m).min(sw) - cx, (uy + uh + m).min(sh) - cy);
-            let tile = kit.detail.crop(&kit.gpu, &source, cx, cy, cw, ch);
-            let tile = kit.detail.apply(&kit.gpu, tile, sigma, &settings);
-            let developed = kit.develop.render(&kit.gpu, &tile, &packed.uniform, &packed.lut, &masks_at(cx, cy))?;
-            let img = sidecar_engine::read_rgba16(&kit.gpu, &developed)?;
-            // Cut the margin.
-            let (mx, my) = (ux - cx, uy - cy);
-            let mut data = Vec::with_capacity((uw * uh * 4) as usize);
-            for y in 0..uh {
-                let row = ((my + y) * cw + mx) as usize * 4;
-                data.extend_from_slice(&img.data[row..row + uw as usize * 4]);
-            }
-            data
+            let (ox, oy, tw, th) = tile_at([ow, oh]);
+            region(ox, oy, tw, th)?
         }
     };
-    let img = sidecar_engine::RgbaF32 { width: uw, height: uh, data }.oriented(flip);
     let rgb: Vec<u8> = img.data.as_chunks::<4>().0.iter().flat_map(|p| [0, 1, 2].map(|c| (export::srgb_encode(p[c]) * 255.0 + 0.5) as u8)).collect();
     let mut out = Vec::new();
     {

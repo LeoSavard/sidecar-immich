@@ -80,6 +80,37 @@ Where the code differs from the text below, the code and these notes win.
   `ProcessVersion` bump was needed: an older Sidecar keeps masks it can't render, and entries a newer one adds
   (a `kind`) are carried and skipped here. The first masks on a new install take minutes while burn tunes
   itself to the GPU; after that a photo's masks take seconds, once.
+- **Crop and straighten (§15):** `sidecar_color::geometry` turns `EditParams.geometry` — quarter turns, a
+  mirror, straighten, Vertical and Horizontal keystone (a virtual camera tilt of up to 30° with a focal length of
+  0.8 picture diagonals, Aspect for the stretch that leaves), and a crop — into one projective map from the
+  output to the lens-corrected picture. It is applied *after* develop, which is per pixel: the editor's view
+  pass samples the developed texture through it (and the histogram counts the output's pixels through it); the
+  worker's warp pass (`shaders/server/warp.wgsl`, bicubic) resamples the developed texture for export, the
+  fallback preview and loupe tiles, with the pending orientation folded into the same matrix. So nothing
+  upstream of develop changed and no parity case moved. The crop is stored in the straightened plane, in
+  fractions of the picture, and is fitted by the same Rust code on every change (through wasm in the
+  browser): a crop nobody drew is the largest of the photo's shape (or the locked ratio) the picture fills,
+  and follows the straighten back and forth; a drawn one keeps its place and only shrinks as it must. The
+  loupe's centre is in the output when the edit has geometry. Absent `geometry` means none and isn't
+  serialized, so no ETag moved; a 0.4 app ignores the field (shows the photo uncropped) and its merge-on-save
+  keeps it.
+- **Mask layers (§15):** a layer now reaches every light and colour control: Whites and Blacks blend the
+  tone map's parameters toward the layer's at its weight, the colour mixer's values add, and a layer curve
+  (`curve`; Highlights and Shadows are its 25 % and 75 % points, as globally) is applied after the global
+  curve from a row of an 8 × 4,096 `r32float` texture — `MaskParams` grew to 1,568 bytes. The develop
+  shader's tone stage is split (`tone_*_curve_in` → curves → `tone_apply`) so the curves sit between;
+  results without layers are bit-identical. New fields are left out at their defaults, so a layer using
+  only 0.4's fields is stored as 0.4 stored it and still renders there; one using new fields is carried and
+  skipped by 0.4. Two parity cases cover layers on a RAW and on a developed file.
+- **Brushes (§15):** `strokes` on a layer (radius as a fraction of the long edge, feather, flow, points),
+  over a model's mask or on a `brush` layer that starts empty. Points are stored in the photo before lens
+  correction — the models' frame — so a stroke stays on what it covered whatever the lens, crop or
+  straighten later do. Rasterized by `client/brush.wgsl` (each segment a capsule, blended `max` into a
+  coverage target, so one stroke lays its flow down once) and `client/brush_composite.wgsl` (paint
+  `b + (1 − b)c`, erase `b(1 − c)`), into `r8unorm` at the proxy's size in the browser and up to 4,096 px on
+  the worker, then moved by `client/lens_mask.wgsl` — the lens pass as a render pass for one-channel targets.
+  The editor draws a stroke live as it is made, then stores it simplified (Ramer–Douglas–Peucker at a tenth of
+  the radius) and rounded to 1e-4, and repaints from what was stored, so the editor shows what export renders.
 - **Interaction:** slider rows allow vertical panning and claim a touch only after 4 px of sideways travel, so the tool panel scrolls. Holding a slider no longer hides the editor chrome — the histogram is exactly what you want to watch while dragging.
 
 ## 0. Summary
@@ -693,7 +724,7 @@ interface EditParams {
   mixer:        Record<Band, { hue: number; saturation: number; luminance: number }>; // −100…+100
   detail:       { sharpen: { amount: number; radius: number; iterations: number };
                   denoise: { luminance: number; chroma: number } };
-  // After V1, optional: lens?, crop?, masks? — absent means off (§15)
+  // After V1, optional: lens?, geometry?, masks? — absent means off (§15)
 }
 ```
 
@@ -948,16 +979,16 @@ After V1: lens correction, then crop and straighten, then local masks (§15).
 | Feature | Preview (phone) | Export (server) | Stored as |
 |---|---|---|---|
 | Lens correction — distortion, lateral CA, vignetting | A lens pass over the proxy, run when a lens setting changes: bicubic remap per channel and a vignetting gain, into the texture develop reads | Same WGSL, after denoise and before develop | `sc:Lens` — profile, per-correction amounts |
-| Crop and straighten | Composed into the view pass `geometry` matrix; the histogram counts only pixels inside the crop | Before resampling to `longEdge` | `sc:Crop` — angle and edges, normalized to the lens-corrected image. An existing Immich crop on the RAW can be offered once as a starting point. |
-| Local masks — linear and radial gradients, brush, subject/sky | Second bind group in the develop pass: each module's inputs blend by mask weight | Same shaders at full resolution | `sc:Masks` — shapes plus adjustments named like the global ones |
+| Crop, straighten, keystone, turns | A projective map in the view pass; the histogram counts the output's pixels through it | The warp pass after develop, before resampling to `longEdge` | `sc:Geometry` — turns, mirror, angle, keystone, aspect, and the crop in the straightened plane |
+| Mask layers — models' masks, brush (gradients and sky still to come) | Second bind group in the develop pass: each module's inputs blend by mask weight | Same shaders at full resolution | `sc:Masks` — the mask's name, strokes, and adjustments named like the global ones |
 
 **Lens correction.** Profiles come from the file when it carries one — DNG opcodes (iPhone ProRAW and Lightroom's DNGs), Sony's and Fujifilm's own tables, each verified as the build log describes — otherwise from the lensfun database, matched on the lens ExifTool identifies. The models are reimplemented from lensfun's documentation, and the database (CC BY-SA 3.0) is downloaded on first use, not shipped (§12). Absent `sc:Lens` means off, so photos edited in V1 render unchanged; new edits default to on.
 
 **Masks.**
 
-- Weights: gradients are analytic in the shader. Brush strokes — normalized points, radius, feather, flow — are rasterized by a WGSL compute pass into an `r8unorm` texture array, at proxy size on the phone and full size on the server, so both sides share the rasterizer.
+- Weights: gradients (still to come) are analytic in the shader. Brush strokes — normalized points, radius, feather, flow — are rasterized by shared WGSL render passes into `r8unorm` masks, at proxy size on the phone and up to 4,096 px on the server (see the build log).
 - Model masks (subject, skin, hair, clothes; sky is still to come) run on the worker's GPU through `sidecar-ml`. The sidecar stores only the mask's name; the raster lives in `/cache` and is recomputed if the cache is gone, so nothing binary lands beside the RAW. See the build log.
-- Blending: `ev = global.ev + Σ wₖ · maskₖ.ev`, and likewise for WB multipliers, contrast, saturation and mixer values. Up to 8 masks per photo in the first release, in a fixed-size uniform array.
+- Blending: `ev = global.ev + Σ wₖ · maskₖ.ev`, and likewise for WB multipliers, contrast, saturation and mixer values; the tone map's parameters blend toward the layer's, and each layer's curve applies after the global one by its weight. Up to 8 layers per photo, in a fixed-size uniform array.
 - Display: the selected mask shows as desaturation outside it, which keeps red and blue reserved for clipping.
 
 **Hooks that ship in V1** so all three arrive without migrations:

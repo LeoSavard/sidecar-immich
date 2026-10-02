@@ -23,7 +23,8 @@ struct Case {
     /// `<name>.lens.bin` holds lens-pass uniforms, run over the source before develop.
     #[serde(default)]
     lens: bool,
-    /// `<name>.mask<i>.u8`, one byte a pixel at `mask_size`, and `<name>.masks.bin` their uniforms.
+    /// `<name>.mask<i>.u8`, one byte a pixel at `mask_size`, `<name>.masks.bin` their uniforms and
+    /// `<name>.curves.f32` the layers' curves.
     #[serde(default)]
     masks: u32,
     #[serde(default)]
@@ -153,6 +154,20 @@ fn cases() -> Vec<Fixture> {
         MaskAdjustment { mask: "skin".into(), invert: true, amount: 70.0, exposure: -0.7, tint: -30.0, saturation: 25.0, ..Default::default() },
     ];
 
+    // Layers reaching the whole edit: their own white and black points, curves and mixer, on a RAW and on a
+    // developed file, whose tone path the layer's parameters blend through differently.
+    let layer_mixer = sidecar_color::params::Mixer {
+        blue: MixerBand { hue: -30.0, saturation: 60.0, luminance: 20.0 },
+        red: MixerBand { hue: 20.0, saturation: -50.0, luminance: -10.0 },
+        ..Default::default()
+    };
+    let layers = vec![
+        MaskAdjustment { mask: "subject".into(), whites: -60.0, blacks: 40.0, curve: vec![[0.0, 0.05], [0.25, 0.32], [0.75, 0.7], [1.0, 0.95]], exposure: 0.4, ..Default::default() },
+        MaskAdjustment { mask: "brush".into(), invert: true, amount: 80.0, mixer: layer_mixer, contrast: -20.0, whites: 30.0, ..Default::default() },
+    ];
+    let layered = EditParams { masks: layers.clone(), ..graded.clone() };
+    let phone_layered = EditParams { masks: layers, ..phone.clone() };
+
     let mut lens = EditParams { lens: Some(sidecar_color::params::Lens { profile: "sony".into(), ..Default::default() }), ..graded.clone() };
     lens.lens.as_mut().unwrap().lateral_ca = 150.0;
 
@@ -164,6 +179,8 @@ fn cases() -> Vec<Fixture> {
         ("heic-graded".into(), heic(), SourceKind::Developed, phone, DisplaySpace::Srgb, None),
         ("lens-zv1".into(), nikon_d850(), SourceKind::Raw, lens, DisplaySpace::Srgb, Some(zv1())),
         ("masks".into(), nikon_d850(), SourceKind::Raw, masked, DisplaySpace::Srgb, None),
+        ("layers".into(), nikon_d850(), SourceKind::Raw, layered, DisplaySpace::Srgb, None),
+        ("heic-layers".into(), heic(), SourceKind::Developed, phone_layered, DisplaySpace::DisplayP3, None),
     ]
 }
 
@@ -191,6 +208,7 @@ pub fn fixtures(dir: &Path) -> Result<()> {
                 std::fs::write(dir.join(format!("{name}.mask{i}.u8")), m)?;
             }
             std::fs::write(dir.join(format!("{name}.masks.bin")), bytemuck::bytes_of(&packed.masks))?;
+            std::fs::write(dir.join(format!("{name}.curves.f32")), bytemuck::cast_slice(&packed.mask_curves))?;
         }
         println!("{name}: white balance {:.0} K, tint {:+.1}{}{}", packed.temperature_k, packed.tint, if lens { ", lens pass" } else { "" }, if masks > 0 { format!(", {masks} masks") } else { String::new() });
         index.push(Case { name, width: src.width, height: src.height, lens, masks, mask_size: if masks > 0 { MASK_SIZE } else { [0; 2] } });
@@ -225,9 +243,10 @@ pub fn native(dir: &Path, out: &Path) -> Result<()> {
             let img = RgbaF32 { width: case.mask_size[0], height: case.mask_size[1], data: bytes.iter().flat_map(|&v| [v as f32 / 255.0; 4]).collect() };
             mask_textures.push(Some(sidecar_engine::upload_rgba16(&gpu, &img)));
         }
+        let curves: Vec<f32> = if case.masks > 0 { bytemuck::cast_slice(&std::fs::read(dir.join(format!("{}.curves.f32", case.name)))?).to_vec() } else { Vec::new() };
         let masks = if case.masks > 0 {
             let params: sidecar_color::params::MaskParams = bytemuck::pod_read_unaligned(&std::fs::read(dir.join(format!("{}.masks.bin", case.name)))?);
-            sidecar_engine::Masks { params, textures: mask_textures.iter().map(Option::as_ref).collect() }
+            sidecar_engine::Masks { params, textures: mask_textures.iter().map(Option::as_ref).collect(), curves: &curves }
         } else {
             sidecar_engine::Masks::none()
         };

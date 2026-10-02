@@ -8,7 +8,15 @@ use anyhow::{Context, Result, bail};
 include!(concat!(env!("OUT_DIR"), "/files.rs"));
 
 /// Entry points that the browser needs, composed into `web/src/lib/gpu/wgsl/`.
-pub const WEB_ENTRIES: &[&str] = &["client/develop.wgsl", "client/view.wgsl", "client/histogram.wgsl", "client/lens.wgsl"];
+pub const WEB_ENTRIES: &[&str] = &[
+    "client/develop.wgsl",
+    "client/view.wgsl",
+    "client/histogram.wgsl",
+    "client/lens.wgsl",
+    "client/lens_mask.wgsl",
+    "client/brush.wgsl",
+    "client/brush_composite.wgsl",
+];
 
 pub fn source(path: &str) -> Result<&'static str> {
     FILES.iter().find(|(p, _)| *p == path).map(|(_, s)| *s).with_context(|| format!("unknown shader {path}"))
@@ -72,6 +80,7 @@ pub const SERVER_ENTRIES: &[&str] = &[
     "detail/rl_update.wgsl",
     "detail/rl_apply.wgsl",
     "detail/crop.wgsl",
+    "server/warp.wgsl",
 ];
 
 /// File name used for a composed entry, e.g. `client/develop.wgsl` -> `client_develop.wgsl`.

@@ -10,6 +10,13 @@ export const PEAKING = 4;
 export const SHOW_MASK = 8;
 /** With SHOW_MASK: the mask is inverted, as its adjustment is. */
 export const MASK_INVERTED = 16;
+const VIEW_UNIFORM_BYTES = 128;
+
+/**
+ * What the canvas shows of the developed picture: the output of a geometry (`Frame.toPicture`, output 0…1 →
+ * picture 0…1, row-major), `size` pixels.
+ */
+export type ViewGeometry = { toPicture: number[][]; size: [number, number] };
 
 /**
  * Threshold (0…1) on the worker's focus_mask that counts as sharp. The mask is a Laplacian energy over
@@ -36,7 +43,7 @@ export class ViewPass {
 	private focusMask: GPUTexture;
 	/** The mask as decoded, before any lens correction; `focusMask` is what the view samples. */
 	private focusSource: GPUTexture;
-	private params = new ArrayBuffer(80);
+	private params = new ArrayBuffer(VIEW_UNIFORM_BYTES);
 
 	private constructor(
 		private device: GPUDevice,
@@ -45,7 +52,7 @@ export class ViewPass {
 		pipeline: GPURenderPipeline
 	) {
 		this.pipeline = pipeline;
-		this.ubo = device.createBuffer({ label: 'view params', size: 80, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+		this.ubo = device.createBuffer({ label: 'view params', size: VIEW_UNIFORM_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 		this.sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
 		// Placeholder until loadFocusMask() lands the real one; never triggers peaking (0 < any threshold > 0).
 		this.focusMask = device.createTexture({ label: 'focus mask placeholder', size: [1, 1], format: 'r8unorm', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
@@ -93,23 +100,28 @@ export class ViewPass {
 		return new ViewPass(device, context, format, pipeline);
 	}
 
-	/** Fit the image in the canvas, then apply zoom (1 = fit) and pan (canvas pixels). */
-	render(developed: GPUTexture, canvas: HTMLCanvasElement, view: Viewport, flags: number) {
+	/** Fit the output in the canvas, then apply zoom (1 = fit) and pan (canvas pixels). */
+	render(developed: GPUTexture, canvas: HTMLCanvasElement, view: Viewport, flags: number, geometry?: ViewGeometry) {
+		const [ow, oh] = geometry?.size ?? [developed.width, developed.height];
 		const cw = canvas.width;
 		const ch = canvas.height;
-		const fit = Math.min(cw / developed.width, ch / developed.height);
-		const dw = developed.width * fit * view.zoom;
-		const dh = developed.height * fit * view.zoom;
+		const fit = Math.min(cw / ow, ch / oh);
+		const dw = ow * fit * view.zoom;
+		const dh = oh * fit * view.zoom;
 		const ox = (cw - dw) / 2 + view.panX;
 		const oy = (ch - dh) / 2 + view.panY;
 		const f = new Float32Array(this.params);
+		f.fill(0);
 		f.set([1 / dw, 0, 0, 0, 0, 1 / dh, 0, 0, -ox / dw, -oy / dh, 1, 0]);
+		const m = geometry?.toPicture ?? [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+		// WGSL's mat3x3f is three padded columns.
+		for (let j = 0; j < 3; j++) f.set([m[0][j], m[1][j], m[2][j], 0], 12 + j * 4);
 		const dv = new DataView(this.params);
-		dv.setUint32(48, flags, true);
-		dv.setFloat32(52, srgbDecode(254.5 / 255), true);
-		dv.setFloat32(56, srgbDecode(0.5 / 255), true);
-		dv.setFloat32(60, 0x16 / 255, true);
-		dv.setFloat32(64, PEAK_THRESHOLD, true);
+		dv.setUint32(96, flags, true);
+		dv.setFloat32(100, srgbDecode(254.5 / 255), true);
+		dv.setFloat32(104, srgbDecode(0.5 / 255), true);
+		dv.setFloat32(108, 0x16 / 255, true);
+		dv.setFloat32(112, PEAK_THRESHOLD, true);
 		this.device.queue.writeBuffer(this.ubo, 0, this.params);
 		if (this.boundTexture !== developed || this.boundFocusMask !== this.focusMask || this.boundOverlay !== this.overlay) {
 			this.bindGroup = this.device.createBindGroup({

@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright Sidecar contributors
 //! requires: common/transfer.wgsl common/hash.wgsl
-// View pass: developedTex (display-linear) → canvas. Pan/zoom geometry, clip overlays, sRGB encoding and
-// triangular dither. Runs on view changes and after each develop; never touches the develop uniforms.
+// View pass: developedTex (display-linear) → canvas. Pan/zoom, the geometry (crop, straighten, keystone,
+// turns — the same projective map the worker's warp pass applies to an export), clip overlays, sRGB encoding
+// and triangular dither. Runs on view changes and after each develop; never touches the develop uniforms.
 
 struct ViewParams {
-  uv_from_px: mat3x3f,   // canvas pixel → developed texture uv (pan, zoom; crop and straighten later)
-  flags: u32,            // bit 0 clip highlights, bit 1 clip shadows, bit 2 focus peaking, bit 3 show a mask, bit 4 it is inverted
+  out_from_px: mat3x3f,  // canvas pixel → output (0…1): fit, zoom and pan
+  geometry: mat3x3f,     // output (0…1) → developed texture uv, projective (sidecar_color::geometry)
+  flags: u32,            // bit 0 clip highlights, bit 1 clip shadows, bit 2 focus peaking, bit 3 show a mask,
+                         // bit 4 it is inverted
   hi_t: f32,             // display-linear threshold for "at white"
   lo_t: f32,             // display-linear threshold for "at black"
   background: f32,       // encoded grey outside the image
@@ -36,10 +39,16 @@ fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
   return vec4f(uv * 2.0 - 1.0, 0.0, 1.0);
 }
 
+fn outside(p: vec2f) -> bool {
+  return p.x < 0.0 || p.y < 0.0 || p.x > 1.0 || p.y > 1.0;
+}
+
 @fragment
 fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
-  let uv = (V.uv_from_px * vec3f(pos.xy, 1.0)).xy;
-  if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0) {
+  let o = (V.out_from_px * vec3f(pos.xy, 1.0)).xy;
+  let h = V.geometry * vec3f(o, 1.0);
+  let uv = h.xy / h.z;
+  if (outside(o) || h.z <= 0.0 || outside(uv)) {
     return vec4f(vec3f(V.background), 1.0);
   }
   var c = textureSampleLevel(developed, bilinear, uv, 0.0).rgb;

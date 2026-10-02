@@ -37,9 +37,10 @@ fn touched(delta: &Value, removed: &[String]) -> Vec<String> {
 }
 
 /// The setting a changed path belongs to, as the editor presents it: Temperature, Tint and the as-shot switch
-/// are one white balance; the lens strengths are one lens correction. Everything else is its own control.
+/// are one white balance; the lens strengths are one lens correction; crop, straighten and keystone are one
+/// geometry. Everything else is its own control.
 fn setting(path: &str) -> &str {
-    ["whiteBalance", "lens"]
+    ["whiteBalance", "lens", "geometry"]
         .into_iter()
         .find(|group| path.strip_prefix(group).is_some_and(|rest| rest.is_empty() || rest.starts_with('.')))
         .unwrap_or(path)

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Full-resolution render for export: decode → GPU demosaic (Bayer) or LibRaw Markesteijn (X-Trans) → develop
-//! (shared WGSL) → orientation → optional resample → 8-bit JPEG with dither or 16-bit TIFF → ICC profile →
+//! (shared WGSL) → orientation, or the edit's crop and geometry with it → optional resample → 8-bit JPEG with dither or 16-bit TIFF → ICC profile →
 //! metadata copied from the RAW by ExifTool → `sc:Sidecar` in the export's XMP.
 
 use anyhow::{Context, Result, bail};
@@ -67,6 +67,8 @@ pub struct Kit {
     pub develop: sidecar_engine::DevelopPass,
     pub detail: sidecar_engine::detail::Detail,
     pub lens: sidecar_engine::lens::LensPass,
+    pub warp: sidecar_engine::warp::WarpPass,
+    pub brush: sidecar_engine::brush::Brush,
     pub lensfun: std::sync::Arc<crate::lensfun::Lensfun>,
 }
 
@@ -136,30 +138,67 @@ impl Rendering {
         }
     }
 
-    /// The edit's masks as textures covering the same frame as a source this rendering corrects. A mask comes
-    /// in the proxy's frame, oriented as the photo is shown; `flip` is the orientation the source still has
-    /// to have applied, which the mask has undone, and the lens correction moves it as it moves the source —
-    /// without vignetting, whose gain would change the mask's values rather than where they are.
-    pub fn mask_textures(&self, kit: &Kit, edit: &EditParams, masks: &[Option<RgbaF32>], flip: i32) -> Vec<Option<wgpu::Texture>> {
+    /// The edit's masks as textures covering the same frame as a source of `frame` pixels this rendering
+    /// corrects. A model's mask comes in the proxy's frame, oriented as the photo is shown, and brush strokes
+    /// are placed in that frame too; `flip` is the orientation the source still has to have applied, which
+    /// they are taken back through. The lens correction then moves them as it moves the source — without
+    /// vignetting, whose gain would change a mask's values rather than where they are.
+    pub fn mask_textures(&self, kit: &Kit, edit: &EditParams, masks: &[Option<RgbaF32>], flip: i32, frame: [u32; 2]) -> Vec<Option<wgpu::Texture>> {
         let mut geometry = edit.clone();
         if let Some(lens) = &mut geometry.lens {
             lens.vignetting = 0.0;
         }
-        masks
+        let to_source = sidecar_color::geometry::sensor_from_oriented(flip);
+        edit.masks
             .iter()
-            .map(|m| {
-                let m = m.clone()?.oriented(sidecar_engine::inverse_flip(flip));
-                Some(self.correct(kit, &geometry, sidecar_engine::upload_rgba16(&kit.gpu, &m)))
+            .take(sidecar_color::params::MAX_MASKS)
+            .enumerate()
+            .map(|(i, layer)| {
+                if !layer.renders() {
+                    return None;
+                }
+                let base = masks.get(i).cloned().flatten().map(|m| sidecar_engine::upload_rgba16(&kit.gpu, &m.oriented(sidecar_engine::inverse_flip(flip))));
+                if layer.strokes.is_empty() {
+                    return Some(self.correct(kit, &geometry, base?));
+                }
+                // Strokes are drawn at the source's resolution up to 4,096 px on the long edge: a mask is
+                // sampled through a linear filter, and nothing a brush draws needs more.
+                let scale = (MASK_EDGE as f64 / frame[0].max(frame[1]) as f64).min(1.0);
+                let size = frame.map(|v| ((v as f64 * scale).round() as u32).max(1));
+                let strokes: Vec<_> = layer.strokes.iter().map(|s| sidecar_engine::brush::stroke_px(s, size, |p| sidecar_color::geometry::map(&to_source, p))).collect();
+                let painted = kit.brush.paint(&kit.gpu, base.as_ref(), size, &strokes);
+                Some(match self.lens_params(&geometry, size, [0.0; 2], [0.0; 2]) {
+                    Some(p) => kit.brush.correct(&kit.gpu, &painted, &p),
+                    None => painted,
+                })
             })
             .collect()
     }
+
+    /// Crop, straighten, keystone and turn a developed texture holding the whole picture in the orientation
+    /// `flip` leaves pending, into the output, oriented. `None` when the edit has no geometry: the caller
+    /// orients as before.
+    pub fn warp(&self, kit: &Kit, edit: &EditParams, developed: &wgpu::Texture, flip: i32) -> Option<wgpu::Texture> {
+        let g = edit.geometry.as_ref().filter(|g| !g.is_identity())?;
+        let picture = oriented_size([developed.width(), developed.height()], flip);
+        let out = sidecar_color::geometry::output_size(g, picture);
+        Some(kit.warp.apply(&kit.gpu, developed, &sidecar_color::geometry::warp_params(g, picture, flip, out, [0.0; 2], out, [0.0; 2])))
+    }
 }
 
-/// `pack`'s mask uniforms and the textures for them, ready for `DevelopPass::render`.
-pub fn masks_for<'a>(packed: &Packed, textures: &'a [Option<wgpu::Texture>], frame: [f32; 4]) -> sidecar_engine::Masks<'a> {
+/// Long edge brush strokes are drawn at on the worker.
+const MASK_EDGE: u32 = 4096;
+
+/// A texture's size once `flip` is applied.
+pub fn oriented_size(size: [u32; 2], flip: i32) -> [u32; 2] {
+    if flip & 4 != 0 { [size[1], size[0]] } else { size }
+}
+
+/// `pack`'s mask uniforms, curves, and the textures for them, ready for `DevelopPass::render`.
+pub fn masks_for<'a>(packed: &'a Packed, textures: &'a [Option<wgpu::Texture>], frame: [f32; 4]) -> sidecar_engine::Masks<'a> {
     let mut params = packed.masks;
     params.frame = frame;
-    sidecar_engine::Masks { params, textures: textures.iter().map(Option::as_ref).collect() }
+    sidecar_engine::Masks { params, textures: textures.iter().map(Option::as_ref).collect(), curves: &packed.mask_curves }
 }
 
 /// Full-resolution linear RGB on the GPU, the orientation still to apply, and how to develop it. RAW comes
@@ -314,12 +353,22 @@ pub fn render(kit: &Kit, req: &RenderRequest, masks: &[Option<RgbaF32>], outbox:
 
     stage(tx, "develop", 0.45);
     let packed = rendering.pack(&req.edit, req.color_space);
-    let mask_textures = rendering.mask_textures(kit, &req.edit, masks, flip);
+    let mask_textures = rendering.mask_textures(kit, &req.edit, masks, flip, [source.width(), source.height()]);
     let developed = kit.develop.render(&kit.gpu, &source, &packed.uniform, &packed.lut, &masks_for(&packed, &mask_textures, [0.0; 4]))?;
     drop(source);
-    let mut img = sidecar_engine::read_rgba16(&kit.gpu, &developed)?;
-    drop(developed);
-    img = img.oriented(flip);
+    drop(mask_textures);
+    let mut img = match rendering.warp(kit, &req.edit, &developed, flip) {
+        Some(warped) => {
+            stage(tx, "geometry", 0.55);
+            drop(developed);
+            sidecar_engine::read_rgba16(&kit.gpu, &warped)?
+        }
+        None => {
+            let img = sidecar_engine::read_rgba16(&kit.gpu, &developed)?;
+            drop(developed);
+            img.oriented(flip)
+        }
+    };
     if let Some(edge) = req.long_edge {
         stage(tx, "resample", 0.6);
         img = img.downsampled(edge);

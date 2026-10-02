@@ -1,11 +1,13 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 <script lang="ts">
 	import { page } from '$app/state';
+	import { untrack } from 'svelte';
 	import { DevelopPass, requestDevice } from '$lib/gpu/develop';
-	import { CLIP_HIGHS, CLIP_LOWS, MASK_INVERTED, PEAKING, SHOW_MASK, ViewPass, type Viewport } from '$lib/gpu/view';
-	import { MaskLibrary, type MaskSet } from '$lib/masks';
+	import { CLIP_HIGHS, CLIP_LOWS, MASK_INVERTED, PEAKING, SHOW_MASK, ViewPass, type ViewGeometry, type Viewport } from '$lib/gpu/view';
+	import { BRUSH, MaskLibrary, brushStroke, type BrushSettings, type MaskSet } from '$lib/masks';
+	import { MaskPainter, simplify } from '$lib/gpu/brush';
 	import { HistogramPass, type HistogramData } from '$lib/gpu/histogram';
-	import { LensPass, correctedPoint } from '$lib/gpu/lens';
+	import { LensPass, correctedPoint, sourcePoint } from '$lib/gpu/lens';
 	import { ColorPacker } from '$lib/color/pack';
 	import { api, HttpError } from '$lib/api';
 	import { settings, SPACE_LABELS } from '$lib/settings';
@@ -19,12 +21,13 @@
 	import Loupe from '$lib/ui/Loupe.svelte';
 	import HistoryPanel from '$lib/ui/HistoryPanel.svelte';
 	import MasksPanel from '$lib/ui/MasksPanel.svelte';
-	import { CURVE_ANCHORS, PICKS, curveOffset, view as sliders, type Anchor } from '$lib/state/edit-view';
+	import CropOverlay from '$lib/ui/CropOverlay.svelte';
+	import { CURVE_ANCHORS, NO_GEOMETRY, PICKS, curveOffset, isNoGeometry, project, twist, untwist, view as sliders, type Anchor } from '$lib/state/edit-view';
 	import { decimals, signed } from '$lib/ui/format';
-	import type { Band, DisplaySpace, EditParams, HistoryState, Lens, MaskAdjustment, Meta, MixerBand } from '$lib/types';
+	import type { Band, Crop, DisplaySpace, EditParams, Frame, Geometry, HistoryState, Lens, MaskAdjustment, Meta, MixerBand } from '$lib/types';
 
 	type EditState = { edit: EditParams; etag: string; head: string; readOnly: boolean; writable?: boolean; exports: unknown[]; forked?: boolean };
-	type Section = 'lens' | 'wb' | 'light' | 'curve' | 'color' | 'masks' | 'detail' | 'history';
+	type Section = 'lens' | 'crop' | 'wb' | 'light' | 'curve' | 'color' | 'masks' | 'detail' | 'history';
 
 	const key = page.params.key!;
 	let canvas: HTMLCanvasElement;
@@ -40,6 +43,8 @@
 	 */
 	let asShotWb = $state({ temperatureK: 5000, tint: 0 });
 	let lut = $state<Float32Array | null>(null);
+	/** The layers' curves as they render, a 4,096-entry row each: what the selected layer's curve editor draws. */
+	let maskCurves = $state<Float32Array | null>(null);
 	let histogram = $state<HistogramData | null>(null);
 	let clipHigh = $state(false);
 	let clipLow = $state(false);
@@ -51,6 +56,13 @@
 	let exporting = $state(false);
 	let loupeCenter = $state<[number, number]>([0.5, 0.5]);
 	let detailOpen = $state(false);
+	/** The crop section is open on the wide layout. */
+	let cropOpen = $state(false);
+	let fallbackImg = $state<HTMLImageElement | null>(null);
+	/** A proxy is on the GPU, so the canvas shows the photo. */
+	let proxyLoaded = $state(false);
+	/** Moves after each frame drawn in the crop tool, so its overlay follows the canvas's layout. */
+	let layoutTick = $state(0);
 	/** Screen position (CSS px, relative to the canvas's positioned ancestor) of the AF point marker. */
 	let markerPos = $state<{ x: number; y: number } | null>(null);
 	let showAfPoint = $state(true);
@@ -73,6 +85,8 @@
 	/// False when the photo's folder can't take a sidecar: said here rather than at the first save.
 	let writable = $state(true);
 	let dirty = $state(false);
+	/** The crop tool is in use: the canvas shows the whole straightened picture, with the crop's frame over it. */
+	const cropping = $derived(!readOnly && (wide ? cropOpen : section === 'crop'));
 	let saving = $state(false);
 	let saveQueue: Promise<void> = Promise.resolve();
 	let restoredDraft = $state(false);
@@ -108,10 +122,26 @@
 	/** The masks the models made for this photo, fetched when a mask is first needed (`$lib/masks`). */
 	let maskLibrary: MaskLibrary | undefined;
 	let maskSet = $state<MaskSet | null>(null);
-	/** The adjustment whose mask is shown over the photo. */
-	let maskShown = $state<number | null>(null);
+	/** The layer being edited, and whether its mask is shown over the photo. */
+	let maskSelected = $state<number | null>(null);
+	let maskShown = $state(false);
+	let brush = $state<BrushSettings>({ mode: 'off', size: 50, feather: 50, flow: 100 });
+	/** Painting happens on the photo while a layer is selected and the brush is on. */
+	const painting = $derived(!fallback && !readOnly && !cropping && brush.mode !== 'off' && maskSelected !== null && (wide || section === 'masks'));
 	/** Masks lens-corrected as the picture is, and the correction each was made with. */
 	const correctedMasks = new Map<string, { madeFrom: string; texture: GPUTexture }>();
+	let painter: MaskPainter;
+	/**
+	 * Layers with brush strokes, painted at the proxy's size by layer slot: what they were painted from, a
+	 * version that moves with every live stroke, and the lens-corrected copy develop reads.
+	 */
+	const layerTextures = new Map<number, { key: string; version: number; painted: GPUTexture; corrected?: GPUTexture; correctedFrom: string }>();
+	/** The stroke being painted: its finger, layer, settings, and points so far (fractions of the photo). */
+	let stroke: { pointerId: number; layer: number; settings: ReturnType<typeof brushStroke>; points: [number, number][] } | null = null;
+	/** The brush outline on screen, CSS pixels. */
+	let brushCursor = $state<{ x: number; y: number; r: number } | null>(null);
+	/** Geometry frames, by geometry and picture size. */
+	const frames = new Map<string, Frame>();
 	/** The uniforms the corrected proxy was made with: they also move markers set in sensor geometry. */
 	let lensUniform: Uint8Array | undefined;
 	/**
@@ -134,7 +164,10 @@
 	function repack() {
 		const source = before ? compareEdit() : $state.snapshot(edit!);
 		const packed = packer.pack(source, meta!.info.color, meta!.info.sourceKind ?? 'raw', display);
-		if (!before) lut = packed.lut;
+		if (!before) {
+			lut = packed.lut;
+			maskCurves = packed.maskCurves;
+		}
 		return packed;
 	}
 
@@ -156,18 +189,161 @@
 			const packed = repack();
 			develop.setUniforms(packed.uniform);
 			develop.setToneLut(packed.lut);
-			develop.setMasks(packed.masks, ((before ? compareEdit() : edit).masks ?? []).map((m) => maskTexture(m.mask)));
+			develop.setMasks(packed.masks, ((before ? compareEdit() : edit).masks ?? []).map((m, i) => layerTexture(i, m)), packed.maskCurves);
 			develop.render();
 			developDirty = false;
-			hist.run(develop.output, histStride, (h) => (histogram = h));
+			const out = outputGeometry(before ? compareEdit().geometry : edit.geometry);
+			hist.run(develop.output, histStride, (h) => (histogram = h), out ? { toPicture: out.toPicture, size: out.size } : undefined);
 		}
-		const showing = maskShown === null ? undefined : edit.masks?.[maskShown];
-		const overlay = showing && maskTexture(showing.mask);
+		const showing = maskSelected !== null && (maskShown || brush.mode !== 'off') && !before ? edit.masks?.[maskSelected] : undefined;
+		const overlay = showing && layerTexture(maskSelected!, showing);
 		view.useOverlay(overlay);
 		const maskFlags = overlay ? SHOW_MASK | (showing.invert ? MASK_INVERTED : 0) : 0;
-		view.render(develop.output, canvas, viewport, (clipHigh ? CLIP_HIGHS : 0) | (clipLow ? CLIP_LOWS : 0) | (peaking ? PEAKING : 0) | maskFlags);
-		markerPos = imageToScreen(afPoint());
+		const shown = displayFrame();
+		const geometry: ViewGeometry | undefined = shown ? { toPicture: shown.frame.toPicture, size: shown.frame.size } : undefined;
+		view.render(develop.output, canvas, viewport, (clipHigh ? CLIP_HIGHS : 0) | (clipLow ? CLIP_LOWS : 0) | (peaking ? PEAKING : 0) | maskFlags, geometry);
+		markerPos = cropping ? null : imageToScreen(afPoint());
+		if (cropping) layoutTick++;
 	}
+
+	// ---------- geometry: crop, straighten, keystone, turns (sidecar_color::geometry, through wasm)
+
+	/** The picture's size: the proxy's, or without WebGPU the photo's as the metadata gives it (oriented). */
+	function pictureSize(): [number, number] | null {
+		const proxy = develop?.proxy;
+		if (proxy) return [proxy.width, proxy.height];
+		return meta ? [meta.info.width, meta.info.height] : null;
+	}
+
+	function frameOf(g: Geometry, size: [number, number]): Frame {
+		const key = JSON.stringify([g, size]);
+		let f = frames.get(key);
+		if (!f) {
+			if (frames.size > 64) frames.clear();
+			f = packer.frame(g, size);
+			frames.set(key, f);
+		}
+		return f;
+	}
+
+	/** An edit's output frame, or `null` when it has no geometry: the output is then the picture. */
+	function outputGeometry(g: Geometry | undefined): Frame | null {
+		const size = pictureSize();
+		return size && g && !isNoGeometry(g) ? frameOf(g, size) : null;
+	}
+
+	/** What the crop tool shows: everything the straightened picture covers, and the crop with it. */
+	function cropView(g: Geometry, size: [number, number]): Geometry {
+		const b = frameOf(g, size).bounds;
+		const c = g.crop;
+		return { ...g, crop: { left: Math.min(b.left, c.left), top: Math.min(b.top, c.top), right: Math.max(b.right, c.right), bottom: Math.max(b.bottom, c.bottom) } };
+	}
+
+	/** The geometry the canvas shows, and its frame: the edit's, or in the crop tool the whole picture. */
+	function displayFrame(): { geometry: Geometry; frame: Frame } | null {
+		const size = pictureSize();
+		if (!size || !edit) return null;
+		const g = before ? compareEdit().geometry : edit.geometry;
+		if (cropping && !before) {
+			const shown = cropView(g ?? NO_GEOMETRY, size);
+			return { geometry: shown, frame: frameOf(shown, size) };
+		}
+		const frame = outputGeometry(g);
+		return frame ? { geometry: g!, frame } : null;
+	}
+
+	/** The crop tool's frame on screen, in the shown output's coordinates. */
+	function cropOnScreen(): [number, number, number, number] | null {
+		const size = pictureSize();
+		if (!size || !edit) return null;
+		const g = edit.geometry ?? NO_GEOMETRY;
+		const all = cropView(g, size).crop;
+		const c = g.crop;
+		const pre = (x: number, y: number): [number, number] => [(x - all.left) / (all.right - all.left), (y - all.top) / (all.bottom - all.top)];
+		const corners = [twist(g, pre(c.left, c.top)), twist(g, pre(c.right, c.bottom))];
+		return [Math.min(corners[0][0], corners[1][0]), Math.min(corners[0][1], corners[1][1]), Math.max(corners[0][0], corners[1][0]), Math.max(corners[0][1], corners[1][1])];
+	}
+
+	/** A crop drawn on screen (the shown output's coordinates) back in crop coordinates. */
+	function cropFromScreen(r: [number, number, number, number]): Crop {
+		const size = pictureSize()!;
+		const g = edit!.geometry ?? NO_GEOMETRY;
+		const all = cropView(g, size).crop;
+		const back = (s: number, t: number) => {
+			const [p, q] = untwist(g, [s, t]);
+			return [all.left + p * (all.right - all.left), all.top + q * (all.bottom - all.top)];
+		};
+		const [a, b] = [back(r[0], r[1]), back(r[2], r[3])];
+		return { left: Math.min(a[0], b[0]), top: Math.min(a[1], b[1]), right: Math.max(a[0], b[0]), bottom: Math.max(a[1], b[1]) };
+	}
+
+	/** Inside the convex outline the picture makes after straightening and keystone. */
+	function insideQuad(quad: [number, number][], [x, y]: [number, number]): boolean {
+		let sign = 0;
+		for (let i = 0; i < 4; i++) {
+			const [a, b] = [quad[i], quad[(i + 1) % 4]];
+			const cross = (b[0] - a[0]) * (y - a[1]) - (b[1] - a[1]) * (x - a[0]);
+			if (Math.abs(cross) < 1e-9) continue;
+			if (!sign) sign = Math.sign(cross);
+			else if (Math.sign(cross) !== sign) return false;
+		}
+		return true;
+	}
+
+	function cropFits(r: [number, number, number, number]): boolean {
+		const size = pictureSize();
+		if (!size || !edit) return false;
+		const c = cropFromScreen(r);
+		const quad = frameOf(edit.geometry ?? NO_GEOMETRY, size).quad;
+		return [[c.left, c.top], [c.right, c.top], [c.right, c.bottom], [c.left, c.bottom]].every((p) => insideQuad(quad, p as [number, number]));
+	}
+
+	/** Change the geometry, fitting the crop to it, and drop it altogether once it does nothing. */
+	function setGeometry(patch: Partial<Geometry>) {
+		const size = pictureSize();
+		if (!edit || !size) return;
+		const was: Geometry = $state.snapshot(edit.geometry) ?? NO_GEOMETRY;
+		const next = packer.fit({ ...was, ...patch }, was, size);
+		if (isNoGeometry(next) && !next.ratio) delete edit.geometry;
+		else edit.geometry = next;
+		changed();
+	}
+
+	function setCrop(r: [number, number, number, number]) {
+		if (!edit) return;
+		edit.geometry = { ...($state.snapshot(edit.geometry) ?? NO_GEOMETRY), crop: cropFromScreen(r) };
+		changed();
+	}
+
+	/** A quarter turn. A locked ratio turns with the photo, so the same part of it stays cropped. */
+	function turn(by: 1 | -1) {
+		const g = edit?.geometry ?? NO_GEOMETRY;
+		setGeometry({ rotate: (g.rotate + by + 4) % 4, ratio: g.ratio ? 1 / g.ratio : 0 });
+		committed();
+	}
+
+	/** The photo's own proportions in the output's orientation. */
+	function originalRatio(): number {
+		const size = pictureSize() ?? [3, 2];
+		return (edit?.geometry?.rotate ?? 0) % 2 ? size[1] / size[0] : size[0] / size[1];
+	}
+
+	function resetGeometry() {
+		if (!edit) return;
+		delete edit.geometry;
+		changed();
+		committed();
+	}
+
+	$effect(() => {
+		// The crop tool shows the whole picture at fit: no zoom or pan to fight its handles. Only entering and
+		// leaving it re-runs this; what the redraw reads is not this effect's business.
+		if (cropping) viewport = { zoom: 1, panX: 0, panY: 0 };
+		untrack(() => {
+			schedule();
+			if (fallback && edit) renderPreview();
+		});
+	});
 
 	/** Width ÷ height before orientation: where the photo's edges are for the lens pass. */
 	const sensorAspect = (info: Meta['info']) => ((info.orientationFlip ?? 0) & 4 ? info.height / info.width : info.width / info.height);
@@ -235,6 +411,71 @@
 		return texture;
 	}
 
+	/** Lens uniforms for a mask of `size`: the shown correction without vignetting; none when it is off. */
+	function maskLens(size: [number, number]): { uniform: Uint8Array; madeFrom: string } | undefined {
+		const profile = meta?.info.lensProfile;
+		const lens = before ? compareEdit().lens : edit?.lens;
+		if (!profile || !lens) return undefined;
+		const uniform = packer.packLens(profile, { ...$state.snapshot(lens), vignetting: 0 }, sensorAspect(meta!.info), size, meta!.info.orientationFlip ?? 0);
+		return uniform && { uniform, madeFrom: JSON.stringify([lens, profile.id]) };
+	}
+
+	/**
+	 * A layer's mask in the frame being developed: the model's mask as it is, or — once it has brush strokes,
+	 * or while one is being painted — painted at the proxy's size over it and lens-corrected. `undefined`
+	 * while something it needs is loading; that redraws when it arrives.
+	 */
+	function layerTexture(i: number, m: MaskAdjustment): GPUTexture | undefined {
+		if (!m.strokes?.length && stroke?.layer !== i) return m.mask === BRUSH ? undefined : maskTexture(m.mask);
+		const entry = layerEntry(i, m);
+		if (!entry) return undefined;
+		const size: [number, number] = [entry.painted.width, entry.painted.height];
+		const lens = maskLens(size);
+		if (!lens) return entry.painted;
+		const from = `${lens.madeFrom}:${entry.key}:${entry.version}`;
+		if (entry.correctedFrom !== from) {
+			entry.corrected ??= painter.mask(size, `layer ${i} corrected`);
+			painter.correct(entry.painted, entry.corrected, lens.uniform);
+			entry.correctedFrom = from;
+		}
+		return entry.corrected;
+	}
+
+	/** Layer `i` painted from its model mask and strokes, up to date unless a stroke is being drawn on it. */
+	function layerEntry(i: number, m: MaskAdjustment) {
+		const proxy = develop?.proxy;
+		if (!proxy || !painter) return undefined;
+		let base: GPUTexture | undefined;
+		if (m.mask !== BRUSH) {
+			base = maskLibrary?.ready(m.mask);
+			if (!base) {
+				maskLibrary?.load(m.mask).then(() => schedule(true), () => {});
+				return undefined;
+			}
+		}
+		let entry = layerTextures.get(i);
+		if (!entry || entry.painted.width !== proxy.width || entry.painted.height !== proxy.height) {
+			entry?.painted.destroy();
+			entry?.corrected?.destroy();
+			entry = { key: '', version: 0, painted: painter.mask([proxy.width, proxy.height], `layer ${i}`), correctedFrom: '' };
+			layerTextures.set(i, entry);
+		}
+		const key = JSON.stringify([m.mask, m.strokes ?? []]);
+		if (entry.key !== key && stroke?.layer !== i) {
+			painter.paint(entry.painted, base, $state.snapshot(m.strokes) ?? []);
+			entry.key = key;
+		}
+		return entry;
+	}
+
+	function forgetLayers() {
+		for (const e of layerTextures.values()) {
+			e.painted.destroy();
+			e.corrected?.destroy();
+		}
+		layerTextures.clear();
+	}
+
 	/** Ask the worker which masks this photo has — the first time for a photo, that computes them. */
 	function loadMaskSet() {
 		if (!maskLibrary || maskSet) return;
@@ -248,7 +489,10 @@
 		if (!edit) return;
 		const m: MaskAdjustment = { mask: name, invert: false, amount: 100, exposure: 0, contrast: 0, saturation: 0, temperature: 0, tint: 0 };
 		edit.masks = [...(edit.masks ?? []), m];
-		maskShown = edit.masks.length - 1;
+		maskSelected = edit.masks.length - 1;
+		maskShown = true;
+		// A brush mask is nothing until it is painted.
+		brush.mode = name === BRUSH ? 'paint' : 'off';
 		changed();
 		committed();
 	}
@@ -259,15 +503,115 @@
 		// No masks is no field at all: the edit then serializes exactly as one made before masks existed.
 		if (rest.length) edit.masks = rest;
 		else delete edit.masks;
-		maskShown = null;
+		maskSelected = null;
+		brush.mode = 'off';
+		// Slots moved: what was painted for one now belongs to another.
+		forgetLayers();
 		changed();
 		committed();
 	}
 
+	/** A field patched to `undefined` is removed, so the layer is stored without it. */
 	function setMask(index: number, patch: Partial<MaskAdjustment>) {
-		if (!edit?.masks?.[index]) return;
-		Object.assign(edit.masks[index], patch);
+		const layer = edit?.masks?.[index] as Record<string, unknown> | undefined;
+		if (!layer) return;
+		for (const [k, v] of Object.entries(patch)) {
+			if (v === undefined) delete layer[k];
+			else layer[k] = v;
+		}
 		changed();
+	}
+
+	// ---------- the brush
+
+	/** A canvas pixel → the photo before lens correction (0…1), where strokes are stored. */
+	function screenToSource(p: { x: number; y: number }): [number, number] | null {
+		const proxy = develop?.proxy;
+		if (!proxy || !develop.output) return null;
+		const r = imageRect();
+		const o: [number, number] = [(p.x - r.x) / r.w, (p.y - r.y) / r.h];
+		const uv = project(displayFrame()?.frame.toPicture ?? [[1, 0, 0], [0, 1, 0], [0, 0, 1]], o);
+		const q = sourcePoint(lensUniform, proxy.width, proxy.height, { x: uv[0], y: uv[1] });
+		return [q.x, q.y];
+	}
+
+	/** The brush's radius in proxy pixels, and on screen in CSS pixels. */
+	function brushRadius() {
+		const proxy = develop?.proxy;
+		if (!proxy || !develop.output) return { px: 0, css: 0 };
+		const px = brushStroke(brush).radius * Math.max(proxy.width, proxy.height);
+		const r = imageRect();
+		const outW = displayFrame()?.frame.size[0] ?? develop.output.width;
+		return { px, css: (px * (r.w / outW)) / devicePixelRatio };
+	}
+
+	function startStroke(e: PointerEvent) {
+		const i = maskSelected;
+		const m = i !== null ? edit?.masks?.[i] : undefined;
+		const p = screenToSource(px(e));
+		if (i === null || !m || !p) return;
+		const entry = layerEntry(i, m);
+		if (!entry) return;
+		const settings = brushStroke(brush);
+		stroke = { pointerId: e.pointerId, layer: i, settings, points: [p] };
+		painter.begin(entry.painted, { ...settings, points: [] });
+		painter.extend([p]);
+		entry.version++;
+		schedule(true);
+	}
+
+	function extendStroke(e: PointerEvent) {
+		const proxy = develop?.proxy;
+		if (!stroke || !proxy) return;
+		const entry = layerTextures.get(stroke.layer);
+		if (!entry) return;
+		// Spaced at a fraction of the radius: smooth curves, without a point per pixel moved.
+		const spacing = Math.max(1, 0.15 * stroke.settings.radius * Math.max(proxy.width, proxy.height));
+		const added: [number, number][] = [];
+		let last = stroke.points[stroke.points.length - 1];
+		const from = last;
+		for (const ev of e.getCoalescedEvents?.() ?? [e]) {
+			const p = screenToSource(px(ev));
+			if (!p || Math.hypot((p[0] - last[0]) * proxy.width, (p[1] - last[1]) * proxy.height) < spacing) continue;
+			added.push(p);
+			last = p;
+		}
+		if (!added.length) return;
+		stroke.points.push(...added);
+		painter.extend(added, from);
+		entry.version++;
+		schedule(true);
+	}
+
+	/** The stroke into the edit, simplified and rounded: a few dozen points, not one per pointer event. */
+	function endStroke() {
+		const proxy = develop?.proxy;
+		const s = stroke;
+		stroke = null;
+		painter.end();
+		const m = s && edit?.masks?.[s.layer];
+		if (!s || !m || !proxy) return;
+		const radiusPx = s.settings.radius * Math.max(proxy.width, proxy.height);
+		const round = (v: number) => Math.round(v * 1e4) / 1e4;
+		const inPx = s.points.map(([x, y]) => [x * proxy.width, y * proxy.height] as [number, number]);
+		const points = simplify(inPx, Math.max(0.5, radiusPx * 0.1)).map(([x, y]) => [round(x / proxy.width), round(y / proxy.height)] as [number, number]);
+		const saved = { erase: s.settings.erase, radius: round(s.settings.radius), feather: round(s.settings.feather), flow: round(s.settings.flow), points };
+		setMask(s.layer, { strokes: [...($state.snapshot(m.strokes) ?? []), saved] });
+		committed();
+	}
+
+	/** A second finger arrived: that was a pinch, not a stroke. */
+	function cancelStroke() {
+		if (!stroke) return;
+		const entry = layerTextures.get(stroke.layer);
+		painter.cancel();
+		stroke = null;
+		if (entry) entry.version++;
+		schedule(true);
+	}
+
+	function moveBrushCursor(e: PointerEvent) {
+		brushCursor = painting ? { x: e.offsetX, y: e.offsetY, r: brushRadius().css } : null;
 	}
 
 	/** The AF point where it sits in the picture on screen — moved by the lens correction when one is on. */
@@ -277,30 +621,54 @@
 		return p && proxy ? correctedPoint(lensUniform, proxy.width, proxy.height, p) : p;
 	}
 
-	/** Where the photo sits on the canvas, in canvas pixels, at the current zoom and pan; `fit` is its scale at zoom 1. */
+	/**
+	 * Where what is shown sits on the canvas, in canvas pixels, at the current zoom and pan — the edit's output,
+	 * or the whole picture in the crop tool; `fit` is its scale at zoom 1. Without WebGPU, the server's JPEG.
+	 */
 	function imageRect() {
-		const out = develop.output!;
-		const fit = Math.min(canvas.width / out.width, canvas.height / out.height);
-		const w = out.width * fit * viewport.zoom;
-		const h = out.height * fit * viewport.zoom;
+		if (fallback) {
+			const img = fallbackImg?.getBoundingClientRect();
+			const box = canvas.getBoundingClientRect();
+			if (!img) return { x: 0, y: 0, w: 1, h: 1, fit: 1 };
+			return { x: (img.left - box.left) * devicePixelRatio, y: (img.top - box.top) * devicePixelRatio, w: img.width * devicePixelRatio, h: img.height * devicePixelRatio, fit: 1 };
+		}
+		const [ow, oh] = displayFrame()?.frame.size ?? [develop.output!.width, develop.output!.height];
+		const fit = Math.min(canvas.width / ow, canvas.height / oh);
+		const w = ow * fit * viewport.zoom;
+		const h = oh * fit * viewport.zoom;
 		return { x: (canvas.width - w) / 2 + viewport.panX, y: (canvas.height - h) / 2 + viewport.panY, w, h, fit };
 	}
 
-	/** Normalized (oriented) image coordinates → CSS pixels over the canvas, or null off-screen/absent. */
+	/** `imageRect` in CSS pixels, for overlays. The markup passes `layoutTick` so it asks again each frame. */
+	function overlayRect(_frame: number) {
+		const r = imageRect();
+		return { x: r.x / devicePixelRatio, y: r.y / devicePixelRatio, w: r.w / devicePixelRatio, h: r.h / devicePixelRatio };
+	}
+
+	/** A point of the picture (0…1, lens-corrected) → CSS pixels over the canvas, or null off-screen/absent. */
 	function imageToScreen(point: { x: number; y: number } | null | undefined): { x: number; y: number } | null {
 		if (!point || !develop?.output) return null;
+		const shown = displayFrame();
+		const [u, v] = shown ? project(shown.frame.fromPicture, [point.x, point.y]) : [point.x, point.y];
+		if (u < 0 || v < 0 || u > 1 || v > 1) return null;
 		const r = imageRect();
-		const px = r.x + point.x * r.w;
-		const py = r.y + point.y * r.h;
+		const px = r.x + u * r.w;
+		const py = r.y + v * r.h;
 		if (px < 0 || py < 0 || px > canvas.width || py > canvas.height) return null;
 		return { x: px / devicePixelRatio, y: py / devicePixelRatio };
+	}
+
+	/** A point of the picture → where it is in the edit's output, which is what the loupe is centred in. */
+	function toOutput(p: { x: number; y: number }): [number, number] {
+		const out = outputGeometry(edit?.geometry);
+		return out ? project(out.fromPicture, [p.x, p.y]) : [p.x, p.y];
 	}
 
 	/** Move the loupe to the AF point and make sure it's visible. */
 	function jumpToAfPoint() {
 		const point = afPoint();
 		if (!point) return;
-		loupeCenter = [point.x, point.y];
+		loupeCenter = toOutput(point);
 		section = 'detail';
 		detailOpen = true;
 	}
@@ -320,8 +688,12 @@
 		try {
 			do {
 				previewPending = false;
+				const shownEdit: EditParams = before ? compareEdit() : $state.snapshot(edit);
+				// The crop tool shows the whole straightened picture, the crop drawn over it here.
+				const size = pictureSize();
+				if (cropping && !before && size) shownEdit.geometry = cropView(shownEdit.geometry ?? NO_GEOMETRY, size);
 				const body = JSON.stringify({
-					edit: before ? compareEdit() : $state.snapshot(edit),
+					edit: shownEdit,
 					colorSpace: display,
 					longEdge: Math.round(Math.min(Math.max(innerWidth, innerHeight) * devicePixelRatio, 2560))
 				});
@@ -521,6 +893,7 @@
 		const w = Number(proxyResp.headers.get('x-width'));
 		const h = Number(proxyResp.headers.get('x-height'));
 		develop.setSource(w, h, await proxyResp.arrayBuffer());
+		proxyLoaded = true;
 		await view.loadFocusMask(await focusResp.arrayBuffer());
 		schedule(true);
 	}
@@ -574,7 +947,13 @@
 				status = '';
 				return;
 			}
-			[develop, view, hist, lensPass] = await Promise.all([DevelopPass.create(device), ViewPass.create(device, canvas, display === 'display-p3'), HistogramPass.create(device), LensPass.create(device)]);
+			[develop, view, hist, lensPass, painter] = await Promise.all([
+				DevelopPass.create(device),
+				ViewPass.create(device, canvas, display === 'display-p3'),
+				HistogramPass.create(device),
+				LensPass.create(device),
+				MaskPainter.create(device)
+			]);
 			maskLibrary = new MaskLibrary(device, key);
 			if (section === 'masks' || wide || (edit?.masks?.length ?? 0) > 0) loadMaskSet();
 			device.lost.then((info) => (error = `The GPU was reset (${info.reason}). Reload to continue — your edits are kept as a draft.`));
@@ -622,8 +1001,11 @@
 		pointers.set(e.pointerId, px(e));
 		downAt = { ...px(e), t: performance.now() };
 		clearTimeout(holdTimer);
-		if (pointers.size === 1) holdTimer = setTimeout(() => setBefore(true), 450);
+		// With the brush on, one finger paints; a second one turns it into a pinch.
+		if (painting && pointers.size === 1) startStroke(e);
+		else if (pointers.size === 1) holdTimer = setTimeout(() => setBefore(true), 450);
 		if (pointers.size === 2) {
+			cancelStroke();
 			clearTimeout(holdTimer);
 			const [a, b] = [...pointers.values()];
 			pinch = { dist: Math.hypot(a.x - b.x, a.y - b.y), zoom: viewport.zoom, mid: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }, panX: viewport.panX, panY: viewport.panY };
@@ -631,10 +1013,15 @@
 	}
 
 	function canvasMove(e: PointerEvent) {
+		moveBrushCursor(e);
 		const prev = pointers.get(e.pointerId);
 		if (!prev) return;
 		const cur = px(e);
 		pointers.set(e.pointerId, cur);
+		if (stroke?.pointerId === e.pointerId) {
+			extendStroke(e);
+			return;
+		}
 		if (Math.hypot(cur.x - downAt.x, cur.y - downAt.y) > 8 * devicePixelRatio) clearTimeout(holdTimer);
 		if (pinch && pointers.size >= 2) {
 			const [a, b] = [...pointers.values()];
@@ -649,6 +1036,11 @@
 		pointers.delete(e.pointerId);
 		clearTimeout(holdTimer);
 		if (pointers.size < 2) pinch = null;
+		if (stroke?.pointerId === e.pointerId) {
+			if (e.type === 'pointercancel') cancelStroke();
+			else endStroke();
+			return;
+		}
 		if (before) {
 			setBefore(false);
 			return;
@@ -656,8 +1048,9 @@
 		const now = performance.now();
 		const still = Math.hypot(px(e).x - downAt.x, px(e).y - downAt.y) < 8 * devicePixelRatio && now - downAt.t < 300;
 		if (still && pointers.size === 0) {
-			if (fallback || !develop?.output) return;
+			if (fallback || !develop?.output || cropping || painting) return;
 			const r = imageRect();
+			// What is shown is the edit's output: the loupe is centred in it.
 			const u = (px(e).x - r.x) / r.w;
 			const v = (px(e).y - r.y) / r.h;
 			if (u >= 0 && u <= 1 && v >= 0 && v <= 1 && (section === 'detail' || detailOpen)) loupeCenter = [u, v];
@@ -683,6 +1076,10 @@
 		else if (e.key.toLowerCase() === 'z' && !e.metaKey && !e.ctrlKey) {
 			section = 'detail';
 			detailOpen = !detailOpen;
+		}
+		else if (e.key.toLowerCase() === 'r' && !e.metaKey && !e.ctrlKey) {
+			if (wide) cropOpen = !cropOpen;
+			else section = section === 'crop' ? 'light' : 'crop';
 		}
 		else if (e.key.toLowerCase() === 'j') {
 			const on = !(clipHigh && clipLow);
@@ -769,6 +1166,7 @@
 	const TINT_TRACK = 'linear-gradient(90deg,#6f9f6f,#9aa0a6 50%,#b07aa6)';
 	const sections: { id: Section; label: string; short: string }[] = [
 		{ id: 'lens', label: 'Lens', short: 'Lens' },
+		{ id: 'crop', label: 'Crop and straighten', short: 'Crop' },
 		{ id: 'wb', label: 'White balance', short: 'WB' },
 		{ id: 'light', label: 'Light', short: 'Light' },
 		{ id: 'curve', label: 'Curve', short: 'Curve' },
@@ -812,6 +1210,33 @@
 					{/if}
 				{/if}
 			{/if}
+		</div>
+	{/if}
+{/snippet}
+
+{#snippet cropSection()}
+	{#if edit && meta}
+		{@const g = edit.geometry ?? NO_GEOMETRY}
+		{@const ratios = [{ label: 'Free', value: 0 }, { label: 'Original', value: originalRatio() }, { label: '1:1', value: 1 }, { label: '4:5', value: 4 / 5 }, { label: '3:2', value: 3 / 2 }, { label: '16:9', value: 16 / 9 }]}
+		<div class="grid gap-2">
+			<div class="flex flex-wrap items-center gap-1.5 text-xs" role="radiogroup" aria-label="Crop proportions">
+				{#each ratios as r (r.label)}
+					{@const on = r.value === 0 ? !g.ratio : Math.abs(g.ratio - r.value) < 1e-3 || (r.label !== 'Original' && Math.abs(g.ratio - 1 / r.value) < 1e-3 && r.value !== 1)}
+					<button type="button" role="radio" aria-checked={on} disabled={readOnly} class="rounded-full px-2.5 py-1 {on ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" onclick={() => { setGeometry({ ratio: r.value }); committed(); }}>{r.label}</button>
+				{/each}
+				<button type="button" disabled={readOnly || !g.ratio || g.ratio === 1} class="rounded-full bg-raised px-2.5 py-1 text-fg-2 disabled:opacity-40" aria-label="Swap portrait and landscape" onclick={() => { setGeometry({ ratio: 1 / g.ratio }); committed(); }}>⇄</button>
+			</div>
+			<div class="flex flex-wrap gap-1.5 text-xs">
+				<button type="button" disabled={readOnly} class="rounded-full bg-raised px-2.5 py-1 text-fg" onclick={() => turn(-1)}>⟲ Left</button>
+				<button type="button" disabled={readOnly} class="rounded-full bg-raised px-2.5 py-1 text-fg" onclick={() => turn(1)}>⟳ Right</button>
+				<button type="button" disabled={readOnly} aria-pressed={g.flip} class="rounded-full px-2.5 py-1 {g.flip ? 'bg-fg text-ground' : 'bg-raised text-fg'}" onclick={() => { setGeometry({ flip: !g.flip }); committed(); }}>Mirror</button>
+				<button type="button" disabled={readOnly || !edit.geometry} class="ml-auto rounded-full bg-raised px-2.5 py-1 text-fg-2 disabled:opacity-40" onclick={resetGeometry}>Reset</button>
+			</div>
+			<Slider id="geo-angle" label="Straighten" value={g.angle} min={-45} max={45} step={0.1} defaultValue={0} bipolar disabled={readOnly} format={(v) => `${signed(v, 1)}°`} onchange={(v) => setGeometry({ angle: v })} oncommit={committed} />
+			<Slider id="geo-vertical" label="Vertical" value={g.vertical} min={-100} max={100} defaultValue={0} bipolar disabled={readOnly} format={(v) => signed(v)} onchange={(v) => setGeometry({ vertical: v })} oncommit={committed} />
+			<Slider id="geo-horizontal" label="Horizontal" value={g.horizontal} min={-100} max={100} defaultValue={0} bipolar disabled={readOnly} format={(v) => signed(v)} onchange={(v) => setGeometry({ horizontal: v })} oncommit={committed} />
+			<Slider id="geo-aspect" label="Aspect" value={g.aspect} min={-100} max={100} defaultValue={0} bipolar disabled={readOnly} format={(v) => signed(v)} onchange={(v) => setGeometry({ aspect: v })} oncommit={committed} />
+			<p class="text-xs text-muted">Drag the frame's corners and edges to crop, or inside it to move it. Straighten and keystone keep the crop inside the photo.</p>
 		</div>
 	{/if}
 {/snippet}
@@ -872,7 +1297,23 @@
 
 {#snippet masksSection()}
 	{#if edit}
-		<MasksPanel masks={edit.masks ?? []} set={maskSet} shown={maskShown} disabled={readOnly} onadd={addMask} onremove={removeMask} onchange={setMask} oncommit={committed} onshow={(i) => { maskShown = i; schedule(); }} />
+		<MasksPanel
+			masks={edit.masks ?? []}
+			set={maskSet}
+			selected={maskSelected}
+			shown={maskShown}
+			{brush}
+			canPaint={!fallback}
+			curveLut={maskCurves && maskSelected !== null ? maskCurves.subarray(maskSelected * 4096, (maskSelected + 1) * 4096) : null}
+			disabled={readOnly}
+			onadd={addMask}
+			onremove={removeMask}
+			onselect={(i) => { maskSelected = maskSelected === i ? null : i; if (maskSelected === null) brush.mode = 'off'; schedule(); }}
+			onchange={setMask}
+			oncommit={committed}
+			onshow={(on) => { maskShown = on; schedule(); }}
+			onbrush={(patch) => { Object.assign(brush, patch); schedule(); }}
+			/>
 	{/if}
 {/snippet}
 
@@ -901,17 +1342,35 @@
 			onpointermove={canvasMove}
 			onpointerup={canvasUp}
 			onpointercancel={canvasUp}
+			onpointerleave={() => (brushCursor = null)}
 			oncontextmenu={(e) => e.preventDefault()}
 		></canvas>
 		{#if fallback}
 			<div class="absolute inset-0 flex items-center justify-center p-2">
 				{#if previewUrl}
-					<img src={previewUrl} alt="" class="max-h-full max-w-full object-contain {previewBusy ? 'opacity-60' : ''}" />
+					<img bind:this={fallbackImg} src={previewUrl} alt="" class="max-h-full max-w-full object-contain {previewBusy ? 'opacity-60' : ''}" onload={() => schedule()} />
 				{/if}
 			</div>
 			{#if previewBusy}
 				<p class="absolute inset-x-4 bottom-3 text-center text-xs text-fg-2">Rendering…</p>
 			{/if}
+		{/if}
+		{#if cropping && edit && (fallback ? previewUrl : proxyLoaded)}
+			{@const r = overlayRect(layoutTick)}
+			{@const c = cropOnScreen()}
+			{#if c}
+				<CropOverlay
+					rect={r}
+					crop={c}
+					ratio={edit.geometry?.ratio ?? 0}
+					accept={cropFits}
+					onchange={setCrop}
+					oncommit={committed}
+				/>
+			{/if}
+		{/if}
+		{#if brushCursor && painting}
+			<div class="pointer-events-none absolute rounded-full border border-white/80 shadow-[0_0_0_1px_rgba(0,0,0,0.5)]" style="left: {brushCursor.x - brushCursor.r}px; top: {brushCursor.y - brushCursor.r}px; width: {brushCursor.r * 2}px; height: {brushCursor.r * 2}px;"></div>
 		{/if}
 		{#if markerPos && showAfPoint}
 			<button
@@ -1004,17 +1463,25 @@
 			</nav>
 
 			<div class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-6 pt-1">
-				{#if section === 'lens'}{@render lensSection()}{:else if section === 'wb'}{@render wbSection()}{:else if section === 'light'}{@render lightSection()}{:else if section === 'curve'}{@render curveSection()}{:else if section === 'color'}{@render colorSection()}{:else if section === 'masks'}{@render masksSection()}{:else if section === 'history'}{@render historySection()}{:else}{@render detailSection()}{/if}
+				{#if section === 'lens'}{@render lensSection()}{:else if section === 'crop'}{@render cropSection()}{:else if section === 'wb'}{@render wbSection()}{:else if section === 'light'}{@render lightSection()}{:else if section === 'curve'}{@render curveSection()}{:else if section === 'color'}{@render colorSection()}{:else if section === 'masks'}{@render masksSection()}{:else if section === 'history'}{@render historySection()}{:else}{@render detailSection()}{/if}
 			</div>
 
 			{/if}
 			{#if wide}
 			<div class="min-h-0 flex-1 overflow-y-auto px-4">
 				{#each sections as s (s.id)}
-					<details class="border-t border-line py-2" open={s.id === 'wb' || s.id === 'light'} ontoggle={(e) => s.id === 'detail' && (detailOpen = (e.currentTarget as HTMLDetailsElement).open)}>
+					<details
+						class="border-t border-line py-2"
+						open={s.id === 'wb' || s.id === 'light' || (s.id === 'crop' && cropOpen)}
+						ontoggle={(e) => {
+							const open = (e.currentTarget as HTMLDetailsElement).open;
+							if (s.id === 'detail') detailOpen = open;
+							if (s.id === 'crop') cropOpen = open;
+						}}
+					>
 						<summary class="cursor-pointer py-1 text-xs font-medium">{s.label}</summary>
 						<div class="pt-2">
-							{#if s.id === 'lens'}{@render lensSection()}{:else if s.id === 'wb'}{@render wbSection()}{:else if s.id === 'light'}{@render lightSection()}{:else if s.id === 'curve'}{@render curveSection()}{:else if s.id === 'color'}{@render colorSection()}{:else if s.id === 'masks'}{@render masksSection()}{:else if s.id === 'history'}{@render historySection()}{:else if detailOpen}{@render detailSection()}{/if}
+							{#if s.id === 'lens'}{@render lensSection()}{:else if s.id === 'crop'}{@render cropSection()}{:else if s.id === 'wb'}{@render wbSection()}{:else if s.id === 'light'}{@render lightSection()}{:else if s.id === 'curve'}{@render curveSection()}{:else if s.id === 'color'}{@render colorSection()}{:else if s.id === 'masks'}{@render masksSection()}{:else if s.id === 'history'}{@render historySection()}{:else if detailOpen}{@render detailSection()}{/if}
 						</div>
 					</details>
 				{/each}

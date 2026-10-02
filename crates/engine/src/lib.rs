@@ -4,12 +4,14 @@
 
 use anyhow::{Context, Result};
 
+pub mod brush;
 pub mod compute;
 pub mod detail;
 pub mod develop;
 pub mod focus;
 pub mod ingest;
 pub mod lens;
+pub mod warp;
 pub use develop::{DevelopPass, Masks};
 pub use focus::focus_energy;
 pub use ingest::{Ingest, MosaicInput};

@@ -21,6 +21,10 @@ pub struct EditParams {
     pub detail: Detail,
     /// Absent means off: photos edited before this field existed render unchanged. See DESIGN.md §15.
     pub lens: Option<Lens>,
+    /// Crop, straighten, keystone and turns, after lens correction (`crate::geometry`). Absent means none, and
+    /// is left out of the serialized edit so every edit made before it keeps its ETag.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub geometry: Option<crate::geometry::Geometry>,
     /// Adjustments through masks, at most `MAX_MASKS`. Left out of the serialized edit when empty, so an edit
     /// without masks keeps the ETag — and the history ids and export records keyed by it — it always had.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -37,6 +41,7 @@ impl Default for EditParams {
             mixer: Mixer::default(),
             detail: Detail::default(),
             lens: None,
+            geometry: None,
             masks: Vec::new(),
         }
     }
@@ -163,13 +168,19 @@ impl Default for Lens {
 /// Masks the develop pass takes at once: texture bindings, and the uniform array's length.
 pub const MAX_MASKS: usize = 8;
 
-/// An adjustment applied through a mask (DESIGN.md §15): each value is added, weighted by the mask, to what
-/// the global edit does there — `ev = global.ev + Σ wₖ · maskₖ.ev`.
+/// A mask layer (DESIGN.md §15): a mask — one the models made, refined or not by brush strokes, or one painted
+/// from nothing — and the adjustments it carries. Each value is added, weighted by the mask, to what the global
+/// edit does there — `ev = global.ev + Σ wₖ · maskₖ.ev` — so a layer reaches every control the global edit has
+/// for light and colour.
+///
+/// Every field past `tint` is left out of the serialized edit at its default: a layer that uses none of them
+/// is written as 0.4 wrote it, keeps its ETag, and still renders in 0.4, which carries layers with fields it
+/// doesn't know and skips rendering them.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct MaskAdjustment {
-    /// Which mask, by name: `subject`, `skin`, `face-skin`, `body-skin`, `hair`, `clothes`. The raster is
-    /// cached by the worker, never stored here.
+    /// Which mask, by name: one of `MASK_NAMES`, which the worker's models make and cache (never stored
+    /// here), or `brush`, which starts empty and is only what the strokes paint.
     pub mask: String,
     /// Apply to everything the mask leaves out: the background, for `subject`.
     pub invert: bool,
@@ -183,40 +194,120 @@ pub struct MaskAdjustment {
     /// Warmer (+) or cooler (−), and more magenta (+) or green (−), relative to the global white balance.
     pub temperature: f64,
     pub tint: f64,
+    /// −100…100, as the global sliders: they move this layer's white and black points from the global ones.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub whites: f64,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub blacks: f64,
+    /// A curve over display-encoded values, applied after the global curve where the mask is. Highlights and
+    /// Shadows move its 75 % and 25 % points, as the global sliders move the global curve's. Empty is none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub curve: Vec<[f64; 2]>,
+    /// Colour mixer values added to the global ones where the mask is.
+    #[serde(skip_serializing_if = "is_default_mixer")]
+    pub mixer: Mixer,
+    /// Brush strokes over the mask, in the order they were painted.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub strokes: Vec<Stroke>,
     /// Fields a newer Sidecar wrote (another kind of mask, a shape), kept as they are so saving here doesn't
     /// lose them. An entry this version can't render is carried along and skipped (`renders`).
     #[serde(flatten)]
     pub other: serde_json::Map<String, serde_json::Value>,
 }
 
+fn is_zero(v: &f64) -> bool {
+    *v == 0.0
+}
+
+fn is_default_mixer(m: &Mixer) -> bool {
+    *m == Mixer::default()
+}
+
 impl Default for MaskAdjustment {
     fn default() -> Self {
-        Self { mask: String::new(), invert: false, amount: 100.0, exposure: 0.0, contrast: 0.0, saturation: 0.0, temperature: 0.0, tint: 0.0, other: Default::default() }
+        Self {
+            mask: String::new(),
+            invert: false,
+            amount: 100.0,
+            exposure: 0.0,
+            contrast: 0.0,
+            saturation: 0.0,
+            temperature: 0.0,
+            tint: 0.0,
+            whites: 0.0,
+            blacks: 0.0,
+            curve: Vec::new(),
+            mixer: Mixer::default(),
+            strokes: Vec::new(),
+            other: Default::default(),
+        }
+    }
+}
+
+/// One brush stroke on a mask. Coordinates are in the photo as it is shown before lens correction — the
+/// frame the models' masks are made in — so a stroke stays on what it was painted over whatever the lens
+/// correction, crop or straighten later do.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Stroke {
+    /// Take the mask away instead of painting it in.
+    pub erase: bool,
+    /// Brush radius, as a fraction of the photo's long edge.
+    pub radius: f64,
+    /// 0 is a hard edge; 1 fades from the centre out.
+    pub feather: f64,
+    /// How much one stroke lays down, 0…1; painting over it again adds more.
+    pub flow: f64,
+    /// The path, `[x, y]` as fractions of the photo's width and height. One point is a dab.
+    pub points: Vec<[f64; 2]>,
+}
+
+impl Default for Stroke {
+    fn default() -> Self {
+        Self { erase: false, radius: 0.05, feather: 0.5, flow: 1.0, points: Vec::new() }
     }
 }
 
 /// The masks the models make, which an adjustment can name. Kept in step with the worker's `masks::NAMES`.
 pub const MASK_NAMES: [&str; 6] = ["subject", "skin", "face-skin", "body-skin", "hair", "clothes"];
+/// A mask painted from nothing: only its strokes.
+pub const BRUSH: &str = "brush";
 
 impl MaskAdjustment {
     /// Whether this version knows how to render it: a mask it knows by name, and nothing a newer version
     /// added to say it is something else.
     pub fn renders(&self) -> bool {
-        MASK_NAMES.contains(&self.mask.as_str()) && self.other.is_empty()
+        (self.uses_model() || self.mask == BRUSH) && self.other.is_empty()
+    }
+
+    /// Whether its mask starts from one the models make.
+    pub fn uses_model(&self) -> bool {
+        MASK_NAMES.contains(&self.mask.as_str())
+    }
+
+    fn has_curve(&self) -> bool {
+        !self.curve.is_empty() && self.curve != [[0.0, 0.0], [1.0, 1.0]]
     }
 }
 
-/// One mask's adjustment as the shader takes it. Mirrors `struct MaskAdjust` in shaders/develop/masks.wgsl.
+/// One mask layer as the shader takes it. Mirrors `struct MaskLayer` in shaders/develop/masks.wgsl.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct MaskAdjust {
+pub struct MaskLayer {
     /// rgb: white-balance gains in camera space at full weight; w: exposure in stops.
     pub gain: [f32; 4],
     /// x: contrast, y: saturation (each −1…1), z: amount (0…1), w: 1 to invert.
     pub tone: [f32; 4],
+    /// The tone map's parameters at full weight, as `DevelopParams::tone`.
+    pub tone_map: [f32; 4],
+    /// x: 1 when it has a curve (row `i` of the layer curves), y: 1 when it moves the mixer, z: 1 when it
+    /// moves the tone map.
+    pub flags: [f32; 4],
+    /// Added to `DevelopParams::mixer` at full weight.
+    pub mixer: [[f32; 4]; 8],
 }
 
-/// Byte-for-byte mirror of `struct MaskParams` in shaders/develop/masks.wgsl (288 bytes); checked by naga.
+/// Byte-for-byte mirror of `struct MaskParams` in shaders/develop/masks.wgsl (1,568 bytes); checked by naga.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct MaskParams {
@@ -225,7 +316,7 @@ pub struct MaskParams {
     pub frame: [f32; 4],
     pub count: u32,
     pub _pad: [u32; 3],
-    pub adjust: [MaskAdjust; MAX_MASKS],
+    pub layers: [MaskLayer; MAX_MASKS],
 }
 
 /// Relative white balance for a mask: gains in camera space that move the global white point `(t, tint)` by
@@ -304,11 +395,52 @@ pub struct Packed {
     pub tint: f64,
     /// `MaskParams` for the edit's masks, frame left at the whole image; texture `i` is `edit.masks[i]`'s.
     pub masks: MaskParams,
+    /// The layers' own curves, `MAX_MASKS` rows of `LUT_SIZE`: row `i` is `edit.masks[i]`'s, the identity
+    /// for a layer without one.
+    pub mask_curves: Vec<f32>,
 }
 
 /// Row-major 3×3 → WGSL `mat3x3f` columns.
 fn to_mat3(m: &M3) -> [[f32; 4]; 3] {
     [0, 1, 2].map(|j| [m[0][j] as f32, m[1][j] as f32, m[2][j] as f32, 0.0])
+}
+
+/// The tone map's parameters for these tone settings and exposure — the global edit's, or a layer's.
+fn tone_params(edit: &EditParams, developed: bool) -> [f32; 4] {
+    let t = &edit.tone;
+    if developed {
+        display_tone(edit)
+    } else {
+        let k = (t.contrast * CONTRAST_SCALE).max(0.5);
+        [t.black_ev as f32, t.white_ev as f32, k as f32, tone::pivot_for(t.black_ev, t.white_ev, k) as f32]
+    }
+}
+
+fn mixer_params(mixer: &Mixer) -> [[f32; 4]; 8] {
+    mixer.bands().map(|b| {
+        [
+            (b.hue.clamp(-100.0, 100.0) / 100.0 * 30f64.to_radians()) as f32,
+            (b.saturation.clamp(-100.0, 100.0) / 100.0) as f32,
+            (b.luminance.clamp(-100.0, 100.0) / 100.0 * 0.15) as f32,
+            0.0,
+        ]
+    })
+}
+
+/// The identity curve, as a LUT row.
+fn identity_lut() -> Vec<f32> {
+    (0..LUT_SIZE).map(|i| i as f32 / (LUT_SIZE - 1) as f32).collect()
+}
+
+/// A layer at full weight: its white and black points moved from the global ones as the global sliders move
+/// them (Whites ±100 is ∓2 EV, Blacks ±100 is ∓3 EV), and exposure added, which a developed file's shoulder
+/// follows.
+fn layer_edit(edit: &EditParams, m: &MaskAdjustment) -> EditParams {
+    let mut e = edit.clone();
+    e.tone.white_ev -= m.whites.clamp(-100.0, 100.0) / 100.0 * 2.0;
+    e.tone.black_ev -= m.blacks.clamp(-100.0, 100.0) / 100.0 * 3.0;
+    e.exposure.ev += m.exposure.clamp(-5.0, 5.0);
+    e
 }
 
 pub fn pack(edit: &EditParams, camera: &CameraColor, source: SourceKind, display: DisplaySpace) -> Packed {
@@ -317,15 +449,8 @@ pub fn pack(edit: &EditParams, camera: &CameraColor, source: SourceKind, display
         WhiteBalanceMode::Custom => crate::cct::temp_tint_to_xy(edit.white_balance.temperature_k, edit.white_balance.tint),
     };
     let wb = camera::resolve(camera, white_xy);
-    let t = &edit.tone;
     let developed = source == SourceKind::Developed;
-    let tone = if developed {
-        display_tone(edit)
-    } else {
-        let k = (t.contrast * CONTRAST_SCALE).max(0.5);
-        [t.black_ev as f32, t.white_ev as f32, k as f32, tone::pivot_for(t.black_ev, t.white_ev, k) as f32]
-    };
-    let bands = edit.mixer.bands();
+    let tone = tone_params(edit, developed);
     let params = DevelopParams {
         wb_mul: wb.mul.map(|v| v as f32),
         exposure: 2f64.powf(edit.exposure.ev) as f32,
@@ -340,17 +465,17 @@ pub fn pack(edit: &EditParams, camera: &CameraColor, source: SourceKind, display
         hl_strength: if developed { 0.0 } else { edit.exposure.highlight_blend.clamp(0.0, 1.0) as f32 },
         display_referred: if developed { 1.0 } else { 0.0 },
         _pad1: [0.0; 2],
-        mixer: bands.map(|b| {
-            [
-                (b.hue.clamp(-100.0, 100.0) / 100.0 * 30f64.to_radians()) as f32,
-                (b.saturation.clamp(-100.0, 100.0) / 100.0) as f32,
-                (b.luminance.clamp(-100.0, 100.0) / 100.0 * 0.15) as f32,
-                0.0,
-            ]
-        }),
+        mixer: mixer_params(&edit.mixer),
     };
-    let mut masks = MaskParams { frame: [0.0; 4], count: 0, _pad: [0; 3], adjust: [MaskAdjust::default(); MAX_MASKS] };
-    for (slot, m) in masks.adjust.iter_mut().zip(edit.masks.iter().take(MAX_MASKS)) {
+    let mut masks = MaskParams { frame: [0.0; 4], count: 0, _pad: [0; 3], layers: [MaskLayer::default(); MAX_MASKS] };
+    let mut mask_curves = Vec::with_capacity(MAX_MASKS * LUT_SIZE);
+    for i in 0..MAX_MASKS {
+        let m = edit.masks.get(i);
+        match m.filter(|m| m.renders() && m.has_curve()) {
+            Some(m) => mask_curves.extend(monotone_lut(&m.curve, LUT_SIZE)),
+            None => mask_curves.extend(identity_lut()),
+        }
+        let Some(m) = m else { continue };
         masks.count += 1;
         // Kept in its slot, so texture `i` stays `edit.masks[i]`'s, at no weight.
         if !m.renders() {
@@ -358,12 +483,17 @@ pub fn pack(edit: &EditParams, camera: &CameraColor, source: SourceKind, display
         }
         let g = mask_gains(camera, &wb, m);
         let unit = |v: f64| (v.clamp(-100.0, 100.0) / 100.0) as f32;
-        *slot = MaskAdjust {
+        let tone_map = tone_params(&layer_edit(edit, m), developed);
+        let flag = |on: bool| if on { 1.0 } else { 0.0 };
+        masks.layers[i] = MaskLayer {
             gain: [g[0] as f32, g[1] as f32, g[2] as f32, m.exposure.clamp(-5.0, 5.0) as f32],
-            tone: [unit(m.contrast), unit(m.saturation), (m.amount.clamp(0.0, 100.0) / 100.0) as f32, if m.invert { 1.0 } else { 0.0 }],
+            tone: [unit(m.contrast), unit(m.saturation), (m.amount.clamp(0.0, 100.0) / 100.0) as f32, flag(m.invert)],
+            tone_map,
+            flags: [flag(m.has_curve()), flag(m.mixer != Mixer::default()), flag(tone_map != tone), 0.0],
+            mixer: mixer_params(&m.mixer),
         };
     }
-    Packed { uniform: bytemuck::bytes_of(&params).to_vec(), lut: monotone_lut(&t.curve, LUT_SIZE), temperature_k: wb.temperature_k, tint: wb.tint, masks }
+    Packed { uniform: bytemuck::bytes_of(&params).to_vec(), lut: monotone_lut(&edit.tone.curve, LUT_SIZE), temperature_k: wb.temperature_k, tint: wb.tint, masks, mask_curves }
 }
 
 #[cfg(test)]
@@ -439,10 +569,11 @@ mod tests {
         e.masks.push(MaskAdjustment { mask: "skin".into(), temperature: 50.0, ..Default::default() });
         let m = pack(&e, &cam, SourceKind::Raw, DisplaySpace::Srgb).masks;
         assert_eq!(m.count, 2);
-        assert_eq!(m.adjust[0].gain, [1.0, 1.0, 1.0, 1.0]);
-        assert_eq!(m.adjust[0].tone, [0.5, 0.0, 0.5, 1.0]);
-        let [r, g, b, _] = m.adjust[1].gain;
-        assert!(r > 1.0 && b < 1.0 && (g - 1.0).abs() < 1e-6, "warmer: more red, less blue, green fixed: {:?}", m.adjust[1].gain);
+        assert_eq!(m.layers[0].gain, [1.0, 1.0, 1.0, 1.0]);
+        assert_eq!(m.layers[0].tone, [0.5, 0.0, 0.5, 1.0]);
+        assert_eq!(m.layers[0].flags, [0.0; 4], "exposure alone leaves a RAW's tone map, curve and mixer");
+        let [r, g, b, _] = m.layers[1].gain;
+        assert!(r > 1.0 && b < 1.0 && (g - 1.0).abs() < 1e-6, "warmer: more red, less blue, green fixed: {:?}", m.layers[1].gain);
     }
 
     #[test]
@@ -452,11 +583,20 @@ mod tests {
         let (_, ty) = module.types.iter().find(|(_, t)| t.name.as_deref() == Some("MaskParams")).unwrap();
         let naga::TypeInner::Struct { members, span } = &ty.inner else { panic!("not a struct") };
         assert_eq!(*span as usize, std::mem::size_of::<MaskParams>());
-        assert_eq!(std::mem::size_of::<MaskParams>(), 288);
+        assert_eq!(std::mem::size_of::<MaskParams>(), 1568);
         let off = |n: &str| members.iter().find(|m| m.name.as_deref() == Some(n)).unwrap().offset as usize;
         assert_eq!(off("frame"), std::mem::offset_of!(MaskParams, frame));
         assert_eq!(off("count"), std::mem::offset_of!(MaskParams, count));
-        assert_eq!(off("adjust"), std::mem::offset_of!(MaskParams, adjust));
+        assert_eq!(off("layers"), std::mem::offset_of!(MaskParams, layers));
+        let (_, ty) = module.types.iter().find(|(_, t)| t.name.as_deref() == Some("MaskLayer")).unwrap();
+        let naga::TypeInner::Struct { members, span } = &ty.inner else { panic!("not a struct") };
+        assert_eq!(*span as usize, std::mem::size_of::<MaskLayer>());
+        let off = |n: &str| members.iter().find(|m| m.name.as_deref() == Some(n)).unwrap().offset as usize;
+        assert_eq!(off("gain"), std::mem::offset_of!(MaskLayer, gain));
+        assert_eq!(off("tone"), std::mem::offset_of!(MaskLayer, tone));
+        assert_eq!(off("tone_map"), std::mem::offset_of!(MaskLayer, tone_map));
+        assert_eq!(off("flags"), std::mem::offset_of!(MaskLayer, flags));
+        assert_eq!(off("mixer"), std::mem::offset_of!(MaskLayer, mixer));
     }
 
     #[test]
@@ -483,5 +623,52 @@ mod tests {
 
         let round_tripped: EditParams = serde_json::from_value(serde_json::to_value(&e).unwrap()).unwrap();
         assert_eq!(round_tripped, e);
+    }
+
+    /// A layer that uses only what 0.4 knew is written exactly as 0.4 wrote it: a newer field at its default
+    /// adds nothing, so its ETag and 0.4's ability to render it are unchanged.
+    #[test]
+    fn a_layer_with_only_old_fields_serializes_as_before() {
+        let m = MaskAdjustment { mask: "subject".into(), exposure: 0.5, ..Default::default() };
+        let json = serde_json::to_value(&m).unwrap();
+        let keys: Vec<&str> = json.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(keys, ["amount", "contrast", "exposure", "invert", "mask", "saturation", "temperature", "tint"]);
+        let back: MaskAdjustment = serde_json::from_value(json).unwrap();
+        assert!(back.renders() && back.other.is_empty());
+    }
+
+    #[test]
+    fn a_layer_reaches_the_tone_map_curve_and_mixer() {
+        let cam = crate::camera::nikon_d850();
+        let mut e = EditParams::default();
+        let mut mixer = Mixer::default();
+        mixer.blue.saturation = 50.0;
+        e.masks.push(MaskAdjustment {
+            mask: BRUSH.into(),
+            whites: 50.0,
+            blacks: -30.0,
+            curve: vec![[0.0, 0.0], [0.5, 0.6], [1.0, 1.0]],
+            mixer,
+            strokes: vec![Stroke { points: vec![[0.5, 0.5]], ..Default::default() }],
+            ..Default::default()
+        });
+        assert!(e.masks[0].renders());
+        let p = pack(&e, &cam, SourceKind::Raw, DisplaySpace::Srgb);
+        let l = p.masks.layers[0];
+        assert_eq!(l.flags, [1.0, 1.0, 1.0, 0.0]);
+        assert_eq!((l.tone_map[0], l.tone_map[1]), ((DEFAULT_BLACK_EV + 0.9) as f32, (DEFAULT_WHITE_EV - 1.0) as f32));
+        assert_eq!(l.mixer[5][1], 0.5);
+        assert_eq!(p.mask_curves.len(), MAX_MASKS * LUT_SIZE);
+        assert!(p.mask_curves[LUT_SIZE / 2] > 0.55, "row 0 is the layer's curve");
+        assert!((p.mask_curves[LUT_SIZE + LUT_SIZE / 2] - 0.5).abs() < 1e-3, "row 1 is the identity");
+    }
+
+    #[test]
+    fn geometry_is_left_out_until_set() {
+        let json = serde_json::to_value(EditParams::default()).unwrap();
+        assert!(json.get("geometry").is_none());
+        let e = EditParams { geometry: Some(crate::geometry::Geometry { angle: 2.5, ..Default::default() }), ..Default::default() };
+        let back: EditParams = serde_json::from_value(serde_json::to_value(&e).unwrap()).unwrap();
+        assert_eq!(back, e);
     }
 }

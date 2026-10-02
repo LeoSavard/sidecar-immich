@@ -41,7 +41,7 @@
 					device.queue.writeTexture({ texture: t }, await get(`mask${i}.u8`), { bytesPerRow: w }, [w, h]);
 					masks.push(t);
 				}
-				pass.setMasks(masks.length ? new Uint8Array(await get('masks.bin')) : new Uint8Array(288), masks);
+				pass.setMasks(masks.length ? new Uint8Array(await get('masks.bin')) : new Uint8Array(1568), masks, masks.length ? new Float32Array(await get('curves.f32')) : undefined);
 				pass.setUniforms(await get('uniform.bin'));
 				pass.setToneLut(new Float32Array(await get('lut.f32')));
 				pass.render();

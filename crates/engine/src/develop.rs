@@ -7,6 +7,7 @@ use wgpu::util::DeviceExt;
 
 use crate::{Gpu, RgbaF32};
 use sidecar_color::params::MAX_MASKS;
+use sidecar_color::spline::LUT_SIZE;
 
 pub struct DevelopPass {
     pipeline: wgpu::RenderPipeline,
@@ -15,19 +16,41 @@ pub struct DevelopPass {
     mask_sampler: wgpu::Sampler,
     /// What an unused mask slot binds: 1×1, zero.
     no_mask: wgpu::Texture,
+    /// Every layer's curve the identity, for a develop whose layers have none.
+    identity_curves: wgpu::Texture,
 }
 
-/// The masks one develop takes: their uniforms, and a texture per adjustment in the frame `params.frame`
-/// describes — `None` for a slot whose mask isn't there (it then weighs nothing).
+/// The masks one develop takes: their uniforms, a texture per layer in the frame `params.frame` describes —
+/// `None` for a slot whose mask isn't there (it then weighs nothing) — and the layers' curves
+/// (`Packed::mask_curves`; empty for none).
 pub struct Masks<'a> {
     pub params: sidecar_color::params::MaskParams,
     pub textures: Vec<Option<&'a wgpu::Texture>>,
+    pub curves: &'a [f32],
 }
 
 impl Masks<'_> {
     pub fn none() -> Self {
-        Self { params: bytemuck::Zeroable::zeroed(), textures: Vec::new() }
+        Self { params: bytemuck::Zeroable::zeroed(), textures: Vec::new(), curves: &[] }
     }
+}
+
+fn curves_texture(gpu: &Gpu, data: &[f32]) -> wgpu::Texture {
+    gpu.device.create_texture_with_data(
+        &gpu.queue,
+        &wgpu::TextureDescriptor {
+            label: Some("layer curves"),
+            size: wgpu::Extent3d { width: LUT_SIZE as u32, height: MAX_MASKS as u32, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        },
+        wgpu::util::TextureDataOrder::LayerMajor,
+        bytemuck::cast_slice(data),
+    )
 }
 
 impl DevelopPass {
@@ -89,6 +112,12 @@ impl DevelopPass {
             wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), count: None },
         ];
         mask_entries.extend((0..MAX_MASKS as u32).map(|i| texture(2 + i)));
+        mask_entries.push(wgpu::BindGroupLayoutEntry {
+            binding: 2 + MAX_MASKS as u32,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: false }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
+            count: None,
+        });
         let mask_layout = gpu.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("develop masks"), entries: &mask_entries });
         let pipeline_layout = gpu.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("develop"),
@@ -127,7 +156,9 @@ impl DevelopPass {
             ..Default::default()
         });
         let no_mask = crate::upload_rgba16(gpu, &RgbaF32 { width: 1, height: 1, data: vec![0.0; 4] });
-        Ok(Self { pipeline, layout, mask_layout, mask_sampler, no_mask })
+        let identity: Vec<f32> = (0..MAX_MASKS).flat_map(|_| (0..LUT_SIZE).map(|i| i as f32 / (LUT_SIZE - 1) as f32)).collect();
+        let identity_curves = curves_texture(gpu, &identity);
+        Ok(Self { pipeline, layout, mask_layout, mask_sampler, no_mask, identity_curves })
     }
 
     /// Run the develop pass once, without masks, and read the result back.
@@ -202,6 +233,9 @@ impl DevelopPass {
             wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.mask_sampler) },
         ];
         entries.extend(views.iter().enumerate().map(|(i, v)| wgpu::BindGroupEntry { binding: 2 + i as u32, resource: wgpu::BindingResource::TextureView(v) }));
+        let own_curves = (masks.curves.len() == MAX_MASKS * LUT_SIZE).then(|| curves_texture(gpu, masks.curves));
+        let curves_view = own_curves.as_ref().unwrap_or(&self.identity_curves).create_view(&Default::default());
+        entries.push(wgpu::BindGroupEntry { binding: 2 + MAX_MASKS as u32, resource: wgpu::BindingResource::TextureView(&curves_view) });
         let mask_bind = d.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("develop masks"), layout: &self.mask_layout, entries: &entries });
         let mut enc = d.create_command_encoder(&Default::default());
         {
