@@ -16,6 +16,7 @@ pub const WEB_ENTRIES: &[&str] = &[
     "client/lens_mask.wgsl",
     "client/brush.wgsl",
     "client/brush_composite.wgsl",
+    "client/mask_preview.wgsl",
 ];
 
 pub fn source(path: &str) -> Result<&'static str> {

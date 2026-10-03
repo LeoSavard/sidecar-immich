@@ -140,8 +140,20 @@ export class DevelopPass {
 		}
 	}
 
-	render() {
-		if (!this.source || !this.lut || !this.target) throw new Error('develop pass needs a source and a tone LUT');
+	private maskGroup(ubo: GPUBuffer, textures: (GPUTexture | undefined)[]): GPUBindGroup {
+		return this.device.createBindGroup({
+			layout: this.maskLayout,
+			entries: [
+				{ binding: 0, resource: { buffer: ubo } },
+				{ binding: 1, resource: this.maskSampler },
+				...Array.from({ length: MAX_MASKS }, (_, i) => ({ binding: 2 + i, resource: (textures[i] ?? this.noMask).createView() })),
+				{ binding: 2 + MAX_MASKS, resource: this.layerCurves.createView() }
+			]
+		});
+	}
+
+	private draw(target: GPUTexture, masks: GPUBindGroup) {
+		if (!this.source || !this.lut) throw new Error('develop pass needs a source and a tone LUT');
 		this.bindGroup ??= this.device.createBindGroup({
 			layout: this.layout,
 			entries: [
@@ -151,22 +163,35 @@ export class DevelopPass {
 			]
 		});
 		const encoder = this.device.createCommandEncoder();
-		const pass = encoder.beginRenderPass({ colorAttachments: [{ view: this.target.createView(), loadOp: 'clear', storeOp: 'store', clearValue: [0, 0, 0, 1] }] });
+		const pass = encoder.beginRenderPass({ colorAttachments: [{ view: target.createView(), loadOp: 'clear', storeOp: 'store', clearValue: [0, 0, 0, 1] }] });
 		pass.setPipeline(this.pipeline);
-		this.maskBind ??= this.device.createBindGroup({
-			layout: this.maskLayout,
-			entries: [
-				{ binding: 0, resource: { buffer: this.maskUbo } },
-				{ binding: 1, resource: this.maskSampler },
-				...Array.from({ length: MAX_MASKS }, (_, i) => ({ binding: 2 + i, resource: (this.maskTextures[i] ?? this.noMask).createView() })),
-				{ binding: 2 + MAX_MASKS, resource: this.layerCurves.createView() }
-			]
-		});
 		pass.setBindGroup(0, this.bindGroup);
-		pass.setBindGroup(1, this.maskBind);
+		pass.setBindGroup(1, masks);
 		pass.draw(3);
 		pass.end();
 		this.device.queue.submit([encoder.finish()]);
+	}
+
+	render() {
+		if (!this.target) throw new Error('develop pass needs a source');
+		this.maskBind ??= this.maskGroup(this.maskUbo, this.maskTextures);
+		this.draw(this.target, this.maskBind);
+	}
+
+	/** A texture of the developed picture's size and format, for `renderVariant`. */
+	variantTarget(label: string): GPUTexture {
+		const t = this.target!;
+		return this.device.createTexture({ label, size: [t.width, t.height], format: 'rgba16float', usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
+	}
+
+	/**
+	 * Develop into `target` with other mask uniforms and textures — the brush preview's renders without and
+	 * with the layer being painted — leaving the editor's own as they are.
+	 */
+	renderVariant(target: GPUTexture, maskParams: Uint8Array, textures: (GPUTexture | undefined)[]) {
+		const ubo = this.device.createBuffer({ size: MASK_UNIFORM_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+		this.device.queue.writeBuffer(ubo, 0, maskParams);
+		this.draw(target, this.maskGroup(ubo, textures));
 	}
 
 	/** Read developedTex back as RGBA16F bytes (tests and parity only — the editor never reads pixels back). */

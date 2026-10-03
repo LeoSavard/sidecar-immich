@@ -136,8 +136,18 @@
 	 * version that moves with every live stroke, and the lens-corrected copy develop reads.
 	 */
 	const layerTextures = new Map<number, { key: string; version: number; painted: GPUTexture; corrected?: GPUTexture; correctedFrom: string }>();
-	/** The stroke being painted: its finger, layer, settings, and points so far (fractions of the photo). */
-	let stroke: { pointerId: number; layer: number; settings: ReturnType<typeof brushStroke>; points: [number, number][] } | null = null;
+	/**
+	 * The stroke being painted: its finger, layer, settings, its points so far (fractions of the photo), and
+	 * those not drawn yet — pointer events only collect them; each frame draws what arrived since the last.
+	 */
+	let stroke: { pointerId: number; layer: number; settings: ReturnType<typeof brushStroke>; points: [number, number][]; drawn: number } | null = null;
+	/**
+	 * While a stroke is painted, the photo developed without its layer and with it at full weight: each frame
+	 * blends the two by the mask where the brush went, instead of developing the whole photo again.
+	 */
+	let preview: { without: GPUTexture; within: GPUTexture; invert: boolean } | null = null;
+	/** The histogram missed a develop while the brush was on; it catches up once the brush is off. */
+	let histogramStale = false;
 	/** The brush outline on screen, CSS pixels. */
 	let brushCursor = $state<{ x: number; y: number; r: number } | null>(null);
 	/** Geometry frames, by geometry and picture size. */
@@ -184,6 +194,7 @@
 			return;
 		}
 		if (!develop?.output) return;
+		if (stroke && preview) drawStroke();
 		if (developDirty) {
 			correctLens();
 			const packed = repack();
@@ -192,8 +203,13 @@
 			develop.setMasks(packed.masks, ((before ? compareEdit() : edit).masks ?? []).map((m, i) => layerTexture(i, m)), packed.maskCurves);
 			develop.render();
 			developDirty = false;
+			histogramStale = true;
+		}
+		// Not while the brush is on: the mask is what's being judged then, and the readback costs a phone frames.
+		if (histogramStale && !painting) {
 			const out = outputGeometry(before ? compareEdit().geometry : edit.geometry);
 			hist.run(develop.output, histStride, (h) => (histogram = h), out ? { toPicture: out.toPicture, size: out.size } : undefined);
+			histogramStale = false;
 		}
 		const showing = maskSelected !== null && (maskShown || brush.mode !== 'off') && !before ? edit.masks?.[maskSelected] : undefined;
 		const overlay = showing && layerTexture(maskSelected!, showing);
@@ -334,6 +350,11 @@
 		changed();
 		committed();
 	}
+
+	$effect(() => {
+		// The brush going off is when a paused histogram catches up.
+		if (!painting) untrack(() => schedule());
+	});
 
 	$effect(() => {
 		// The crop tool shows the whole picture at fit: no zoom or pan to fight its handles. Only entering and
@@ -549,46 +570,90 @@
 		const i = maskSelected;
 		const m = i !== null ? edit?.masks?.[i] : undefined;
 		const p = screenToSource(px(e));
-		if (i === null || !m || !p) return;
+		if (i === null || !m || !p || !edit?.masks || !develop.output) return;
+		// Whatever is waiting to be developed first, so both renders below start from the edit as it is.
+		if (developDirty) draw();
+		// The layer's mask painted from its strokes so far — before the stroke is live, which holds repainting.
 		const entry = layerEntry(i, m);
 		if (!entry) return;
 		const settings = brushStroke(brush);
-		stroke = { pointerId: e.pointerId, layer: i, settings, points: [p] };
+		stroke = { pointerId: e.pointerId, layer: i, settings, points: [p], drawn: 0 };
+		// And lens-corrected, as it renders now: the stroke draws onto both.
+		layerTexture(i, m);
+		// Without the layer (its amount at 0), and with it at full weight everywhere: an empty mask, inverted.
+		const textures = edit.masks.map((l, j) => layerTexture(j, l));
+		const packed = repack();
+		const layerTone = 32 + i * 192 + 16;
+		const without = packed.masks.slice();
+		new DataView(without.buffer).setFloat32(layerTone + 8, 0, true);
+		const within = packed.masks.slice();
+		new DataView(within.buffer).setFloat32(layerTone + 12, 1, true);
+		preview = { without: develop.variantTarget('without the layer'), within: develop.variantTarget('with the layer'), invert: m.invert };
+		develop.renderVariant(preview.without, without, textures);
+		develop.renderVariant(preview.within, within, textures.map((t, j) => (j === i ? undefined : t)));
 		painter.begin(entry.painted, { ...settings, points: [] });
-		painter.extend([p]);
-		entry.version++;
-		schedule(true);
+		schedule();
 	}
 
 	function extendStroke(e: PointerEvent) {
 		const proxy = develop?.proxy;
 		if (!stroke || !proxy) return;
-		const entry = layerTextures.get(stroke.layer);
-		if (!entry) return;
 		// Spaced at a fraction of the radius: smooth curves, without a point per pixel moved.
 		const spacing = Math.max(1, 0.15 * stroke.settings.radius * Math.max(proxy.width, proxy.height));
-		const added: [number, number][] = [];
 		let last = stroke.points[stroke.points.length - 1];
-		const from = last;
 		for (const ev of e.getCoalescedEvents?.() ?? [e]) {
 			const p = screenToSource(px(ev));
 			if (!p || Math.hypot((p[0] - last[0]) * proxy.width, (p[1] - last[1]) * proxy.height) < spacing) continue;
-			added.push(p);
+			stroke.points.push(p);
 			last = p;
 		}
-		if (!added.length) return;
-		stroke.points.push(...added);
-		painter.extend(added, from);
-		entry.version++;
-		schedule(true);
+		if (stroke.points.length > stroke.drawn) schedule();
+	}
+
+	/**
+	 * Draw what the stroke gained since the last frame: onto the mask, through the lens correction and into
+	 * the picture — each only over the area the stroke has covered.
+	 */
+	function drawStroke() {
+		const s = stroke!;
+		const entry = layerTextures.get(s.layer);
+		if (!entry || s.points.length === s.drawn) return;
+		const fresh = s.points.slice(s.drawn);
+		painter.extend(fresh, s.drawn ? s.points[s.drawn - 1] : undefined);
+		s.drawn = s.points.length;
+		const box = painter.liveBox;
+		if (!box) return;
+		const [w, h] = [entry.painted.width, entry.painted.height];
+		let mask = entry.painted;
+		let area = box;
+		const lens = maskLens([w, h]);
+		if (lens && entry.corrected) {
+			// The box in the corrected picture: where its edges' points land, with a margin for the curve between.
+			const xs = [box[0], (box[0] + box[2]) / 2, box[2]];
+			const ys = [box[1], (box[1] + box[3]) / 2, box[3]];
+			const pts = xs.flatMap((x) => ys.map((y) => correctedPoint(lensUniform, w, h, { x: x / w, y: y / h })));
+			const margin = 4 + 0.005 * Math.max(w, h);
+			area = [Math.min(...pts.map((p) => p.x)) * w - margin, Math.min(...pts.map((p) => p.y)) * h - margin, Math.max(...pts.map((p) => p.x)) * w + margin, Math.max(...pts.map((p) => p.y)) * h + margin];
+			painter.correct(entry.painted, entry.corrected, lens.uniform, area);
+			mask = entry.corrected;
+		}
+		painter.blend(preview!.without, preview!.within, mask, preview!.invert, develop.output!, area);
+	}
+
+	function endPreview() {
+		preview?.without.destroy();
+		preview?.within.destroy();
+		preview = null;
 	}
 
 	/** The stroke into the edit, simplified and rounded: a few dozen points, not one per pointer event. */
 	function endStroke() {
 		const proxy = develop?.proxy;
 		const s = stroke;
+		if (s && s.drawn < s.points.length && preview) drawStroke();
 		stroke = null;
 		painter.end();
+		endPreview();
 		const m = s && edit?.masks?.[s.layer];
 		if (!s || !m || !proxy) return;
 		const radiusPx = s.settings.radius * Math.max(proxy.width, proxy.height);
@@ -606,6 +671,7 @@
 		const entry = layerTextures.get(stroke.layer);
 		painter.cancel();
 		stroke = null;
+		endPreview();
 		if (entry) entry.version++;
 		schedule(true);
 	}
@@ -1387,7 +1453,9 @@
 		{#if before}<span class="absolute top-[max(1rem,env(safe-area-inset-top))] left-4 rounded bg-ground/80 px-2 py-1 text-xs">{compare?.label ?? (developed ? 'As saved' : 'As shot')}</span>{/if}
 		<div class="absolute top-[max(0.75rem,env(safe-area-inset-top))] right-3 grid justify-items-end gap-1.5">
 			{#if !wide && showPhoneHistogram && !fallback}
-				<Histogram data={histogram} {clipHigh} {clipLow} compact ontoggle={(w) => { if (w === 'high') clipHigh = !clipHigh; else clipLow = !clipLow; schedule(); }} />
+				<div class="transition-opacity {painting ? 'opacity-30' : ''}" title={painting ? 'Paused while painting' : undefined}>
+					<Histogram data={histogram} {clipHigh} {clipLow} compact ontoggle={(w) => { if (w === 'high') clipHigh = !clipHigh; else clipLow = !clipLow; schedule(); }} />
+				</div>
 			{/if}
 			{#if !wide && !fallback}
 				<button type="button" aria-pressed={peaking} class="rounded-full px-2.5 py-1 text-[0.6875rem] {peaking ? 'bg-fg text-ground' : 'bg-ground/80 text-fg-2'}" onclick={() => { peaking = !peaking; schedule(); }}>Focus</button>
@@ -1440,7 +1508,9 @@
 
 			{#if wide && !fallback}
 			<div class="px-4 pb-2">
-				<Histogram data={histogram} {clipHigh} {clipLow} ontoggle={(w) => { if (w === 'high') clipHigh = !clipHigh; else clipLow = !clipLow; schedule(); }} />
+				<div class="transition-opacity {painting ? 'opacity-30' : ''}" title={painting ? 'Paused while painting' : undefined}>
+					<Histogram data={histogram} {clipHigh} {clipLow} ontoggle={(w) => { if (w === 'high') clipHigh = !clipHigh; else clipLow = !clipLow; schedule(); }} />
+				</div>
 				<div class="mt-1 flex items-center justify-between gap-2 text-[0.6875rem]">
 					<div class="flex items-center gap-2">
 						<button type="button" aria-pressed={peaking} class="rounded-full px-2 py-0.5 {peaking ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" onclick={() => { peaking = !peaking; schedule(); }}>Focus peaking</button>

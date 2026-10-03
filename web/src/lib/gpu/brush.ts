@@ -6,6 +6,7 @@
 import brushWgsl from './wgsl/client_brush.wgsl?raw';
 import compositeWgsl from './wgsl/client_brush_composite.wgsl?raw';
 import lensMaskWgsl from './wgsl/client_lens_mask.wgsl?raw';
+import previewWgsl from './wgsl/client_mask_preview.wgsl?raw';
 import type { Stroke } from '$lib/types';
 
 const MASK: GPUTextureFormat = 'r8unorm';
@@ -35,6 +36,10 @@ export class MaskPainter {
 	private empty: GPUTexture;
 	private brushUbo: GPUBuffer;
 	private lensUbo: GPUBuffer;
+	private compositeUbo: GPUBuffer;
+	private previewUbo: GPUBuffer;
+	/** Segments for one draw, grown as needed: every pointer move reuses it. */
+	private segments?: GPUBuffer;
 	/** Scratch at the mask size: a stroke's coverage, and the mask as it was before the stroke. */
 	private coverage?: GPUTexture;
 	private before?: GPUTexture;
@@ -45,19 +50,27 @@ export class MaskPainter {
 		private device: GPUDevice,
 		private brush: GPURenderPipeline,
 		private composite: GPURenderPipeline,
-		private lens: GPURenderPipeline
+		private lens: GPURenderPipeline,
+		private preview: GPURenderPipeline
 	) {
 		this.sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
 		this.empty = this.mask([1, 1], 'empty mask');
 		this.brushUbo = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 		this.lensUbo = device.createBuffer({ size: 1072, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+		this.compositeUbo = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+		this.previewUbo = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 	}
 
 	static async create(device: GPUDevice): Promise<MaskPainter> {
-		const [b, c, l] = await Promise.all([compiled(device, 'brush', brushWgsl), compiled(device, 'brush composite', compositeWgsl), compiled(device, 'lens mask', lensMaskWgsl)]);
+		const [b, c, l, v] = await Promise.all([
+			compiled(device, 'brush', brushWgsl),
+			compiled(device, 'brush composite', compositeWgsl),
+			compiled(device, 'lens mask', lensMaskWgsl),
+			compiled(device, 'mask preview', previewWgsl)
+		]);
 		const target = (blend?: GPUBlendState): GPUColorTargetState => ({ format: MASK, blend });
 		const max: GPUBlendComponent = { operation: 'max', srcFactor: 'one', dstFactor: 'one' };
-		const [brush, composite, lens] = await Promise.all([
+		const [brush, composite, lens, preview] = await Promise.all([
 			device.createRenderPipelineAsync({
 				label: 'brush',
 				layout: 'auto',
@@ -65,9 +78,10 @@ export class MaskPainter {
 				fragment: { module: b, entryPoint: 'fs', targets: [target({ color: max, alpha: max })] }
 			}),
 			device.createRenderPipelineAsync({ label: 'brush composite', layout: 'auto', vertex: { module: c, entryPoint: 'vs' }, fragment: { module: c, entryPoint: 'fs', targets: [target()] } }),
-			device.createRenderPipelineAsync({ label: 'lens mask', layout: 'auto', vertex: { module: l, entryPoint: 'vs' }, fragment: { module: l, entryPoint: 'fs', targets: [target()] } })
+			device.createRenderPipelineAsync({ label: 'lens mask', layout: 'auto', vertex: { module: l, entryPoint: 'vs' }, fragment: { module: l, entryPoint: 'fs', targets: [target()] } }),
+			device.createRenderPipelineAsync({ label: 'mask preview', layout: 'auto', vertex: { module: v, entryPoint: 'vs' }, fragment: { module: v, entryPoint: 'fs', targets: [{ format: 'rgba16float' }] } })
 		]);
-		return new MaskPainter(device, brush, composite, lens);
+		return new MaskPainter(device, brush, composite, lens, preview);
 	}
 
 	/** A mask texture the painter can draw into and develop can read. */
@@ -106,7 +120,11 @@ export class MaskPainter {
 		const params = new Float32Array([coverage.width, coverage.height, stroke.radius, stroke.feather, stroke.flow, 0, 0, 0]);
 		this.device.queue.writeBuffer(this.brushUbo, 0, params);
 		const data = new Float32Array(segments.flat());
-		const buffer = this.device.createBuffer({ size: Math.max(16, data.byteLength), usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
+		if (!this.segments || this.segments.size < data.byteLength) {
+			this.segments?.destroy();
+			this.segments = this.device.createBuffer({ size: Math.max(4096, data.byteLength * 2), usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
+		}
+		const buffer = this.segments;
 		this.device.queue.writeBuffer(buffer, 0, data);
 		const pass = this.pass(encoder, coverage, clear)!;
 		pass.setPipeline(this.brush);
@@ -121,8 +139,8 @@ export class MaskPainter {
 		const params = new ArrayBuffer(16);
 		new Float32Array(params, 0, 2).set([target.width, target.height]);
 		new Uint32Array(params, 8, 1)[0] = mode;
-		// Each composite needs its own uniforms: the queue applies every write before the encoder runs.
-		const ubo = this.device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+		// One composite per submission at most (see `paint` and `extend`), so the uniforms can be shared.
+		const ubo = this.compositeUbo;
 		this.device.queue.writeBuffer(ubo, 0, params);
 		const pass = this.pass(encoder, target, false, box);
 		if (!pass) return;
@@ -188,6 +206,11 @@ export class MaskPainter {
 		this.device.queue.submit([encoder.finish()]);
 	}
 
+	/** The live stroke's extent so far, target pixels `[x0, y0, x1, y1]`; `null` without one. */
+	get liveBox(): [number, number, number, number] | null {
+		return this.live && this.live.box[0] < this.live.box[2] ? this.live.box : null;
+	}
+
 	/** Undo the live stroke: put the target back as it was when it began. */
 	cancel() {
 		if (!this.live) return;
@@ -201,11 +224,15 @@ export class MaskPainter {
 		this.live = undefined;
 	}
 
-	/** `src` through the lens correction into `dst` (same size), `uniform` packed for that size without vignetting. */
-	correct(src: GPUTexture, dst: GPUTexture, uniform: Uint8Array) {
+	/**
+	 * `src` through the lens correction into `dst` (same size), `uniform` packed for that size without
+	 * vignetting — all of it, or only `box` (pixels of `dst`), leaving the rest as it was.
+	 */
+	correct(src: GPUTexture, dst: GPUTexture, uniform: Uint8Array, box?: [number, number, number, number]) {
 		this.device.queue.writeBuffer(this.lensUbo, 0, uniform);
 		const encoder = this.device.createCommandEncoder();
-		const pass = this.pass(encoder, dst, true)!;
+		const pass = this.pass(encoder, dst, !box, box);
+		if (!pass) return;
 		pass.setPipeline(this.lens);
 		pass.setBindGroup(
 			0,
@@ -215,6 +242,34 @@ export class MaskPainter {
 					{ binding: 0, resource: { buffer: this.lensUbo } },
 					{ binding: 1, resource: src.createView() },
 					{ binding: 2, resource: this.sampler }
+				]
+			})
+		);
+		pass.draw(3);
+		pass.end();
+		this.device.queue.submit([encoder.finish()]);
+	}
+
+	/**
+	 * The preview while a stroke is painted: `without` and `withLayer` (the photo developed without the layer
+	 * and with it at full weight) blended into `target` by `mask`, over `box` (pixels; all of it when absent).
+	 * All four the developed picture's size.
+	 */
+	blend(without: GPUTexture, withLayer: GPUTexture, mask: GPUTexture, invert: boolean, target: GPUTexture, box?: [number, number, number, number]) {
+		this.device.queue.writeBuffer(this.previewUbo, 0, new Uint32Array([invert ? 1 : 0, 0, 0, 0]));
+		const encoder = this.device.createCommandEncoder();
+		const pass = this.pass(encoder, target, false, box);
+		if (!pass) return;
+		pass.setPipeline(this.preview);
+		pass.setBindGroup(
+			0,
+			this.device.createBindGroup({
+				layout: this.preview.getBindGroupLayout(0),
+				entries: [
+					{ binding: 0, resource: { buffer: this.previewUbo } },
+					{ binding: 1, resource: without.createView() },
+					{ binding: 2, resource: withLayer.createView() },
+					{ binding: 3, resource: mask.createView() }
 				]
 			})
 		);

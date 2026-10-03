@@ -109,7 +109,13 @@ Where the code differs from the text below, the code and these notes win.
   coverage target, so one stroke lays its flow down once) and `client/brush_composite.wgsl` (paint
   `b + (1 − b)c`, erase `b(1 − c)`), into `r8unorm` at the proxy's size in the browser and up to 4,096 px on
   the worker, then moved by `client/lens_mask.wgsl` — the lens pass as a render pass for one-channel targets.
-  The editor draws a stroke live as it is made, then stores it simplified (Ramer–Douglas–Peucker at a tenth of
+  While a stroke is painted the editor doesn't develop the photo per move: at its first point it develops
+  the photo twice — without the layer, and with it at full weight everywhere (an empty mask, inverted) — and
+  each frame draws only what the finger added since the last, lens-corrects only that area of the mask, and
+  blends the two renders by it there (`client/mask_preview.wgsl`). That is exact where the mask is 0 or 1;
+  in a soft edge it blends results rather than parameters, which measured 0.04 levels from the exact render.
+  The histogram, whose readback costs a phone frames, waits until the brush is off. On the A4000 the GPU had
+  run a median 200 ms behind the finger; now it keeps up. When the finger lifts, the editor stores the stroke simplified (Ramer–Douglas–Peucker at a tenth of
   the radius) and rounded to 1e-4, and repaints from what was stored, so the editor shows what export renders.
 - **Interaction:** slider rows allow vertical panning and claim a touch only after 4 px of sideways travel, so the tool panel scrolls. Holding a slider no longer hides the editor chrome — the histogram is exactly what you want to watch while dragging.
 
