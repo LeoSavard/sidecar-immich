@@ -70,12 +70,36 @@ image telling an HDR screen how far past SDR white to lift each area — and Pho
 only the SDR picture (ImageMagick and `heif-convert` decode the primary image and drop the auxiliary one) and
 exports SDR, so an edit looks flat beside its original. In order:
 
-1. *Read the gain map* at decode, with its metadata (headroom, min/max boost, gamma). `heif-convert` can write
-   auxiliary images out; check which it names the gain map, and whether Apple's pre-21496 maps (HEIC
-   `urn:com:apple:photo:2020:aux:hdrgainmap`) need their own handling. Cache it beside the proxy.
+1. *Read the gain map* at decode, with its metadata — **done**, in `sidecar_raw::gain_map`, through the same
+   `heif-convert --with-aux` boundary as `portrait_depth` (docs above). Checked against a real iPhone 17 Pro
+   HEIC rather than assumed: the aux image (`urn:com:apple:photo:2020:aux:hdrgainmap`) comes out named
+   `<stem>-urn_com_apple_photo_2020_aux_hdrgainmap.png`, 8-bit grey at exactly half the main image's linear
+   size — the same resolution convention `portrait_depth` already found for the Portrait Effects Matte.
+   `exiftool` carries two tags in the gain map's own group, `HDRGainMapVersion`/`HDRGainMapHeadroom`, plus two
+   MakerNotes scalars that sound related (`Apple:HDRHeadroom`, `Apple:HDRGain`) but aren't confirmed to mean
+   what their names suggest; all four are read and carried, unapplied.
+
+   **No reconstruction formula is implemented, and that's deliberate, not an oversight.** Apple hasn't
+   published one, and the independent reverse-engineering attempts that exist
+   ([heif-hdrgainmap-decode](https://github.com/m13253/heif-hdrgainmap-decode),
+   [AppleJPEGGainMap](https://github.com/grapeot/AppleJPEGGainMap)) call their own results "known to be
+   incorrect" or "unverified" — one guesses `hdr = sdr × 8^gain` "because it looks good," the other doesn't
+   claim a formula at all. A community decode (not verified here) gives a linear form instead:
+   `hdr = sdr × (1 + (headroom − 1) × gain)`. Even Photos on iPhone and on Mac are reported to render the same
+   file differently. A wrong formula looks plausible and is silently wrong — worse than not rendering HDR —
+   so stage 2 needs an actual HDR display to check against, not another guess from documentation that doesn't
+   exist. (Both reverse-engineering projects are GPL-licensed or unlicensed; nothing from either is usable
+   here regardless — CLAUDE.md — this was read for background, not ported.)
+
+   **A second, newer mechanism exists and isn't read yet either.** Some files also carry an ICC profile
+   (`Display P3 Primaries; PQ (Adaptive Gain Curve …)`) with a binary `HD Gain Map Info` tag — Apple's iOS
+   18+ "Adaptive HDR", introduced alongside ISO 21496-1 at WWDC24 and still not interchangeable with
+   Adobe/Google's ISO files in practice. Whether this is the mechanism actually driving HDR display for a
+   given photo, with the auxiliary-image gain map as a compatibility fallback, or something else, is open.
 2. *Carry it through the edit.* Edit the SDR picture as now and reapply the original map to the result, as
    the gain-map standard intends; exposure changes the base, so the map's headroom may need scaling with it.
-   Geometry (crop, straighten, orientation) must transform the map exactly as it does the picture.
+   Geometry (crop, straighten, orientation) must transform the map exactly as it does the picture. Blocked on
+   deciding stage 1's open formula question first — there's nothing to carry through correctly otherwise.
 3. *Export with it*: an Ultra HDR JPEG (ISO 21496-1 with the Adobe/Google XMP fallback) is what iOS and
    Android both display as HDR. Google's `libultrahdr` is Apache-2.0 — check it through `cargo deny`
    (or its C build) and add it to NOTICE before depending on it. HEIC output stays off the table (HEVC).
