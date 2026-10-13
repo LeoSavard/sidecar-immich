@@ -3,15 +3,36 @@
 //! boundary as `decoded::decode_heif` — nothing LGPL runs in this process; see that module's docs and
 //! docs/ROADMAP.md, "Portrait depth maps".
 //!
-//! Not every Portrait photo carries the same aux image, checked against this repo's own fixture rather than
-//! assumed: `heif-convert --with-aux` (libheif 1.23.4) on `testdata/cache/IMG_3042.heic` writes out six
-//! auxiliary images, and the only depth-shaped one is `urn:com:apple:photo:2018:aux:portraiteffectsmatte` —
-//! there is no `…:aux:disparity` here at all. The matte is a continuous 8-bit grey image at exactly half the
-//! main image's linear dimensions (1512×2016 of 3024×4032), not a binary cutout (measured: values span the
-//! full 0–255 range), but it is also not a measurement: it is the blur-strength Photos already baked into the
-//! picture, biased by distance but not a reading of it. Where a device wrote a true disparity or LiDAR depth
-//! aux image, `read` prefers it (`DepthKind`); none of the fixtures here have one to confirm the convention
-//! against, so that preference rests on Apple's published AVDepthData documentation, not measurement.
+//! Not every Portrait photo carries the same aux image, checked against a stratified sample of this user's
+//! own library (205 HEICs out of 7,588, `heif-convert --with-aux` + `exiftool`, iPhone 14 Pro through 17 Pro)
+//! rather than assumed. In that sample: 91% carry an HDR gain map (near-universal, unrelated to depth); ~16%
+//! (33/205) carry a literal raw disparity auxiliary image (`urn:mpeg:hevc:2015:auxid:2`, described further by
+//! Apple's own `XMP-apdi:AuxiliaryImageType = disparity`); ~16% (32/205) carry the derived Portrait Effects
+//! Matte (`urn:com:apple:photo:2018:aux:portraiteffectsmatte`) — the two overlap but aren't the same set: 18
+//! of the 33 disparity-bearing photos have *no* effects matte at all, so the raw map is the more universal of
+//! the two (segmentation apparently needs a recognized subject; the stereo disparity capture doesn't).
+//!
+//! The two are not interchangeable. The effects matte is a continuous 8-bit grey image at exactly half the
+//! main image's linear dimensions (e.g. 1512×2016 of 3024×4032) — plenty sharp, but it is Photos' own
+//! blur-strength weight, not a distance. The raw disparity image is a real geometric signal, with its own
+//! `XMP-depthData` camera-calibration block (focal length, principal point, lens distortion), but at a
+//! **fixed** low resolution regardless of the main photo's size — measured 576×768 on both a 3024×4032 and a
+//! 4284×5712 capture from the same iPhone 17 Pro, so it is roughly a twentieth to a thirtieth of the main
+//! image's pixel count, always. Every example found reports `XMP-depthData:Accuracy = relative`, never
+//! `absolute`, even on these LiDAR-equipped Pro models — Apple's photo pipeline evidently publishes the
+//! dual/triple-camera stereo disparity into the still photo, not the LiDAR's metric range, so *true* metric
+//! depth, while representable in Apple's own format (`AVDepthData.DepthDataAccuracy.absolute`), is not what
+//! ordinary Portrait captures on this hardware actually carry. The raw 8-bit samples are quantized per shot:
+//! `XMP-apdi:IntMinValue`/`IntMaxValue` (always 0/255 so far) rescale linearly onto that photo's own
+//! `FloatMinValue`/`FloatMaxValue` (e.g. 0.0616–0.571, consistent with inverse metres) — reading those two XMP
+//! tags to undo the rescale is the next step, not done here yet, so `PortraitDepth::values` for `Disparity`
+//! today are the raw 0–1 samples, not Apple's own disparity units.
+//!
+//! DNG (ProRAW) is a different, unhandled case: it carries the *derived* mattes too (same URNs, seen directly
+//! in this library's DNGs), but as extra TIFF SubIFDs tagged `Semantic Name` (DNG 1.6's semantic-mask
+//! extension) rather than a HEIF auxiliary image box — `heif-convert` has no reason to find anything in a
+//! DNG, and none of the DNGs sampled here carried the raw disparity array or its calibration block at all.
+//! Reading a DNG's depth-ish data needs its own TIFF-SubIFD reader; nothing here attempts it.
 
 use crate::decoded::DecodeError;
 use std::path::Path;
@@ -28,8 +49,8 @@ const DEPTH_COMMANDS: &[&str] = &["heif-convert --with-aux %i %o"];
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum DepthKind {
-    /// `…:aux:disparity` or `…:aux:depth` — Apple's AVDepthData, continuous. Disparity is inverse depth (a
-    /// higher value is nearer); true (LiDAR) depth is the opposite. Unverified against a real file.
+    /// Apple's AVDepthData, continuous, real but relative — see the module docs for what's confirmed (fixed
+    /// 576×768 resolution, `Accuracy: relative`, a per-shot linear quantization this type doesn't undo yet).
     Disparity,
     /// `urn:com:apple:photo:2018:aux:portraiteffectsmatte` — how much background blur Photos already baked
     /// in, not a distance.
@@ -60,10 +81,14 @@ fn depth_command() -> Option<String> {
     DEPTH_COMMANDS.iter().find(|c| which(c.split_whitespace().next().unwrap_or_default())).map(|c| c.to_string())
 }
 
-/// `heif-convert` names each auxiliary file `<output stem>-<urn>.png`, with ':' sometimes kept and sometimes
-/// turned into '_' depending on version and `--no-colons`. Matching on the bare word in the URN's last segment
-/// is robust to both, and none of this file's other aux types (`portraiteffectsmatte`, `semanticskymatte`,
-/// `semanticskinmatte`, `hdrgainmap`, `linearthumbnail`, `styledeltamap`) contain "depth" as a substring.
+/// `heif-convert` names each auxiliary file after its aux type, but not uniformly: Apple's own URNs come
+/// through as `<output stem>-<urn>.png` (colons sometimes kept, sometimes turned into '_' depending on
+/// version and `--no-colons`), while the raw disparity image — tagged with the generic ISO base media type
+/// `urn:mpeg:hevc:2015:auxid:2` rather than one of Apple's — comes out named `<output stem>-depth.png`
+/// instead (checked against real Portrait photos, not assumed). Matching on the bare word covers both, and
+/// none of the other aux types seen in this library (`portraiteffectsmatte`, `semanticskymatte`,
+/// `semanticskinmatte`, `semantichairmatte`, `semanticteethmatte`, `semanticglassesmatte`, `hdrgainmap`,
+/// `linearthumbnail`, `styledeltamap`) contain "depth" as a substring.
 const AUX_NEEDLES: &[(&str, DepthKind)] = &[("disparity", DepthKind::Disparity), ("depth", DepthKind::Disparity), ("portraiteffectsmatte", DepthKind::EffectsMatte)];
 
 fn classify(filename: &str) -> Option<DepthKind> {
@@ -135,6 +160,9 @@ mod tests {
     fn disparity_and_literal_depth_outrank_the_effects_matte() {
         assert_eq!(classify("out-urn_com_apple_photo_2020_aux_disparity.png"), Some(DepthKind::Disparity));
         assert_eq!(classify("out-urn:com:apple:photo:2020:aux:depth.png"), Some(DepthKind::Disparity));
+        // The real name `heif-convert` gives the raw disparity image on an actual Portrait photo (its aux
+        // type is the generic `urn:mpeg:hevc:2015:auxid:2`, not one of Apple's own URNs) — not assumed.
+        assert_eq!(classify("out-depth.png"), Some(DepthKind::Disparity));
         assert_eq!(classify("out-urn_com_apple_photo_2018_aux_portraiteffectsmatte.png"), Some(DepthKind::EffectsMatte));
         assert_eq!(classify("out-urn_com_apple_photo_2020_aux_hdrgainmap.png"), None);
         assert_eq!(classify("out-urn_com_apple_photo_2020_aux_semanticskymatte.png"), None);

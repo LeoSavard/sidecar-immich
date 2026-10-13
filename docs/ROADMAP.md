@@ -88,22 +88,61 @@ boundary as the gain map above (`heif-convert --with-aux`, no libheif link). Thi
 branch, not `sidecar-ml`: the signal is already in the file, not a model's guess from pixels, and needs no
 GPU, weights, or the `-ml` image.
 
-*Confirmed, not assumed, against the repo's own fixture* (`testdata/cache/IMG_3042.heic`, `heif-convert`
-1.23.4): the file carries no `…:aux:disparity` at all. Its only depth-shaped aux image is
-`urn:com:apple:photo:2018:aux:portraiteffectsmatte` — a continuous 8-bit grey image at exactly half the main
-picture's linear size (1512×2016 of 3024×4032), spanning the full 0–255 range rather than two flat plateaus.
-That is Apple's *Portrait Effects Matte*: how much of the baked-in blur Photos already applied at each pixel,
-not a distance — useful for separating subject from background, not for anything that needs to know *how
-far*. Whether any photo in this library carries a literal `disparity` or `depth` aux image (dual-camera
-stereo, or LiDAR on Pro models) is still open; `portrait_depth::read` already prefers one when present
-(`DepthKind::Disparity` outranks `EffectsMatte`), but that preference, and the inverse-depth convention it
-assumes, both rest on Apple's published AVDepthData documentation rather than a measurement taken here.
+*Confirmed, not assumed, against a stratified sample of this user's own library* (205 of 7,588 HEICs,
+`heif-convert` 1.23.4 + `exiftool` 13.25, iPhone 14 Pro through 17 Pro, iOS/software ~18 through ~27): 91% of
+HEICs carry an HDR gain map (near-universal, unrelated to depth); **~16% (33/205) carry a literal raw
+disparity aux image** (`urn:mpeg:hevc:2015:auxid:2`, named by Apple's own `XMP-apdi:AuxiliaryImageType =
+disparity`); **~16% (32/205) carry the derived Portrait Effects Matte**
+(`urn:com:apple:photo:2018:aux:portraiteffectsmatte`). These overlap but aren't the same set: 18 of the 33
+disparity-bearing photos have *no* effects matte at all — segmentation apparently needs a recognized subject
+(person or pet) to produce a matte, while the raw stereo capture doesn't, so the raw map is the more universal
+of the two whenever Portrait mode was used. `ExifIFD:CustomRendered = "Portrait"` is a cheap, already-present
+flag for "the Camera app rendered this as Portrait," present on files from both groups — worth checking before
+paying for an aux-image decode. The two are confirmed as the same Apple API Apple documents publicly:
+`CGImageSourceCopyAuxiliaryDataInfoAtIndex` plus `AVDepthData`/`AVPortraitEffectsMatte`
+`.init(fromDictionaryRepresentation:)` — see
+[Image Depth Maps Tutorial for iOS](https://www.kodeco.com/8246240-image-depth-maps-tutorial-for-ios-getting-started),
+which also notes HEIC keeps depth as metadata where a JPEG would store it as a second image (not checked here:
+this library has no Portrait JPEGs to confirm against).
 
-*Resolution and registration.* Half the main image's edge, same aspect, the same HEIF rotation libheif already
-applies to the main image — close enough to the proxy's frame that it could slot in beside the existing model
-masks (DESIGN.md §15) once resized, but it arrives in the *original's* frame, not the proxy's downsampled one,
-so it needs its own resize rather than reusing `mask_images`' assumption that every mask already matches the
-proxy.
+*The two are not interchangeable, and neither is what it might look like at first.* The effects matte is a
+continuous 8-bit grey image at exactly half the main picture's linear size (1512×2016 of 3024×4032), spanning
+the full 0–255 range rather than two flat plateaus — Apple's *Portrait Effects Matte*: how much of the
+baked-in blur Photos already applied at each pixel, not a distance. The raw disparity image is a real
+geometric signal, carrying its own `XMP-depthData` camera-calibration block (focal length, principal point,
+radial lens distortion — `AVCameraCalibrationData`, serialized), but at a **fixed** low resolution regardless
+of the main photo's size: measured 576×768 on both a 3024×4032 and a 4284×5712 capture from the same iPhone 17
+Pro — a twentieth to a thirtieth of the main image's pixel count, always, because the stereo correspondence
+search that produces it runs at a constant working resolution, not the sensor's. Every example found reports
+`XMP-depthData:Accuracy = relative`, **never `absolute`, even on these LiDAR-equipped Pro models** — Apple's
+Camera app evidently publishes dual/triple-camera stereo disparity into the still photo, not the LiDAR's
+metric range. **Metric depth is representable in Apple's own format** (`AVDepthData.DepthDataAccuracy`'s
+other case is `.absolute`) **— the format allows it, but ordinary Portrait captures on this hardware don't use
+that case**; whether some other capture path (a LiDAR-scanning app, Cinematic video) ever does is still open.
+The raw samples are quantized per shot, and the file carries what's needed to undo that:
+`XMP-apdi:IntMinValue`/`IntMaxValue` (0/255 in every example) rescale linearly onto that photo's own
+`FloatMinValue`/`FloatMaxValue` (e.g. 0.0616–0.571 on one frame, consistent with inverse metres) — reading
+those two tags and applying the rescale is the next step for `portrait_depth::read`, which today returns the
+raw 0–1 samples, not Apple's own disparity units.
+
+*DNG (ProRAW) gets a reduced, structurally different subset.* The sampled library's DNGs (80 of 11,617, all
+iPhone 17 Pro) carry the *derived* mattes — the same URNs (`portraiteffectsmatte`, `semanticskinmatte`,
+`semanticskymatte`) turned up directly in about a third of them — but as extra TIFF SubIFDs tagged `Semantic
+Name` (DNG 1.6's semantic-mask extension, added alongside ProRAW; Adobe and Apple co-developed it, though
+Adobe's own tools don't read it back) rather than a HEIF auxiliary-image box. **None of the 80 DNGs sampled
+carried the raw disparity array or its `XMP-depthData` calibration block at all** — only the mattes. So a DNG
+needs its own TIFF-SubIFD reader; `heif-convert` (a HEIF-only tool) finds nothing in one, and
+`portrait_depth::read` doesn't attempt it.
+
+*Resolution and registration.* The effects matte is half the main image's edge, same aspect, the same HEIF
+rotation libheif already applies to the main image — close enough to the proxy's frame that it could slot in
+beside the existing model masks (DESIGN.md §15) once resized. The raw disparity image, being fixed-resolution
+rather than scaled to the photo, needs more work: upsampling naively would blur edges (hair, fingers) well
+past what the effects matte already does at half-res, so anything using the raw map for a *sharp* mask (as
+opposed to a coarse depth ordering) wants edge-aware upsampling (joint bilateral or a guided filter, guided by
+the RGB proxy) rather than a plain resize. Either way it arrives in the *original's* frame, not the proxy's
+downsampled one, so it needs its own resize rather than reusing `mask_images`' assumption that every mask
+already matches the proxy.
 
 *What it's good for, roughly most to least ready:*
 
@@ -111,24 +150,37 @@ proxy.
   existing layer system (§15) today: a "depth" mask that darkens, cools or desaturates the background relative
   to the subject reuses `MaskParams` and the weighted exposure/white-balance/contrast/curve blending that
   already ships, with no new shader work. The cheapest real feature here, and the obvious next step.
+- **A cheaper, possibly better subject mask for the ~16% of photos that have one.** The raw disparity (or the
+  effects matte, where present) is real multi-view geometry, not a single-image model's guess — for exactly
+  the photos that carry it, it could stand in for `sidecar-ml`'s BiRefNet `subject` mask entirely, skipping a
+  GPU inference pass. It needs the edge-aware upsampling above first, and BiRefNet still has to run for the
+  other ~84% of photos, so this is a conditional win, not a replacement.
+- **Weak supervision or a sanity check for the ML masks.** Short of replacing BiRefNet outright, the same
+  signal can validate it: where BiRefNet's `subject` mask disagrees sharply with the depth-derived rough split,
+  that's a cheap low-confidence flag, cheaper than a second model. The thousands of effects-mattes and semantic
+  mattes (sky, skin, hair, teeth, glasses) already sitting in this library are also free, human-unlabelled
+  ground truth if `sidecar-ml`'s own models are ever fine-tuned — Apple's segmentation running for free on
+  photos this library already has.
 - **Background blur ("portrait mode" after the fact),** even on a photo a lensed camera didn't shoot with one.
-  The matte alone gives a soft subject/background split good enough to simulate depth of field — but
-  simulating a lens means a spatially-varying blur *radius*, and nothing in the develop pipeline does that
-  yet: today's mask layers blend parameter values per pixel, not a convolution. A real bokeh renderer
-  (progressively larger blur discs with distance, or a two-layer sharp/blurred composite) is new rendering
-  work, not a slot into the existing mask weights.
-- **Background replacement.** The matte is already most of a green-screen-free cutout; combined with the
-  `subject` mask `sidecar-ml` computes (on the `-ml` image), the two could cross-check each other — but
-  replacement itself (compositing a new background, relighting the cut edge) is also new work.
-- **Haze or relighting by actual distance** needs the metric case (LiDAR depth, not disparity, not the
-  effects matte), which the one fixture checked here doesn't have.
+  A mask alone gives a soft subject/background split good enough to simulate depth of field — but simulating a
+  lens means a spatially-varying blur *radius*, and nothing in the develop pipeline does that yet: today's mask
+  layers blend parameter values per pixel, not a convolution. A real bokeh renderer (progressively larger blur
+  discs with distance, or a two-layer sharp/blurred composite) is new rendering work, not a slot into the
+  existing mask weights.
+- **Background replacement.** A mask is already most of a green-screen-free cutout; combined with `sidecar-ml`'s
+  `subject` mask (on the `-ml` image), the two could cross-check each other — but replacement itself
+  (compositing a new background, relighting the cut edge) is also new work.
+- **Haze or relighting by actual distance** needs metric depth, which nothing found here has: `relative`
+  disparity gives ordering (nearer/farther), not metres.
 - **Depth-aware noise reduction or sharpening** (lighter on the subject, heavier on a soft background) fits
   the same mask-weighted model as grading, once a depth mask exists.
-- **AF point corroboration.** ExifTool's `Apple:AFMeasuredDepth` (seen on this fixture: `109`, units
-  unconfirmed) is a second, single-number depth reading already available with no aux-image work at all —
-  worth cross-checking a disparity map against, when one is found, rather than trusting either blind.
-- **Parallax / "spatial" effects** need a true per-pixel metric map at usable resolution; the one matte seen
-  here answers "foreground or background," not "how far," so this is the least ready use.
+- **AF point corroboration.** ExifTool's `Apple:AFMeasuredDepth` (a single scalar, present on nearly every
+  file regardless of Portrait mode, units unconfirmed — not the same thing as `Apple:FocusDistanceRange`,
+  which is the lens's focus-position bracket, not a scene reading) is a second, independent depth-ish signal
+  with no aux-image work at all, worth cross-checking a disparity map against rather than trusting either
+  blind.
+- **Parallax / "spatial" effects** need a true per-pixel metric map at usable resolution; disparity here is
+  relative and fixed-resolution, so this is the least ready use.
 
 *Licensing.* No new exposure: the gain map section above already establishes that reading any HEIC auxiliary
 image goes through the same opt-in external decoder (`HEIF=1`, `heif-convert`), never a linked libheif.
@@ -138,9 +190,10 @@ known to expose auxiliary images at all, so there is exactly one built-in comman
 three like the main decode.
 
 *Status.* `sidecar_raw::portrait_depth::read` extracts and classifies the aux image and decodes it to a plain
-0–1 buffer, with the fixture's own numbers pinned in a test. Nothing yet calls it from the worker or exposes
-it over HTTP — that, the resize into the proxy's frame, and picking a first real use (depth as a mask layer,
-above, is the obvious one) are still open.
+0–1 buffer, pinned against both the repo's committed fixture and the real-library numbers above in tests.
+Still open: undoing the per-shot `IntMinValue`/`FloatMinValue` quantization described above, a DNG reader,
+calling any of this from the worker or exposing it over HTTP, the edge-aware resize into the proxy's frame,
+and picking a first real use (depth as a mask layer is the obvious one).
 
 **Editing non-RAW images — done, in `sidecar_raw::decoded`.** JPEG, PNG and TIFF decode in-process; HEIC runs
 an external decoder. They skip the RAW-only ingest stages (hot pixels, demosaic, highlight reconstruction all
