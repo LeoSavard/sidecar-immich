@@ -47,7 +47,9 @@ fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
 fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let src = textureLoad(source_tex, vec2i(pos.xy), 0);
   let developed = P.display_referred > 0.5;
-  let local = mask_mix(M.layers, M.count, mask_weights(pos.xy), P.tone, P.mixer);
+  var local = mask_start(P.tone, P.mixer);
+  let weights = mask_weights(pos.xy);
+  for (var i = 0u; i < min(M.count, 8u); i++) { mask_add(&local, M.layers[i], i, weights[i], P.tone); }
   var c = white_balance(src.rgb, P.wb_mul * local.gain);      // 1
   c = exposure(c, P.exposure * exp2(local.ev));                // 2
   c = highlight_blend(c, src.a, P.hl_strength);

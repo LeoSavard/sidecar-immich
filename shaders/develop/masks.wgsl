@@ -35,30 +35,33 @@ struct MaskMix {
   curves: array<f32, 8>,     // each layer's weight on its curve, 0 for a layer without one
 }
 
-// `weights[i]` is mask i's value here, 0…1, as sampled; inverting and the amount are applied here. `tone` and
-// `mixer` are the global edit's.
-fn mask_mix(layers: array<MaskLayer, 8>, count: u32, weights: array<f32, 8>, tone: vec4f, mixer: array<vec4f, 8>) -> MaskMix {
+// No layer yet: the global edit's `tone` and `mixer`.
+fn mask_start(tone: vec4f, mixer: array<vec4f, 8>) -> MaskMix {
   var m: MaskMix;
   m.gain = vec3f(1.0);
   m.tone = tone;
   m.mixer = mixer;
-  for (var i = 0u; i < min(count, 8u); i++) {
-    let l = layers[i];
-    var w = clamp(weights[i], 0.0, 1.0);
-    if (l.tone.w > 0.5) { w = 1.0 - w; }
-    w *= l.tone.z;
-    if (w <= 0.0) { continue; }
-    m.gain *= pow(l.gain.rgb, vec3f(w));
-    m.ev += w * l.gain.w;
-    m.contrast += w * l.tone.x;
-    m.saturation += w * l.tone.y;
-    if (l.flags.z > 0.5) { m.tone += w * (l.tone_map - tone); }
-    if (l.flags.y > 0.5) {
-      for (var b = 0u; b < 8u; b++) { m.mixer[b] += w * l.mixer[b]; }
-    }
-    if (l.flags.x > 0.5) { m.curves[i] = w; }
-  }
   return m;
+}
+
+// Add layer `i`, `l`, to `m`. `weight` is its mask's value here, 0…1, as sampled; inverting and the amount are
+// applied here. `tone` is the global edit's. The caller loops over the layers, indexing the uniform array one
+// layer at a time: taking all eight (1.5 KB) as an argument copies them into every pixel's private memory,
+// which made developing some 60× slower.
+fn mask_add(m: ptr<function, MaskMix>, l: MaskLayer, i: u32, weight: f32, tone: vec4f) {
+  var w = clamp(weight, 0.0, 1.0);
+  if (l.tone.w > 0.5) { w = 1.0 - w; }
+  w *= l.tone.z;
+  if (w <= 0.0) { return; }
+  (*m).gain *= pow(l.gain.rgb, vec3f(w));
+  (*m).ev += w * l.gain.w;
+  (*m).contrast += w * l.tone.x;
+  (*m).saturation += w * l.tone.y;
+  if (l.flags.z > 0.5) { (*m).tone += w * (l.tone_map - tone); }
+  if (l.flags.y > 0.5) {
+    for (var b = 0u; b < 8u; b++) { (*m).mixer[b] += w * l.mixer[b]; }
+  }
+  if (l.flags.x > 0.5) { (*m).curves[i] = w; }
 }
 
 // Row `row` of the layer curves at `v`, linearly between entries (r32float isn't filterable).
