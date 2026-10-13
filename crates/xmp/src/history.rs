@@ -229,6 +229,12 @@ impl History {
     }
 
     /// The full edit a node stands for, rebuilt from the root down its ancestry.
+    ///
+    /// Not yet migration-aware: `SidecarDoc::edit` runs `migrate_highlight_shadow_anchors` for a sidecar
+    /// whose `processVersion` predates 2 (curve points doubling as Highlights/Shadows), but this method has
+    /// no such hook — it isn't called from `crates/api` or `crates/worker` yet (DESIGN.md §4's history
+    /// endpoints aren't wired up), so nothing live is affected today. Whoever wires it up should route the
+    /// document's `processVersion` through here first.
     pub fn edit_of(&self, id: &str) -> Result<EditParams> {
         let mut chain = Vec::new();
         let mut at = Some(id.to_string());

@@ -193,6 +193,30 @@ fn newer_process_version_is_read_only() {
     assert!(doc.set_edit(&EditParams::default(), "x").is_err());
 }
 
+/// A sidecar a `PROCESS_VERSION` 1 Sidecar wrote, with Highlights at +20 stored the old way (a curve point at
+/// x=0.75), must read back with `tone.highlights == 20` and no such point in `tone.curve` — the point that
+/// would otherwise collide with a hand-drawn one near the same x.
+#[test]
+fn an_old_sidecars_highlight_anchor_migrates_on_read() {
+    let tmp = tempfile::tempdir().unwrap();
+    let roots = [tmp.path().canonicalize().unwrap()];
+    let original = fixture(tmp.path(), "e.NEF");
+    let mut edit = EditParams::default();
+    edit.tone.curve = vec![[0.0, 0.0], [0.75, 0.75 + 20.0 / 100.0 * 0.15], [1.0, 1.0]];
+    update(&original, &roots, |d| {
+        d.set_edit(&edit, "x")?;
+        d.sidecar["processVersion"] = serde_json::json!(1);
+        Ok(())
+    })
+    .unwrap();
+
+    let doc = SidecarDoc::load(&original).unwrap();
+    let migrated = doc.edit();
+    assert!((migrated.tone.highlights - 20.0).abs() < 1e-6);
+    assert_eq!(migrated.tone.shadows, 0.0);
+    assert!(migrated.tone.curve.iter().all(|p| (p[0] - 0.75).abs() >= 1e-6), "the anchor point is gone: {:?}", migrated.tone.curve);
+}
+
 #[test]
 fn refuses_to_write_outside_roots() {
     let tmp = tempfile::tempdir().unwrap();

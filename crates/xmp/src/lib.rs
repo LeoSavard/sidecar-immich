@@ -268,7 +268,13 @@ impl SidecarDoc {
     }
 
     pub fn edit(&self) -> EditParams {
-        self.sidecar.get("edit").cloned().and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default()
+        let mut edit: EditParams = self.sidecar.get("edit").cloned().and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
+        // A sidecar with no processVersion at all predates this field; either way, under 2 means Highlights
+        // and Shadows (if ever touched) are still curve points, not tone.highlights/shadows.
+        if self.process_version().unwrap_or(0) < 2 {
+            edit.migrate_highlight_shadow_anchors();
+        }
+        edit
     }
 
     pub fn etag(&self) -> String {
