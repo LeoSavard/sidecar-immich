@@ -9,6 +9,7 @@ type Exports = {
 	sc_free(ptr: number, len: number): void;
 	sc_pack(ptr: number, len: number): number;
 	sc_pack_lens(ptr: number, len: number): number;
+	sc_tone_curve_lut(ptr: number, len: number): number;
 	sc_geometry(ptr: number, len: number): number;
 	sc_geometry_fit(ptr: number, len: number): number;
 	sc_default_edit(): number;
@@ -74,6 +75,15 @@ export class ColorPacker {
 	/** `geometry` with its crop fitted after a change from `before` (`sidecar_color::geometry::fit`). */
 	fit(geometry: Geometry, before: Geometry, size: [number, number]): Geometry {
 		return JSON.parse(new TextDecoder().decode(this.call(this.x.sc_geometry_fit, { geometry, before, size })));
+	}
+
+	/**
+	 * The tone curve's own LUT (`sidecar_color::spline::tone_curve_lut`) — the same one `pack()` bakes into
+	 * its result, callable on its own so the curve editor can draw the "ghost" line Highlights/Shadows alone
+	 * would produce (`curve: []`) without a full `pack()` call, which needs camera colour this doesn't have.
+	 */
+	toneCurveLut(curve: [number, number][], highlights: number, shadows: number): Float32Array {
+		return new Float32Array(this.call(this.x.sc_tone_curve_lut, { curve, highlights, shadows }).buffer);
 	}
 
 	/** `source` picks the develop pass's tone path: sensor light, or a picture a camera or app already rendered. */

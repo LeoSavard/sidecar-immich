@@ -7,17 +7,17 @@ import type { EditParams, Geometry, MaskAdjustment, MixerBand } from '$lib/types
 import { MASK_LABELS } from '$lib/masks';
 import { clean, decimals, signed } from '$lib/ui/format';
 
-/** Shadows and Highlights move the curve points at 25 % and 75 % — the same curve the curve editor shows. */
+/**
+ * A mask layer's Shadows and Highlights still move its curve's points at 25 % and 75 % (unlike the global
+ * curve, PROCESS_VERSION 2 gave that its own `tone.highlights`/`shadows` fields instead — see
+ * `crates/color/src/params.rs`'s `Tone` and docs/ROADMAP.md).
+ */
 export const CURVE_ANCHORS = { shadows: 0.25, highlights: 0.75 } as const;
 export type Anchor = keyof typeof CURVE_ANCHORS;
 
 const isAnchor = (x: number) => Object.values(CURVE_ANCHORS).some((a) => Math.abs(x - a) < 1e-6);
 
-export function curveOffset(e: EditParams, which: Anchor): number {
-	return curvePointOffset(e.tone.curve, which);
-}
-
-/** Highlights or Shadows as a curve holds them: its point at 75 % or 25 %, ±100 being ±0.15. */
+/** Highlights or Shadows as a mask layer's curve holds them: its point at 75 % or 25 %, ±100 being ±0.15. */
 export function curvePointOffset(curve: [number, number][], which: Anchor): number {
 	const x = CURVE_ANCHORS[which];
 	const p = curve.find((q) => Math.abs(q[0] - x) < 1e-6);
@@ -84,8 +84,8 @@ type Control = { label: string; get: (e: EditParams) => number; show: (v: number
 const CONTROLS: Control[] = [
 	{ label: 'Exposure', get: (e) => e.exposure.ev, show: (v) => `${signed(v, 2)} EV` },
 	{ label: 'Contrast', get: view.contrast, show: (v) => signed(v) },
-	{ label: 'Highlights', get: (e) => curveOffset(e, 'highlights'), show: (v) => signed(v) },
-	{ label: 'Shadows', get: (e) => curveOffset(e, 'shadows'), show: (v) => signed(v) },
+	{ label: 'Highlights', get: (e) => e.tone.highlights ?? 0, show: (v) => signed(v) },
+	{ label: 'Shadows', get: (e) => e.tone.shadows ?? 0, show: (v) => signed(v) },
 	{ label: 'Whites', get: view.whites, show: (v) => signed(v) },
 	{ label: 'Blacks', get: view.blacks, show: (v) => signed(v) },
 	{ label: 'Highlight recovery', get: view.highlightRecovery, show: (v) => `${decimals(v)} %` },
@@ -96,8 +96,9 @@ const CONTROLS: Control[] = [
 	{ label: 'Colour noise reduction', get: (e) => e.detail.denoiseChroma, show: (v) => decimals(v) }
 ];
 
-/** The curve apart from the two points Highlights and Shadows own, so moving those isn't also "curve edited". */
-const ownCurve = (e: EditParams) => JSON.stringify(e.tone.curve.filter((p) => !isAnchor(p[0])));
+/** The global curve is manually-drawn points only — Highlights/Shadows are `tone.highlights`/`shadows`, not
+ * points in here, so unlike a mask layer's curve (`layerCurve`) this needs no anchor filtering. */
+const ownCurve = (e: EditParams) => JSON.stringify(e.tone.curve);
 
 /** What `to` changes from `from`, in the order the editor shows its controls: "Exposure +0.30 EV". */
 export function describeChanges(from: EditParams, to: EditParams): string[] {
@@ -191,9 +192,8 @@ export const PICKS: { id: string; label: string; take: (into: EditParams, from: 
 			e.tone.contrast = f.tone.contrast;
 			e.tone.whiteEv = f.tone.whiteEv;
 			e.tone.blackEv = f.tone.blackEv;
-			// Highlights and Shadows are curve points: take those two, keep the rest of this curve.
-			const anchors = f.tone.curve.filter((p) => isAnchor(p[0]));
-			e.tone.curve = [...e.tone.curve.filter((p) => !isAnchor(p[0])), ...structuredClone(anchors)].sort((a, b) => a[0] - b[0]);
+			e.tone.highlights = f.tone.highlights ?? 0;
+			e.tone.shadows = f.tone.shadows ?? 0;
 		}
 	},
 	{ id: 'curve', label: 'Curve', take: (e, f) => (e.tone.curve = structuredClone(f.tone.curve)) },

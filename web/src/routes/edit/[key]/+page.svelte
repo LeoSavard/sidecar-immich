@@ -22,7 +22,7 @@
 	import HistoryPanel from '$lib/ui/HistoryPanel.svelte';
 	import MasksPanel from '$lib/ui/MasksPanel.svelte';
 	import CropOverlay from '$lib/ui/CropOverlay.svelte';
-	import { CURVE_ANCHORS, NO_GEOMETRY, PICKS, curveOffset, isNoGeometry, project, twist, untwist, view as sliders, type Anchor } from '$lib/state/edit-view';
+	import { NO_GEOMETRY, PICKS, isNoGeometry, project, twist, untwist, view as sliders } from '$lib/state/edit-view';
 	import { decimals, signed } from '$lib/ui/format';
 	import type { Band, Crop, DisplaySpace, EditParams, Frame, Geometry, HistoryState, Lens, MaskAdjustment, Meta, MixerBand } from '$lib/types';
 
@@ -160,6 +160,9 @@
 	 */
 	let lensDefaulted = false;
 	let packer: ColorPacker;
+	/** What Highlights/Shadows alone would do to an identity curve — the curve editor's "ghost" line, drawn
+	 * behind the real one so a slider's effect stays visible even once a manual curve has its own shape. */
+	const ghostLut = $derived.by(() => (edit ? (packer?.toneCurveLut([], edit.tone.highlights ?? 0, edit.tone.shadows ?? 0) ?? null) : null));
 	let display: DisplaySpace = 'srgb';
 	let developDirty = true;
 	let frame = 0;
@@ -1194,14 +1197,6 @@
 		changed();
 	}
 
-	function setCurveOffset(which: Anchor, v: number) {
-		if (!edit) return;
-		const x = CURVE_ANCHORS[which];
-		const rest = edit.tone.curve.filter((q) => Math.abs(q[0] - x) >= 1e-6);
-		edit.tone.curve = v === 0 ? rest : [...rest, [x, Math.min(1, Math.max(0, x + (v / 100) * 0.15))] as [number, number]].sort((a, b) => a[0] - b[0]);
-		changed();
-	}
-
 	function setLens(on: boolean) {
 		const profile = meta?.info.lensProfile;
 		if (!edit || !profile) return;
@@ -1326,8 +1321,8 @@
 			<!-- A developed file has no headroom past white to recover: ±2 EV is already most of what it holds. -->
 			<Slider id="exposure" label="Exposure" value={edit.exposure.ev} min={developed ? -2 : -5} max={developed ? 2 : 5} step={0.01} defaultValue={0} bipolar format={(v) => `${signed(v, 2)} EV`} onchange={(v) => { edit!.exposure.ev = v; changed(); }} oncommit={committed} />
 			<Slider id="contrast" label="Contrast" value={sliders.contrast(edit)} min={-70} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => { edit!.tone.contrast = 1 + v / 100; changed(); }} oncommit={committed} />
-			<Slider id="highlights" label="Highlights" value={curveOffset(edit, 'highlights')} min={-100} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => setCurveOffset('highlights', v)} oncommit={committed} />
-			<Slider id="shadows" label="Shadows" value={curveOffset(edit, 'shadows')} min={-100} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => setCurveOffset('shadows', v)} oncommit={committed} />
+			<Slider id="highlights" label="Highlights" value={edit.tone.highlights ?? 0} min={-100} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => { edit!.tone.highlights = v; changed(); }} oncommit={committed} />
+			<Slider id="shadows" label="Shadows" value={edit.tone.shadows ?? 0} min={-100} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => { edit!.tone.shadows = v; changed(); }} oncommit={committed} />
 			<Slider id="whites" label="Whites" value={sliders.whites(edit)} min={-100} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => { edit!.tone.whiteEv = 4.5 - (v / 100) * 2; changed(); }} oncommit={committed} />
 			<Slider id="blacks" label="Blacks" value={sliders.blacks(edit)} min={-100} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => { edit!.tone.blackEv = -8 - (v / 100) * 3; changed(); }} oncommit={committed} />
 			<!-- Highlight recovery reconstructs clipped sensor channels; an already-developed file has none to
@@ -1342,7 +1337,7 @@
 {#snippet curveSection()}
 	{#if edit}
 		<div class="grid gap-2">
-			<CurveEditor points={edit.tone.curve} {lut} onchange={(p) => { edit!.tone.curve = p; changed(); }} oncommit={committed} />
+			<CurveEditor points={edit.tone.curve} {lut} {ghostLut} onchange={(p) => { edit!.tone.curve = p; changed(); }} oncommit={committed} />
 			<button type="button" class="justify-self-end rounded px-2 py-1 text-xs text-fg-2 hover:bg-raised" onclick={() => { edit!.tone.curve = [[0, 0], [1, 1]]; changed(); committed(); }}>Reset curve</button>
 		</div>
 	{/if}

@@ -13,7 +13,12 @@ export type EditParams = {
 	processVersion: number;
 	whiteBalance: { mode: 'asShot' | 'custom'; temperatureK: number; tint: number };
 	exposure: { ev: number; highlightBlend: number };
-	tone: { blackEv: number; whiteEv: number; contrast: number; curve: [number, number][] };
+	/**
+	 * `curve` is manually-drawn points only. Highlights/Shadows are `highlights`/`shadows` (−100…100), a
+	 * smooth additive bump rather than points sharing `curve`'s array (absent at 0, matching a never-touched
+	 * edit's lean JSON — see crates/color/src/params.rs's `Tone` and `PROCESS_VERSION` 2).
+	 */
+	tone: { blackEv: number; whiteEv: number; contrast: number; curve: [number, number][]; highlights?: number; shadows?: number };
 	mixer: Record<Band, MixerBand>;
 	detail: {
 		sharpenAmount: number;
