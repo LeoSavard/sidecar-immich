@@ -91,6 +91,13 @@ exports SDR, so an edit looks flat beside its original. In order:
    exist. (Both reverse-engineering projects are GPL-licensed or unlicensed; nothing from either is usable
    here regardless — CLAUDE.md — this was read for background, not ported.)
 
+   `dev/hdr-gainmap-probe` builds that check: real, controlled Ultra HDR JPEGs (ISO 21496-1, via Google's
+   `libultrahdr` — MIT/Apache-2.0) at known gain and headroom values, to view on an iPhone and measure with a
+   colorimeter against that format's own documented formula (`HDR = SDR × headroom^gain`, the grounded form
+   of the guesses above). Measuring tells us whether Safari actually renders the open standard faithfully,
+   and if Apple's own `HDRGainMapHeadroom` behaves the way this format's `maxContentBoost` does — the best
+   starting point available for stage 2's formula, once measured rather than assumed.
+
    **A second, newer mechanism exists and isn't read yet either.** Some files also carry an ICC profile
    (`Display P3 Primaries; PQ (Adaptive Gain Curve …)`) with a binary `HD Gain Map Info` tag — Apple's iOS
    18+ "Adaptive HDR", introduced alongside ISO 21496-1 at WWDC24 and still not interchangeable with
