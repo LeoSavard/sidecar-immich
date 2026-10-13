@@ -134,6 +134,15 @@ carried the raw disparity array or its `XMP-depthData` calibration block at all*
 needs its own TIFF-SubIFD reader; `heif-convert` (a HEIF-only tool) finds nothing in one, and
 `portrait_depth::read` doesn't attempt it.
 
+Checked and ruled out, rather than left open: these ProRAW DNGs carry no `NoiseProfile`, `GainMap`,
+`OpcodeList`, or `CameraCalibration` tag at all (grepped 5–15 files directly), so there's no free per-camera
+noise model sitting unused for the wavelet denoiser (roadmap, "Detail") to pick up, and no shading/vignette
+table beyond what lensfun already supplies. They also carry no HDR gain map — expected, since a gain map
+describes how an *already-rendered* SDR picture should be lifted for HDR display, and a DNG hasn't been
+rendered yet; the gain map work below is a HEIC/JPEG-export concern, not something a DNG path would also
+unlock. `AsShotNeutral` is present but always `1 1 1` on every file checked — Apple doesn't put the as-shot
+white balance there; LibRaw already gets it from `cam_mul` instead (DESIGN.md §5), so this isn't a gap.
+
 *Resolution and registration.* The effects matte is half the main image's edge, same aspect, the same HEIF
 rotation libheif already applies to the main image — close enough to the proxy's frame that it could slot in
 beside the existing model masks (DESIGN.md §15) once resized. The raw disparity image, being fixed-resolution
@@ -194,6 +203,15 @@ three like the main decode.
 Still open: undoing the per-shot `IntMinValue`/`FloatMinValue` quantization described above, a DNG reader,
 calling any of this from the worker or exposing it over HTTP, the edge-aware resize into the proxy's frame,
 and picking a first real use (depth as a mask layer is the obvious one).
+
+*Decision (2026-10-13): parked behind the HDR gain map work below.* The depth signal only ever appears on
+~16% of photos and its best-understood use (a depth mask for grading) is a small, well-scoped follow-up
+whenever it's picked back up — but it doesn't unlock the headline ask (a blurred background) by itself, since
+that needs a new spatially-varying blur renderer that would work just as well off `sidecar-ml`'s `subject`
+mask, for all photos, once it exists. The gain map is universal (91% of HEICs) and fixes a visible regression
+(an edited photo looking duller than its original) rather than adding a new capability, so it's the correct
+next step. This section stays as the record of what was verified, for whenever the depth mask or the blur
+renderer comes back up.
 
 **Editing non-RAW images — done, in `sidecar_raw::decoded`.** JPEG, PNG and TIFF decode in-process; HEIC runs
 an external decoder. They skip the RAW-only ingest stages (hot pixels, demosaic, highlight reconstruction all
