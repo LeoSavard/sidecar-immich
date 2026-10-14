@@ -268,7 +268,13 @@ impl SidecarDoc {
     }
 
     pub fn edit(&self) -> EditParams {
-        self.sidecar.get("edit").cloned().and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default()
+        let mut edit: EditParams = self.sidecar.get("edit").cloned().and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
+        // The sidecar's own version is the one an older Sidecar wrote; the edit inside carries it too, but a
+        // sidecar from before the field existed has none, which means 1.
+        let stored = self.process_version().unwrap_or(1).min(edit.process_version as u64) as u32;
+        edit.process_version = stored;
+        edit.migrate();
+        edit
     }
 
     pub fn etag(&self) -> String {

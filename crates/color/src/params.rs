@@ -5,10 +5,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::camera::{self, CameraColor};
 use crate::mat::{self, M3};
-use crate::spline::{LUT_SIZE, monotone_lut};
+use crate::spline::{HIGHLIGHT_SHADOW_SCALE, LUT_SIZE, monotone_lut, tone_curve_lut};
 use crate::tone;
 
-pub const PROCESS_VERSION: u32 = 1;
+/// 2: Highlights and Shadows stopped sharing points with the manual curve (`Tone::highlights`/`shadows`,
+/// `migrate_highlight_shadow_anchors`) — an edit saved under version 1 needs its curve read differently, not
+/// just a field that defaults to off, so this is a real bump rather than an additive field. See
+/// docs/ROADMAP.md, "Curve editor: Highlights and Shadows stop sharing points with the manual curve".
+pub const PROCESS_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
@@ -54,6 +58,37 @@ impl Default for EditParams {
     }
 }
 
+impl EditParams {
+    /// Bring an edit stored under an older `PROCESS_VERSION` to the current meaning, and stamp it current.
+    /// Idempotent: an edit already at this version is left as it is (a point a person later drew at exactly
+    /// x = 0.75 is theirs, not an old Highlights anchor). A newer version is never lowered.
+    pub fn migrate(&mut self) {
+        if self.process_version < 2 {
+            self.migrate_highlight_shadow_anchors();
+        }
+        self.process_version = self.process_version.max(PROCESS_VERSION);
+    }
+
+    /// An edit saved under `PROCESS_VERSION` 1 stored Highlights/Shadows as curve points at x≈0.25/0.75
+    /// (`CURVE_ANCHORS` in the web app, before this version): pulls those two points' offsets out into
+    /// `tone.highlights`/`shadows` and removes them from `tone.curve`, so a slider that was at, say, +20 keeps
+    /// reading +20 — its strength carries forward even though the curve no longer shares a point with it.
+    /// Called through `migrate`, which `sidecar_xmp` runs on the current edit and on every history version
+    /// it hands out; an edit built fresh (no anchor points to find) is unaffected either way.
+    fn migrate_highlight_shadow_anchors(&mut self) {
+        let anchor_offset = |curve: &[[f64; 2]], x: f64| {
+            curve.iter().find(|p| (p[0] - x).abs() < 1e-6).map(|p| (p[1] - x) / HIGHLIGHT_SHADOW_SCALE * 100.0)
+        };
+        if let Some(v) = anchor_offset(&self.tone.curve, 0.25) {
+            self.tone.shadows = v;
+        }
+        if let Some(v) = anchor_offset(&self.tone.curve, 0.75) {
+            self.tone.highlights = v;
+        }
+        self.tone.curve.retain(|p| (p[0] - 0.25).abs() >= 1e-6 && (p[0] - 0.75).abs() >= 1e-6);
+    }
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub enum WhiteBalanceMode {
@@ -95,8 +130,15 @@ pub struct Tone {
     pub black_ev: f64,
     pub white_ev: f64,
     pub contrast: f64,
-    /// Control points over display-encoded values, `[x, y]` in 0…1.
+    /// Control points over display-encoded values, `[x, y]` in 0…1. Manually drawn only, as of
+    /// `PROCESS_VERSION` 2 — Highlights and Shadows are `highlights`/`shadows` below, not points in here.
     pub curve: Vec<[f64; 2]>,
+    /// −100…100 each: a smooth additive bump on top of `curve` (`spline::tone_curve_lut`), not a point in it,
+    /// so drawing a custom curve can never have a slider silently steal or move one of its points.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub highlights: f64,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub shadows: f64,
 }
 
 /// Where the default tone curve puts black and white, in stops from middle grey. The Blacks and Whites sliders
@@ -106,7 +148,14 @@ pub const DEFAULT_WHITE_EV: f64 = 4.5;
 
 impl Default for Tone {
     fn default() -> Self {
-        Self { black_ev: DEFAULT_BLACK_EV, white_ev: DEFAULT_WHITE_EV, contrast: 1.0, curve: vec![[0.0, 0.0], [1.0, 1.0]] }
+        Self {
+            black_ev: DEFAULT_BLACK_EV,
+            white_ev: DEFAULT_WHITE_EV,
+            contrast: 1.0,
+            curve: vec![[0.0, 0.0], [1.0, 1.0]],
+            highlights: 0.0,
+            shadows: 0.0,
+        }
     }
 }
 
@@ -503,7 +552,8 @@ pub fn pack(edit: &EditParams, camera: &CameraColor, source: SourceKind, display
             mixer: mixer_params(&m.mixer),
         };
     }
-    Packed { uniform: bytemuck::bytes_of(&params).to_vec(), lut: monotone_lut(&edit.tone.curve, LUT_SIZE), temperature_k: wb.temperature_k, tint: wb.tint, masks, mask_curves }
+    let lut = tone_curve_lut(&edit.tone.curve, edit.tone.highlights, edit.tone.shadows, LUT_SIZE);
+    Packed { uniform: bytemuck::bytes_of(&params).to_vec(), lut, temperature_k: wb.temperature_k, tint: wb.tint, masks, mask_curves }
 }
 
 #[cfg(test)]
@@ -705,5 +755,43 @@ mod tests {
         let e = EditParams { geometry: Some(crate::geometry::Geometry { angle: 2.5, ..Default::default() }), ..Default::default() };
         let back: EditParams = serde_json::from_value(serde_json::to_value(&e).unwrap()).unwrap();
         assert_eq!(back, e);
+    }
+
+    /// A `PROCESS_VERSION` 1 edit with a manually-drawn point plus Highlights at +20 and Shadows untouched:
+    /// migration must carry the +20 forward into the new field, leave the manual point alone, and remove only
+    /// the anchor point — not reinterpret the hand-drawn one as an anchor just because it's nearby-ish.
+    #[test]
+    fn migration_carries_old_anchor_points_into_the_new_fields() {
+        let mut e = EditParams::default();
+        e.tone.curve = vec![[0.0, 0.0], [0.3, 0.22], [0.75, 0.75 + 20.0 / 100.0 * HIGHLIGHT_SHADOW_SCALE], [1.0, 1.0]];
+        e.migrate_highlight_shadow_anchors();
+        assert!((e.tone.highlights - 20.0).abs() < 1e-9);
+        assert_eq!(e.tone.shadows, 0.0);
+        assert_eq!(e.tone.curve, vec![[0.0, 0.0], [0.3, 0.22], [1.0, 1.0]]);
+    }
+
+    #[test]
+    fn migration_is_a_no_op_without_anchor_points() {
+        let mut e = EditParams::default();
+        e.tone.curve = vec![[0.0, 0.0], [0.4, 0.5], [1.0, 1.0]];
+        let before = e.clone();
+        e.migrate_highlight_shadow_anchors();
+        assert_eq!(e, before);
+    }
+
+    /// The whole point: migrating must reproduce the exact LUT value the old mechanism baked at the anchor,
+    /// not just a numerically-equal slider reading.
+    #[test]
+    fn migrated_edit_packs_the_same_value_at_the_anchor_as_the_old_mechanism_did() {
+        let mut e = EditParams::default();
+        let old_y = 0.25 + (-35.0_f64) / 100.0 * HIGHLIGHT_SHADOW_SCALE;
+        e.tone.curve = vec![[0.0, 0.0], [0.25, old_y], [1.0, 1.0]];
+        let before = pack(&e, &crate::camera::nikon_d850(), SourceKind::Raw, DisplaySpace::Srgb).lut;
+
+        e.migrate_highlight_shadow_anchors();
+        let after = pack(&e, &crate::camera::nikon_d850(), SourceKind::Raw, DisplaySpace::Srgb).lut;
+
+        let i = (0.25 * (LUT_SIZE - 1) as f64).round() as usize;
+        assert!((before[i] - after[i]).abs() < 1e-3, "before={}, after={}", before[i], after[i]);
     }
 }
