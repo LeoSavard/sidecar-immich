@@ -12,6 +12,7 @@
 	import { api, HttpError } from '$lib/api';
 	import { settings, SPACE_LABELS } from '$lib/settings';
 	import { clearDraft, loadDraft, saveDraft } from '$lib/state/drafts';
+	import { copyLook, pasteLook, readLookClipboard, type LookClipboard } from '$lib/state/look-clipboard';
 	import { UndoStack } from '$lib/state/undo';
 	import Slider from '$lib/ui/Slider.svelte';
 	import Histogram from '$lib/ui/Histogram.svelte';
@@ -42,6 +43,7 @@
 	 * it every few pixels of a drag.
 	 */
 	let asShotWb = $state({ temperatureK: 5000, tint: 0 });
+	let lookClipboard = $state<LookClipboard | null>(readLookClipboard());
 	let lut = $state<Float32Array | null>(null);
 	/** The layers' curves as they render, a 4,096-entry row each: what the selected layer's curve editor draws. */
 	let maskCurves = $state<Float32Array | null>(null);
@@ -1480,6 +1482,26 @@
 					</button>
 					<button type="button" class="grid size-9 place-items-center rounded bg-raised text-fg-2 disabled:opacity-40" aria-label="Redo" disabled={!canRedo || readOnly} onclick={() => restore(undo.redo())}>
 						<svg viewBox="0 0 16 16" class="size-4 -scale-x-100" aria-hidden="true"><path d="M6 3 2 7l4 4M2.5 7H10a4 4 0 0 1 0 8H8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></svg>
+					</button>
+					<button
+						type="button"
+						class="grid size-9 place-items-center rounded bg-raised text-fg-2 disabled:opacity-40"
+						aria-label="Copy look"
+						title="Copy this photo's color recipe"
+						disabled={!edit}
+						onclick={() => { if (edit && meta) { copyLook($state.snapshot(edit), meta.fileName); lookClipboard = readLookClipboard(); } }}
+					>
+						<svg viewBox="0 0 16 16" class="size-4" aria-hidden="true"><rect x="5" y="2.5" width="7" height="3" rx="0.5" fill="none" stroke="currentColor" stroke-width="1.3" /><rect x="3.5" y="4.5" width="10" height="10" rx="1" fill="none" stroke="currentColor" stroke-width="1.3" /></svg>
+					</button>
+					<button
+						type="button"
+						class="grid size-9 place-items-center rounded bg-raised text-fg-2 disabled:opacity-40"
+						aria-label="Paste look"
+						title={lookClipboard ? `Apply the look copied from ${lookClipboard.from}` : 'No look copied yet'}
+						disabled={!edit || !lookClipboard || readOnly}
+						onclick={() => { if (edit && pasteLook(edit)) { changed(); committed(); } }}
+					>
+						<svg viewBox="0 0 16 16" class="size-4" aria-hidden="true"><rect x="3.5" y="4.5" width="10" height="10" rx="1" fill="none" stroke="currentColor" stroke-width="1.3" /><path d="M6 9.2 7.7 11l2.6-3.4" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" /></svg>
 					</button>
 					<button type="button" class="h-9 rounded bg-raised px-3 text-sm" onclick={() => (exporting = true)}>Export</button>
 					<button type="button" class="h-9 rounded bg-fg px-4 text-sm font-medium text-ground disabled:bg-raised disabled:text-muted" disabled={!dirty || saving || readOnly} onclick={() => commit()}>
