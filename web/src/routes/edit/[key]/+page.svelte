@@ -14,18 +14,20 @@
 	import { clearDraft, loadDraft, saveDraft } from '$lib/state/drafts';
 	import { copyLook, pasteLook, readLookClipboard, type LookClipboard } from '$lib/state/look-clipboard';
 	import { UndoStack } from '$lib/state/undo';
-	import Slider from '$lib/ui/Slider.svelte';
 	import Histogram from '$lib/ui/Histogram.svelte';
-	import CurveEditor from '$lib/ui/CurveEditor.svelte';
-	import ColorMixer from '$lib/ui/ColorMixer.svelte';
 	import ExportSheet from '$lib/ui/ExportSheet.svelte';
-	import Loupe from '$lib/ui/Loupe.svelte';
 	import HistoryPanel from '$lib/ui/HistoryPanel.svelte';
 	import MasksPanel from '$lib/ui/MasksPanel.svelte';
 	import CropOverlay from '$lib/ui/CropOverlay.svelte';
-	import { NO_GEOMETRY, PICKS, isNoGeometry, project, twist, untwist, view as sliders } from '$lib/state/edit-view';
-	import { decimals, signed } from '$lib/ui/format';
-	import type { Band, Crop, DisplaySpace, EditParams, Frame, Geometry, HistoryState, Lens, MaskAdjustment, Meta, MixerBand } from '$lib/types';
+	import LensSection from '$lib/ui/sections/LensSection.svelte';
+	import CropSection from '$lib/ui/sections/CropSection.svelte';
+	import WhiteBalanceSection from '$lib/ui/sections/WhiteBalanceSection.svelte';
+	import LightSection from '$lib/ui/sections/LightSection.svelte';
+	import CurveSection from '$lib/ui/sections/CurveSection.svelte';
+	import ColorSection from '$lib/ui/sections/ColorSection.svelte';
+	import DetailSection from '$lib/ui/sections/DetailSection.svelte';
+	import { NO_GEOMETRY, PICKS, isNoGeometry, project, twist, untwist } from '$lib/state/edit-view';
+	import type { Crop, DisplaySpace, EditParams, Frame, Geometry, HistoryState, MaskAdjustment, Meta } from '$lib/types';
 
 	type EditState = { edit: EditParams; etag: string; head: string; readOnly: boolean; writable?: boolean; exports: unknown[]; forked?: boolean; savedFor?: string };
 	type Section = 'lens' | 'crop' | 'wb' | 'light' | 'curve' | 'color' | 'masks' | 'detail' | 'history';
@@ -1193,28 +1195,10 @@
 	});
 
 	// ---------- edit helpers
-	function setWb(field: 'temperatureK' | 'tint', value: number) {
+	/** What sections call to change the edit (`$lib/ui/sections`): apply it, then redraw and mark it unsaved. */
+	function update(mutate: (e: EditParams) => void) {
 		if (!edit) return;
-		if (edit.whiteBalance.mode === 'asShot') {
-			edit.whiteBalance.temperatureK = Math.round(asShotWb.temperatureK);
-			edit.whiteBalance.tint = Math.round(asShotWb.tint);
-			edit.whiteBalance.mode = 'custom';
-		}
-		edit.whiteBalance[field] = value;
-		changed();
-	}
-
-	function setLens(on: boolean) {
-		const profile = meta?.info.lensProfile;
-		if (!edit || !profile) return;
-		edit.lens = on ? { profile: profile.id, distortion: 100, lateralCa: 100, vignetting: 100 } : null;
-		changed();
-		committed();
-	}
-
-	function setLensStrength(field: keyof Omit<Lens, 'profile'>, v: number) {
-		if (!edit?.lens) return;
-		edit.lens[field] = v;
+		mutate(edit);
 		changed();
 	}
 
@@ -1230,8 +1214,6 @@
 		]
 			.filter(Boolean)
 			.join(' · ');
-	const TEMP_TRACK = 'linear-gradient(90deg,#5f7fb6,#9aa0a6 45%,#c9a15f)';
-	const TINT_TRACK = 'linear-gradient(90deg,#6f9f6f,#9aa0a6 50%,#b07aa6)';
 	const sections: { id: Section; label: string; short: string }[] = [
 		{ id: 'lens', label: 'Lens', short: 'Lens' },
 		{ id: 'crop', label: 'Crop and straighten', short: 'Crop' },
@@ -1249,118 +1231,27 @@
 <svelte:window onkeydown={keydown} />
 
 {#snippet lensSection()}
-	{#if edit && meta}
-		{@const profile = meta.info.lensProfile}
-		{@const name = meta.info.lensIdentity?.lensId ?? meta.info.lensIdentity?.lensModel ?? meta.info.lens}
-		<div class="grid gap-2">
-			{#if name}<p class="text-xs text-fg-2">{name}</p>{/if}
-			{#if !profile}
-				<p class="text-xs text-fg-2">
-					{developed ? 'This picture was already developed, lens and all.' : 'No correction for this lens: the file carries none, and no lens database profile matches it yet.'}
-				</p>
-			{:else}
-				<div class="flex items-center justify-between text-xs">
-					<span class="text-fg-2">{profile.label}</span>
-					<button type="button" aria-pressed={!!edit.lens} class="rounded-full px-3 py-1 {edit.lens ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" onclick={() => setLens(!edit!.lens)}>{edit.lens ? 'On' : 'Off'}</button>
-				</div>
-				{#if profile.required && !edit.lens}
-					<p class="text-xs text-warning">This lens is designed to be corrected in software. Without it the frame shows distortion the camera never showed.</p>
-				{/if}
-				{#if edit.lens}
-					{#if profile.distortion}
-						<Slider id="lens-distortion" label="Distortion" value={edit.lens.distortion} min={0} max={200} defaultValue={100} format={(v) => `${decimals(v)} %`} onchange={(v) => setLensStrength('distortion', v)} oncommit={committed} />
-					{/if}
-					{#if profile.caRed || profile.caBlue}
-						<Slider id="lens-ca" label="Chromatic aberration" value={edit.lens.lateralCa} min={0} max={200} defaultValue={100} format={(v) => `${decimals(v)} %`} onchange={(v) => setLensStrength('lateralCa', v)} oncommit={committed} />
-					{/if}
-					{#if profile.vignetting}
-						<Slider id="lens-vignetting" label="Vignetting" value={edit.lens.vignetting} min={0} max={200} defaultValue={100} format={(v) => `${decimals(v)} %`} onchange={(v) => setLensStrength('vignetting', v)} oncommit={committed} />
-					{/if}
-				{/if}
-			{/if}
-		</div>
-	{/if}
+	{#if edit && meta}<LensSection {edit} onchange={update} oncommit={committed} info={meta.info} {developed} />{/if}
 {/snippet}
 
 {#snippet cropSection()}
-	{#if edit && meta}
-		{@const g = edit.geometry ?? NO_GEOMETRY}
-		{@const ratios = [{ label: 'Free', value: 0 }, { label: 'Original', value: originalRatio() }, { label: '1:1', value: 1 }, { label: '4:5', value: 4 / 5 }, { label: '3:2', value: 3 / 2 }, { label: '16:9', value: 16 / 9 }]}
-		<div class="grid gap-2">
-			<div class="flex flex-wrap items-center gap-1.5 text-xs" role="radiogroup" aria-label="Crop proportions">
-				{#each ratios as r (r.label)}
-					{@const on = r.value === 0 ? !g.ratio : Math.abs(g.ratio - r.value) < 1e-3 || (r.label !== 'Original' && Math.abs(g.ratio - 1 / r.value) < 1e-3 && r.value !== 1)}
-					<button type="button" role="radio" aria-checked={on} disabled={readOnly} class="rounded-full px-2.5 py-1 {on ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" onclick={() => { setGeometry({ ratio: r.value }); committed(); }}>{r.label}</button>
-				{/each}
-				<button type="button" disabled={readOnly || !g.ratio || g.ratio === 1} class="rounded-full bg-raised px-2.5 py-1 text-fg-2 disabled:opacity-40" aria-label="Swap portrait and landscape" onclick={() => { setGeometry({ ratio: 1 / g.ratio }); committed(); }}>⇄</button>
-			</div>
-			<div class="flex flex-wrap gap-1.5 text-xs">
-				<button type="button" disabled={readOnly} class="rounded-full bg-raised px-2.5 py-1 text-fg" onclick={() => turn(-1)}>⟲ Left</button>
-				<button type="button" disabled={readOnly} class="rounded-full bg-raised px-2.5 py-1 text-fg" onclick={() => turn(1)}>⟳ Right</button>
-				<button type="button" disabled={readOnly} aria-pressed={g.flip} class="rounded-full px-2.5 py-1 {g.flip ? 'bg-fg text-ground' : 'bg-raised text-fg'}" onclick={() => { setGeometry({ flip: !g.flip }); committed(); }}>Mirror</button>
-				<button type="button" disabled={readOnly || !edit.geometry} class="ml-auto rounded-full bg-raised px-2.5 py-1 text-fg-2 disabled:opacity-40" onclick={resetGeometry}>Reset</button>
-			</div>
-			<Slider id="geo-angle" label="Straighten" value={g.angle} min={-45} max={45} step={0.1} defaultValue={0} bipolar disabled={readOnly} format={(v) => `${signed(v, 1)}°`} onchange={(v) => setGeometry({ angle: v })} oncommit={committed} />
-			<Slider id="geo-vertical" label="Vertical" value={g.vertical} min={-100} max={100} defaultValue={0} bipolar disabled={readOnly} format={(v) => signed(v)} onchange={(v) => setGeometry({ vertical: v })} oncommit={committed} />
-			<Slider id="geo-horizontal" label="Horizontal" value={g.horizontal} min={-100} max={100} defaultValue={0} bipolar disabled={readOnly} format={(v) => signed(v)} onchange={(v) => setGeometry({ horizontal: v })} oncommit={committed} />
-			<Slider id="geo-aspect" label="Aspect" value={g.aspect} min={-100} max={100} defaultValue={0} bipolar disabled={readOnly} format={(v) => signed(v)} onchange={(v) => setGeometry({ aspect: v })} oncommit={committed} />
-			<p class="text-xs text-muted">Drag the frame's corners and edges to crop, or inside it to move it. Straighten and keystone keep the crop inside the photo.</p>
-		</div>
-	{/if}
+	{#if edit && meta}<CropSection {edit} {readOnly} originalRatio={originalRatio()} ongeometry={setGeometry} onturn={turn} onreset={resetGeometry} oncommit={committed} />{/if}
 {/snippet}
 
 {#snippet wbSection()}
-	{#if edit}
-		<div class="grid gap-2">
-			<div class="flex items-center justify-between text-xs">
-				<span class="text-fg-2">{edit.whiteBalance.mode === 'asShot' ? (developed ? 'As saved' : 'As shot') : 'Custom'}</span>
-				<button type="button" class="rounded px-2 py-1 text-fg-2 hover:bg-raised disabled:opacity-40" disabled={edit.whiteBalance.mode === 'asShot'} onclick={() => { edit!.whiteBalance.mode = 'asShot'; changed(); committed(); }}>Reset to {developed ? 'as saved' : 'as shot'}</button>
-			</div>
-			<Slider id="wb-temp" label="Temperature" value={edit.whiteBalance.mode === 'asShot' ? Math.round(asShotWb.temperatureK) : edit.whiteBalance.temperatureK} min={2000} max={12000} step={10} defaultValue={Math.round(asShotWb.temperatureK)} trackGradient={TEMP_TRACK} format={(v) => `${decimals(v)} K`} onchange={(v) => setWb('temperatureK', v)} oncommit={committed} />
-			<Slider id="wb-tint" label="Tint" value={edit.whiteBalance.mode === 'asShot' ? Math.round(asShotWb.tint) : edit.whiteBalance.tint} min={-150} max={150} defaultValue={0} bipolar trackGradient={TINT_TRACK} format={(v) => signed(v)} onchange={(v) => setWb('tint', v)} oncommit={committed} />
-		</div>
-	{/if}
+	{#if edit}<WhiteBalanceSection {edit} onchange={update} oncommit={committed} {developed} asShot={asShotWb} />{/if}
 {/snippet}
 
 {#snippet lightSection()}
-	{#if edit}
-		<div class="grid gap-2">
-			<!-- A developed file has no headroom past white to recover: ±2 EV is already most of what it holds. -->
-			<Slider id="exposure" label="Exposure" value={edit.exposure.ev} min={developed ? -2 : -5} max={developed ? 2 : 5} step={0.01} defaultValue={0} bipolar format={(v) => `${signed(v, 2)} EV`} onchange={(v) => { edit!.exposure.ev = v; changed(); }} oncommit={committed} />
-			<Slider id="contrast" label="Contrast" value={sliders.contrast(edit)} min={-70} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => { edit!.tone.contrast = 1 + v / 100; changed(); }} oncommit={committed} />
-			<Slider id="highlights" label="Highlights" value={edit.tone.highlights ?? 0} min={-100} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => { edit!.tone.highlights = v; changed(); }} oncommit={committed} />
-			<Slider id="shadows" label="Shadows" value={edit.tone.shadows ?? 0} min={-100} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => { edit!.tone.shadows = v; changed(); }} oncommit={committed} />
-			<Slider id="whites" label="Whites" value={sliders.whites(edit)} min={-100} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => { edit!.tone.whiteEv = 4.5 - (v / 100) * 2; changed(); }} oncommit={committed} />
-			<Slider id="blacks" label="Blacks" value={sliders.blacks(edit)} min={-100} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => { edit!.tone.blackEv = -8 - (v / 100) * 3; changed(); }} oncommit={committed} />
-			<!-- Highlight recovery reconstructs clipped sensor channels; an already-developed file has none to
-			     reconstruct, so the control would sit there doing nothing. -->
-			{#if !developed}
-				<Slider id="hl-blend" label="Highlight recovery" value={sliders.highlightRecovery(edit)} min={0} max={100} defaultValue={50} format={(v) => `${decimals(v)} %`} onchange={(v) => { edit!.exposure.highlightBlend = v / 100; changed(); }} oncommit={committed} />
-			{/if}
-		</div>
-	{/if}
+	{#if edit}<LightSection {edit} onchange={update} oncommit={committed} {developed} />{/if}
 {/snippet}
 
 {#snippet curveSection()}
-	{#if edit}
-		<div class="grid gap-2">
-			<CurveEditor points={edit.tone.curve} {lut} {ghostLut} onchange={(p) => { edit!.tone.curve = p; changed(); }} oncommit={committed} />
-			<button type="button" class="justify-self-end rounded px-2 py-1 text-xs text-fg-2 hover:bg-raised" onclick={() => { edit!.tone.curve = [[0, 0], [1, 1]]; changed(); committed(); }}>Reset curve</button>
-		</div>
-	{/if}
+	{#if edit}<CurveSection {edit} onchange={update} oncommit={committed} {lut} {ghostLut} />{/if}
 {/snippet}
 
 {#snippet detailSection()}
-	{#if edit}
-		<div class="grid gap-2">
-			<Loupe assetKey={key} edit={$state.snapshot(edit)} center={loupeCenter} colorSpace={displaySpace} />
-			<p class="text-xs text-muted">Tap the photo to move the loupe.</p>
-			<Slider id="sharpen" label="Sharpening" value={edit.detail.sharpenAmount} min={0} max={100} defaultValue={0} format={(v) => decimals(v)} onchange={(v) => { edit!.detail.sharpenAmount = v; changed(); }} oncommit={committed} />
-			<Slider id="sharpen-radius" label="Sharpening radius" value={edit.detail.sharpenRadius} min={0.5} max={2} step={0.1} defaultValue={1} format={(v) => `${decimals(v, 1)} px`} onchange={(v) => { edit!.detail.sharpenRadius = v; changed(); }} oncommit={committed} />
-			<Slider id="denoise-luma" label="Noise reduction" value={edit.detail.denoiseLuminance} min={0} max={100} defaultValue={0} format={(v) => decimals(v)} onchange={(v) => { edit!.detail.denoiseLuminance = v; changed(); }} oncommit={committed} />
-			<Slider id="denoise-chroma" label="Colour noise reduction" value={edit.detail.denoiseChroma} min={0} max={100} defaultValue={0} format={(v) => decimals(v)} onchange={(v) => { edit!.detail.denoiseChroma = v; changed(); }} oncommit={committed} />
-		</div>
-	{/if}
+	{#if edit}<DetailSection {edit} onchange={update} oncommit={committed} assetKey={key} {loupeCenter} colorSpace={displaySpace} />{/if}
 {/snippet}
 
 {#snippet masksSection()}
@@ -1394,12 +1285,7 @@
 {/snippet}
 
 {#snippet colorSection()}
-	{#if edit}
-		<div class="grid gap-2">
-			<Slider id="saturation" label="Saturation" value={edit.saturation ?? 0} min={-100} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => { edit!.saturation = v; changed(); }} oncommit={committed} />
-			<ColorMixer mixer={edit.mixer} onchange={(band: Band, field: keyof MixerBand, v: number) => { edit!.mixer[band][field] = v; changed(); }} oncommit={committed} />
-		</div>
-	{/if}
+	{#if edit}<ColorSection {edit} onchange={update} oncommit={committed} />{/if}
 {/snippet}
 
 <div class="flex h-dvh flex-col overflow-hidden bg-ground text-fg select-none [-webkit-touch-callout:none] lg:flex-row">
