@@ -1071,8 +1071,16 @@
 {/snippet}
 
 {#snippet historySection()}
+	<!-- The colour sections as a look: copied here, pasted onto another photo (`$lib/state/look-clipboard`). -->
+	<div class="mb-2 flex flex-wrap items-center gap-1.5 text-xs">
+		<span class="text-fg-2">Look</span>
+		<button type="button" class="rounded-full bg-raised px-2.5 py-1 text-fg disabled:opacity-40" disabled={!edit} title="Copy this photo's white balance, light, curve, colour and detail" onclick={() => { if (edit && meta) { copyLook($state.snapshot(edit), meta.fileName); lookClipboard = readLookClipboard(); } }}>Copy look</button>
+		<button type="button" class="rounded-full bg-raised px-2.5 py-1 text-fg disabled:opacity-40" disabled={!edit || !lookClipboard || readOnly} onclick={() => { if (edit && pasteLook(edit)) { changed(); committed(); } }}>Paste look</button>
+		{#if lookClipboard}<span class="min-w-0 truncate text-fg-2">from {lookClipboard.from}</span>{/if}
+	</div>
 	{#if session.versions}
 		<HistoryPanel history={session.versions} compareId={compare?.id ?? null} busy={session.versionsBusy || session.saving} onopen={(id) => session.openVersion(id)} oncompare={(id) => session.setCompare(id)} onpick={(id, section) => session.pickFrom(id, section)} onlabel={(id, label) => session.labelVersion(id, label)} />
+
 	{:else}
 		<p class="text-xs text-fg-2">Loading history…</p>
 	{/if}
@@ -1154,7 +1162,7 @@
 	{#if edit && meta}
 		<!-- Phone: one tool at a time in a bottom sheet. Desktop: all sections in pipeline order. -->
 		<aside class="flex max-h-[48dvh] shrink-0 flex-col bg-panel pb-[max(0.75rem,env(safe-area-inset-bottom))] lg:max-h-none lg:w-80 lg:pb-3">
-			<header class="flex items-center justify-between gap-3 px-6 pt-3 pb-2 lg:px-4">
+			<header class="flex items-center justify-between gap-3 px-6 pt-3 pb-2 lg:flex-col lg:items-stretch lg:gap-2 lg:px-4">
 				<div class="min-w-0 text-xs text-fg-2">
 					<p class="truncate text-sm text-fg">{meta.fileName}</p>
 					<p class="truncate">{cameraLine(meta.info)}</p>
@@ -1165,26 +1173,6 @@
 					</button>
 					<button type="button" class="grid size-9 place-items-center rounded bg-raised text-fg-2 disabled:opacity-40" aria-label="Redo" disabled={!session.canRedo || readOnly} onclick={() => session.redo()}>
 						<svg viewBox="0 0 16 16" class="size-4 -scale-x-100" aria-hidden="true"><path d="M6 3 2 7l4 4M2.5 7H10a4 4 0 0 1 0 8H8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></svg>
-					</button>
-					<button
-						type="button"
-						class="grid size-9 place-items-center rounded bg-raised text-fg-2 disabled:opacity-40"
-						aria-label="Copy look"
-						title="Copy this photo's color recipe"
-						disabled={!edit}
-						onclick={() => { if (edit && meta) { copyLook($state.snapshot(edit), meta.fileName); lookClipboard = readLookClipboard(); } }}
-					>
-						<svg viewBox="0 0 16 16" class="size-4" aria-hidden="true"><rect x="5" y="2.5" width="7" height="3" rx="0.5" fill="none" stroke="currentColor" stroke-width="1.3" /><rect x="3.5" y="4.5" width="10" height="10" rx="1" fill="none" stroke="currentColor" stroke-width="1.3" /></svg>
-					</button>
-					<button
-						type="button"
-						class="grid size-9 place-items-center rounded bg-raised text-fg-2 disabled:opacity-40"
-						aria-label="Paste look"
-						title={lookClipboard ? `Apply the look copied from ${lookClipboard.from}` : 'No look copied yet'}
-						disabled={!edit || !lookClipboard || readOnly}
-						onclick={() => { if (edit && pasteLook(edit)) { changed(); committed(); } }}
-					>
-						<svg viewBox="0 0 16 16" class="size-4" aria-hidden="true"><rect x="3.5" y="4.5" width="10" height="10" rx="1" fill="none" stroke="currentColor" stroke-width="1.3" /><path d="M6 9.2 7.7 11l2.6-3.4" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" /></svg>
 					</button>
 					<button type="button" class="h-9 rounded bg-raised px-3 text-sm" onclick={() => (exporting = true)}>Export</button>
 					<button type="button" class="h-9 rounded bg-fg px-4 text-sm font-medium text-ground disabled:bg-raised disabled:text-muted" disabled={!session.dirty || session.saving || readOnly} onclick={() => session.commit()}>
