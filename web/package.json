@@ -6,7 +6,8 @@
 	"scripts": {
 		"shaders": "cd .. && cargo run -q -p sidecar-shaders -- web/src/lib/gpu/wgsl",
 		"wasm": "cd .. && cargo build -q -p sidecar-color-wasm --target wasm32-unknown-unknown --release && cp ${SIDECAR_TARGET_DIR:-${CARGO_TARGET_DIR:-target}}/wasm32-unknown-unknown/release/sidecar_color_wasm.wasm web/src/lib/color/sidecar_color.wasm",
-		"generate": "npm run shaders && npm run wasm",
+		"types": "cd .. && TS_RS_EXPORT_DIR=\"$PWD/web/src/lib/generated\" cargo test -q -p sidecar-color --features ts export_bindings > /dev/null",
+		"generate": "npm run shaders && npm run wasm && npm run types",
 		"dev": "vite dev",
 		"build": "vite build",
 		"preview": "vite preview",

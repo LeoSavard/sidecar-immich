@@ -20,6 +20,7 @@ THIRD_PARTY_NOTICES.md, which ships in the Docker image at /usr/share/doc/sideca
 - Compact-ICC-Profiles — Clinton Ingram (CC0-1.0).
 - Free blue-noise textures — Christoph Peters (CC0-1.0).
 - wgpu and naga — the wgpu contributors (MIT OR Apache-2.0).
+- ts-rs — Aleph Alpha GmbH and contributors (MIT): generates the web app's TypeScript for the edit types.
 - burn and CubeCL — Tracel AI and the burn contributors (MIT OR Apache-2.0): the machine-learning runtime in
   sidecar-ml.
 - YuNet face detector — Shiqi Yu, via OpenCV Zoo (MIT).

@@ -24,6 +24,7 @@ pub const R_MAX: f64 = 1.5;
 /// the tone curve (`spline::Monotone`), so it never overshoots between a table's knots; held flat past either
 /// end.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "edit/"))]
 pub struct Curve(pub Vec<[f64; 2]>);
 
 impl Curve {
@@ -44,6 +45,7 @@ impl Curve {
 /// Where a correction came from. The editor names it; `sc:Lens/Profile` stores `id`.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "edit/"))]
 pub struct LensProfile {
     /// Stable identifier: `dng` (the file's own opcodes), `sony` or `fujifilm` (the camera's tables),
     /// `lensfun:<maker>/<model>`.
@@ -53,12 +55,16 @@ pub struct LensProfile {
     /// Optical centre in the unoriented image, 0…1, top-left origin.
     pub center: [f64; 2],
     #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     pub distortion: Option<Curve>,
     #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     pub ca_red: Option<Curve>,
     #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     pub ca_blue: Option<Curve>,
     #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
     pub vignetting: Option<Curve>,
     /// The lens is designed to be corrected in software (Sony's "fixed by lens"): uncorrected, the frame
     /// shows distortion the camera never let anyone see. The editor says so rather than hiding the control.

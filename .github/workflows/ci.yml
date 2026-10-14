@@ -25,6 +25,11 @@ jobs:
       - run: cargo clippy --workspace --exclude sidecar-ml --all-targets -- -D warnings
       # GPU tests fall back to lavapipe (software Vulkan) on CI runners.
       - run: cargo test --workspace --exclude sidecar-ml
+      # The web app's edit types are generated from sidecar-color and committed; fail if they've drifted.
+      - name: Generated TypeScript is current
+        run: |
+          TS_RS_EXPORT_DIR="$PWD/web/src/lib/generated" cargo test -q -p sidecar-color --features ts export_bindings
+          git status --porcelain -- web/src/lib/generated | tee /dev/stderr | (! grep -q .)
   # sidecar-ml on its own runner: burn's debug build is what filled the disk (the linker died with a bus error
   # writing its test binary), and nothing else depends on it.
   ml:

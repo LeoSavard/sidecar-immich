@@ -35,6 +35,10 @@ Clinton Ingram. `assets/icc/sRGB-v4.icc`, `assets/icc/DisplayP3-v4.icc`.
 ## jpeg-encoder — (MIT OR Apache-2.0) AND IJG
 This software is based in part on the work of the Independent JPEG Group.
 
+## ts-rs — MIT
+Aleph Alpha GmbH and the ts-rs contributors. A build-time code generator: it writes `web/src/lib/generated/` from
+`sidecar-color`'s types (`--features ts`) and is not compiled into the published image.
+
 ## libgomp — GPL-3.0 with the GCC Runtime Library Exception
 Linked for OpenMP in LibRaw; the exception permits distribution with non-GPL software.
 
