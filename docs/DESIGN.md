@@ -535,6 +535,26 @@ are the RAW ones (`whiteEv`, `blackEv`, `contrast`), read through the slider map
 sidecar format need no second meaning; the editor limits Exposure to ±2 EV and hides Highlight recovery.
 Measured on an iPhone HEIC at default settings: mean difference from the file 0.03/255, none above 0.12/255.
 
+**Film.** A RAW can be rendered the way colour negative film renders light, as an alternative to step 4's
+neutral rendering — the process, not a look imitating any stock. Film has three emulsion layers, each with its
+own characteristic curve, so red, green and blue each pass through the curve separately: a bright saturated
+light reaches the shoulder in one channel before the others and fades toward white, and midtones gain
+saturation from the toe and shoulder pulling channels apart. The neutral path's `rgb × Y′ / Y` holds hue
+instead; that is its point, and film's is not to. `EditParams.film` (absent = neutral, so old edits are
+unchanged and need no process version) holds:
+
+- **Amount** 0–100 (default 100): a mix between the neutral and the film result, after the user's curve.
+- **Interlayer effects** 0–100 (default 30): in film, developer by-products from one layer hold back
+  development in its neighbours, which separates colours. Modelled as a spread in log exposure away from the
+  pixel's mean over the channels, `x + s·(x − mean)`, with `s = interlayer/100 × 0.6`, before the curves. A
+  neutral has no spread, so greys stay grey and white balance keeps its meaning.
+
+`film_curve_in` (shaders/develop/tone.wgsl) applies the same logistic, black and white points as the neutral
+path to each channel; the user's curve LUT and mask curves then apply per channel. A channel at zero is held
+four stops under the black point, where the curve is flat. Developed files ignore it (`pack` writes 0): their
+curve was already applied. Judged on ten RAWs from the library: 30 reads as natural, 70 is strong (skin goes
+orange-red). Halation, grain and monochrome film are later steps.
+
 Uniform buffer:
 
 ```wgsl
@@ -547,12 +567,14 @@ struct DevelopParams {            // offset  size
                                   //                developed: blacks, whites, contrast, knee
   hlStrength : f32,               //  128      4
   displayReferred : f32,          //  132      4   0 RAW, 1 developed
-  _pad1      : vec2f,             //  136      8
+  saturation : f32,               //  136      4   global chroma gain − 1
+  _pad1      : f32,               //  140      4
   mixer      : array<vec4f, 8>,   //  144    128   per band: hue, sat, lum, unused
-}                                 //  total 272 bytes
+  film       : vec4f,             //  272     16   amount 0–1 (0 neutral), interlayer spread, unused ×2
+}                                 //  total 288 bytes
 ```
 
-**Struct layouts.** The 272-byte table above documents the layout; code never hard-codes it. `encase` (MIT-0) derives it on the Rust side and `webgpu-utils` (MIT) reads it from the WGSL source in the browser, so a field added to the struct can't silently shift the offsets.
+**Struct layouts.** The 288-byte table above documents the layout; code never hard-codes it. `encase` (MIT-0) derives it on the Rust side and `webgpu-utils` (MIT) reads it from the WGSL source in the browser, so a field added to the struct can't silently shift the offsets.
 
 **Parameter flow.** Slider input → params store (Svelte 5 `$state`) → derived CPU values (WASM: WB → multipliers and matrix; curve → LUT) → `queue.writeBuffer` → dirty flag → next `requestAnimationFrame` runs develop → view → histogram. Undo snapshots on `pointerup`, not per input event.
 

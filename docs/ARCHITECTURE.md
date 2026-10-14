@@ -75,7 +75,9 @@ The global Saturation slider (PR #4: one commit for the core, one for the UI) is
    `#[serde(skip_serializing_if = …)]` at the default so existing edits keep their ETag.
 2. If the shader needs it: the `DevelopParams` (or `MaskParams`) field — use padding before growing the struct —
    set in `pack()`, mirrored in `shaders/develop/params.wgsl`, and added to the `uniform_layout_matches_wgsl`
-   test's offset list. That test, run by naga, is what catches a layout mismatch.
+   test's offset list. That test, run by naga, is what catches a layout mismatch. If the struct grows, change
+   `DEVELOP_UNIFORM_BYTES` in `web/src/lib/color/pack.ts` too: the browser checks it against the wasm's
+   `sc_develop_uniform_bytes` on load, and the engine takes its size from Rust.
 3. The stage in `shaders/develop/` taking the value as an argument; only `shaders/client/develop.wgsl` reads
    the uniform. Results at the default must be bit-identical to before.
 4. Tests in `params.rs`: the packing scale, and that the field is omitted at its default.
