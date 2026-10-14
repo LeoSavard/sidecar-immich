@@ -26,7 +26,7 @@
 	import { decimals, signed } from '$lib/ui/format';
 	import type { Band, Crop, DisplaySpace, EditParams, Frame, Geometry, HistoryState, Lens, MaskAdjustment, Meta, MixerBand } from '$lib/types';
 
-	type EditState = { edit: EditParams; etag: string; head: string; readOnly: boolean; writable?: boolean; exports: unknown[]; forked?: boolean };
+	type EditState = { edit: EditParams; etag: string; head: string; readOnly: boolean; writable?: boolean; exports: unknown[]; forked?: boolean; savedFor?: string };
 	type Section = 'lens' | 'crop' | 'wb' | 'light' | 'curve' | 'color' | 'masks' | 'detail' | 'history';
 
 	const key = page.params.key!;
@@ -105,6 +105,8 @@
 	const CHECKPOINT_MS = 4000;
 	/** Another device saved since this one loaded: both versions were kept, as branches. */
 	let forked = $state(false);
+	/** The sidecar was last saved for a different file (its `sourceSha1`); cleared by the next save. */
+	let savedFor = $state<string | null>(null);
 	let versions = $state<HistoryState | null>(null);
 	let versionsBusy = $state(false);
 	/** What pressing and holding the photo shows instead of the edit: a chosen version, or the original. */
@@ -851,6 +853,7 @@
 			etag = state.etag;
 			head = state.head;
 			forked ||= !!state.forked;
+			savedFor = state.savedFor ?? null;
 			lensDefaulted = false;
 			// Only what was sent is saved. A slider moved while the request was out used to be marked saved
 			// here, and its draft cleared, so the change was lost without a word.
@@ -900,6 +903,7 @@
 			edit = state.edit;
 			etag = state.etag;
 			head = state.head;
+			savedFor = state.savedFor ?? null;
 			dirty = false;
 			restoredDraft = false;
 			await clearDraft(key);
@@ -988,6 +992,7 @@
 			etag = state.etag;
 			head = state.head;
 			readOnly = state.readOnly;
+			savedFor = state.savedFor ?? null;
 			writable = state.writable !== false;
 			const draft = await loadDraft(key);
 			if (draft && draft.baseEtag === state.etag && JSON.stringify(draft.edit) !== JSON.stringify(state.edit)) {
@@ -1498,6 +1503,14 @@
 				{#if readOnly}<p class="rounded bg-raised p-2 text-xs">A newer Sidecar edited this photo. Update Sidecar to change it.</p>{/if}
 				{#if !readOnly && !writable}<p class="rounded bg-raised p-2 text-xs text-warning">Sidecar can't write in this photo's folder, so edits here can't be saved. Give the account Sidecar runs as write access to it.</p>{/if}
 				{#if restoredDraft && dirty}<p class="rounded bg-raised p-2 text-xs">Restored unsaved changes from this device.</p>{/if}
+				{#if savedFor}
+					<p class="rounded bg-raised p-2 text-xs">
+						This photo's sidecar was saved for a different file — the photo was replaced, or another one was
+						renamed into its place. Its edit is shown, and saving keeps it for this photo.
+						<button type="button" class="underline" onclick={() => openVersion('original')}>Start from the original</button>
+						instead; the earlier versions stay in History.
+					</p>
+				{/if}
 				{#if forked}
 					<p class="rounded bg-raised p-2 text-xs">
 						This photo was also saved somewhere else since you opened it. Both versions are kept —

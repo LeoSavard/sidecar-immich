@@ -536,11 +536,17 @@ struct EditState {
     /// This save branched: another device had saved since the version it was made from. Both are kept.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     forked: bool,
+    /// The SHA-1 this sidecar was saved for, when it isn't this photo's: the file beside it was renamed into
+    /// place or rewritten since (DESIGN.md §4, `sc:SourceSHA1`). The edit is still shown — a DNG rewritten by
+    /// another program is the same picture — and the next save ties the sidecar to this file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    saved_for: Option<String>,
 }
 
 impl EditState {
-    fn of(doc: &SidecarDoc, writable: bool, forked: bool) -> Self {
-        Self { edit: doc.edit(), etag: doc.etag(), head: doc.history().head, read_only: doc.is_read_only(), writable, exports: doc.exports(), forked }
+    fn of(doc: &SidecarDoc, key: &str, writable: bool, forked: bool) -> Self {
+        let saved_for = doc.source_sha1().filter(|s| !s.eq_ignore_ascii_case(key)).map(String::from);
+        Self { edit: doc.edit(), etag: doc.etag(), head: doc.history().head, read_only: doc.is_read_only(), writable, exports: doc.exports(), forked, saved_for }
     }
 
     fn into_response(self) -> Response {
@@ -552,7 +558,7 @@ async fn get_edit(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Path(key)
     let Some(rec) = asset_for(&app, &user, &key).await else { return StatusCode::NOT_FOUND.into_response() };
     let loaded = tokio::task::spawn_blocking(move || {
         let writable = sidecar_xmp::writable_beside(&rec.path);
-        SidecarDoc::load(&rec.path).map(|d| EditState::of(&d, writable, false))
+        SidecarDoc::load(&rec.path).map(|d| EditState::of(&d, &key, writable, false))
     })
     .await;
     match loaded {
@@ -570,20 +576,21 @@ struct Stale;
 /// Change a photo's sidecar through the guarded writer, off the async runtime, and answer with the edit state
 /// it leaves. `change` returns whether the save forked. The failures a person can act on carry their own
 /// message and status; anything else is a bug here and goes to the log as one.
-async fn write_sidecar(app: &Arc<App>, rec: &AssetRecord, mut change: impl FnMut(&mut SidecarDoc) -> anyhow::Result<bool> + Send + 'static) -> Response {
+async fn write_sidecar(app: &Arc<App>, key: &str, rec: &AssetRecord, mut change: impl FnMut(&mut SidecarDoc) -> anyhow::Result<bool> + Send + 'static) -> Response {
     let roots = app.config.canonical_mounts();
     let moves_files = app.config.root_of(&rec.path).is_some_and(|(r, _)| r.moves_files);
     let path = rec.path.clone();
+    let key = key.to_string();
     let result = tokio::task::spawn_blocking(move || {
         let created = !sidecar_xmp::sidecar_path_for(&path).exists();
         let writable = sidecar_xmp::writable_beside(&path);
         let mut state = None;
         let saved = sidecar_xmp::update(&path, &roots, |doc| {
             let forked = change(doc)?;
-            state = Some(EditState::of(doc, writable, forked));
+            state = Some(EditState::of(doc, &key, writable, forked));
             Ok(())
         });
-        let stale = || SidecarDoc::load(&path).map(|d| EditState::of(&d, writable, false));
+        let stale = || SidecarDoc::load(&path).map(|d| EditState::of(&d, &key, writable, false));
         match saved {
             Ok(_) => Ok((state.expect("set by a successful change"), created)),
             Err(e) if e.is::<Stale>() => Err(Box::new(stale().map_or_else(internal, |s| (StatusCode::PRECONDITION_FAILED, [(header::ETAG, format!("\"{}\"", s.etag))], Json(s)).into_response()))),
@@ -642,7 +649,7 @@ async fn put_edit(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Path(key)
                 return (StatusCode::PRECONDITION_REQUIRED, "Send If-Match with the ETag you edited from.").into_response();
             };
             // Without a base the save can only go on top of the head, and only if the client saw the head.
-            return write_sidecar(&app, &rec, move |doc| {
+            return write_sidecar(&app, &key.clone(), &rec, move |doc| {
                 if doc.etag() != if_match {
                     anyhow::bail!(Stale);
                 }
@@ -653,7 +660,7 @@ async fn put_edit(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Path(key)
         }
     };
     let name = user.name.clone();
-    write_sidecar(&app, &rec, move |doc| {
+    write_sidecar(&app, &key.clone(), &rec, move |doc| {
         let c = Commit { edit: &save.edit, base: &save.base, checkpoint: save.checkpoint, session: save.session.as_deref(), user: Some(&name) };
         Ok(doc.commit(&c, &key)?.forked)
     })
@@ -704,7 +711,7 @@ struct Checkout {
 /// `POST /api/assets/{key}/history/checkout { node }` — make that version (or `original`) the current edit.
 async fn checkout(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Path(key): Path<String>, Json(body): Json<Checkout>) -> Response {
     let Some(rec) = asset_for(&app, &user, &key).await else { return StatusCode::NOT_FOUND.into_response() };
-    write_sidecar(&app, &rec, move |doc| doc.checkout(&body.node, &key).map(|()| false)).await
+    write_sidecar(&app, &key.clone(), &rec, move |doc| doc.checkout(&body.node, &key).map(|()| false)).await
 }
 
 #[derive(Deserialize)]
@@ -715,7 +722,7 @@ struct Label {
 /// `PUT /api/assets/{key}/history/{node}/label { label }` — name a version, or clear its name with null.
 async fn label(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Path((key, node)): Path<(String, String)>, Json(body): Json<Label>) -> Response {
     let Some(rec) = asset_for(&app, &user, &key).await else { return StatusCode::NOT_FOUND.into_response() };
-    write_sidecar(&app, &rec, move |doc| doc.label(&node, body.label.clone()).map(|()| false)).await
+    write_sidecar(&app, &key, &rec, move |doc| doc.label(&node, body.label.clone()).map(|()| false)).await
 }
 
 #[derive(Deserialize)]
@@ -803,5 +810,22 @@ mod tests {
 
         let SaveBody::Bare(e) = serde_json::from_value(serde_json::to_value(&edit).unwrap()).unwrap() else { panic!("read as versioned") };
         assert_eq!(e, edit, "a client from before history still saves");
+    }
+
+    /// A sidecar saved for other bytes says so, whatever the hex's case; the file's own doesn't, and neither
+    /// does a photo with no sidecar yet.
+    #[test]
+    fn a_sidecar_saved_for_another_file_is_reported() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().canonicalize().unwrap();
+        let original = dir.join("DSC_1.NEF");
+        std::fs::write(&original, b"raw").unwrap();
+        sidecar_xmp::update(&original, std::slice::from_ref(&dir), |d| d.set_edit(&EditParams::default(), "aaaa")).unwrap();
+        let doc = SidecarDoc::load(&original).unwrap();
+        assert_eq!(EditState::of(&doc, "bbbb", true, false).saved_for.as_deref(), Some("aaaa"));
+        assert_eq!(EditState::of(&doc, "AAAA", true, false).saved_for, None);
+        let other = dir.join("DSC_2.NEF");
+        std::fs::write(&other, b"raw2").unwrap();
+        assert_eq!(EditState::of(&SidecarDoc::load(&other).unwrap(), "bbbb", true, false).saved_for, None);
     }
 }
