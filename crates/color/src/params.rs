@@ -18,6 +18,12 @@ pub struct EditParams {
     pub exposure: Exposure,
     pub tone: Tone,
     pub mixer: Mixer,
+    /// Global chroma gain, −100…100, 0 at default — the same OKLCh scale `MaskAdjustment.saturation` uses, as
+    /// the baseline every mask's own saturation adds to (`DevelopParams.saturation`,
+    /// `shaders/develop/masks.wgsl`'s `mask_start`). Left out of the serialized edit at 0, so an edit that
+    /// never touches it keeps the ETag it already had.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub saturation: f64,
     pub detail: Detail,
     /// Absent means off: photos edited before this field existed render unchanged. See DESIGN.md §15.
     pub lens: Option<Lens>,
@@ -39,6 +45,7 @@ impl Default for EditParams {
             exposure: Exposure::default(),
             tone: Tone::default(),
             mixer: Mixer::default(),
+            saturation: 0.0,
             detail: Detail::default(),
             lens: None,
             geometry: None,
@@ -370,7 +377,9 @@ pub struct DevelopParams {
     pub hl_strength: f32,
     /// 0 for a RAW, 1 for a developed file — see `SourceKind`.
     pub display_referred: f32,
-    pub _pad1: [f32; 2],
+    /// Global chroma gain − 1 (OKLCh) — the mask-saturation baseline every layer's own saturation adds to.
+    pub saturation: f32,
+    pub _pad1: f32,
     pub mixer: [[f32; 4]; 8],
 }
 
@@ -464,7 +473,8 @@ pub fn pack(edit: &EditParams, camera: &CameraColor, source: SourceKind, display
         // has no sensor clipping to speak of.
         hl_strength: if developed { 0.0 } else { edit.exposure.highlight_blend.clamp(0.0, 1.0) as f32 },
         display_referred: if developed { 1.0 } else { 0.0 },
-        _pad1: [0.0; 2],
+        saturation: (edit.saturation.clamp(-100.0, 100.0) / 100.0) as f32,
+        _pad1: 0.0,
         mixer: mixer_params(&edit.mixer),
     };
     let mut masks = MaskParams { frame: [0.0; 4], count: 0, _pad: [0; 3], layers: [MaskLayer::default(); MAX_MASKS] };
@@ -536,6 +546,7 @@ mod tests {
             ("tone", std::mem::offset_of!(DevelopParams, tone)),
             ("hl_strength", std::mem::offset_of!(DevelopParams, hl_strength)),
             ("display_referred", std::mem::offset_of!(DevelopParams, display_referred)),
+            ("saturation", std::mem::offset_of!(DevelopParams, saturation)),
             ("mixer", std::mem::offset_of!(DevelopParams, mixer)),
         ];
         for (name, off) in rust {
@@ -547,6 +558,30 @@ mod tests {
         assert_eq!(p.lut.len(), LUT_SIZE);
         // exposure sits at byte 12
         assert_eq!(f32::from_le_bytes(p.uniform[12..16].try_into().unwrap()), 1.0);
+    }
+
+    #[test]
+    fn global_saturation_packs_to_the_same_scale_a_mask_layer_uses() {
+        let cam = crate::camera::nikon_d850();
+        let neutral = pack(&EditParams::default(), &cam, SourceKind::Raw, DisplaySpace::Srgb);
+        let params: &DevelopParams = bytemuck::from_bytes(&neutral.uniform);
+        assert_eq!(params.saturation, 0.0);
+
+        let edit = EditParams { saturation: 50.0, ..Default::default() };
+        let boosted = pack(&edit, &cam, SourceKind::Raw, DisplaySpace::Srgb);
+        let params: &DevelopParams = bytemuck::from_bytes(&boosted.uniform);
+        assert_eq!(params.saturation, 0.5, "same -100..100 -> -1..1 scale as MaskAdjustment.saturation's `unit`");
+    }
+
+    #[test]
+    fn saturation_is_left_out_until_set() {
+        let json = serde_json::to_value(EditParams::default()).unwrap();
+        assert!(json.get("saturation").is_none());
+        let e = EditParams { saturation: 25.0, ..Default::default() };
+        let json = serde_json::to_value(&e).unwrap();
+        assert_eq!(json["saturation"], 25.0);
+        let back: EditParams = serde_json::from_value(json).unwrap();
+        assert_eq!(back, e);
     }
 
     /// An edit without masks serializes as it did before masks existed: its ETag, and everything keyed by it,

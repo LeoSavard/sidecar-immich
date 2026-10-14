@@ -89,6 +89,7 @@ const CONTROLS: Control[] = [
 	{ label: 'Whites', get: view.whites, show: (v) => signed(v) },
 	{ label: 'Blacks', get: view.blacks, show: (v) => signed(v) },
 	{ label: 'Highlight recovery', get: view.highlightRecovery, show: (v) => `${decimals(v)} %` },
+	{ label: 'Saturation', get: (e) => e.saturation ?? 0, show: (v) => signed(v) },
 	...BANDS.flatMap((b) => FIELDS.map((f): Control => ({ label: `${cap(b)} ${f}`, get: (e) => e.mixer[b][f], show: (v) => signed(v) }))),
 	{ label: 'Sharpening', get: (e) => e.detail.sharpenAmount, show: (v) => decimals(v) },
 	{ label: 'Sharpening radius', get: (e) => e.detail.sharpenRadius, show: (v) => `${decimals(v, 1)} px` },
@@ -197,7 +198,14 @@ export const PICKS: { id: string; label: string; take: (into: EditParams, from: 
 		}
 	},
 	{ id: 'curve', label: 'Curve', take: (e, f) => (e.tone.curve = structuredClone(f.tone.curve)) },
-	{ id: 'color', label: 'Color mixer', take: (e, f) => (e.mixer = structuredClone(f.mixer)) },
+	{
+		id: 'color',
+		label: 'Color mixer',
+		take: (e, f) => {
+			e.mixer = structuredClone(f.mixer);
+			e.saturation = f.saturation ?? 0;
+		}
+	},
 	{ id: 'detail', label: 'Detail', take: (e, f) => (e.detail = structuredClone(f.detail)) },
 	{
 		id: 'masks',
