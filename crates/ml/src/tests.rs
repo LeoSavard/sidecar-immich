@@ -95,3 +95,16 @@ fn tells_hair_from_clothes() {
         assert_eq!(best((0.05, 0.2)), "background");
     });
 }
+
+#[test]
+fn puts_the_reflection_at_the_mirror() {
+    with_models(|mut ml, photo| {
+        let depth = ml.depth(photo, 518).unwrap();
+        assert_eq!((depth.width, depth.height, depth.channels), (518, 518, 1));
+        // Her back is nearer than her face in the mirror, which is as far as the mirror is.
+        let (back, reflection) = (at(&depth, (0.35, 0.4), 0), at(&depth, (0.85, 0.25), 0));
+        assert!(back > reflection + 40, "back {back}, reflection {reflection}");
+        let (lo, hi) = (depth.data.iter().min().unwrap(), depth.data.iter().max().unwrap());
+        assert!(*lo == 0 && *hi == 255, "stretched to the full range: {lo}…{hi}");
+    });
+}

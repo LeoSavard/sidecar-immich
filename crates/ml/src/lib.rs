@@ -5,6 +5,7 @@
 //! - **Faces** — YuNet: boxes and five landmarks per face.
 //! - **Subject** — BiRefNet lite: a soft mask of the main subject, at 1024² model resolution.
 //! - **Parts** — MediaPipe multi-class: hair, face skin, body skin, clothes, other, background, at 256².
+//! - **Depth** — Depth Anything V2 Small: relative depth, near white, at 518².
 //!
 //! It runs as its own program (`sidecar-ml`), which the worker starts when a task needs it and which exits after
 //! a while idle, since burn only hands GPU memory back when the process ends. A machine without the GPU for it
@@ -21,6 +22,8 @@ mod models {
     #[rustfmt::skip]
     pub mod birefnet;
     #[rustfmt::skip]
+    pub mod depth;
+    #[rustfmt::skip]
     pub mod multiclass;
     #[rustfmt::skip]
     pub mod yunet;
@@ -31,7 +34,7 @@ use anyhow::{Result, anyhow, ensure};
 use burn::prelude::*;
 use burn::tensor::{DType, FloatDType};
 use burn_store::{BurnpackStore, ModuleSnapshot};
-use models::{birefnet, multiclass, yunet};
+use models::{birefnet, depth, multiclass, yunet};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -114,6 +117,7 @@ pub struct Ml {
     half: bool,
     yunet: Option<yunet::Model>,
     birefnet: Option<birefnet::Model>,
+    depth: Option<depth::Model>,
     multiclass: Option<multiclass::Model>,
 }
 
@@ -138,6 +142,7 @@ impl Ml {
             half,
             yunet: None,
             birefnet: None,
+            depth: None,
             multiclass: None,
         })
     }
@@ -226,6 +231,27 @@ impl Ml {
         Ok(planes(&scores, SIZE, PARTS.len(), (w, h), long_edge))
     }
 
+    /// How near each point is, as one channel, `long_edge` at most: 255 for the nearest, 0 for the farthest.
+    /// The model gives relative inverse depth, which has no unit and no fixed origin, so the values are
+    /// stretched between the photo's own 1st and 99th percentiles: a few stray pixels at either end can't
+    /// squash the rest.
+    pub fn depth(&mut self, picture: Picture, long_edge: u32) -> Result<Planes> {
+        const SIZE: usize = 518;
+        let (w, h) = picture.size()?;
+        let small = resample::resize(&picture.samples(), (w, h), 3, (SIZE, SIZE));
+        // RGB with ImageNet's normalisation, as BiRefNet.
+        let (mean, std) = ([0.485f32, 0.456, 0.406], [0.229f32, 0.224, 0.225]);
+        let mut input = vec![0f32; 3 * SIZE * SIZE];
+        for (i, px) in small.as_chunks::<3>().0.iter().enumerate() {
+            for c in 0..3 {
+                input[c * SIZE * SIZE + i] = (px[c] / 255.0 - mean[c]) / std[c];
+            }
+        }
+        let input = self.tensor(input, [1, 3, SIZE, SIZE]);
+        let disparity = read(self.depth_model()?.forward(input))?;
+        Ok(planes(&normalized(&disparity), SIZE, 1, (w, h), long_edge))
+    }
+
     /// Loads every model and runs it once, so the kernels are compiled and tuned before anyone waits on them.
     pub fn warm(&mut self) -> Result<()> {
         let grey = vec![128u8; 64 * 48 * 3];
@@ -237,6 +263,7 @@ impl Ml {
         self.faces(picture)?;
         self.parts(picture, 64)?;
         self.subject(picture, 64)?;
+        self.depth(picture, 64)?;
         Ok(())
     }
 
@@ -275,6 +302,13 @@ impl Ml {
         Ok(self.birefnet.as_ref().expect("just loaded"))
     }
 
+    fn depth_model(&mut self) -> Result<&depth::Model> {
+        if self.depth.is_none() {
+            self.depth = Some(self.load(depth::Model::new(&self.device), "depth")?);
+        }
+        Ok(self.depth.as_ref().expect("just loaded"))
+    }
+
     fn multiclass(&mut self) -> Result<&multiclass::Model> {
         if self.multiclass.is_none() {
             self.multiclass = Some(self.load(multiclass::Model::new(&self.device), "multiclass")?);
@@ -288,6 +322,19 @@ fn read<const D: usize>(t: Tensor<D>) -> Result<Vec<f32>> {
         .convert::<f32>()
         .try_to_vec::<f32>()
         .map_err(|e| anyhow!("reading a result back: {e:?}"))
+}
+
+/// `values` stretched so the 1st percentile is 0 and the 99th is 1, clamped. A flat field is all 0.
+fn normalized(values: &[f32]) -> Vec<f32> {
+    let mut sorted: Vec<f32> = values.iter().copied().filter(|v| v.is_finite()).collect();
+    if sorted.is_empty() {
+        return vec![0.0; values.len()];
+    }
+    sorted.sort_by(f32::total_cmp);
+    let at = |q: f32| sorted[((sorted.len() - 1) as f32 * q).round() as usize];
+    let (lo, hi) = (at(0.01), at(0.99));
+    let span = (hi - lo).max(1e-6);
+    values.iter().map(|v| if v.is_finite() { ((v - lo) / span).clamp(0.0, 1.0) } else { 0.0 }).collect()
 }
 
 /// A square model output stretched back to the picture's aspect ratio, at `long_edge` at most.

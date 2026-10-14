@@ -26,3 +26,4 @@ THIRD_PARTY_NOTICES.md, which ships in the Docker image at /usr/share/doc/sideca
 - YuNet face detector — Shiqi Yu, via OpenCV Zoo (MIT).
 - BiRefNet — Peng Zheng and contributors (MIT), as exported to ONNX by onnx-community.
 - MediaPipe multi-class selfie segmentation — Google (Apache-2.0).
+- Depth Anything V2 Small — the Depth Anything V2 authors (Apache-2.0), as exported to ONNX by onnx-community.

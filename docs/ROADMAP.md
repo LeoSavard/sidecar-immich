@@ -144,6 +144,11 @@ hasn't been built:
 - **Gradients.** Linear and radial masks, analytic in the shader: a third kind of layer beside model masks and
   brushes, with handles drawn over the photo like the crop's.
 - **Sky.** A sky model, to join the subject, skin and hair ones.
+- **Depth, beyond range masks.** The depth mask (Depth Anything V2 Small) shipped with range layers. What it
+  could drive next: a lens blur by distance (a gather blur whose radius follows depth from a focal plane,
+  with near-over-far occlusion handled so edges don't halo), atmospheric haze by distance, and depth-weighted
+  focus peaking. The map is relative and 518² at source: fine for soft bands, not for hair-accurate edges, so
+  a blur needs edge-aware upsampling guided by the photo first.
 - **Detail per layer.** Sharpening and noise reduction through a mask: they run on the worker at full
   resolution, so a layer's value has to reach the detail passes, not just the develop pass.
 - **Upright.** Keystone found automatically from the photo's lines; today Vertical and Horizontal are set by eye.

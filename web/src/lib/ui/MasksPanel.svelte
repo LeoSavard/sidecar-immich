@@ -4,7 +4,7 @@ a brush or not, or one painted from nothing — and its own light and colour: ev
 added on top of it where the mask is. "Show" greys out what the selected mask leaves out. -->
 <script lang="ts">
 	import type { Band, MaskAdjustment, MixerBand } from '$lib/types';
-	import { BRUSH, MASK_LABELS, type BrushMode, type BrushSettings, type MaskSet } from '$lib/masks';
+	import { BRUSH, DEPTH, MASK_LABELS, type BrushMode, type BrushSettings, type MaskSet } from '$lib/masks';
 	import { curvePointOffset, isIdentityCurve, withCurvePoint } from '$lib/state/edit-view';
 	import Slider from '$lib/ui/Slider.svelte';
 	import ColorMixer from '$lib/ui/ColorMixer.svelte';
@@ -90,9 +90,9 @@ added on top of it where the mask is. "Show" greys out what the selected mask le
 			{/each}
 		</div>
 		{#if set === null}
-			<p class="text-xs text-fg-2">Finding the subject, skin and hair in this photo… The first time on a new server takes a few minutes while the models tune themselves to its GPU.</p>
+			<p class="text-xs text-fg-2">Finding the subject, skin, hair and depth in this photo… The first time on a new server takes a few minutes while the models tune themselves to its GPU.</p>
 		{:else if !set.available}
-			<p class="text-xs text-fg-2">Subject, skin and hair masks need the Sidecar image with the machine-learning models (the <code>-ml</code> tag). Brush masks work everywhere.</p>
+			<p class="text-xs text-fg-2">Subject, skin, hair and depth masks need the Sidecar image with the machine-learning models (the <code>-ml</code> tag). Brush masks work everywhere.</p>
 		{/if}
 	{/if}
 	{#if !canPaint}<p class="text-xs text-fg-2">Painting needs WebGPU (Safari 26 or a current Chromium); masks already painted still render here.</p>{/if}
@@ -109,6 +109,14 @@ added on top of it where the mask is. "Show" greys out what the selected mask le
 				</div>
 			</div>
 			<Slider id="mask-amount" label="Amount" value={layer.amount} min={0} max={100} defaultValue={100} {disabled} format={(v) => `${decimals(v)} %`} onchange={(v) => onchange(i, { amount: v })} {oncommit} />
+			{#if layer.mask === DEPTH}
+				{@const r = layer.range ?? { from: 0, to: 100, feather: 0 }}
+				{@render group('Distance')}
+				<p class="text-xs text-muted">0 is the farthest part of the photo, 100 the nearest. Show the mask to see the band.</p>
+				<Slider id="mask-depth-near" label="Near edge" value={r.to} min={0} max={100} defaultValue={100} {disabled} format={(v) => decimals(v)} onchange={(v) => onchange(i, { range: { ...r, to: v } })} {oncommit} />
+				<Slider id="mask-depth-far" label="Far edge" value={r.from} min={0} max={100} defaultValue={50} {disabled} format={(v) => decimals(v)} onchange={(v) => onchange(i, { range: { ...r, from: v } })} {oncommit} />
+				<Slider id="mask-depth-feather" label="Feather" value={r.feather} min={0} max={50} defaultValue={15} {disabled} format={(v) => decimals(v)} onchange={(v) => onchange(i, { range: { ...r, feather: v } })} {oncommit} />
+			{/if}
 
 			{@render group('Brush')}
 			<div class="flex gap-1 text-xs" role="radiogroup" aria-label="Brush">

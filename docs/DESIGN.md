@@ -80,6 +80,17 @@ Where the code differs from the text below, the code and these notes win.
   `ProcessVersion` bump was needed: an older Sidecar keeps masks it can't render, and entries a newer one adds
   (a `kind`) are carried and skipped here. The first masks on a new install take minutes while burn tunes
   itself to the GPU; after that a photo's masks take seconds, once.
+- **Depth masks (§15):** Depth Anything V2 *Small* (Apache-2.0; Base and Large are CC-BY-NC and excluded),
+  simplified at 518² like BiRefNet and imported by burn-onnx, gives relative inverse depth: no unit, no fixed
+  origin. `Ml::depth` stretches it between the photo's own 1st and 99th percentiles to 0–255, near white, and
+  the worker caches it as `depth` with the other masks (`MASK_REVISION` 2, so cached sets are made again once
+  with it). f16 stays within 2.4 % of f32's span at worst, 0.2 % on average, and runs in about 100 ms on the
+  A4000. On its own the mask is a far-to-near gradient; a layer on it usually carries a `range`
+  (`MaskAdjustment.range`: from, to, feather, 0–100 of the mask's value), which the brush composite applies
+  when it seeds the layer from the model's mask (`in_range` in `client/brush_composite.wgsl`, the same pass
+  in the browser and on export), so strokes still add to or take from the band it selects, and the develop
+  pass is unchanged. A new depth layer starts as the nearer half (50–100, feather 15). A mirror's reflection
+  sits at the mirror's distance, where Apple's Portrait matte counts it as subject.
 - **Crop and straighten (§15):** `sidecar_color::geometry` turns `EditParams.geometry` — quarter turns, a
   mirror, straighten, Vertical and Horizontal keystone (a virtual camera tilt of up to 30° with a focal length of
   0.8 picture diagonals, Aspect for the stretch that leaves), and a crop — into one projective map from the
@@ -1020,7 +1031,7 @@ After V1: lens correction, then crop and straighten, then local masks (§15).
 **Masks.**
 
 - Weights: gradients (still to come) are analytic in the shader. Brush strokes — normalized points, radius, feather, flow — are rasterized by shared WGSL render passes into `r8unorm` masks, at proxy size on the phone and up to 4,096 px on the server (see the build log).
-- Model masks (subject, skin, hair, clothes; sky is still to come) run on the worker's GPU through `sidecar-ml`. The sidecar stores only the mask's name; the raster lives in `/cache` and is recomputed if the cache is gone, so nothing binary lands beside the RAW. See the build log.
+- Model masks (subject, skin, hair, clothes, depth; sky is still to come) run on the worker's GPU through `sidecar-ml`. A layer's `range` keeps a band of its mask's values — on depth, a band of distance. The sidecar stores only the mask's name; the raster lives in `/cache` and is recomputed if the cache is gone, so nothing binary lands beside the RAW. See the build log.
 - Blending: `ev = global.ev + Σ wₖ · maskₖ.ev`, and likewise for WB multipliers, contrast, saturation and mixer values; the tone map's parameters blend toward the layer's, and each layer's curve applies after the global one by its weight. Up to 8 layers per photo, in a fixed-size uniform array.
 - Display: the selected mask shows as desaturation outside it, which keeps red and blue reserved for clipping.
 

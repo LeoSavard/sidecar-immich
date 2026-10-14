@@ -19,10 +19,10 @@ use crate::ml::{Face, PARTS, Picture};
 use crate::{DEFAULT_EDGE, Worker, cache_generation, export, unique_tmp};
 
 /// Bump when the models, or how masks are made from them, change: every cached mask is then made again.
-pub const MASK_REVISION: u32 = 1;
+pub const MASK_REVISION: u32 = 2;
 
 /// The masks an edit can name, in the order the editor lists them.
-pub const NAMES: [&str; 6] = ["subject", "skin", "face-skin", "body-skin", "hair", "clothes"];
+pub const NAMES: [&str; 7] = ["subject", "skin", "face-skin", "body-skin", "hair", "clothes", "depth"];
 
 /// The size the models look at: past BiRefNet's 1024² input nothing more is seen.
 const INPUT_EDGE: u32 = 1024;
@@ -30,6 +30,8 @@ const INPUT_EDGE: u32 = 1024;
 /// they know.
 const SUBJECT_EDGE: u32 = 1024;
 const PARTS_EDGE: u32 = 512;
+/// Depth comes from a 518² model, and a layer on it is a smooth band of distance.
+const DEPTH_EDGE: u32 = 518;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct MaskSet {
@@ -84,6 +86,7 @@ impl Worker {
                     let picture = default_rendering(&kit, &info, w, h, &bytes)?;
                     let subject = ml.subject(&picture, SUBJECT_EDGE)?;
                     let parts = ml.parts(&picture, PARTS_EDGE)?;
+                    let depth = ml.depth(&picture, DEPTH_EDGE)?;
                     let faces = ml.faces(&picture)?;
                     let channel = |name: &str| {
                         let c = PARTS.iter().position(|p| *p == name).expect("a part");
@@ -95,6 +98,7 @@ impl Worker {
                         let bytes = match *name {
                             "subject" => grey_png(subject.width, subject.height, &subject.data)?,
                             "skin" => grey_png(parts.width, parts.height, &skin)?,
+                            "depth" => grey_png(depth.width, depth.height, &depth.data)?,
                             "faces.json" => serde_json::to_vec(&faces)?,
                             part => grey_png(parts.width, parts.height, &channel(part))?,
                         };

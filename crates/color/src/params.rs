@@ -312,6 +312,11 @@ pub struct MaskAdjustment {
     #[serde(skip_serializing_if = "is_default_mixer")]
     #[cfg_attr(feature = "ts", ts(as = "Option<Mixer>", optional))]
     pub mixer: Mixer,
+    /// Only where the mask's value lies in this range: a band of distance, for `depth`. None is the mask as
+    /// it is. Applied before the strokes, so painting still adds to or takes from what the range selects.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub range: Option<MaskRange>,
     /// Brush strokes over the mask, in the order they were painted.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     #[cfg_attr(feature = "ts", ts(as = "Option<Vec<Stroke>>", optional))]
@@ -346,8 +351,35 @@ impl Default for MaskAdjustment {
             blacks: 0.0,
             curve: Vec::new(),
             mixer: Mixer::default(),
+            range: None,
             strokes: Vec::new(),
             other: Default::default(),
+        }
+    }
+}
+
+/// A window over a mask's values, each 0…100: the layer applies fully where the mask is between `from` and
+/// `to`, and fades out over `feather` beyond either end. On the depth mask, where near is 100, it selects a
+/// band of distance.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "edit/"))]
+pub struct MaskRange {
+    pub from: f64,
+    pub to: f64,
+    pub feather: f64,
+}
+
+impl MaskRange {
+    /// As the brush composite shader takes it (`CompositeParams.range`): low and high ends and feather as
+    /// 0…1, and w = 1 for "applied". `None` is all zeros: the mask as it is.
+    pub fn uniform(range: Option<&MaskRange>) -> [f32; 4] {
+        match range {
+            Some(r) => {
+                let (a, b) = (r.from.clamp(0.0, 100.0), r.to.clamp(0.0, 100.0));
+                [(a.min(b) / 100.0) as f32, (a.max(b) / 100.0) as f32, (r.feather.clamp(0.0, 100.0) / 100.0) as f32, 1.0]
+            }
+            None => [0.0; 4],
         }
     }
 }
@@ -378,7 +410,7 @@ impl Default for Stroke {
 }
 
 /// The masks the models make, which an adjustment can name. Kept in step with the worker's `masks::NAMES`.
-pub const MASK_NAMES: [&str; 6] = ["subject", "skin", "face-skin", "body-skin", "hair", "clothes"];
+pub const MASK_NAMES: [&str; 7] = ["subject", "skin", "face-skin", "body-skin", "hair", "clothes", "depth"];
 /// A mask painted from nothing: only its strokes.
 pub const BRUSH: &str = "brush";
 
@@ -693,6 +725,19 @@ mod tests {
         let edit = EditParams { film: Some(Film { amount: 50.0, interlayer: 100.0 }), ..Default::default() };
         assert_eq!(at(&edit, SourceKind::Raw).film, [0.5, FILM_INTERLAYER as f32, 0.0, 0.0]);
         assert_eq!(at(&edit, SourceKind::Developed).film, [0.0; 4]);
+    }
+
+    /// A layer's range stays out of the edit until set, packs low end first, and a depth layer renders.
+    #[test]
+    fn a_mask_range_is_left_out_until_set_and_packs_in_order() {
+        let plain = MaskAdjustment { mask: "depth".into(), ..Default::default() };
+        assert!(serde_json::to_value(&plain).unwrap().get("range").is_none());
+        let r = MaskRange { from: 80.0, to: 20.0, feather: 10.0 };
+        assert_eq!(MaskRange::uniform(Some(&r)), [0.2, 0.8, 0.1, 1.0]);
+        assert_eq!(MaskRange::uniform(None), [0.0; 4]);
+        let ranged = MaskAdjustment { range: Some(r), ..plain };
+        assert!(ranged.renders());
+        assert_eq!(serde_json::to_value(&ranged).unwrap()["range"], serde_json::json!({ "from": 80.0, "to": 20.0, "feather": 10.0 }));
     }
 
     #[test]
