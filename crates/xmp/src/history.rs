@@ -228,13 +228,19 @@ impl History {
         self.nodes.iter().any(|n| n.parent.as_deref() == Some(id))
     }
 
-    /// The full edit a node stands for, rebuilt from the root down its ancestry.
-    ///
-    /// Not yet migration-aware: `SidecarDoc::edit` runs `migrate_highlight_shadow_anchors` for a sidecar
-    /// whose `processVersion` predates 2 (curve points doubling as Highlights/Shadows), but this method has
-    /// no such hook — it isn't called from `crates/api` or `crates/worker` yet (DESIGN.md §4's history
-    /// endpoints aren't wired up), so nothing live is affected today. Whoever wires it up should route the
-    /// document's `processVersion` through here first.
+    /// A version as the editor should see it: `edit_of`, brought to the current `PROCESS_VERSION`. Each node
+    /// records the version it was saved under (the root holds all of `EditParams`, a later node's delta any
+    /// change to it), so a version saved before an upgrade migrates and one saved after is left alone. This
+    /// is what `GET …/history` lists and what a checkout makes current.
+    pub fn version_of(&self, id: &str) -> Result<EditParams> {
+        let mut edit = self.edit_of(id)?;
+        edit.migrate();
+        Ok(edit)
+    }
+
+    /// The full edit a node stands for, rebuilt from the root down its ancestry, exactly as stored. Deltas are
+    /// taken against this, so it must not migrate: a delta computed against a migrated parent would be
+    /// replayed onto the unmigrated one. Anything handed out goes through `version_of`.
     pub fn edit_of(&self, id: &str) -> Result<EditParams> {
         let mut chain = Vec::new();
         let mut at = Some(id.to_string());
@@ -350,7 +356,7 @@ impl History {
 
     /// Move the head to `id`, and return the edit it holds.
     pub fn checkout(&mut self, id: &str) -> Result<EditParams> {
-        let edit = self.edit_of(id)?;
+        let edit = self.version_of(id)?;
         self.head = id.to_string();
         Ok(edit)
     }

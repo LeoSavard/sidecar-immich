@@ -52,13 +52,23 @@ impl Default for EditParams {
 }
 
 impl EditParams {
+    /// Bring an edit stored under an older `PROCESS_VERSION` to the current meaning, and stamp it current.
+    /// Idempotent: an edit already at this version is left as it is (a point a person later drew at exactly
+    /// x = 0.75 is theirs, not an old Highlights anchor). A newer version is never lowered.
+    pub fn migrate(&mut self) {
+        if self.process_version < 2 {
+            self.migrate_highlight_shadow_anchors();
+        }
+        self.process_version = self.process_version.max(PROCESS_VERSION);
+    }
+
     /// An edit saved under `PROCESS_VERSION` 1 stored Highlights/Shadows as curve points at x≈0.25/0.75
     /// (`CURVE_ANCHORS` in the web app, before this version): pulls those two points' offsets out into
     /// `tone.highlights`/`shadows` and removes them from `tone.curve`, so a slider that was at, say, +20 keeps
     /// reading +20 — its strength carries forward even though the curve no longer shares a point with it.
-    /// `sidecar_xmp::SidecarDoc::edit` calls this for any sidecar whose stored `processVersion` predates 2;
-    /// an edit built fresh (no anchor points to find) is unaffected either way.
-    pub fn migrate_highlight_shadow_anchors(&mut self) {
+    /// Called through `migrate`, which `sidecar_xmp` runs on the current edit and on every history version
+    /// it hands out; an edit built fresh (no anchor points to find) is unaffected either way.
+    fn migrate_highlight_shadow_anchors(&mut self) {
         let anchor_offset = |curve: &[[f64; 2]], x: f64| {
             curve.iter().find(|p| (p[0] - x).abs() < 1e-6).map(|p| (p[1] - x) / HIGHLIGHT_SHADOW_SCALE * 100.0)
         };

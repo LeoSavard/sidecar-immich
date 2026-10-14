@@ -269,11 +269,11 @@ impl SidecarDoc {
 
     pub fn edit(&self) -> EditParams {
         let mut edit: EditParams = self.sidecar.get("edit").cloned().and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
-        // A sidecar with no processVersion at all predates this field; either way, under 2 means Highlights
-        // and Shadows (if ever touched) are still curve points, not tone.highlights/shadows.
-        if self.process_version().unwrap_or(0) < 2 {
-            edit.migrate_highlight_shadow_anchors();
-        }
+        // The sidecar's own version is the one an older Sidecar wrote; the edit inside carries it too, but a
+        // sidecar from before the field existed has none, which means 1.
+        let stored = self.process_version().unwrap_or(1).min(edit.process_version as u64) as u32;
+        edit.process_version = stored;
+        edit.migrate();
         edit
     }
 

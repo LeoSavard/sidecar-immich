@@ -528,4 +528,29 @@ mod history {
         let err = h.commit(&Commit { edit: &ev(1.0), base: "nope", checkpoint: false, session: None, user: None }, &[]).unwrap_err();
         assert!(matches!(err.downcast_ref::<SidecarError>(), Some(SidecarError::UnknownVersion { .. })));
     }
+
+    /// A history written under `PROCESS_VERSION` 1: its versions read back migrated, and a save made from one
+    /// after the upgrade keeps its Highlights. That second part is why `edit_of` stays raw: a delta taken
+    /// against the migrated parent, replayed onto the stored one, would drop Highlights (unchanged, so not in
+    /// the delta) while the anchor point it came from is replaced along with the rest of the curve.
+    #[test]
+    fn versions_saved_before_highlights_left_the_curve_migrate_and_saves_on_top_keep_them() {
+        let mut h = History::begin(&EditParams::default());
+        h.nodes[0].delta["processVersion"] = serde_json::json!(1);
+        let mut old = EditParams { process_version: 1, ..Default::default() };
+        old.tone.curve = vec![[0.0, 0.0], [0.75, 0.75 + 0.2 * 0.15], [1.0, 1.0]];
+        let a = save(&mut h, &old, ORIGINAL).head;
+
+        let shown = h.version_of(&a).unwrap();
+        assert!((shown.tone.highlights - 20.0).abs() < 1e-9, "{shown:?}");
+        assert_eq!(shown.tone.curve, vec![[0.0, 0.0], [1.0, 1.0]]);
+        assert_eq!(shown.process_version, sidecar_color::params::PROCESS_VERSION);
+        assert_eq!(h.edit_of(&a).unwrap(), old, "what's stored is untouched");
+
+        let mut next = shown.clone();
+        next.tone.curve = vec![[0.0, 0.0], [0.4, 0.45], [1.0, 1.0]];
+        let b = save(&mut h, &next, &a).head;
+        assert_eq!(h.version_of(&b).unwrap(), next);
+        assert_eq!(h.checkout(&a).unwrap(), shown, "a checkout makes the migrated version current");
+    }
 }

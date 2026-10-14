@@ -681,7 +681,7 @@ async fn get_history(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Path(k
             .nodes
             .iter()
             .map(|n| {
-                let edit = history.edit_of(&n.id)?;
+                let edit = history.version_of(&n.id)?;
                 let exports = exports.iter().filter(|e| e["editEtag"] == n.etag).cloned().collect();
                 Ok(HistoryNode { node: n.clone(), edit, exports })
             })
