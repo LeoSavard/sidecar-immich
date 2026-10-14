@@ -262,6 +262,13 @@ impl SidecarDoc {
         self.sidecar.get("processVersion").and_then(Value::as_u64)
     }
 
+    /// The SHA-1 of the original this sidecar was last saved for. Sidecars are found by path, so this is what
+    /// tells a sidecar left beside a different file — a rename, or new bytes under the old name — from the
+    /// file's own.
+    pub fn source_sha1(&self) -> Option<&str> {
+        self.sidecar.get("sourceSha1").and_then(Value::as_str)
+    }
+
     /// True when a newer Sidecar wrote this file; the editor opens it read-only.
     pub fn is_read_only(&self) -> bool {
         self.process_version().is_some_and(|v| v > PROCESS_VERSION as u64)
