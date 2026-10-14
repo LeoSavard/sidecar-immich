@@ -100,6 +100,11 @@ export class ViewPass {
 		return new ViewPass(device, context, format, pipeline);
 	}
 
+	/** Draw in another colour space from the next frame on: only the canvas is configured again. */
+	setDisplayP3(displayP3: boolean) {
+		this.context.configure({ device: this.device, format: this.format, alphaMode: 'opaque', colorSpace: displayP3 ? 'display-p3' : 'srgb' });
+	}
+
 	/** Fit the output in the canvas, then apply zoom (1 = fit) and pan (canvas pixels). */
 	render(developed: GPUTexture, canvas: HTMLCanvasElement, view: Viewport, flags: number, geometry?: ViewGeometry) {
 		const [ow, oh] = geometry?.size ?? [developed.width, developed.height];

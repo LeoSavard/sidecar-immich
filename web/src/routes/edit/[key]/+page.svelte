@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 <script lang="ts">
 	import { page } from '$app/state';
-	import { untrack } from 'svelte';
+	import { tick, untrack } from 'svelte';
 	import { DevelopPass, requestDevice } from '$lib/gpu/develop';
 	import { CLIP_HIGHS, CLIP_LOWS, MASK_INVERTED, PEAKING, SHOW_MASK, ViewPass, type ViewGeometry, type Viewport } from '$lib/gpu/view';
 	import { BRUSH, MaskLibrary, brushStroke, type BrushSettings, type MaskSet } from '$lib/masks';
@@ -10,7 +10,7 @@
 	import { LensPass, correctedPoint, sourcePoint } from '$lib/gpu/lens';
 	import { ColorPacker } from '$lib/color/pack';
 	import { api } from '$lib/api';
-	import { settings, SPACE_LABELS } from '$lib/settings';
+	import { saveSettings, settings, SPACE_LABELS } from '$lib/settings';
 	import { EditSession, type EditState } from '$lib/state/edit-session.svelte';
 	import { copyLook, pasteLook, readLookClipboard, type LookClipboard } from '$lib/state/look-clipboard';
 	import Histogram from '$lib/ui/Histogram.svelte';
@@ -28,6 +28,8 @@
 	import DetailSection from '$lib/ui/sections/DetailSection.svelte';
 	import { NO_GEOMETRY, isNoGeometry, project, twist, untwist } from '$lib/state/edit-view';
 	import type { Crop, DisplaySpace, EditParams, Frame, Geometry, MaskAdjustment, Meta } from '$lib/types';
+
+	const SPACES: DisplaySpace[] = ['srgb', 'display-p3'];
 
 	type Section = 'lens' | 'crop' | 'wb' | 'light' | 'film' | 'curve' | 'color' | 'masks' | 'detail' | 'history';
 
@@ -56,6 +58,8 @@
 	let before = $state(false);
 	let section = $state<Section>('light');
 	let showPhoneHistogram = $state(true);
+	/** The editing tools put away so the photo has the screen: only the section tabs stay. Kept per device. */
+	let toolsHidden = $state(typeof localStorage !== 'undefined' && localStorage.getItem('sidecar.toolsHidden') === '1');
 	let wide = $state(false);
 	let exporting = $state(false);
 	let loupeCenter = $state<[number, number]>([0.5, 0.5]);
@@ -103,7 +107,7 @@
 	const changed = () => session.changed();
 	const committed = () => session.committed();
 	/** The crop tool is in use: the canvas shows the whole straightened picture, with the crop's frame over it. */
-	const cropping = $derived(!readOnly && (wide ? cropOpen : section === 'crop'));
+	const cropping = $derived(!readOnly && !toolsHidden && (wide ? cropOpen : section === 'crop'));
 	const compareEdit = () => compare?.edit ?? defaults;
 
 	let develop: DevelopPass;
@@ -122,7 +126,7 @@
 	let maskShown = $state(false);
 	let brush = $state<BrushSettings>({ mode: 'off', size: 50, feather: 50, flow: 100 });
 	/** Painting happens on the photo while a layer is selected and the brush is on. */
-	const painting = $derived(!fallback && !readOnly && !cropping && brush.mode !== 'off' && maskSelected !== null && (wide || section === 'masks'));
+	const painting = $derived(!fallback && !readOnly && !toolsHidden && !cropping && brush.mode !== 'off' && maskSelected !== null && (wide || section === 'masks'));
 	/** Masks lens-corrected as the picture is, and the correction each was made with. */
 	const correctedMasks = new Map<string, { madeFrom: string; texture: GPUTexture }>();
 	let painter: MaskPainter;
@@ -161,6 +165,41 @@
 	function schedule(dev = false) {
 		developDirty ||= dev;
 		if (!frame) frame = requestAnimationFrame(draw);
+	}
+
+	/**
+	 * View and export in another space from now on: the canvas is configured again and the develop uniforms
+	 * repacked for it. Saved as the setting, so the next photo and the Settings page agree.
+	 */
+	async function setOutputSpace(next: DisplaySpace) {
+		if (next === display) return;
+		display = next;
+		displaySpace = next;
+		view?.setDisplayP3(next === 'display-p3');
+		schedule(true);
+		if (fallback) renderPreview();
+		try {
+			await saveSettings({ ...(await settings()), outputSpace: next });
+		} catch (e) {
+			error = e instanceof Error ? e.message : String(e);
+		}
+	}
+
+	function setToolsHidden(hidden: boolean, open?: Section) {
+		toolsHidden = hidden;
+		localStorage.setItem('sidecar.toolsHidden', hidden ? '1' : '0');
+		if (hidden) pickingWhite = false;
+		if (!open) return;
+		section = open;
+		// On the desktop every section is a <details>: open the one asked for and bring it into view.
+		if (wide)
+			tick().then(() => {
+				const d = document.getElementById(`section-${open}`) as HTMLDetailsElement | null;
+				if (d) {
+					d.open = true;
+					d.scrollIntoView({ block: 'start' });
+				}
+			});
 	}
 
 	/** Resolve the edit through the colour packer — wasm, so it works with or without a GPU. */
@@ -988,6 +1027,7 @@
 			if (e.shiftKey) session.redo();
 			else session.undo();
 		} else if (e.key === '\\') setBefore(!before);
+		else if (e.key.toLowerCase() === 'h' && !e.metaKey && !e.ctrlKey) setToolsHidden(!toolsHidden);
 		else if (e.key.toLowerCase() === 'e' && !e.metaKey && !e.ctrlKey) exporting = true;
 		else if (e.key.toLowerCase() === 'z' && !e.metaKey && !e.ctrlKey) {
 			section = 'detail';
@@ -1192,7 +1232,24 @@
 		{#if status || error}
 			<p class="absolute inset-x-4 top-[max(1rem,env(safe-area-inset-top))] text-center text-sm {error ? 'text-danger' : 'text-fg-2'}">{error || status}</p>
 		{/if}
-		{#if before}<span class="absolute top-[max(1rem,env(safe-area-inset-top))] left-4 rounded bg-ground/80 px-2 py-1 text-xs">{compare?.label ?? (developed ? 'As saved' : 'As shot')}</span>{/if}
+		<button
+			type="button"
+			class="absolute top-[max(0.75rem,env(safe-area-inset-top))] left-3 grid size-8 place-items-center rounded-full {toolsHidden ? 'bg-fg text-ground' : 'bg-ground/80 text-fg-2'}"
+			aria-pressed={toolsHidden}
+			aria-label={toolsHidden ? 'Show the editing tools' : 'Hide the editing tools'}
+			title={toolsHidden ? 'Show the editing tools (H)' : 'Hide the editing tools (H)'}
+			onclick={() => setToolsHidden(!toolsHidden)}
+		>
+			<svg viewBox="0 0 16 16" class="size-4" aria-hidden="true"><circle cx="8" cy="8" r="6.75" fill="none" stroke="currentColor" stroke-width="1.5" /><path d="M8 7.25v4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" /><circle cx="8" cy="4.9" r="0.95" fill="currentColor" /></svg>
+		</button>
+		{#if wide && toolsHidden && edit && meta}
+			<nav class="absolute bottom-3 left-1/2 flex max-w-[calc(100%-1.5rem)] -translate-x-1/2 gap-1 overflow-x-auto rounded-full bg-panel/90 p-1" aria-label="Tools">
+				{#each sections as s (s.id)}
+					<button type="button" class="h-8 shrink-0 rounded-full px-3 text-xs text-fg-2 hover:bg-raised" aria-label={s.label} onclick={() => setToolsHidden(false, s.id)}>{s.short}</button>
+				{/each}
+			</nav>
+		{/if}
+		{#if before}<span class="absolute top-[max(1rem,env(safe-area-inset-top))] left-14 rounded bg-ground/80 px-2 py-1 text-xs">{compare?.label ?? (developed ? 'As saved' : 'As shot')}</span>{/if}
 		<div class="absolute top-[max(0.75rem,env(safe-area-inset-top))] right-3 grid justify-items-end gap-1.5">
 			{#if !wide && showPhoneHistogram && !fallback}
 				<div class="transition-opacity {painting ? 'opacity-30' : ''}" title={painting ? 'Paused while painting' : undefined}>
@@ -1201,6 +1258,11 @@
 			{/if}
 			{#if !wide && !fallback}
 				<button type="button" aria-pressed={peaking} class="rounded-full px-2.5 py-1 text-[0.6875rem] {peaking ? 'bg-fg text-ground' : 'bg-ground/80 text-fg-2'}" onclick={() => { peaking = !peaking; schedule(); }}>Focus</button>
+				{/if}
+				{#if !wide}
+					<button type="button" class="rounded-full bg-ground/80 px-2.5 py-1 text-[0.6875rem] text-fg-2" aria-label="Viewing and exporting in {SPACE_LABELS[displaySpace]}: switch to {displaySpace === 'srgb' ? 'Display P3' : 'sRGB'}" onclick={() => setOutputSpace(displaySpace === 'srgb' ? 'display-p3' : 'srgb')}>{displaySpace === 'srgb' ? 'sRGB' : 'P3'}</button>
+				{/if}
+				{#if !wide && !fallback}
 				{#if meta?.info.afPoint}
 					<button type="button" aria-pressed={showAfPoint} class="rounded-full px-2.5 py-1 text-[0.6875rem] {showAfPoint ? 'bg-fg text-ground' : 'bg-ground/80 text-fg-2'}" onclick={() => (showAfPoint = !showAfPoint)}>AF</button>
 				{/if}
@@ -1208,9 +1270,11 @@
 		</div>
 	</div>
 
-	{#if edit && meta}
-		<!-- Phone: one tool at a time in a bottom sheet. Desktop: all sections in pipeline order. -->
+	{#if edit && meta && !(wide && toolsHidden)}
+		<!-- Phone: one tool at a time in a bottom sheet. Desktop: all sections in pipeline order. Tools hidden:
+		     the phone keeps its tab row, the desktop a strip of tabs over the photo. -->
 		<aside class="flex max-h-[48dvh] shrink-0 flex-col bg-panel pb-[max(0.75rem,env(safe-area-inset-bottom))] lg:max-h-none lg:w-80 lg:pb-3">
+			{#if !toolsHidden}
 			<header class="flex items-center justify-between gap-3 px-6 pt-3 pb-2 lg:flex-col lg:items-stretch lg:gap-2 lg:px-4">
 				<div class="min-w-0 text-xs text-fg-2">
 					<p class="truncate text-sm text-fg">{meta.fileName}</p>
@@ -1255,6 +1319,7 @@
 					</p>
 				{/if}
 			</div>
+			{/if}
 
 			{#if wide}
 			<div class="px-4 pb-2">
@@ -1274,29 +1339,36 @@
 						{/if}
 						{/if}
 					</div>
-					<a href="/settings" class="text-fg-2">Viewing and exporting in {SPACE_LABELS[displaySpace]}</a>
+					<div class="flex items-center gap-1" role="radiogroup" aria-label="Viewing and exporting in">
+						{#each SPACES as sp (sp)}
+							<button type="button" role="radio" aria-checked={displaySpace === sp} title="View and export in {SPACE_LABELS[sp]}" class="rounded-full px-2 py-0.5 {displaySpace === sp ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" onclick={() => setOutputSpace(sp)}>{sp === 'srgb' ? 'sRGB' : 'P3'}</button>
+						{/each}
+					</div>
 				</div>
 			</div>
 
 			{:else}
 			<nav class="flex items-center gap-2 overflow-x-auto px-6 py-2" aria-label="Tools">
 				{#each sections as s (s.id)}
-					<button type="button" aria-pressed={section === s.id} class="h-8 shrink-0 rounded-full px-3 text-xs {section === s.id ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" aria-label={s.label} onclick={() => (section = s.id)}>{s.short}</button>
+					<button type="button" aria-pressed={section === s.id && !toolsHidden} class="h-8 shrink-0 rounded-full px-3 text-xs {section === s.id && !toolsHidden ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" aria-label={s.label} onclick={() => setToolsHidden(false, s.id)}>{s.short}</button>
 				{/each}
 				<button type="button" aria-pressed={showPhoneHistogram} aria-label="Show histogram" class="ml-auto grid size-8 shrink-0 place-items-center rounded-full {showPhoneHistogram ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" onclick={() => (showPhoneHistogram = !showPhoneHistogram)}>
 					<svg viewBox="0 0 16 16" class="size-4" aria-hidden="true"><path d="M1 14 L4 8 L7 10 L10 3 L13 9 L15 6 L15 14 Z" fill="currentColor" /></svg>
 				</button>
 			</nav>
 
+			{#if !toolsHidden}
 			<div class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-6 pt-1">
 				{#if section === 'lens'}{@render lensSection()}{:else if section === 'crop'}{@render cropSection()}{:else if section === 'wb'}{@render wbSection()}{:else if section === 'light'}{@render lightSection()}{:else if section === 'film'}{@render filmSection()}{:else if section === 'curve'}{@render curveSection()}{:else if section === 'color'}{@render colorSection()}{:else if section === 'masks'}{@render masksSection()}{:else if section === 'history'}{@render historySection()}{:else}{@render detailSection()}{/if}
 			</div>
+			{/if}
 
 			{/if}
 			{#if wide}
 			<div class="min-h-0 flex-1 overflow-y-auto px-4">
 				{#each sections as s (s.id)}
 					<details
+						id="section-{s.id}"
 						class="border-t border-line py-2"
 						open={s.id === 'wb' || s.id === 'light' || (s.id === 'crop' && cropOpen)}
 						ontoggle={(e) => {

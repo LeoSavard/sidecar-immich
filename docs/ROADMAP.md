@@ -199,18 +199,14 @@ sky, the subject.
 
 ## Interface
 
-**Hide the editing tools.** A circled-i toggle in the canvas's top-left corner (a different corner from the
-existing clip/peaking/AF-point toggles, top-right) collapses the sidebar — file/camera details, the develop
-sliders, Export/Save — into a compact center bar: the section tabs (WB · Light · Curve · Color · Detail) stay
-reachable, so switching tools still works, but everything else shrinks to its smallest useful form and the
-photo gets the rest of the viewport. Client-only state, no sidecar involved.
+**Hide the editing tools — done.** A circled-i toggle in the canvas's top-left corner (or `H`) puts the tools
+away: on a phone the bottom sheet shrinks to its tab row, on the desktop the sidebar gives way to a strip of
+section tabs over the photo. A tab brings the tools back open at that section. Crop handles and the brush are
+off while hidden. Remembered per device (`localStorage`), no sidecar involved.
 
-The same panel is the right place to put output space (sRGB / Display P3) inline, instead of only reachable
-by leaving the editor for `/settings`. This is wiring, not an architecture change: `ViewPass.create`'s
-`context.configure({ colorSpace })` in `web/src/lib/gpu/view.ts` only runs once today, but a
-`GPUCanvasContext` can be reconfigured live — switching mid-edit means calling `configure()` again with the
-new colour space and re-packing the develop uniforms (`packer.pack(source, meta.info.color, display)`) for
-the new `DisplaySpace`, then `schedule(true)`.
+**Output space in the editor — done.** sRGB / P3 sits where "Viewing and exporting in …" was (desktop) and
+under Focus (phone). Switching reconfigures the canvas (`ViewPass.setDisplayP3`), repacks the develop uniforms
+for the new `DisplaySpace` and saves it as the setting, so `/settings` and the next photo agree.
 
 ## Housekeeping
 
