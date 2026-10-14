@@ -100,7 +100,7 @@ export class DevelopPass {
 		this.source?.destroy();
 		this.target?.destroy();
 		this.input = undefined;
-		this.source = this.device.createTexture({ label: 'source', size: [width, height], format: 'rgba16float', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+		this.source = this.device.createTexture({ label: 'source', size: [width, height], format: 'rgba16float', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC });
 		this.device.queue.writeTexture({ texture: this.source }, f16, { bytesPerRow: width * 8 }, [width, height]);
 		this.target = this.device.createTexture({
 			label: 'developed',
@@ -194,6 +194,44 @@ export class DevelopPass {
 		this.draw(target, this.maskGroup(ubo, textures));
 	}
 
+	/**
+	 * The camera RGB around a point of the source (0…1), averaged over a square `radius` pixels out from it,
+	 * leaving out pixels the ingest flagged as clipped (alpha above 0): the white balance eyedropper's patch.
+	 * Null when every pixel there is clipped.
+	 */
+	async sampleSource(at: [number, number], radius: number): Promise<[number, number, number] | null> {
+		const t = this.source!;
+		const cx = Math.round(at[0] * (t.width - 1));
+		const cy = Math.round(at[1] * (t.height - 1));
+		const x0 = Math.max(0, Math.min(t.width - 1, cx - radius));
+		const y0 = Math.max(0, Math.min(t.height - 1, cy - radius));
+		const w = Math.min(t.width, cx + radius + 1) - x0;
+		const h = Math.min(t.height, cy + radius + 1) - y0;
+		if (w <= 0 || h <= 0) return null;
+		const bytesPerRow = 256 * Math.ceil((w * 8) / 256);
+		const buf = this.device.createBuffer({ size: bytesPerRow * h, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+		const encoder = this.device.createCommandEncoder();
+		encoder.copyTextureToBuffer({ texture: t, origin: [x0, y0] }, { buffer: buf, bytesPerRow }, [w, h]);
+		this.device.queue.submit([encoder.finish()]);
+		await buf.mapAsync(GPUMapMode.READ);
+		const sum = [0, 0, 0];
+		let n = 0;
+		for (let row = 0; row < h; row++) {
+			const bits = new Uint16Array(buf.getMappedRange(row * bytesPerRow, bytesPerRow), 0, w * 4);
+			const px = Array.from(bits, half);
+			for (let i = 0; i < w * 4; i += 4) {
+				if (px[i + 3] > 0) continue;
+				sum[0] += px[i];
+				sum[1] += px[i + 1];
+				sum[2] += px[i + 2];
+				n++;
+			}
+		}
+		buf.unmap();
+		buf.destroy();
+		return n ? [sum[0] / n, sum[1] / n, sum[2] / n] : null;
+	}
+
 	/** Read developedTex back as RGBA16F bytes (tests and parity only — the editor never reads pixels back). */
 	async readback(): Promise<Uint8Array> {
 		const t = this.target!;
@@ -210,6 +248,16 @@ export class DevelopPass {
 		buf.destroy();
 		return out;
 	}
+}
+
+/** An IEEE half float's bits → its value. */
+function half(h: number): number {
+	const exp = (h >> 10) & 0x1f;
+	const frac = h & 0x3ff;
+	const sign = h & 0x8000 ? -1 : 1;
+	if (exp === 0) return sign * frac * 2 ** -24;
+	if (exp === 31) return frac ? NaN : sign * Infinity;
+	return sign * (1 + frac / 1024) * 2 ** (exp - 15);
 }
 
 export async function requestDevice(): Promise<GPUDevice> {

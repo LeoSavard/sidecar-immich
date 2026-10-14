@@ -189,6 +189,30 @@ pub unsafe extern "C" fn sc_tone_curve_lut(ptr: *const u8, len: usize) -> *const
     }))
 }
 
+#[derive(Deserialize)]
+struct NeutralRequest {
+    camera: CameraColor,
+    /// The camera RGB of the patch to make grey.
+    neutral: [f64; 3],
+}
+
+/// `{ camera, neutral }` → `{ temperatureK, tint }` under which that patch is grey: the white balance
+/// eyedropper (`CameraColor::neutral_xy`).
+///
+/// # Safety
+/// `ptr` must point to `len` readable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sc_white_from_neutral(ptr: *const u8, len: usize) -> *const u8 {
+    let input = unsafe { std::slice::from_raw_parts(ptr, len) };
+    respond(serde_json::from_slice::<NeutralRequest>(input).map_err(|e| e.to_string()).and_then(|req| {
+        if !req.neutral.iter().all(|v| v.is_finite() && *v > 0.0) {
+            return Err("the patch has a channel at zero".into());
+        }
+        let (t, tint) = sidecar_color::cct::xy_to_temp_tint(req.camera.neutral_xy(req.neutral));
+        serde_json::to_vec(&serde_json::json!({ "temperatureK": t, "tint": tint })).map_err(|e| e.to_string())
+    }))
+}
+
 /// Default edit parameters as length-prefixed JSON, so the web app never duplicates them.
 #[unsafe(no_mangle)]
 pub extern "C" fn sc_default_edit() -> *const u8 {

@@ -78,6 +78,21 @@ try {
 
 	await step('white balance', async () => {
 		await section('White balance');
+		if (mode === 'webgpu') {
+			// The eyedropper: a tap in the middle of the photo sets a custom white balance (logged, then
+			// overwritten below, so the saved edit doesn't depend on the photo).
+			await click('Pick a neutral');
+			const box = await page.locator('canvas').first().boundingBox();
+			// A tap before the preview has reached the GPU is ignored and the eyedropper stays armed: tap again.
+			const custom = () => page.waitForFunction(() => [...document.querySelectorAll('span')].some((s) => s.textContent === 'Custom'), null, { timeout: 2000 }).then(() => true, () => false);
+			for (let i = 0; ; i++) {
+				await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+				if (await custom()) break;
+				if (i === 5) throw new Error('the eyedropper never set a white balance');
+			}
+			const temp = await (await visible(page.getByRole('slider', { name: 'Temperature' }))).getAttribute('aria-valuenow');
+			log('eyedropper:', temp, 'K');
+		}
 		await set('wb-temp', 4800);
 		await set('wb-tint', 8);
 	});
