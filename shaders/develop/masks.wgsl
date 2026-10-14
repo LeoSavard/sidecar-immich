@@ -36,11 +36,16 @@ struct MaskMix {
 }
 
 // No layer yet: the global edit's `tone` and `mixer`.
-fn mask_start(tone: vec4f, mixer: array<vec4f, 8>) -> MaskMix {
+// `saturation` is the global edit's own (EditParams.saturation, 0 for an edit that never touched it) — the
+// baseline every mask layer's own saturation (`mask_add`'s `l.tone.y`) adds to, same as `tone` is for the tone
+// map. A global saturation needs no mask-style neutral guard: `mask_saturation` scales OKLCh chroma directly,
+// and that's naturally a no-op wherever chroma is already ~0.
+fn mask_start(tone: vec4f, mixer: array<vec4f, 8>, saturation: f32) -> MaskMix {
   var m: MaskMix;
   m.gain = vec3f(1.0);
   m.tone = tone;
   m.mixer = mixer;
+  m.saturation = saturation;
   return m;
 }
 

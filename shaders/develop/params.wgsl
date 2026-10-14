@@ -10,6 +10,7 @@ struct DevelopParams {
   tone: vec4f,               // RAW: black EV, white EV, steepness, pivot · developed: blacks, whites, contrast, knee
   hl_strength: f32,          // highlight blend strength
   display_referred: f32,     // 0 RAW (scene-referred), 1 JPEG/HEIC/PNG/TIFF (display-referred)
-  _pad1: vec2f,
+  saturation: f32,           // global chroma gain - 1 (OKLCh), the mask-saturation baseline every layer adds to
+  _pad1: f32,
   mixer: array<vec4f, 8>,    // per band: hue shift (radians), chroma gain - 1, lightness shift, unused
 }
