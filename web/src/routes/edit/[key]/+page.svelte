@@ -1393,7 +1393,10 @@
 
 {#snippet colorSection()}
 	{#if edit}
-		<ColorMixer mixer={edit.mixer} onchange={(band: Band, field: keyof MixerBand, v: number) => { edit!.mixer[band][field] = v; changed(); }} oncommit={committed} />
+		<div class="grid gap-2">
+			<Slider id="saturation" label="Saturation" value={edit.saturation ?? 0} min={-100} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => { edit!.saturation = v; changed(); }} oncommit={committed} />
+			<ColorMixer mixer={edit.mixer} onchange={(band: Band, field: keyof MixerBand, v: number) => { edit!.mixer[band][field] = v; changed(); }} oncommit={committed} />
+		</div>
 	{/if}
 {/snippet}
 

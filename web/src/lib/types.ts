@@ -15,6 +15,9 @@ export type EditParams = {
 	exposure: { ev: number; highlightBlend: number };
 	tone: { blackEv: number; whiteEv: number; contrast: number; curve: [number, number][] };
 	mixer: Record<Band, MixerBand>;
+	/** Global chroma gain, −100…100, the same OKLCh scale a mask layer's own `saturation` uses, and the
+	 * baseline every mask layer's adds to. Absent at 0, matching a never-touched edit's lean JSON. */
+	saturation?: number;
 	detail: {
 		sharpenAmount: number;
 		sharpenRadius: number;
