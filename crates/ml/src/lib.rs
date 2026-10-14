@@ -21,6 +21,8 @@ mod models {
     #[rustfmt::skip]
     pub mod birefnet;
     #[rustfmt::skip]
+    pub mod depth;
+    #[rustfmt::skip]
     pub mod multiclass;
     #[rustfmt::skip]
     pub mod yunet;
@@ -31,7 +33,7 @@ use anyhow::{Result, anyhow, ensure};
 use burn::prelude::*;
 use burn::tensor::{DType, FloatDType};
 use burn_store::{BurnpackStore, ModuleSnapshot};
-use models::{birefnet, multiclass, yunet};
+use models::{birefnet, depth, multiclass, yunet};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -114,6 +116,7 @@ pub struct Ml {
     half: bool,
     yunet: Option<yunet::Model>,
     birefnet: Option<birefnet::Model>,
+    depth: Option<depth::Model>,
     multiclass: Option<multiclass::Model>,
 }
 
@@ -138,6 +141,7 @@ impl Ml {
             half,
             yunet: None,
             birefnet: None,
+            depth: None,
             multiclass: None,
         })
     }
@@ -273,6 +277,15 @@ impl Ml {
             self.birefnet = Some(self.load(birefnet::Model::new(&self.device), "birefnet")?);
         }
         Ok(self.birefnet.as_ref().expect("just loaded"))
+    }
+
+    /// Spike: Depth Anything V2 Small on an already-normalised 1×3×518×518 input, its raw output back.
+    pub fn depth_raw(&mut self, input: Vec<f32>) -> Result<Vec<f32>> {
+        if self.depth.is_none() {
+            self.depth = Some(self.load(depth::Model::new(&self.device), "depth")?);
+        }
+        let input = self.tensor(input, [1, 3, 518, 518]);
+        read(self.depth.as_ref().expect("just loaded").forward(input))
     }
 
     fn multiclass(&mut self) -> Result<&multiclass::Model> {

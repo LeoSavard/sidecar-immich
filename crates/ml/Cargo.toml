@@ -12,6 +12,10 @@ path = "src/main.rs"
 
 # Regenerates src/models/ and the weights from ONNX; run through `dev/ml-models`.
 [[bin]]
+name = "depth-check"
+path = "src/bin/depth_check.rs"
+
+[[bin]]
 name = "sidecar-ml-import"
 path = "src/bin/import.rs"
 required-features = ["import"]
