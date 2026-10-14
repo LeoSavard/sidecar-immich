@@ -9,7 +9,7 @@ import type { EditParams } from '$lib/types';
  * the photo they were made for. Taking them through `PICKS` means a control added to one of these sections
  * travels with a copied look without this file changing.
  */
-const LOOK_SECTIONS = ['wb', 'light', 'curve', 'color', 'detail'];
+const LOOK_SECTIONS = ['wb', 'light', 'film', 'curve', 'color', 'detail'];
 
 export type LookClipboard = { edit: EditParams; from: string; copiedAt: number };
 

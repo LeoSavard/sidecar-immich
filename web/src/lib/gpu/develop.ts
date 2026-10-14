@@ -2,8 +2,8 @@
 // Develop pass in the browser. Bind group layout, formats and the draw mirror crates/engine/src/develop.rs,
 // and the WGSL is the same composed file, so the parity harness can compare the two renders directly.
 import developWgsl from './wgsl/client_develop.wgsl?raw';
+import { DEVELOP_UNIFORM_BYTES } from '$lib/color/pack';
 
-const DEVELOP_UNIFORM_BYTES = 272;
 /** `MaskParams` (shaders/develop/masks.wgsl), and the texture slots it describes. */
 const MASK_UNIFORM_BYTES = 1568;
 const MAX_MASKS = 8;

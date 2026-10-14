@@ -67,6 +67,21 @@ fn tone_map_curve_in(c: vec3f, tone: vec4f) -> f32 {
   return (logistic(x, tone.z, tone.w) - s0) / (s1 - s0);
 }
 
+// Module 4 for a RAW, rendered as film: each channel through the characteristic curve on its own, as each of a
+// colour film's three layers has its own, after interlayer effects spread the channels apart in log exposure
+// (`spread` stops per stop away from their mean; a neutral has no spread to widen). Returns the encoded value
+// per channel that the user's curve then takes; decoding it per channel finishes.
+fn film_curve_in(c: vec3f, tone: vec4f, spread: f32) -> vec3f {
+  // A channel at zero has no log: hold it four stops under the black point, where the curve is flat anyway.
+  let lowest = 0.18 * exp2(tone.x - 4.0);
+  let x = log2(max(c, vec3f(lowest)) / 0.18);
+  let xs = x + spread * (x - vec3f((x.r + x.g + x.b) / 3.0));
+  let t = clamp((xs - vec3f(tone.x)) / (tone.y - tone.x), vec3f(0.0), vec3f(1.0));
+  let s0 = logistic(0.0, tone.z, tone.w);
+  let s1 = logistic(1.0, tone.z, tone.w);
+  return (vec3f(logistic(t.r, tone.z, tone.w), logistic(t.g, tone.z, tone.w), logistic(t.b, tone.z, tone.w)) - vec3f(s0)) / (s1 - s0);
+}
+
 // Scale `c` to the luminance the curves settled on, `e` display-encoded.
 fn tone_apply(c: vec3f, e: f32, developed: bool) -> vec3f {
   let y_out = srgb_decode1(e);

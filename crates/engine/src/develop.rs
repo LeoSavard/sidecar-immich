@@ -170,8 +170,9 @@ impl DevelopPass {
 
     /// Develop a source texture into a new RGBA16F texture (display-linear).
     pub fn render(&self, gpu: &Gpu, src_tex: &wgpu::Texture, uniform: &[u8], lut: &[f32], masks: &Masks) -> Result<wgpu::Texture> {
-        if uniform.len() != 272 {
-            bail!("develop uniform must be 272 bytes, got {}", uniform.len());
+        let expected = std::mem::size_of::<sidecar_color::params::DevelopParams>();
+        if uniform.len() != expected {
+            bail!("develop uniform must be {expected} bytes, got {}", uniform.len());
         }
         let (w, h) = (src_tex.width(), src_tex.height());
         let size = wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 };
@@ -276,7 +277,7 @@ mod tests {
         eprintln!("adapter: {} ({:?})", gpu.adapter_info.name, gpu.adapter_info.backend);
         let pass = DevelopPass::new(&gpu).unwrap();
         // Identity-ish uniforms: unit WB, unit matrices, default tone.
-        let mut u = vec![0u8; 272];
+        let mut u = vec![0u8; std::mem::size_of::<sidecar_color::params::DevelopParams>()];
         let put = |u: &mut Vec<u8>, off: usize, v: &[f32]| u[off..off + v.len() * 4].copy_from_slice(bytemuck::cast_slice(v));
         put(&mut u, 0, &[1.0, 1.0, 1.0, 1.0]);
         put(&mut u, 16, &[1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]);

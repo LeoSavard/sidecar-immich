@@ -55,15 +55,28 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   c = highlight_blend(c, src.a, P.hl_strength);
   c = P.cam_to_work * c;                                       // 3
   var e: f32;
+  // Film rendering (RAW only; `pack` leaves it at 0 for a developed file): the curves per channel, blended
+  // with the neutral rendering by its amount. At 0 none of it runs, so the neutral path is unchanged.
+  let film = P.film.x > 0.0;
+  var ef = vec3f(0.0);
   if (developed) {
     // Already inside its own display gamut and already tone-mapped: neither step is the file's to take again.
     e = tone_display_curve_in(c, local.tone);                  // 4
   } else {
     c = gamut_compress(c);
     e = tone_map_curve_in(c, local.tone);                      // 4
+    if (film) { ef = film_curve_in(c, local.tone, P.film.y); }
   }
   e = layer_curves(lut_sample(tone_lut, e), layer_curves_tex, local.curves, M.count);
   c = tone_apply(c, e, developed);
+  if (film) {
+    let user = vec3f(
+      layer_curves(lut_sample(tone_lut, ef.r), layer_curves_tex, local.curves, M.count),
+      layer_curves(lut_sample(tone_lut, ef.g), layer_curves_tex, local.curves, M.count),
+      layer_curves(lut_sample(tone_lut, ef.b), layer_curves_tex, local.curves, M.count),
+    );
+    c = mix(c, vec3f(srgb_decode1(user.r), srgb_decode1(user.g), srgb_decode1(user.b)), P.film.x);
+  }
   c = mask_saturation(mask_contrast(c, local.contrast), local.saturation);
   c = color_mixer(c, local.mixer);                             // 5
   c = output_transform(c, P.work_to_disp, developed);
