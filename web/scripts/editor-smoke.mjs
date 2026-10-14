@@ -139,9 +139,46 @@ try {
 		await click('Copy look');
 		await click('Paste look');
 	});
-
 	const saved = (await state()).edit;
-	console.log(JSON.stringify({ mode, layout: narrow ? 'narrow' : 'wide', steps, edit: saved }, null, 1));
+
+	// Versions: back to the original, then open the saved version again.
+	const versions = {};
+	const headBecomes = async (id) => {
+		for (let t = 0; t < 150; t++) {
+			const s = await state();
+			if (s.head === id) return s;
+			await new Promise((r) => setTimeout(r, 100));
+		}
+		throw new Error(`head never became ${id}`);
+	};
+	/** Key order isn't part of an edit's meaning. */
+	const canonical = (v) => JSON.stringify(v, (_, x) => (x && typeof x === 'object' && !Array.isArray(x) ? Object.fromEntries(Object.entries(x).sort(([a], [b]) => a.localeCompare(b))) : x));
+	/** What the Exposure slider shows once it reads `want` (the Light section is opened to see it). */
+	const shownExposure = async (want) => {
+		await section('Light');
+		await page.waitForFunction((w) => document.querySelector('[role=slider][aria-labelledby="exposure-label"]')?.getAttribute('aria-valuenow') === w, want, { timeout: 5000 });
+		return Number(await (await visible(page.getByRole('slider', { name: 'Exposure' }))).getAttribute('aria-valuenow'));
+	};
+	await step('back to original', async () => {
+		await section('History');
+		await click('Back to original');
+		versions.original = (await headBecomes('original')).edit.exposure.ev;
+		versions.originalShown = await shownExposure('0');
+	});
+	await step('open the saved version', async () => {
+		await section('History');
+		const history = await (await page.request.get(`${base}/api/assets/${key}/history`)).json();
+		const savedNode = history.nodes.filter((n) => n.kind === 'save').at(-1);
+		const row = await visible(page.getByRole('button', { name: /Exposure \+0\.50 EV/ }));
+		if (!row) throw new Error('no history row for the saved version');
+		await row.click();
+		await click('Open');
+		const now = await headBecomes(savedNode.id);
+		versions.reopened = canonical(now.edit) === canonical(savedNode.edit);
+		versions.reopenedShown = await shownExposure('0.5');
+	});
+
+	console.log(JSON.stringify({ mode, layout: narrow ? 'narrow' : 'wide', steps, versions, edit: saved }, null, 1));
 } catch (e) {
 	log('FAIL', e.message);
 	process.exitCode = 1;

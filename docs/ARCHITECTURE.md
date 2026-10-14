@@ -62,7 +62,10 @@ no WebGPU: POST …/preview → worker develops the proxy with the same shaders 
 | What's stored in the sidecar | `crates/xmp` — it serializes `EditParams` generically, field names in PascalCase |
 | Edit history and versions | `crates/xmp/src/history.rs`, `web/src/lib/ui/HistoryPanel.svelte` |
 | Export, versions, stacking | `crates/api/src/export.rs`, `crates/worker/src/export.rs` |
-| The editor UI | `web/src/routes/edit/[key]/+page.svelte`, `web/src/lib/ui/`, `web/src/lib/state/edit-view.ts` |
+| The editor's sections (sliders, buttons) | `web/src/lib/ui/sections/*` — one component per section |
+| Loading, saving, drafts, undo, versions | `web/src/lib/state/edit-session.svelte.ts` |
+| Drawing: develop, view, geometry, brush, gestures | `web/src/routes/edit/[key]/+page.svelte` (the next thing worth splitting out) |
+| What a section offers History and a copied look | `web/src/lib/state/edit-view.ts` (`CONTROLS`, `PICKS`) |
 
 ### Adding a develop control
 
@@ -81,7 +84,8 @@ The global Saturation slider (PR #4: one commit for the core, one for the UI) is
    `#[cfg_attr(feature = "ts", ts(as = "Option<…>", optional))]`, so the TypeScript says it can be absent.
 6. `web/src/lib/state/edit-view.ts` — a `CONTROLS` entry (history summaries) and the right `PICKS` section
    ("use its …" in History, and what a copied look carries).
-7. The slider in the editor's section snippet.
+7. The slider in its section component (`web/src/lib/ui/sections/`), changing the edit through
+   `onchange((e) => { … })` — never by mutating `edit` directly.
 8. If old edits would render differently, bump `PROCESS_VERSION` and migrate in `sidecar-xmp` — both where
    the current edit is read (`SidecarDoc::edit`) and where history rebuilds one (`History::edit_of`).
    Purely additive fields don't need a bump.
@@ -98,15 +102,21 @@ The global Saturation slider (PR #4: one commit for the core, one for the UI) is
   (`sidecar-serve-<worktree>`). sccache shares compiled dependencies between them.
 - **Fast checks**: `./dev/run cargo check -p <crate>`, `./dev/run cargo test -p <crate>`,
   `./dev/run bash -c 'cd web && npm run check'`.
+- **Editor smoke test**: `web/scripts/editor-smoke.mjs <url> <photo path>` (`--narrow`, `--fallback`) drives
+  every section, saves, opens versions, and prints the saved edit. Run it before and after an editor refactor
+  and diff the output: the same edit means the same behaviour. From `web/` with
+  `SIDECAR_DEV_EXTRA="--network host" ./dev/run …` against `./dev/serve`.
 
 ### Testing pitfalls
 
 - **Fixtures**: put copies under `testdata/cache/library/` (never touch `/mnt/storage/`). Use a *new file
   name* for different content: the sidecar is found by path, so overwriting `a.nef` with other bytes hands the
   new photo the old one's edit. Byte-identical copies are the same asset (same `assetKey`).
-- **Headless Chromium has no GPU adapter**, so the editor runs in server-preview fallback: the photo is an
-  `<img>`, and the histogram and overlays are hidden. That's expected, not a bug.
-- **The editor renders each control twice** at desktop widths (tab bar and accordion). Pick the visible one.
+- **WebGPU in headless Chromium** needs the flags `parity-browser.mjs` and `editor-smoke.mjs` pass
+  (`--enable-unsafe-webgpu`, Vulkan); without them it finds no adapter and the editor falls back to the
+  server's preview — the photo becomes an `<img>`, and the histogram and overlays are hidden.
+- **Controls can exist twice in the DOM** (an open section can render in more than one place): pick the
+  visible one.
 - **Sliders** are `role="slider"` with `aria-valuenow`; arrow keys step (Shift ×10); clicking the value opens
   an input for an exact number — more reliable than dragging.
 - **Edits persist** in the server state across runs of the same worktree: set absolute values in tests rather

@@ -9,11 +9,10 @@
 	import { HistogramPass, type HistogramData } from '$lib/gpu/histogram';
 	import { LensPass, correctedPoint, sourcePoint } from '$lib/gpu/lens';
 	import { ColorPacker } from '$lib/color/pack';
-	import { api, HttpError } from '$lib/api';
+	import { api } from '$lib/api';
 	import { settings, SPACE_LABELS } from '$lib/settings';
-	import { clearDraft, loadDraft, saveDraft } from '$lib/state/drafts';
+	import { EditSession, type EditState } from '$lib/state/edit-session.svelte';
 	import { copyLook, pasteLook, readLookClipboard, type LookClipboard } from '$lib/state/look-clipboard';
-	import { UndoStack } from '$lib/state/undo';
 	import Histogram from '$lib/ui/Histogram.svelte';
 	import ExportSheet from '$lib/ui/ExportSheet.svelte';
 	import HistoryPanel from '$lib/ui/HistoryPanel.svelte';
@@ -26,16 +25,14 @@
 	import CurveSection from '$lib/ui/sections/CurveSection.svelte';
 	import ColorSection from '$lib/ui/sections/ColorSection.svelte';
 	import DetailSection from '$lib/ui/sections/DetailSection.svelte';
-	import { NO_GEOMETRY, PICKS, isNoGeometry, project, twist, untwist } from '$lib/state/edit-view';
-	import type { Crop, DisplaySpace, EditParams, Frame, Geometry, HistoryState, MaskAdjustment, Meta } from '$lib/types';
+	import { NO_GEOMETRY, isNoGeometry, project, twist, untwist } from '$lib/state/edit-view';
+	import type { Crop, DisplaySpace, EditParams, Frame, Geometry, MaskAdjustment, Meta } from '$lib/types';
 
-	type EditState = { edit: EditParams; etag: string; head: string; readOnly: boolean; writable?: boolean; exports: unknown[]; forked?: boolean; savedFor?: string };
 	type Section = 'lens' | 'crop' | 'wb' | 'light' | 'curve' | 'color' | 'masks' | 'detail' | 'history';
 
 	const key = page.params.key!;
 	let canvas: HTMLCanvasElement;
 	let meta = $state<Meta | null>(null);
-	let edit = $state<EditParams | null>(null);
 	let defaults: EditParams;
 	let status = $state('Opening…');
 	let error = $state('');
@@ -84,37 +81,26 @@
 	let displaySpace = $state<DisplaySpace>('srgb');
 	let viewport: Viewport = { zoom: 1, panX: 0, panY: 0 };
 
-	let etag = '';
-	let readOnly = $state(false);
-	/// False when the photo's folder can't take a sidecar: said here rather than at the first save.
-	let writable = $state(true);
-	let dirty = $state(false);
+	/** The edit, its saving and its versions (`$lib/state/edit-session`); the page draws what follows a change. */
+	const session = new EditSession(key, {
+		redraw: () => schedule(true),
+		settled: () => {
+			if (fallback) renderPreview();
+		},
+		compared: () => {
+			if (!before) return;
+			schedule(true);
+			if (fallback) renderPreview();
+		},
+		error: (message) => (error = message)
+	});
+	const edit = $derived(session.edit);
+	const readOnly = $derived(session.readOnly);
+	const compare = $derived(session.compare);
+	const changed = () => session.changed();
+	const committed = () => session.committed();
 	/** The crop tool is in use: the canvas shows the whole straightened picture, with the crop's frame over it. */
 	const cropping = $derived(!readOnly && (wide ? cropOpen : section === 'crop'));
-	let saving = $state(false);
-	let saveQueue: Promise<void> = Promise.resolve();
-	let restoredDraft = $state(false);
-	let draftTimer: ReturnType<typeof setTimeout> | undefined;
-	/** In-session undo: every gesture. The saved history below is coarser — saves and checkpoints. */
-	let undo: UndoStack<EditParams>;
-	let canUndo = $state(false);
-	let canRedo = $state(false);
-
-	/** The history node the edit on screen came from: what the next save names as its base. */
-	let head = '';
-	/** This tab, so the server folds its checkpoints together and never another device's. */
-	const session = globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2);
-	/** A pause after a gesture saves a checkpoint, so the history keeps up without anyone pressing Save. */
-	let checkpointTimer: ReturnType<typeof setTimeout> | undefined;
-	const CHECKPOINT_MS = 4000;
-	/** Another device saved since this one loaded: both versions were kept, as branches. */
-	let forked = $state(false);
-	/** The sidecar was last saved for a different file (its `sourceSha1`); cleared by the next save. */
-	let savedFor = $state<string | null>(null);
-	let versions = $state<HistoryState | null>(null);
-	let versionsBusy = $state(false);
-	/** What pressing and holding the photo shows instead of the edit: a chosen version, or the original. */
-	let compare = $state<{ id: string; label: string; edit: EditParams } | null>(null);
 	const compareEdit = () => compare?.edit ?? defaults;
 
 	let develop: DevelopPass;
@@ -160,11 +146,6 @@
 	const frames = new Map<string, Frame>();
 	/** The uniforms the corrected proxy was made with: they also move markers set in sensor geometry. */
 	let lensUniform: Uint8Array | undefined;
-	/**
-	 * Lens correction switched on by default for a photo never edited, without counting as a change: opening a
-	 * photo must not write a sidecar. It is saved with the first real change, or before an export.
-	 */
-	let lensDefaulted = false;
 	let packer: ColorPacker;
 	/** What Highlights/Shadows alone would do to an identity curve — the curve editor's "ghost" line, drawn
 	 * behind the real one so a slider's effect stays visible even once a manual curve has its own shape. */
@@ -784,176 +765,6 @@
 		}
 	}
 
-	/** Continuous change during a gesture: redraw, mark unsaved, keep a device draft. */
-	function changed() {
-		schedule(true);
-		dirty = true;
-		clearTimeout(checkpointTimer);
-		clearTimeout(draftTimer);
-		draftTimer = setTimeout(() => edit && saveDraft(key, { edit: $state.snapshot(edit), baseEtag: etag, savedAt: Date.now() }), 500);
-	}
-
-	/** A gesture ended: one undo step, and in fallback mode the moment to ask for a new render. */
-	function committed() {
-		if (edit) undo.commit($state.snapshot(edit));
-		syncUndo();
-		if (fallback) renderPreview();
-		scheduleCheckpoint();
-	}
-
-	function scheduleCheckpoint() {
-		clearTimeout(checkpointTimer);
-		if (writable && !readOnly) checkpointTimer = setTimeout(() => commit(false, true), CHECKPOINT_MS);
-	}
-
-	function syncUndo() {
-		canUndo = undo.canUndo;
-		canRedo = undo.canRedo;
-	}
-
-	function restore(state: EditParams | null) {
-		if (!state || !edit) return;
-		edit = state;
-		changed();
-		syncUndo();
-		if (fallback) renderPreview();
-		scheduleCheckpoint();
-	}
-
-	/**
-	 * Save the edit as a version in the photo's history. One PUT at a time, each sending the latest state: a
-	 * call made while one is out waits for it and then saves whatever is still unsaved, instead of being
-	 * dropped. `checkpoint` is the save a pause triggers; the server folds this tab's checkpoints together.
-	 */
-	function commit(keepalive = false, checkpoint = false): Promise<void> {
-		if (!checkpoint) clearTimeout(checkpointTimer);
-		saveQueue = saveQueue.then(() => save(keepalive, checkpoint));
-		return saveQueue;
-	}
-
-	async function save(keepalive: boolean, checkpoint: boolean) {
-		if (!edit || !dirty || readOnly) return;
-		saving = true;
-		try {
-			const sent = JSON.stringify($state.snapshot(edit));
-			const put = (base: string) =>
-				api(`/api/assets/${key}/edit`, {
-					method: 'PUT',
-					keepalive,
-					headers: { 'content-type': 'application/json' },
-					body: JSON.stringify({ edit: JSON.parse(sent), base, checkpoint, session })
-				});
-			let r: Response;
-			try {
-				r = await put(head);
-			} catch (e) {
-				// The version this page was built on isn't in the history any more: typically a page opened
-				// before the server was updated, holding an id the new server never gave out. Save on top of
-				// the current version instead of failing until a reload.
-				if (!(e instanceof HttpError) || e.status !== 404) throw e;
-				const current: EditState = await (await api(`/api/assets/${key}/edit`)).json();
-				if (current.head === head) throw e;
-				head = current.head;
-				r = await put(head);
-			}
-			const state: EditState = await r.json();
-			etag = state.etag;
-			head = state.head;
-			forked ||= !!state.forked;
-			savedFor = state.savedFor ?? null;
-			lensDefaulted = false;
-			// Only what was sent is saved. A slider moved while the request was out used to be marked saved
-			// here, and its draft cleared, so the change was lost without a word.
-			if (JSON.stringify($state.snapshot(edit)) === sent) {
-				dirty = false;
-				restoredDraft = false;
-				await clearDraft(key);
-			} else {
-				await saveDraft(key, { edit: $state.snapshot(edit), baseEtag: etag, savedAt: Date.now() });
-			}
-			if (versions) loadVersions();
-		} catch (e) {
-			error = e instanceof Error ? e.message : String(e);
-		} finally {
-			saving = false;
-		}
-	}
-
-	/** Save if needed and return the ETag an export should pin, or null when saving failed. */
-	async function prepareExport(): Promise<string | null> {
-		if (readOnly) return etag;
-		// What's on screen is what gets exported: a correction switched on by default is saved first.
-		if (lensDefaulted && edit?.lens) dirty = true;
-		// Always through the queue: a save already out has to land before its ETag is the one to pin.
-		await commit();
-		return dirty ? null : etag;
-	}
-
-	async function loadVersions() {
-		try {
-			versions = await (await api(`/api/assets/${key}/history`)).json();
-			// A compared version may have been folded into a later checkpoint; keep comparing only what exists.
-			if (compare && !versions!.nodes.some((n) => n.id === compare!.id)) compare = null;
-		} catch (e) {
-			error = e instanceof Error ? e.message : String(e);
-		}
-	}
-
-	/** Make a version current. Unsaved changes are saved first, so opening something else never loses them. */
-	async function openVersion(id: string) {
-		versionsBusy = true;
-		try {
-			await commit();
-			if (dirty) return;
-			const r = await api(`/api/assets/${key}/history/checkout`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ node: id }) });
-			const state: EditState = await r.json();
-			edit = state.edit;
-			etag = state.etag;
-			head = state.head;
-			savedFor = state.savedFor ?? null;
-			dirty = false;
-			restoredDraft = false;
-			await clearDraft(key);
-			undo.reset($state.snapshot(edit));
-			syncUndo();
-			schedule(true);
-			if (fallback) renderPreview();
-			await loadVersions();
-		} catch (e) {
-			error = e instanceof Error ? e.message : String(e);
-		} finally {
-			versionsBusy = false;
-		}
-	}
-
-	/** Take one section — white balance, light, curve, mixer, detail — from another version into this edit. */
-	function pickFrom(id: string, section: string) {
-		const from = versions?.nodes.find((n) => n.id === id);
-		const pick = PICKS.find((p) => p.id === section);
-		if (!edit || !from || !pick) return;
-		pick.take(edit, from.edit);
-		changed();
-		committed();
-	}
-
-	async function labelVersion(id: string, label: string | null) {
-		try {
-			await api(`/api/assets/${key}/history/${id}/label`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ label }) });
-			await loadVersions();
-		} catch (e) {
-			error = e instanceof Error ? e.message : String(e);
-		}
-	}
-
-	function setCompare(id: string | null) {
-		const n = id ? versions?.nodes.find((v) => v.id === id) : undefined;
-		compare = n ? { id: n.id, label: n.label ?? (n.kind === 'original' ? 'Original' : 'Compared version'), edit: n.edit } : null;
-		if (before) {
-			schedule(true);
-			if (fallback) renderPreview();
-		}
-	}
-
 	// Masks are asked for when a tool needs them — the section is opened, or the edit has some — not with
 	// every photo: the first ask computes them.
 	$effect(() => {
@@ -962,7 +773,7 @@
 
 	// The history loads when it's first looked at, not with every photo.
 	$effect(() => {
-		if ((section === 'history' || wide) && edit && !versions) loadVersions();
+		if ((section === 'history' || wide) && edit && !session.versions) session.loadVersions();
 	});
 
 	async function loadProxy(longEdge: number) {
@@ -995,25 +806,7 @@
 			defaults = packer.defaultEdit();
 			const asShot = packer.pack(defaults, meta!.info.color, meta!.info.sourceKind ?? 'raw', display);
 			asShotWb = { temperatureK: asShot.temperatureK, tint: asShot.tint };
-			edit = state.edit;
-			etag = state.etag;
-			head = state.head;
-			readOnly = state.readOnly;
-			savedFor = state.savedFor ?? null;
-			writable = state.writable !== false;
-			const draft = await loadDraft(key);
-			if (draft && draft.baseEtag === state.etag && JSON.stringify(draft.edit) !== JSON.stringify(state.edit)) {
-				edit = draft.edit;
-				dirty = true;
-				restoredDraft = true;
-			}
-			// A photo never edited starts with the correction its file (or lensfun) provides (DESIGN.md §15).
-			const profile = meta!.info.lensProfile;
-			if (profile && !edit!.lens && head === 'original' && !restoredDraft && !readOnly) {
-				edit!.lens = { profile: profile.id, distortion: 100, lateralCa: 100, vignetting: 100 };
-				lensDefaulted = true;
-			}
-			undo = new UndoStack($state.snapshot(edit));
+			await session.begin(state, meta!.info.lensProfile);
 			const prefs = await settings();
 			display = prefs.outputSpace;
 			displaySpace = display;
@@ -1148,7 +941,8 @@
 		if ((e.target as HTMLElement)?.tagName === 'INPUT') return;
 		if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') {
 			e.preventDefault();
-			restore(e.shiftKey ? undo.redo() : undo.undo());
+			if (e.shiftKey) session.redo();
+			else session.undo();
 		} else if (e.key === '\\') setBefore(!before);
 		else if (e.key.toLowerCase() === 'e' && !e.metaKey && !e.ctrlKey) exporting = true;
 		else if (e.key.toLowerCase() === 'z' && !e.metaKey && !e.ctrlKey) {
@@ -1177,7 +971,7 @@
 			schedule();
 		});
 		ro.observe(canvas);
-		const onHide = () => document.visibilityState === 'hidden' && commit(true);
+		const onHide = () => document.visibilityState === 'hidden' && session.commit(true);
 		const noGesture = (e: Event) => e.preventDefault();
 		document.addEventListener('visibilitychange', onHide);
 		canvas.addEventListener('gesturestart', noGesture);
@@ -1277,8 +1071,8 @@
 {/snippet}
 
 {#snippet historySection()}
-	{#if versions}
-		<HistoryPanel history={versions} compareId={compare?.id ?? null} busy={versionsBusy || saving} onopen={openVersion} oncompare={setCompare} onpick={pickFrom} onlabel={labelVersion} />
+	{#if session.versions}
+		<HistoryPanel history={session.versions} compareId={compare?.id ?? null} busy={session.versionsBusy || session.saving} onopen={(id) => session.openVersion(id)} oncompare={(id) => session.setCompare(id)} onpick={(id, section) => session.pickFrom(id, section)} onlabel={(id, label) => session.labelVersion(id, label)} />
 	{:else}
 		<p class="text-xs text-fg-2">Loading history…</p>
 	{/if}
@@ -1366,10 +1160,10 @@
 					<p class="truncate">{cameraLine(meta.info)}</p>
 				</div>
 				<div class="flex shrink-0 gap-2">
-					<button type="button" class="grid size-9 place-items-center rounded bg-raised text-fg-2 disabled:opacity-40" aria-label="Undo" disabled={!canUndo || readOnly} onclick={() => restore(undo.undo())}>
+					<button type="button" class="grid size-9 place-items-center rounded bg-raised text-fg-2 disabled:opacity-40" aria-label="Undo" disabled={!session.canUndo || readOnly} onclick={() => session.undo()}>
 						<svg viewBox="0 0 16 16" class="size-4" aria-hidden="true"><path d="M6 3 2 7l4 4M2.5 7H10a4 4 0 0 1 0 8H8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></svg>
 					</button>
-					<button type="button" class="grid size-9 place-items-center rounded bg-raised text-fg-2 disabled:opacity-40" aria-label="Redo" disabled={!canRedo || readOnly} onclick={() => restore(undo.redo())}>
+					<button type="button" class="grid size-9 place-items-center rounded bg-raised text-fg-2 disabled:opacity-40" aria-label="Redo" disabled={!session.canRedo || readOnly} onclick={() => session.redo()}>
 						<svg viewBox="0 0 16 16" class="size-4 -scale-x-100" aria-hidden="true"><path d="M6 3 2 7l4 4M2.5 7H10a4 4 0 0 1 0 8H8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></svg>
 					</button>
 					<button
@@ -1393,8 +1187,8 @@
 						<svg viewBox="0 0 16 16" class="size-4" aria-hidden="true"><rect x="3.5" y="4.5" width="10" height="10" rx="1" fill="none" stroke="currentColor" stroke-width="1.3" /><path d="M6 9.2 7.7 11l2.6-3.4" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" /></svg>
 					</button>
 					<button type="button" class="h-9 rounded bg-raised px-3 text-sm" onclick={() => (exporting = true)}>Export</button>
-					<button type="button" class="h-9 rounded bg-fg px-4 text-sm font-medium text-ground disabled:bg-raised disabled:text-muted" disabled={!dirty || saving || readOnly} onclick={() => commit()}>
-						{saving ? 'Saving…' : dirty ? 'Save' : 'Saved'}
+					<button type="button" class="h-9 rounded bg-fg px-4 text-sm font-medium text-ground disabled:bg-raised disabled:text-muted" disabled={!session.dirty || session.saving || readOnly} onclick={() => session.commit()}>
+						{session.saving ? 'Saving…' : session.dirty ? 'Save' : 'Saved'}
 					</button>
 				</div>
 			</header>
@@ -1407,20 +1201,20 @@
 					</p>
 				{/if}
 				{#if readOnly}<p class="rounded bg-raised p-2 text-xs">A newer Sidecar edited this photo. Update Sidecar to change it.</p>{/if}
-				{#if !readOnly && !writable}<p class="rounded bg-raised p-2 text-xs text-warning">Sidecar can't write in this photo's folder, so edits here can't be saved. Give the account Sidecar runs as write access to it.</p>{/if}
-				{#if restoredDraft && dirty}<p class="rounded bg-raised p-2 text-xs">Restored unsaved changes from this device.</p>{/if}
-				{#if savedFor}
+				{#if !readOnly && !session.writable}<p class="rounded bg-raised p-2 text-xs text-warning">Sidecar can't write in this photo's folder, so edits here can't be saved. Give the account Sidecar runs as write access to it.</p>{/if}
+				{#if session.restoredDraft && session.dirty}<p class="rounded bg-raised p-2 text-xs">Restored unsaved changes from this device.</p>{/if}
+				{#if session.savedFor}
 					<p class="rounded bg-raised p-2 text-xs">
 						This photo's sidecar was saved for a different file — the photo was replaced, or another one was
 						renamed into its place. Its edit is shown, and saving keeps it for this photo.
-						<button type="button" class="underline" onclick={() => openVersion('original')}>Start from the original</button>
+						<button type="button" class="underline" onclick={() => session.openVersion('original')}>Start from the original</button>
 						instead; the earlier versions stay in History.
 					</p>
 				{/if}
-				{#if forked}
+				{#if session.forked}
 					<p class="rounded bg-raised p-2 text-xs">
 						This photo was also saved somewhere else since you opened it. Both versions are kept —
-						<button type="button" class="underline" onclick={() => { section = 'history'; forked = false; }}>see History</button>.
+						<button type="button" class="underline" onclick={() => { section = 'history'; session.forked = false; }}>see History</button>.
 					</p>
 				{/if}
 			</div>
@@ -1480,4 +1274,4 @@
 	{/if}
 </div>
 
-{#if exporting}<ExportSheet assetKey={key} colorSpace={displaySpace} prepare={prepareExport} onclose={() => (exporting = false)} />{/if}
+{#if exporting}<ExportSheet assetKey={key} colorSpace={displaySpace} prepare={() => session.prepareExport()} onclose={() => (exporting = false)} />{/if}
