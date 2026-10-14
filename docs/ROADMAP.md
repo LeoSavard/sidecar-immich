@@ -193,10 +193,11 @@ already matches the proxy.
 
 *Licensing.* No new exposure: the gain map section above already establishes that reading any HEIC auxiliary
 image goes through the same opt-in external decoder (`HEIF=1`, `heif-convert`), never a linked libheif.
-`portrait_depth::DEPTH_DECODER_ENV` is a separate override from `decoded::HEIF_DECODER_ENV` because
+`heif_aux::AUX_DECODER_ENV` is a separate override from `decoded::HEIF_DECODER_ENV` because
 ImageMagick's `magick`/`convert` HEIF delegates have no equivalent of `--with-aux` — only `heif-convert` is
 known to expose auxiliary images at all, so there is exactly one built-in command to try, not a choice of
-three like the main decode.
+three like the main decode. `sidecar_raw::heif_aux` runs it once per photo and hands every auxiliary image to
+whichever readers want one (this, and the gain map), so a photo isn't decoded once per reader.
 
 *Status.* `sidecar_raw::portrait_depth::read` extracts and classifies the aux image and decodes it to a plain
 0–1 buffer, pinned against both the repo's committed fixture and the real-library numbers above in tests.
