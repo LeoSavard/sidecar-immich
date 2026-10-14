@@ -544,7 +544,7 @@ instead; that is its point, and film's is not to. `EditParams.film` (absent = ne
 unchanged and need no process version) holds:
 
 - **Amount** 0–100 (default 100): a mix between the neutral and the film result, after the user's curve.
-- **Interlayer effects** 0–100 (default 30): in film, developer by-products from one layer hold back
+- **Interlayer effects** 0–100 (default 45): in film, developer by-products from one layer hold back
   development in its neighbours, which separates colours. Modelled as a spread in log exposure away from the
   pixel's mean over the channels, `x + s·(x − mean)`, with `s = interlayer/100 × 0.6`, before the curves. A
   neutral has no spread, so greys stay grey and white balance keeps its meaning.
@@ -553,7 +553,7 @@ unchanged and need no process version) holds:
 path to each channel; the user's curve LUT and mask curves then apply per channel. A channel at zero is held
 four stops under the black point, where the curve is flat. Developed files ignore it (`pack` writes 0): their
 curve was already applied. Judged on ten RAWs from the library: 30 reads as natural, 70 is strong (skin goes
-orange-red). Halation, grain and monochrome film are later steps.
+orange-red); the user chose 45 as the default. Halation, grain and monochrome film are later steps.
 
 Uniform buffer:
 

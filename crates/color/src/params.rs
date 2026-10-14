@@ -239,7 +239,7 @@ pub struct Film {
 
 impl Default for Film {
     fn default() -> Self {
-        Self { amount: 100.0, interlayer: 30.0 }
+        Self { amount: 100.0, interlayer: 45.0 }
     }
 }
 
@@ -700,7 +700,7 @@ mod tests {
         assert!(serde_json::to_value(EditParams::default()).unwrap().get("film").is_none());
         let e = EditParams { film: Some(Film::default()), ..Default::default() };
         let json = serde_json::to_value(&e).unwrap();
-        assert_eq!(json["film"], serde_json::json!({ "amount": 100.0, "interlayer": 30.0 }));
+        assert_eq!(json["film"], serde_json::json!({ "amount": 100.0, "interlayer": 45.0 }));
         assert_eq!(serde_json::from_value::<EditParams>(json).unwrap(), e);
     }
 
