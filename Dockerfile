@@ -46,10 +46,10 @@ RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm
 WORKDIR /src
 COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry --mount=type=cache,target=/src/target \
-    cargo build --release -p sidecar -p sidecar-devtools \
+    cargo build --release -p sidecar -p sidecar-shaders \
  && cargo build --release -p sidecar-color-wasm --target wasm32-unknown-unknown \
  && cp target/release/sidecar /usr/local/bin/sidecar \
- && ./target/release/sidecar-dev shaders web/src/lib/gpu/wgsl \
+ && ./target/release/sidecar-shaders web/src/lib/gpu/wgsl \
  && cp target/wasm32-unknown-unknown/release/sidecar_color_wasm.wasm web/src/lib/color/sidecar_color.wasm
 RUN --mount=type=cache,target=/root/.npm cd web && npm ci --no-audit --no-fund && npm run build
 
