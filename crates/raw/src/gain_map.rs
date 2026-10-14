@@ -31,15 +31,8 @@
 //! practice). Investigating that is separate follow-up work, not done here.
 
 use crate::decoded::DecodeError;
+use crate::heif_aux::AuxImages;
 use std::path::Path;
-
-/// Env override for the command that dumps a HEIC's auxiliary images to files beside the main decode,
-/// `%i`/`%o` as in `decoded::HEIF_DECODER_ENV` and `portrait_depth::DEPTH_DECODER_ENV` (which this
-/// deliberately doesn't share — the three call sites happen to agree today, but nothing requires an operator
-/// to point them at the same program).
-pub const GAINMAP_DECODER_ENV: &str = "SIDECAR_HEIF_GAINMAP_DECODER";
-
-const GAINMAP_COMMANDS: &[&str] = &["heif-convert --with-aux %i %o"];
 
 /// The raw numbers `exiftool` carries beside the map — see the module docs for which are understood.
 #[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -59,21 +52,6 @@ pub struct GainMap {
     pub meta: GainMapMeta,
 }
 
-fn which(program: &str) -> bool {
-    std::env::var_os("PATH")
-        .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join(program).is_file()))
-        .unwrap_or(false)
-}
-
-fn gainmap_command() -> Option<String> {
-    if let Ok(configured) = std::env::var(GAINMAP_DECODER_ENV)
-        && !configured.trim().is_empty()
-    {
-        return Some(configured);
-    }
-    GAINMAP_COMMANDS.iter().find(|c| which(c.split_whitespace().next().unwrap_or_default())).map(|c| c.to_string())
-}
-
 fn is_gain_map_file(filename: &str) -> bool {
     filename.to_ascii_lowercase().contains("hdrgainmap")
 }
@@ -82,20 +60,17 @@ fn is_gain_map_file(filename: &str) -> bool {
 /// installed or the file carries none: this enriches a photo that can already be opened, and is never why one
 /// can't be.
 pub fn read(path: &Path) -> Result<Option<GainMap>, DecodeError> {
-    let Some(template) = gainmap_command() else { return Ok(None) };
-    let dir = tempfile::tempdir().map_err(|e| DecodeError::HeifDecoder(e.to_string()))?;
-    let out = dir.path().join("decoded.png");
-    run(&template, path, &out)?;
+    match AuxImages::extract(path)? {
+        Some(aux) => from_aux(&aux, path),
+        None => Ok(None),
+    }
+}
 
-    let found = std::fs::read_dir(dir.path())
-        .map_err(|e| DecodeError::HeifDecoder(e.to_string()))?
-        .filter_map(Result::ok)
-        .find(|entry| is_gain_map_file(&entry.file_name().to_string_lossy()));
-    let Some(entry) = found else { return Ok(None) };
-
-    let bytes = std::fs::read(entry.path()).map_err(|e| DecodeError::HeifDecoder(format!("reading {}: {e}", entry.path().display())))?;
-    let (width, height, values) = decode_first_channel(&bytes)?;
-    Ok(Some(GainMap { width, height, values, meta: read_meta(path) }))
+/// `read`, from images already extracted — so a caller that also wants the depth map decodes the photo once.
+/// `path` is still needed for the scalars `exiftool` reads beside the map.
+pub fn from_aux(aux: &AuxImages, path: &Path) -> Result<Option<GainMap>, DecodeError> {
+    let Some(plane) = aux.read(is_gain_map_file)? else { return Ok(None) };
+    Ok(Some(GainMap { width: plane.width, height: plane.height, values: plane.values, meta: read_meta(path) }))
 }
 
 /// One `exiftool` run for the four scalars the module docs name — matching `decoded::exif`'s own rule of one
@@ -117,41 +92,6 @@ fn read_meta(path: &Path) -> GainMapMeta {
     }
 }
 
-fn run(template: &str, input: &Path, out: &Path) -> Result<(), DecodeError> {
-    let mut parts =
-        template.split_whitespace().map(|part| part.replace("%i", &input.to_string_lossy()).replace("%o", &out.to_string_lossy()));
-    let program = parts.next().ok_or_else(|| DecodeError::HeifDecoder("empty decoder command".into()))?;
-    let result = std::process::Command::new(&program)
-        .args(parts)
-        .output()
-        .map_err(|e| DecodeError::HeifDecoder(format!("running {program}: {e}")))?;
-    if !result.status.success() {
-        let stderr = String::from_utf8_lossy(&result.stderr);
-        return Err(DecodeError::HeifDecoder(format!("{program} exited {}: {}", result.status, stderr.trim())));
-    }
-    Ok(())
-}
-
-/// The first channel of a PNG, normalized to 0–1 by its bit depth. No sRGB transfer: the stored samples are
-/// fractions already, not light to decode.
-fn decode_first_channel(bytes: &[u8]) -> Result<(u32, u32, Vec<f32>), DecodeError> {
-    let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
-    decoder.set_transformations(png::Transformations::EXPAND);
-    let mut reader = decoder.read_info().map_err(|e| DecodeError::Decode(format!("PNG: {e}")))?;
-    let mut buf = vec![0u8; reader.output_buffer_size().ok_or_else(|| DecodeError::Decode("PNG too large".into()))?];
-    let frame = reader.next_frame(&mut buf).map_err(|e| DecodeError::Decode(format!("PNG: {e}")))?;
-    let channels = frame.color_type.samples();
-    let used = &buf[..frame.buffer_size()];
-    let info = reader.info();
-    let values = match frame.bit_depth {
-        png::BitDepth::Sixteen => {
-            used.as_chunks::<2>().0.iter().enumerate().filter(|(i, _)| i % channels == 0).map(|(_, b)| u16::from_be_bytes(*b) as f32 / 65535.0).collect()
-        }
-        _ => used.iter().step_by(channels).map(|&v| v as f32 / 255.0).collect(),
-    };
-    Ok((info.width, info.height, values))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,29 +105,12 @@ mod tests {
         assert!(!is_gain_map_file("out.png"));
     }
 
-    fn png_bytes(w: u32, h: u32, color: png::ColorType, depth: png::BitDepth, data: &[u8]) -> Vec<u8> {
-        let mut out = Vec::new();
-        let mut enc = png::Encoder::new(&mut out, w, h);
-        enc.set_color(color);
-        enc.set_depth(depth);
-        enc.write_header().unwrap().write_image_data(data).unwrap();
-        out
-    }
-
-    #[test]
-    fn the_first_channel_is_read_without_gamma() {
-        let grey = png_bytes(3, 1, png::ColorType::Grayscale, png::BitDepth::Eight, &[0, 128, 255]);
-        let (w, h, v) = decode_first_channel(&grey).unwrap();
-        assert_eq!((w, h), (3, 1));
-        assert_eq!(v, vec![0.0, 128.0 / 255.0, 1.0]);
-    }
-
     /// Pins the measurements in the module docs against a real file. Skips, rather than fails, where
     /// `heif-convert` or `exiftool` isn't installed, or the fixture isn't there (not committed — see
     /// `portrait_depth`'s equivalent test for why).
     #[test]
     fn a_real_hdr_photo_has_a_half_size_gain_map_and_its_own_headroom() {
-        if !which("heif-convert") || !which("exiftool") {
+        if !crate::heif_aux::which("heif-convert") || !crate::heif_aux::which("exiftool") {
             return eprintln!("skipping: heif-convert or exiftool not installed");
         }
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
