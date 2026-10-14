@@ -4,7 +4,7 @@
 	"version": "0.0.1",
 	"type": "module",
 	"scripts": {
-		"shaders": "cd .. && cargo run -q -p sidecar-devtools -- shaders web/src/lib/gpu/wgsl",
+		"shaders": "cd .. && cargo run -q -p sidecar-shaders -- web/src/lib/gpu/wgsl",
 		"wasm": "cd .. && cargo build -q -p sidecar-color-wasm --target wasm32-unknown-unknown --release && cp ${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/sidecar_color_wasm.wasm web/src/lib/color/sidecar_color.wasm",
 		"generate": "npm run shaders && npm run wasm",
 		"dev": "vite dev",

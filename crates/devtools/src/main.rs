@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-//! `sidecar-dev shaders <dir>`            compose the browser's WGSL entry points into <dir>
 //! `sidecar-dev parity fixtures <dir>`    write synthetic sources + packed uniforms for each parity case
 //! `sidecar-dev parity native <dir> <out>`  render every case with wgpu (Vulkan on the server)
 //! `sidecar-dev parity compare <out>`     compare <case>.native.f16 with <case>.browser.f16 (ΔE2000)
@@ -12,21 +11,10 @@
 mod parity;
 
 use anyhow::{Result, bail};
-use std::path::PathBuf;
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
-        ["shaders", dir] => {
-            let dir = PathBuf::from(dir);
-            std::fs::create_dir_all(&dir)?;
-            for entry in sidecar_shaders::WEB_ENTRIES {
-                let path = dir.join(sidecar_shaders::composed_name(entry));
-                std::fs::write(&path, sidecar_shaders::compose(entry)?)?;
-                println!("wrote {}", path.display());
-            }
-            Ok(())
-        }
         ["ingest", input, out, rest @ ..] => ingest(input.as_ref(), out.as_ref(), rest.first().map_or(Ok(1600), |v| v.parse())?),
         ["develop", input, out, rest @ ..] => develop(input.as_ref(), out.as_ref(), rest.first().map_or(Ok(1600), |v| v.parse())?),
         ["png", input, w, h, out] => {
@@ -84,7 +72,7 @@ fn main() -> Result<()> {
         ["parity", "fixtures", dir] => parity::fixtures(dir.as_ref()),
         ["parity", "native", dir, out] => parity::native(dir.as_ref(), out.as_ref()),
         ["parity", "compare", dir, out] => parity::compare(dir.as_ref(), out.as_ref()),
-        _ => bail!("usage: sidecar-dev shaders <dir> | parity fixtures <dir> | parity native <dir> <out> | parity compare <dir> <out>"),
+        _ => bail!("usage: sidecar-dev parity fixtures <dir> | parity native <dir> <out> | parity compare <dir> <out>"),
     }
 }
 

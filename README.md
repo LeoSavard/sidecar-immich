@@ -65,7 +65,9 @@ enforces the allowlist in CI.
 
 ## Develop
 
-Everything builds and runs in a container with the GPU: `./dev/run <command>`, `./dev/serve` for a local server.
+Everything builds and runs in a container with the GPU. `./dev/bootstrap` once, then `./dev/run <command>`, and
+`./dev/serve` (or `./dev/serve --web` for live reload) for a local server. [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
+is the map of the code.
 
 ## Built on
 
