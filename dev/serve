@@ -52,7 +52,7 @@ ml=""
 for d in "$here/target/ml-models" "$SIDECAR_MAIN_CHECKOUT/target/ml-models"; do
   if [ -f "$d/birefnet.bpk" ]; then
     mounts="$mounts -v $d:/ml-models:ro"
-    ml='cargo build -q --profile dev-serve -p sidecar-ml && export SIDECAR_ML=$CARGO_TARGET_DIR/dev-serve/sidecar-ml SIDECAR_ML_MODELS=/ml-models &&'
+    ml='cargo build -q --profile dev-serve -p sidecar-ml && export SIDECAR_ML=$SIDECAR_TARGET_DIR/dev-serve/sidecar-ml SIDECAR_ML_MODELS=/ml-models &&'
     break
   fi
 done
