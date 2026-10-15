@@ -71,8 +71,6 @@ const HP5_PLUS: Fit = Fit { fog: 0.171, gradient: 0.750, e0: 1.169, w: 0.258, e1
 const TRI_X_400: Fit = Fit { fog: 0.278, gradient: 0.637, e0: -2.658, w: 0.256, e1: -0.192, v: 0.143, c: 0.295 };
 /// KODAK TRI-X 320, D-76, 8 min (`film_data::TRI_X_320_CURVE`; RMS 0.0066): its long toe.
 const TRI_X_320: Fit = Fit { fog: 0.009, gradient: 0.900, e0: -2.056, w: 0.531, e1: -0.254, v: 0.104, c: 0.204 };
-/// EASTMAN DOUBLE-X 5222, D-96, 6½ min, gamma 0.66 (`film_data::DOUBLE_X_CURVE`; RMS 0.0044).
-const DOUBLE_X: Fit = Fit { fog: 0.189, gradient: 0.664, e0: -2.665, w: 0.219, e1: -0.737, v: 0.050, c: 0.159 };
 /// ILFORD SFX 200, ID-11, 10 min (`film_data::SFX_200_CURVE`; RMS 0.0040): its shoulder.
 const SFX_200: Fit = Fit { fog: 0.276, gradient: 0.735, e0: 1.001, w: 0.230, e1: 3.931, v: 0.452, c: 1.000 };
 
@@ -81,7 +79,6 @@ fn fit(film: &str) -> Option<&'static Fit> {
         "hp5-plus" => &HP5_PLUS,
         "tri-x-400" => &TRI_X_400,
         "tri-x-320" => &TRI_X_320,
-        "double-x" => &DOUBLE_X,
         "sfx-200" => &SFX_200,
         _ => return None,
     })
@@ -122,11 +119,10 @@ mod tests {
     /// Each fit follows its traced curve within 0.02 density.
     #[test]
     fn fits_follow_their_datasheets() {
-        let sets: [(&str, &[(f64, f64)]); 5] = [
+        let sets: [(&str, &[(f64, f64)]); 4] = [
             ("hp5-plus", &film_data::HP5_PLUS_CURVE),
             ("tri-x-400", &film_data::TRI_X_400_CURVE),
             ("tri-x-320", &film_data::TRI_X_320_CURVE),
-            ("double-x", &film_data::DOUBLE_X_CURVE),
             ("sfx-200", &film_data::SFX_200_CURVE),
         ];
         for (film, data) in sets {
@@ -148,7 +144,7 @@ mod tests {
     /// 320's long toe nearer, and SFX 200's shoulder bends the highlights over.
     #[test]
     fn curves_keep_grey_and_bend_at_their_ends() {
-        for film in ["hp5-plus", "tri-x-400", "tri-x-320", "double-x", "sfx-200"] {
+        for film in ["hp5-plus", "tri-x-400", "tri-x-320", "sfx-200"] {
             let c = curve(film).unwrap();
             assert!(c.print_stops(0.0).abs() < 1e-12);
             let slope = (c.print_stops(0.01) - c.print_stops(-0.01)) / 0.02;

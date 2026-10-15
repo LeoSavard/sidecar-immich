@@ -60,11 +60,11 @@ and J. Hanika, "A Low-Dimensional Function Space for Efficient Spectral Upsampli
 ## Film stocks — makers' datasheets
 Spectral sensitivities and characteristic curves read, by the scripts in `crates/color/film-data/`, from:
 HARMAN technology's *ILFORD HP5 Plus technical information* and *ILFORD SFX 200 technical information*
-(Nov 2018; https://www.ilfordphoto.com/amfile/file/download/file/1903/product/691/ for HP5 Plus); Kodak Alaris's
-*KODAK PROFESSIONAL TRI-X 320 and 400 Films* (F-4017, Feb 2016); and Eastman Kodak's *EASTMAN DOUBLE-X Negative
-Film 5222 / 7222* (H-1-5222, March 2022). The values are in `crates/color/src/film_data.rs`; the datasheets are
-not redistributed. ILFORD, HP5 and SFX are trademarks of HARMAN technology Ltd; Kodak, Kodak Professional,
-Tri-X, Eastman and Double-X of Eastman Kodak Company — named here to say whose films the curves describe.
+(Nov 2018; https://www.ilfordphoto.com/amfile/file/download/file/1903/product/691/ for HP5 Plus); and Kodak
+Alaris's *KODAK PROFESSIONAL TRI-X 320 and 400 Films* (F-4017, Feb 2016). The values are in
+`crates/color/src/film_data.rs`; the datasheets are not redistributed. ILFORD, HP5 and SFX are trademarks of
+HARMAN technology Ltd; Kodak, Kodak Professional and Tri-X of Eastman Kodak Company — named here to say whose
+films the curves describe.
 
 ## OKLab
 Björn Ottosson, "A perceptual color space for image processing" (2020). Constants in `shaders/common/color.wgsl`.

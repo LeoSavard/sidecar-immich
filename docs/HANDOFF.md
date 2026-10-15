@@ -30,7 +30,7 @@ the one before, and its PR's base is that branch, not `main`. Merge in this orde
 | 16 | `worktree-bw-film` | Black and white from estimated spectra: film types and filters |
 | 17 | `worktree-film-grain` | Film grain: procedural, in exposure, sized on 35 mm; browser = server |
 | 18 | `worktree-film-developer` | Black and white: the scene's light, developers and development (adjacency map) |
-| 19 | `worktree-film-hp5` | Named stocks from datasheets: HP5 Plus, Tri-X 400 and 320, Double-X, SFX 200 (spectral sensitivity, toe and shoulder) |
+| 19 | `worktree-film-hp5` | Named stocks from datasheets: HP5 Plus, Tri-X 400 and 320, SFX 200 (spectral sensitivity, toe and shoulder) |
 
 Held: #1 `worktree-portrait-depth` (Apple Portrait matte) and #2 `worktree-hdr-gain-map` (HDR, paused until
 the owner's Spyder X display measurements).
@@ -60,14 +60,6 @@ cd ~/Claude/sidecar/deploy/local && docker compose up -d
   5-3-1995 (IT2.18-1996, table 3) and ISO sensitometric daylight from ISO 7589-1984 (table 1). Copies sit in the
   git-ignored `testdata/cache/standards/` of the depth-spike worktree; they must never enter the repository or
   image (loaded at run time). Next: the develop pass, the editor, and the server reading the owner's files.
-- **Double-X below 420 nm**: its sheet stops there; the held-flat trace carries 15 % of a daylight exposure.
-  Owner's decision: better data, or another treatment.
-- **A photo drawn stretched in Immich's desktop viewer.** A portrait NEF (`_D5N5343.nef`, landscape pixels,
-  "Rotate 270" tag) stacked with its export showed its portrait preview in a landscape box. The export JPEG is
-  verified well-formed (3728 × 5584, orientation 1). Suspected: Immich re-reads the NEF's metadata after Sidecar
-  writes its `.xmp` and asks Immich to rescan sidecars, and loses the rotation. Waiting on the owner for
-  `GET /api/assets/c486a20a-b033-4d0e-9c2d-5fc5cc901771` (width, height, exifInfo) to confirm before changing
-  what Sidecar asks Immich to do. Don't touch Immich's database or containers.
 - **Sidecar's default rendering is darker than the camera's JPEG.** Visible with the Camera toggle. This is
   ROADMAP's "Tone curve above middle grey"; decide with pictures, against the camera rendering.
 - **Film defaults.** Colour film's interlayer default is 45 (the owner's choice). Black and white has no
@@ -79,7 +71,7 @@ Film, in three stages:
 
 1. **Black and white** — done in #16: film types (class sensitivities), filters; grain in #17 (colour too).
    The scene's light (daylight, tungsten, from white balance) and developers (adjacency, compensation, staining,
-   N±2) in #18. Named stocks from datasheets in #19: HP5 Plus, Tri-X 400 and 320, Double-X, SFX 200; more are data
+   N±2) in #18. Named stocks from datasheets in #19: HP5 Plus, Tri-X 400 and 320, SFX 200; more are data
    (`crates/color/film-data/README.md` shows how each sheet was read). The owner also supplied colour sheets
    for stage 3: Fujifilm ETERNA 250D, Superia X-TRA 400 and Fujifilm's motion picture film manual.
 2. **Alternative processes** — tintype (collodion: the blue-sensitive type plus its short tonal scale) and

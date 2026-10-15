@@ -85,7 +85,6 @@ sets = {
     "HP5 Plus (ILFOTEC HC 1+31)": [(round(0.1 * i, 1), d) for i, d in enumerate([None, 0.179, 0.179, 0.179, 0.179, 0.179, 0.188, 0.199, 0.210, 0.230, 0.253, 0.285, 0.319, 0.361, 0.410, 0.464, 0.518, 0.588, 0.656, 0.724, 0.791, 0.858, 0.924, 0.987, 1.050, 1.116, 1.182, 1.246, 1.308, 1.374, 1.437, 1.499, 1.564, 1.627, 1.690, 1.754, 1.818, 1.880, 1.941, 2.002, 2.067]) if d is not None],
     "Tri-X 400 (D-76 8 min)": parse(lines["TRIX400 D-76 8min"].split(":", 1)[1]),
     "Tri-X 320 (D-76 8 min)": parse(lines["TRIX320 D-76 8min"].split(":", 1)[1]),
-    "Double-X (D-96 6.5 min)": [(-3.0, 0.225)] + parse(open("doublex.txt").read().split("6.5min:")[1]),
     "SFX 200 (ID-11 10 min)": [(round(0.1 * i, 1), 0.287) for i in range(1, 6)] + parse(open("sfx_curve.txt").read().split(":", 1)[1]),
 }
 for name, data in sets.items():
