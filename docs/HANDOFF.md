@@ -9,8 +9,20 @@ you stop.
 
 ## Open pull requests and the order to merge them
 
-All are drafts on GitHub (`LeoSavard/sidecar-immich`). From #8 up they are *stacked*: each branch is built on
-the one before, and its PR's base is that branch, not `main`. Merge in this order:
+On GitHub (`LeoSavard/sidecar-immich`). From #8 up they are *stacked*: each branch is built on the one before,
+and its PR's base is that branch, not `main`. **#3–#20 are out of draft and ready to merge**; #21 and #22 are
+still drafts, and #1 and #2 are held. CI is green on every branch.
+
+**Merging a stacked PR needs its base retargeted first.** GitHub only retargets a PR automatically when the
+branch it was based on is *deleted* on merge, and these branches are kept (worktrees use them). So after each
+one lands, point the next at `main` before merging it, or it will merge into its old base instead:
+
+```bash
+gh pr edit <next> --base main
+gh pr merge <next> --merge        # a merge commit: the history of how it was built is the point
+```
+
+Merge in this order:
 
 | # | Branch | What |
 |---|---|---|
@@ -45,7 +57,10 @@ the owner's Spyder X display measurements).
 
 **A fix to a lower branch** goes on that branch, then is merged upward through every branch above it, in
 order, and each is pushed (`git merge --no-edit <base>`; new commits only, never rebase or force-push, never
-push to `main`). #14 and #6's Dockerfile fix were carried up this way.
+push to `main`). #14 and #6's Dockerfile fix were carried up this way, and so was the clippy fix that turned
+the whole stack red: the lint was in #20's code, so it was fixed there and merged into #21 and #22. One cause,
+one fix, nine red builds — which is the shape of every mistake in a stack this deep, and the reason to run
+CI's own checks before pushing (ARCHITECTURE, "Before pushing, run what CI runs").
 
 ## Deploying a test build
 
@@ -60,8 +75,10 @@ docker tag sidecar:local sidecar:previous && docker tag sidecar:latest-test side
 cd ~/Claude/sidecar/deploy/local && docker compose up -d
 ```
 
-`sidecar:latest-test` currently holds everything through #19, so it predates #20 and the withdrawal of
-Double-X: rebuild it from the top of the stack before the next hand-over.
+`sidecar:latest-test` holds everything through #19, so it predates #20, #22 and the withdrawal of Double-X.
+**Rebuild it before the next hand-over**, from whichever branch holds everything you mean to ship —
+`worktree-depth-edges` is the furthest along (it contains #20 and the depth work; `worktree-tone-curve` is its
+sibling and changes no pixels yet). Once the stack has landed, build from `main` instead.
 
 **To get the colour stocks in a real deployment**, the image needs the owner's two ISO tables mounted and
 named, since Sidecar carries neither and will not render a stock without them. In `deploy/local/compose.yaml`,
