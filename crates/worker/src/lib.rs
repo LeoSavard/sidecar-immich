@@ -469,7 +469,7 @@ fn preview_jpeg(kit: &export::Kit, rendering: &export::Rendering, req: &PreviewR
     let (width, height, bytes) = proxy;
     let source = sidecar_engine::upload_rgba16(&kit.gpu, &sidecar_engine::RgbaF32::from_f16_bytes(width, height, &bytes));
     let source = rendering.correct(kit, &req.edit, source);
-    let depth_texture = depth.map(|d| rendering.depth_texture(kit, &req.edit, &d.image, 0));
+    let depth_texture = depth.map(|d| rendering.refine_depth(kit, &source, rendering.depth_texture(kit, &req.edit, &d.image, 0), [width, height]));
     let source = rendering.depth_effects(kit, &req.edit, depth.zip(depth_texture.as_ref()), source, [width, height], [0, 0]);
     let packed = rendering.pack(&req.edit, req.color_space);
     let profile = stocks::for_edit(&req.edit);
@@ -573,7 +573,9 @@ fn loupe_png(w: &Worker, kit: &export::Kit, req: &LoupeRequest, masks: &[Option<
         false => None,
     };
     let masks_at = |x: u32, y: u32| sidecar_engine::Masks { density: density.as_ref(), ..export::masks_for(&packed, &mask_textures, [x as f32, y as f32, sw as f32, sh as f32], slide_response) };
-    let depth_texture = depth.map(|d| rendering.depth_texture(kit, &req.edit, &d.image, flip));
+    // The whole frame's source, before any tile is cut from it: the refinement reads the photo and the map
+    // across the same frame.
+    let depth_texture = depth.map(|d| rendering.refine_depth(kit, &source, rendering.depth_texture(kit, &req.edit, &d.image, flip), [sw, sh]));
     let depth_params = depth.and_then(|d| sidecar_color::depth::pack(&req.edit, d.airlight, [sw, sh], [0.0; 2]));
     // A rectangle of the sensor's pixels, developed as export develops it: denoised, sharpened, lens-corrected,
     // hazed and blurred by distance, through the masks.

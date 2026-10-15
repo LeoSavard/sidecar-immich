@@ -150,6 +150,16 @@ Where the code differs from the text below, the code and these notes win.
   reads the depth mask under the tap. `EditParams.lensBlur` (amount, focus, range) and `haze` are left out when
   off. Measured on the tractor photo's server previews (edge energy, higher is sharper): focus near → fence,
   cab and trees 2.3, 2.5, 2.6; focus on the cab → 3.4, 10.8, 3.8; unblurred 5.3, 11.1, 13.8.
+- **The depth map's edges are the photo's** (§7, "Depth"): the model's map is 518², so stretching it to the
+  frame leaves a step smeared over a couple of its texels and a blur's edge drifts off the subject into a halo
+  — visible around hair and thin branches. `client/depth_refine.wgsl` upsamples it against the photo instead
+  (joint bilateral upsampling, Kopf et al. 2007, from the paper): 25 taps a texel apart, each weighted by
+  distance and by how closely the photo's luminance there matches the photo's here, so depth steps where the
+  photo steps and stays smooth where it does not. It depends on the photo and the map alone, not on any
+  slider, so both engines render it once and keep it; it is capped at 2,048 on the long edge, four times the
+  model's own. One pass takes most of an edge's error out rather than all of it — the texel being repaired is
+  itself a tap — which is what the engine test holds it to, along with leaving flat regions and fine texture
+  alone. Checked in the browser with `web/scripts/depth-edges.mjs`.
 - **Depth masks (§15):** Depth Anything V2 *Small* (Apache-2.0; Base and Large are CC-BY-NC and excluded),
   simplified at 518² like BiRefNet and imported by burn-onnx, gives relative inverse depth: no unit, no fixed
   origin. `Ml::depth` stretches it between the photo's own 1st and 99th percentiles to 0–255, near white, and

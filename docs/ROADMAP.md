@@ -144,10 +144,13 @@ hasn't been built:
 - **Gradients.** Linear and radial masks, analytic in the shader: a third kind of layer beside model masks and
   brushes, with handles drawn over the photo like the crop's.
 - **Sky.** A sky model, to join the subject, skin and hair ones.
-- **Depth, beyond what shipped.** Range layers, lens blur and haze by distance have shipped. The map is relative
-  and 518² at source: fine for soft bands and a smooth blur, but a blur's edge around hair or a thin branch
-  follows the map, not the photo. Next: edge-aware upsampling of the depth guided by the photo (a guided
-  filter), then depth-weighted focus peaking. Haze's strength curve may want tuning with pictures.
+- **Depth, beyond what shipped.** Range layers, lens blur and haze by distance have shipped, and the map's
+  edges are now the photo's: `client/depth_refine.wgsl` upsamples the model's 518² map against the photo
+  (joint bilateral upsampling, §7 "Depth"), so a blur's edge follows hair or a thin branch instead of drifting
+  into a halo. What is left here: **depth-weighted focus peaking**, and haze's strength curve, which may want
+  tuning with pictures. The refinement itself could go further — it is one pass, so it takes most of the error
+  out of an edge rather than all of it (the texel being repaired votes for itself); a second pass, or He, Sun
+  and Tang's guided filter with its box means, would finish the job if pictures ask for it.
 - **Detail per layer.** Sharpening and noise reduction through a mask: they run on the worker at full
   resolution, so a layer's value has to reach the detail passes, not just the develop pass.
 - **Upright.** Keystone found automatically from the photo's lines; today Vertical and Horizontal are set by eye.
