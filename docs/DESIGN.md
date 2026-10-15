@@ -670,11 +670,11 @@ exposure right after `mono_exposure`, before grain and the tone map (`develop/de
 
 | developer | adjacency | reach | compensation | grain |
 |---|---|---|---|---|
-| standard (D-76's kind) | 0 | — | 0 | × 1 |
-| fine grain (solvent, Perceptol's kind) | 0 | — | 0 | × 0.75 |
-| high acutance (dilute, Rodinal's kind) | 0.35 | 0.08 mm | 0.1 | × 1.2 |
+| standard (general purpose) | 0 | — | 0 | × 1 |
+| fine grain (solvent) | 0 | — | 0 | × 0.75 |
+| high acutance (dilute) | 0.35 | 0.08 mm | 0.1 | × 1.2 |
 | compensating (two-bath, stand) | 0.25 | 0.3 mm | 0.45 | × 1 |
-| staining (pyro's kind) | 0.2 | 0.15 mm | 0.3 | × 1, stain hides up to half at the white point |
+| staining (pyro) | 0.2 | 0.15 mm | 0.3 | × 1, stain hides up to half at the white point |
 
 Development scales grain by `1 + 0.15 N`. These are the developers' kinds as the literature describes them, not
 fits to one formula's measurements. The standard developer at N returns its input exactly.

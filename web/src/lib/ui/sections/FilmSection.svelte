@@ -49,9 +49,9 @@ sees the light, through a filter. -->
 
 	/** The developers `sidecar_color::developer` knows, and what each does. */
 	const DEVELOPERS = [
-		{ id: 'standard', label: 'Standard', note: 'A general-purpose developer (the D-76 kind): the film as its datasheet shows it.' },
-		{ id: 'fine-grain', label: 'Fine grain', note: 'A solvent developer (the Perceptol kind): smaller, smoother grain.' },
-		{ id: 'acutance', label: 'High acutance', note: 'A dilute sharp developer (the Rodinal kind): crisp edges, grain shown off.' },
+		{ id: 'standard', label: 'Standard', note: 'A general-purpose developer: the film as its datasheet shows it.' },
+		{ id: 'fine-grain', label: 'Fine grain', note: 'A solvent developer: smaller, smoother grain.' },
+		{ id: 'acutance', label: 'High acutance', note: 'A dilute sharp developer: crisp edges, grain shown off.' },
 		{ id: 'compensating', label: 'Compensating', note: 'Two-bath or stand development: highlights held back, broad halos of local contrast at edges.' },
 		{ id: 'staining', label: 'Staining', note: 'A pyro developer: highlights held and their grain hidden by the stain, edges a little sharper.' }
 	];
