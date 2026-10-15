@@ -117,14 +117,19 @@ fn canonical(edit: &EditParams) -> Value {
 }
 
 /// Fields of `child` that differ from `parent`, recursing into objects; arrays and scalars are replaced whole.
+/// A field `child` doesn't have — left out at its default, as saturation 0 or no geometry is — is removed.
 fn diff(parent: &Value, child: &Value, path: &str, delta: &mut Map<String, Value>, removed: &mut Vec<String>) {
     let Value::Object(c) = child else { return };
+    let dotted = |k: &str| if path.is_empty() { k.to_string() } else { format!("{path}.{k}") };
+    if let Value::Object(p) = parent {
+        removed.extend(p.keys().filter(|k| !c.contains_key(*k)).map(|k| dotted(k)));
+    }
     for (k, v) in c {
         let p = parent.get(k).unwrap_or(&Value::Null);
         if p == v {
             continue;
         }
-        let here = if path.is_empty() { k.clone() } else { format!("{path}.{k}") };
+        let here = dotted(k);
         match (p, v) {
             (_, Value::Null) => removed.push(here),
             (Value::Object(_), Value::Object(_)) => {
@@ -146,8 +151,10 @@ fn clear(v: &mut Value, dotted: &str) {
     let mut parts = dotted.split('.').peekable();
     while let Some(part) = parts.next() {
         let Some(obj) = at.as_object_mut() else { return };
+        // Removed, not set to null: a field left out at its default reads back as that default, and null
+        // isn't a number. (Histories written before this held only fields that read null as none.)
         if parts.peek().is_none() {
-            obj.insert(part.to_string(), Value::Null);
+            obj.remove(part);
             return;
         }
         let Some(next) = obj.get_mut(part) else { return };
