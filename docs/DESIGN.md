@@ -738,6 +738,33 @@ editor (the edit names the stock). Five so far, read from the datasheets the own
   steepness follows the narrower range. The gradient itself is the print's: a darkroom printer picks the
   paper grade. From a RAW only; a developed file keeps its own tones and takes just the sensitivity.
 
+*Named products use their own data.* The owner's rule: generic items (the film classes, the developer kinds, Film's
+interlayer model) may rest on assumptions, but anything carrying a product name must rest on that product's own
+data or a published standard — never another product's curves. The generic items name no products. One known gap:
+Double-X's sheet plots its sensitivity from 420 nm and the trace is held flat below, which carries 15 % of a
+daylight exposure (Tri-X, measured to 300 nm, carries 18 % there): it needs the owner's decision.
+
+**Colour film, spectrally (stage 3; in progress).** `crate::slide` renders a colour reversal stock from its data
+sheet alone — FUJICHROME PROVIA 100F first, whose sheet (AF3-036E) gives each layer's spectral sensitivity, the
+three characteristic curves and each dye's spectral density, all traced (`crates/color/film-data/provia-100f/`):
+
+1. The scene's spectrum: each colour's reflectance (Jakob and Hanika) under the scene's light, at the exposure a
+   reflected-light meter gives ISO 100 for Sidecar's middle grey (ISO 2720: q·K/S = 0.65 × 12.5 / 100 lux·s).
+2. Each layer's exposure through its sensitivity. FUJIFILM's sensitivities are relative (read as absolute, density
+   1.0 would take ~0.1 J/cm², 10⁸ times what an ISO 100 film needs), so each layer is placed on its curve through the
+   light the curves were exposed with — the sheet's "Daylight", **ISO 7589's sensitometric daylight**.
+3. The characteristic curves give Status A densities, as the sheet measured them (a Fuji FAD-30S densitometer).
+4. The dye amounts that read those densities through **ISO 5-3's Status A spectral products**, by Newton's method.
+5. The slide on the sheet's ISO 3664 light table (CIE D50), the eye adapted to it (Bradford), on the display.
+
+Both ISO tables are licensed: the owner is obtaining them, and they stay **out of the public repository and image** —
+read at run time from the owner's files (`Densitometer::parse`, `parse_spectrum`; tests use `SIDECAR_STATUS_A` and
+`SIDECAR_ISO_DAYLIGHT`). The tests run the mechanics with a stand-in densitometer and D55, which never render. The
+develop pass will read the chain from two tables: each colour's layer responses over the colour cube
+(`exposure_lut`), and the slide's colour over layer log H, 65³, stored in log₂ (`response_lut`; within 2 % between
+lattice points). Edges, stated: sensitivities beyond the sheet's plotted floor (about 1/30 of each peak) are 0;
+dyes beyond 388–719 nm hold their end values, where the eye sees under 0.1 % of the light.
+
 **Grain.** `EditParams.grain { amount, size }` makes each spot's exposure flicker as a negative's grains make
 it, before the tone map, in colour or black and white, on a RAW or a developed file (`develop/grain.wgsl`). The
 noise is procedural, not a stored map: two octaves of value noise — clumps at the grain's size, grains at half

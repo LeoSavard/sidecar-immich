@@ -18,7 +18,7 @@ use crate::spectral_data::{CMF, D65, DAYLIGHT_S0, DAYLIGHT_S1, DAYLIGHT_S2};
 /// Samples: 380–730 nm, every 10 nm.
 pub const SAMPLES: usize = 36;
 
-fn wavelength(i: usize) -> f64 {
+pub(crate) fn wavelength(i: usize) -> f64 {
     380.0 + 10.0 * i as f64
 }
 
@@ -285,7 +285,7 @@ const SURFACE_Y: f64 = 0.18;
 /// until a channel reaches 1 is brighter and more saturated than any surface, which the family can only meet
 /// with odd shapes — a red that rises again in the violet, unseen by the eye and seen by blue-sensitive film.
 /// At a surface's brightness, a red is a red: low in the blue and violet.
-fn fit_scale(rgb: [f64; 3]) -> f64 {
+pub(crate) fn fit_scale(rgb: [f64; 3]) -> f64 {
     let y = REC2020_TO_XYZ[1][0] * rgb[0] + REC2020_TO_XYZ[1][1] * rgb[1] + REC2020_TO_XYZ[1][2] * rgb[2];
     let max = rgb.iter().cloned().fold(0.0, f64::max);
     if y <= 1e-6 || max <= 1e-6 {
@@ -295,7 +295,7 @@ fn fit_scale(rgb: [f64; 3]) -> f64 {
 }
 
 /// For each colour of the cube: its coefficients, fitted at `fit_scale`, and that scale.
-fn grid() -> &'static [([f64; 3], f64)] {
+pub(crate) fn grid() -> &'static [([f64; 3], f64)] {
     static GRID_COEFFICIENTS: std::sync::OnceLock<Vec<([f64; 3], f64)>> = std::sync::OnceLock::new();
     GRID_COEFFICIENTS.get_or_init(|| {
         let at = |i: usize| i as f64 / (GRID - 1) as f64;

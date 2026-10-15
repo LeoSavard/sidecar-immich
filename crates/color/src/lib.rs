@@ -11,6 +11,7 @@ pub mod lens;
 pub mod mat;
 pub mod camera;
 pub mod params;
+pub mod slide;
 pub mod spectral;
 pub mod stock;
 mod spectral_data;

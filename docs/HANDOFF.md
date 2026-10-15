@@ -56,6 +56,12 @@ cd ~/Claude/sidecar/deploy/local && docker compose up -d
 
 ## Open questions
 
+- **Colour film needs two ISO tables** (branch `worktree-film-provia`): Status A spectral products (ISO 5-3:2009,
+  Annex A) and ISO sensitometric daylight (ISO 7589). The owner is obtaining them; they must stay out of the
+  public repository and image (loaded at run time). `crate::slide` has the rest of Provia 100F's chain; the
+  develop pass, the editor and the loading of the owner's files come next.
+- **Double-X below 420 nm**: its sheet stops there; the held-flat trace carries 15 % of a daylight exposure.
+  Owner's decision: better data, or another treatment.
 - **A photo drawn stretched in Immich's desktop viewer.** A portrait NEF (`_D5N5343.nef`, landscape pixels,
   "Rotate 270" tag) stacked with its export showed its portrait preview in a landscape box. The export JPEG is
   verified well-formed (3728 × 5584, orientation 1). Suspected: Immich re-reads the NEF's metadata after Sidecar
