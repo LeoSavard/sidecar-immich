@@ -15,8 +15,8 @@ sees the light, through a filter. -->
 
 	/** The film types `sidecar_color::spectral` knows, and what each does to colours. */
 	const FILMS = [
-		{ id: 'panchromatic', label: 'Panchromatic', note: 'Classic black-and-white film (the HP5 and Tri-X kind): sees every colour, a little more of blue, reds somewhat darker than the eye sees them.' },
-		{ id: 'panchromatic-extended', label: 'Extended red', note: 'Modern T-grain film: flatter, sees further into the red, so skin and reds come out lighter.' },
+		{ id: 'panchromatic', label: 'Panchromatic', note: 'Classic black-and-white film, as a class: sees every colour, a little more of blue, reds somewhat darker than the eye sees them.' },
+		{ id: 'panchromatic-extended', label: 'Extended red', note: 'Modern flat-grain film, as a class: flatter, sees further into the red, so skin and reds come out lighter.' },
 		{ id: 'orthochromatic', label: 'Orthochromatic', note: 'Blind to red: reds and lips go dark, skies stay bright, skin shows every freckle.' },
 		{ id: 'blue-sensitive', label: 'Blue-sensitive', note: "Wet collodion and the earliest plates: sees only blue, so warm colours go near black and blue skies blow out. Real plates also saw ultraviolet, which no camera records." }
 	];
