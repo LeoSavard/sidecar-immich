@@ -53,9 +53,17 @@ Academy Software Foundation, aces-core, Apache-2.0. Implemented in `shaders/deve
 `crates/color/src/spectral_data.rs` holds the CIE 1931 2° colour-matching functions and the D65 illuminant at
 380–730 nm in 10 nm steps, exported from colour-science 0.4.7 (Copyright 2013 Colour Developers, BSD-3-Clause,
 https://github.com/colour-science/colour), which distributes the CIE's standard data; and a few of its Jakob
-2019 spectra as test references. `crates/color/src/spectral.rs` implements the spectral upsampling of W. Jakob
+2019 spectra as test references, and CIE daylight's basis functions S0, S1, S2. `crates/color/src/spectral.rs` implements the spectral upsampling of W. Jakob
 and J. Hanika, "A Low-Dimensional Function Space for Efficient Spectral Upsampling", Computer Graphics Forum
 38(2), 2019, from the paper; no code was copied.
+
+## Film stocks — makers' datasheets
+ILFORD HP5 Plus: the wedge spectrogram to tungsten light and the characteristic curve (ILFOTEC HC 1+31) were
+traced from HARMAN technology's *ILFORD HP5 Plus technical information*, Nov 2018
+(https://www.ilfordphoto.com/amfile/file/download/file/1903/product/691/), by the scripts in
+`crates/color/film-data/`; the traced values are in `crates/color/src/spectral_data.rs` and
+`crates/color/src/stock.rs`. The datasheet is not redistributed. ILFORD and HP5 are trademarks of HARMAN
+technology Ltd, named here to say whose film the curves describe.
 
 ## OKLab
 Björn Ottosson, "A perceptual color space for image processing" (2020). Constants in `shaders/common/color.wgsl`.

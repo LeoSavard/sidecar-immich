@@ -194,6 +194,9 @@ fn cases() -> Vec<Fixture> {
     let dev_acutance = developed_mono(&grain_mono, "acutance", 1.0, "daylight");
     let dev_staining = developed_mono(&grain(&layered_mono, 50.0, 60.0), "staining", -1.0, "tungsten");
     let dev_compensating = developed_mono(&graded_mono, "compensating", 0.5, "white-balance");
+    // A named stock: HP5 Plus's sensitivity and toe, with grain and a developer.
+    let mut stock_hp5 = developed_mono(&grain_mono, "staining", 0.0, "daylight");
+    stock_hp5.monochrome.as_mut().unwrap().film = "hp5-plus".into();
 
     let mut lens = EditParams { lens: Some(sidecar_color::params::Lens { profile: "sony".into(), ..Default::default() }), ..graded.clone() };
     lens.lens.as_mut().unwrap().lateral_ca = 150.0;
@@ -218,6 +221,7 @@ fn cases() -> Vec<Fixture> {
         ("dev-acutance".into(), nikon_d850(), SourceKind::Raw, dev_acutance, DisplaySpace::Srgb, None),
         ("dev-staining-layers".into(), nikon_d850(), SourceKind::Raw, dev_staining, DisplaySpace::Srgb, None),
         ("dev-compensating".into(), nikon_d850(), SourceKind::Raw, dev_compensating, DisplaySpace::DisplayP3, None),
+        ("stock-hp5".into(), nikon_d850(), SourceKind::Raw, stock_hp5, DisplaySpace::Srgb, None),
     ]
 }
 

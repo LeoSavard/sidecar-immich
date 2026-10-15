@@ -18,6 +18,7 @@ sees the light, through a filter. -->
 		{ id: 'panchromatic', label: 'Panchromatic', note: 'Classic black-and-white film (the HP5 and Tri-X kind): sees every colour, a little more of blue, reds somewhat darker than the eye sees them.' },
 		{ id: 'panchromatic-extended', label: 'Extended red', note: 'Modern T-grain film: flatter, sees further into the red, so skin and reds come out lighter.' },
 		{ id: 'orthochromatic', label: 'Orthochromatic', note: 'Blind to red: reds and lips go dark, skies stay bright, skin shows every freckle.' },
+		{ id: 'hp5-plus', label: 'ILFORD HP5 Plus', note: "From HARMAN's datasheet: its measured spectral sensitivity and the toe of its characteristic curve, so shadows fall off into the film's fog as an HP5 print's do. The curve is from a RAW only." },
 		{ id: 'blue-sensitive', label: 'Blue-sensitive', note: "Wet collodion and the earliest plates: sees only blue, so warm colours go near black and blue skies blow out. Real plates also saw ultraviolet, which no camera records." }
 	];
 	const FILTERS = [
@@ -127,7 +128,7 @@ sees the light, through a filter. -->
 		</div>
 		<Slider id="mono-development" label="Development" value={mono.development ?? 0} min={-2} max={2} step={0.5} defaultValue={0} bipolar format={zone} onchange={(v) => onchange((e) => { if (!e.monochrome) return; if (v === 0) delete e.monochrome.development; else e.monochrome.development = v; })} {oncommit} />
 		<p class="text-xs text-muted">Longer development (N+) gives the negative more contrast above the shadows and coarser grain; shorter (N−) less, for a scene too contrasty to hold.</p>
-		<p class="text-xs text-muted">Each colour's spectrum is estimated from the photo, then seen as the film type would. The types are the classes' sensitivities, not any one brand's measured curve.</p>
+		<p class="text-xs text-muted">Each colour's spectrum is estimated from the photo, then seen as the film type would. The types are the classes' sensitivities; a named stock is its maker's measured curve.</p>
 	{:else if edit.film}
 		<Slider id="film-amount" label="Amount" value={edit.film.amount} min={0} max={100} defaultValue={100} format={(v) => `${decimals(v)} %`} onchange={(v) => onchange((e) => { if (e.film) e.film.amount = v; })} {oncommit} />
 		<Slider id="film-interlayer" label="Interlayer effects" value={edit.film.interlayer} min={0} max={100} defaultValue={45} format={(v) => decimals(v)} onchange={(v) => onchange((e) => { if (e.film) e.film.interlayer = v; })} {oncommit} />

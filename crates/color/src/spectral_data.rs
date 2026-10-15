@@ -94,6 +94,13 @@ pub const ILLUMINANT_A: [f64; 36] = [9.7951, 12.0853, 14.708, 17.6753, 20.995, 2
 #[cfg(test)]
 pub const D50: [f64; 36] = [24.5495, 29.9346, 49.4004, 56.6079, 60.1251, 57.8977, 74.9113, 87.3335, 90.6914, 91.4369, 95.1701, 92.0119, 95.7636, 96.6462, 97.1522, 102.1163, 100.7656, 102.3223, 100.0, 97.7308, 98.9085, 93.4813, 97.6602, 99.2342, 99.0008, 95.6773, 98.8019, 95.6093, 98.1228, 102.9264, 99.0548, 87.3154, 91.5289, 92.8203, 76.7982, 86.45];
 
+/// ILFORD HP5 Plus's wedge spectrogram to tungsten light (2,850 K), from its technical information sheet (HARMAN
+/// technology, Nov 2018, page 1), traced from the sheet's graph and resampled here: 0 to 1 as the sheet draws it.
+pub const HP5_PLUS_SPECTROGRAM: [f64; 36] = [
+    0.435, 0.577, 0.679, 0.730, 0.765, 0.789, 0.809, 0.821, 0.825, 0.825, 0.816, 0.796, 0.781, 0.790, 0.820, 0.858, 0.899, 0.933,
+    0.966, 0.981, 0.976, 0.945, 0.912, 0.906, 0.930, 0.914, 0.558, 0.182, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+];
+
 /// colour-science's own Jakob 2019 spectra for a few linear Rec.2020 colours, for the fit's test.
 #[cfg(test)]
 #[allow(clippy::approx_constant)] // measured values; one happens to be near 1/π

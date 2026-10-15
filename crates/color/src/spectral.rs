@@ -178,10 +178,13 @@ fn sampled(knots: &[(f64, f64)]) -> [f64; SAMPLES] {
     })
 }
 
-/// A black-and-white film type: its spectral sensitivity, relative, per wavelength. These are the classes'
-/// shapes — where panchromatic, orthochromatic and blue-sensitive emulsions begin and stop seeing, as their
-/// manufacturers' datasheets show them — not one stock's measured curve.
+/// A black-and-white film type: its spectral sensitivity, relative, per wavelength. The classes' shapes —
+/// where panchromatic, orthochromatic and blue-sensitive emulsions begin and stop seeing, as their
+/// manufacturers' datasheets show them — and named stocks from their own datasheets.
 pub fn film_sensitivity(id: &str) -> Option<[f64; SAMPLES]> {
+    if id == "hp5-plus" {
+        return Some(from_tungsten_spectrogram(&crate::spectral_data::HP5_PLUS_SPECTROGRAM, 2850.0));
+    }
     Some(sampled(match id {
         // Classic panchromatic (HP5, Tri-X and their kind): blue-heavy, a dip in the green, sensitising out to
         // the orange-red and gone by about 680 nm, which is why reds print darker than the eye sees them.
@@ -195,6 +198,17 @@ pub fn film_sensitivity(id: &str) -> Option<[f64; SAMPLES]> {
         "blue-sensitive" => &[(380.0, 1.0), (400.0, 1.0), (430.0, 0.9), (460.0, 0.6), (480.0, 0.35), (500.0, 0.12), (520.0, 0.02), (530.0, 0.0)],
         _ => return None,
     }))
+}
+
+/// A film's own sensitivity from a datasheet's spectrogram to tungsten light at `t` kelvin: the response divided
+/// by the light that made it, largest 1. Read as drawn (linear): so read, HP5 Plus needs 1.65 stops more behind a
+/// red filter than an eye-like meter gives and 1.9 behind orange, where its sheet warns of "as much as 1½
+/// stops" — read as the film's own sensitivity it would need almost none.
+fn from_tungsten_spectrogram(spectrogram: &[f64; SAMPLES], t: f64) -> [f64; SAMPLES] {
+    let light = planck(t, 1.4388e-2);
+    let s: [f64; SAMPLES] = std::array::from_fn(|i| spectrogram[i] / light[i]);
+    let max = s.iter().cloned().fold(0.0, f64::max);
+    s.map(|v| v / max)
 }
 
 /// A filter on the lens: its transmission per wavelength. Generic shapes after the classic yellow, orange, red
@@ -412,6 +426,33 @@ mod tests {
         assert!(e(&tungsten, sky) < 0.9 * e(&D65, sky), "{} vs {}", e(&tungsten, sky), e(&D65, sky));
         let mid = (GRID - 1) / 2;
         assert!((at(&mono_lut("panchromatic", "none", &tungsten).unwrap(), [mid, mid, mid]) - 0.5).abs() < 0.02);
+    }
+
+    /// HP5 Plus behind a red or orange filter needs more than an eye-like meter gives — its sheet warns of up to
+    /// 1½ stops — and renders yellow darker and a blue sky lighter than the eye sees them, as panchromatic film
+    /// does.
+    #[test]
+    fn hp5_needs_more_behind_red_than_a_meter_gives() {
+        let hp5 = film_sensitivity("hp5-plus").unwrap();
+        let eye: [f64; SAMPLES] = std::array::from_fn(|i| CMF[i][1]);
+        let factor = |s: &[f64; SAMPLES], f: &str| {
+            let t = filter_transmission(f).unwrap();
+            let open: f64 = (0..SAMPLES).map(|i| D65[i] * s[i]).sum();
+            open / (0..SAMPLES).map(|i| D65[i] * s[i] * t[i]).sum::<f64>()
+        };
+        for f in ["red", "orange"] {
+            let more = (factor(&hp5, f) / factor(&eye, f)).log2();
+            eprintln!("HP5 Plus behind {f}: {more:.2} stops more than an eye-like meter");
+            assert!((1.0..2.2).contains(&more), "{f}: {more}");
+        }
+        let lut = mono_lut("hp5-plus", "none", &D65).unwrap();
+        let e = |rgb: [f64; 3]| {
+            let m = rgb.iter().cloned().fold(0.0, f64::max);
+            m * at(&lut, rgb.map(|v| (v / m * (GRID - 1) as f64).round() as usize)) as f64
+        };
+        let lum = |rgb: [f64; 3]| REC2020_TO_XYZ[1][0] * rgb[0] + REC2020_TO_XYZ[1][1] * rgb[1] + REC2020_TO_XYZ[1][2] * rgb[2];
+        let (yellow, sky) = ([0.6, 0.5, 0.05], [0.25, 0.42, 0.75]);
+        assert!(e(yellow) < 0.7 * lum(yellow) && e(sky) > 1.2 * lum(sky), "yellow {} / {}, sky {} / {}", e(yellow), lum(yellow), e(sky), lum(sky));
     }
 
     #[test]

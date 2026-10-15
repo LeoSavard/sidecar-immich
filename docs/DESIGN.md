@@ -7,6 +7,12 @@ Source: the architecture plan (PWA entry, XMP sidecars, server-side demosaic, We
 
 Where the code differs from the text below, the code and these notes win.
 
+- **ILFORD HP5 Plus** (§7, "Stocks"): the first named stock, from the datasheet the owner supplied —
+  spectral sensitivity from its spectrogram to tungsten light, and its characteristic curve's toe. Checked: the
+  curve fit within 0.02 density; HP5 behind red and orange needs 1.65 and 1.9 stops more than an eye-like meter
+  (the sheet warns of up to 1½); packing tests for the toe and the moved black point; parity `stock-hp5`
+  (20/20 pass); generic panchromatic against HP5 on the tractor and the portrait; the editor chooses it.
+
 - **Developers** (§7, "Developers"): adjacency through a low-resolution map of the whole frame, development N±2,
   compensation, grain per developer and a staining developer's grain masking. Checked: packing tests; an engine
   test of an edge (bright side 0.588 → 0.634, dark side 0.138 → 0.107, display-linear) and of a loupe tile given
@@ -689,6 +695,30 @@ the loupe builds one from the whole session source, lens-corrected at the map's 
 tile, so a tile's edges are the whole picture's (engine test: within 0.001). Depth effects and the detail
 filters are not in the loupe's map; at a fraction of a millimetre's reach this doesn't show.
 
+**Stocks.** A named stock is a film type with its maker's measured curves. The first is ILFORD HP5 Plus
+(`hp5-plus`), from HARMAN's technical information sheet (Nov 2018); the traces, the scripts that made them and how
+to rerun them are in `crates/color/film-data/`.
+
+- *Spectral sensitivity.* The sheet gives a wedge spectrogram *to tungsten light (2,850 K)*, drawn 0 to 1. Sidecar
+  reads it as drawn and divides out the light (Planck at 2,850 K), giving the film's own sensitivity, which the
+  black-and-white table then lights as the scene was lit. The check is the sheet's own warning, that behind deep
+  red and orange filters a camera's meter "can produce negatives under exposed by as much as 1½ stops": read
+  this way, HP5 needs 1.65 stops more than an eye-like meter behind Sidecar's red filter and 1.9 behind orange.
+  Read as the film's own sensitivity it would need 0–0.5 stop, which contradicts the sheet; read as log
+  sensitivity (a wedge's height) it would need a scale the sheet doesn't give, and lands within 0.3 stop of
+  the linear reading. In daylight HP5 renders yellow 1.6 stops and foliage 1.2 stops darker than the eye, and a
+  blue sky 0.8 stop lighter — the strongly blue-sensitive classic panchromatic a yellow filter is for.
+- *Characteristic curve.* Traced (ILFOTEC HC 1+31, 6½ min) and fitted as `fog + G·w·ln(1 + exp((log E − e₀)/w))`:
+  fog 0.182, G 0.645, e₀ 1.06, w 0.18, within 0.02 density everywhere (RMS 0.0065); no shoulder within the
+  sheet's 4 log E. Sidecar keeps its shape: middle grey sits 1.2 log E (Zone V four stops over Zone I) above the
+  speed point at fog + 0.1, and the toe becomes `stock = [1, at, width]` in stops from grey (HP5: about −4.1
+  and 0.6). The develop pass bends exposure through it after grain (`develop/stock.wgsl`), so the deepest
+  shadows flatten into the film's fog, grain with them, while grey and the straight line above are unchanged.
+  The print puts the fog half a stop over the tone map's black point (`tone_params`): the black point moves to
+  the toe's floor, Blacks still moves it from there, and the steepness follows the narrower range so Contrast
+  keeps its midtone meaning. The gradient itself is the print's: a darkroom printer picks the paper grade.
+  From a RAW only; a developed file keeps its own tones and takes just the sensitivity.
+
 **Grain.** `EditParams.grain { amount, size }` makes each spot's exposure flicker as a negative's grains make
 it, before the tone map, in colour or black and white, on a RAW or a developed file (`develop/grain.wgsl`). The
 noise is procedural, not a stored map: two octaves of value noise — clumps at the grain's size, grains at half
@@ -732,10 +762,11 @@ struct DevelopParams {            // offset  size
                                   //                adjacency map's log exposure, unused
   grain      : vec4f,             //  304     16   σ in stops (0 none), size ÷ long edge, stain masking, unused
   developer  : vec4f,             //  320     16   adjacency, reach ÷ long edge, development contrast, compensation
-}                                 //  total 336 bytes
+  stock      : vec4f,             //  336     16   a named stock's toe: 1 on, where (stops from grey), width, unused
+}                                 //  total 352 bytes
 ```
 
-**Struct layouts.** The 336-byte table above documents the layout; code never hard-codes it. `encase` (MIT-0) derives it on the Rust side and `webgpu-utils` (MIT) reads it from the WGSL source in the browser, so a field added to the struct can't silently shift the offsets.
+**Struct layouts.** The 352-byte table above documents the layout; code never hard-codes it. `encase` (MIT-0) derives it on the Rust side and `webgpu-utils` (MIT) reads it from the WGSL source in the browser, so a field added to the struct can't silently shift the offsets.
 
 **Parameter flow.** Slider input → params store (Svelte 5 `$state`) → derived CPU values (WASM: WB → multipliers and matrix; curve → LUT) → `queue.writeBuffer` → dirty flag → next `requestAnimationFrame` runs develop → view → histogram. Undo snapshots on `pointerup`, not per input event.
 

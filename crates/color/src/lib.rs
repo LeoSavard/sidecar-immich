@@ -11,6 +11,7 @@ pub mod mat;
 pub mod camera;
 pub mod params;
 pub mod spectral;
+pub mod stock;
 mod spectral_data;
 pub mod spline;
 pub mod tone;

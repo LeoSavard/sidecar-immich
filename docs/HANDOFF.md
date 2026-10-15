@@ -30,6 +30,7 @@ the one before, and its PR's base is that branch, not `main`. Merge in this orde
 | 16 | `worktree-bw-film` | Black and white from estimated spectra: film types and filters |
 | 17 | `worktree-film-grain` | Film grain: procedural, in exposure, sized on 35 mm; browser = server |
 | 18 | `worktree-film-developer` | Black and white: the scene's light, developers and development (adjacency map) |
+| 19 | `worktree-film-hp5` | ILFORD HP5 Plus from its datasheet: spectral sensitivity and the characteristic curve's toe |
 
 Held: #1 `worktree-portrait-depth` (Apple Portrait matte) and #2 `worktree-hdr-gain-map` (HDR, paused until
 the owner's Spyder X display measurements).
@@ -72,8 +73,8 @@ Film, in three stages:
 
 1. **Black and white** — done in #16: film types (class sensitivities), filters; grain in #17 (colour too).
    The scene's light (daylight, tungsten, from white balance) and developers (adjacency, compensation, staining,
-   N±2) in #18. Remaining: each stock's characteristic curve, named stocks once their datasheet curves are
-   digitised.
+   N±2) in #18. The first named stock, ILFORD HP5 Plus, from its datasheet, in #19; more stocks are data
+   (`crates/color/film-data/README.md` shows how HP5's sheet was traced).
 2. **Alternative processes** — tintype (collodion: the blue-sensitive type plus its short tonal scale) and
    cyanotype simulation; then cyanotype *digital negatives*, calibrated from a printed and scanned step tablet.
 3. **Colour film, spectrally** — layer sensitivities → characteristic curves → dye densities → a print stock,
