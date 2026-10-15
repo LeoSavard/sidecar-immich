@@ -15,8 +15,8 @@ sees the light, through a filter. -->
 
 	/** The film types `sidecar_color::spectral` knows, and what each does to colours. */
 	const FILMS = [
-		{ id: 'panchromatic', label: 'Panchromatic', note: 'Classic black-and-white film (the HP5 and Tri-X kind): sees every colour, a little more of blue, reds somewhat darker than the eye sees them.' },
-		{ id: 'panchromatic-extended', label: 'Extended red', note: 'Modern T-grain film: flatter, sees further into the red, so skin and reds come out lighter.' },
+		{ id: 'panchromatic', label: 'Panchromatic', note: 'Classic black-and-white film, as a class: sees every colour, a little more of blue, reds somewhat darker than the eye sees them.' },
+		{ id: 'panchromatic-extended', label: 'Extended red', note: 'Modern flat-grain film, as a class: flatter, sees further into the red, so skin and reds come out lighter.' },
 		{ id: 'orthochromatic', label: 'Orthochromatic', note: 'Blind to red: reds and lips go dark, skies stay bright, skin shows every freckle.' },
 		{ id: 'blue-sensitive', label: 'Blue-sensitive', note: "Wet collodion and the earliest plates: sees only blue, so warm colours go near black and blue skies blow out. Real plates also saw ultraviolet, which no camera records." }
 	];
@@ -66,9 +66,9 @@ sees the light, through a filter. -->
 
 	/** The developers `sidecar_color::developer` knows, and what each does. */
 	const DEVELOPERS = [
-		{ id: 'standard', label: 'Standard', note: 'A general-purpose developer (the D-76 kind): the film as its datasheet shows it.' },
-		{ id: 'fine-grain', label: 'Fine grain', note: 'A solvent developer (the Perceptol kind): smaller, smoother grain.' },
-		{ id: 'acutance', label: 'High acutance', note: 'A dilute sharp developer (the Rodinal kind): crisp edges, grain shown off.' },
+		{ id: 'standard', label: 'Standard', note: 'A general-purpose developer: the film as its datasheet shows it.' },
+		{ id: 'fine-grain', label: 'Fine grain', note: 'A solvent developer: smaller, smoother grain.' },
+		{ id: 'acutance', label: 'High acutance', note: 'A dilute sharp developer: crisp edges, grain shown off.' },
 		{ id: 'compensating', label: 'Compensating', note: 'Two-bath or stand development: highlights held back, broad halos of local contrast at edges.' },
 		{ id: 'staining', label: 'Staining', note: 'A pyro developer: highlights held and their grain hidden by the stain, edges a little sharper.' }
 	];

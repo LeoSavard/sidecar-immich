@@ -648,8 +648,8 @@ film and filter (`mono_lut`, rebuilt per pack in well under a millisecond), read
 after the camera matrix (`develop/mono.wgsl`, eight corners, since r32float isn't filterable), and passed on as a
 neutral to the tone map. Film rendering gives way when both are set; developed files can be black and white too.
 
-Film types are the classes' sensitivities — panchromatic (HP5/Tri-X-like), extended-red panchromatic
-(T-grain), orthochromatic, blue-sensitive (collodion; the ultraviolet real plates saw is not in any RAW) — not
+Film types are the classes' sensitivities — panchromatic (classic), extended-red panchromatic
+(modern flat-grain), orthochromatic, blue-sensitive (collodion; the ultraviolet real plates saw is not in any RAW) — not
 measured curves of named stocks, which need their datasheets digitised. Filters are generic yellow, orange,
 red (long-pass edges at 500, 555, 600 nm) and green (a band). Measured on everyday colours: blue-sensitive film
 darkens skin 0.7 stop against panchromatic and lifts the sky; orthochromatic takes a saturated red to near
@@ -679,11 +679,11 @@ exposure right after `mono_exposure`, before grain and the tone map (`develop/de
 
 | developer | adjacency | reach | compensation | grain |
 |---|---|---|---|---|
-| standard (D-76's kind) | 0 | — | 0 | × 1 |
-| fine grain (solvent, Perceptol's kind) | 0 | — | 0 | × 0.75 |
-| high acutance (dilute, Rodinal's kind) | 0.35 | 0.08 mm | 0.1 | × 1.2 |
+| standard (general purpose) | 0 | — | 0 | × 1 |
+| fine grain (solvent) | 0 | — | 0 | × 0.75 |
+| high acutance (dilute) | 0.35 | 0.08 mm | 0.1 | × 1.2 |
 | compensating (two-bath, stand) | 0.25 | 0.3 mm | 0.45 | × 1 |
-| staining (pyro's kind) | 0.2 | 0.15 mm | 0.3 | × 1, stain hides up to half at the white point |
+| staining (pyro) | 0.2 | 0.15 mm | 0.3 | × 1, stain hides up to half at the white point |
 
 Development scales grain by `1 + 0.15 N`. These are the developers' kinds as the literature describes them, not
 fits to one formula's measurements. The standard developer at N returns its input exactly.
