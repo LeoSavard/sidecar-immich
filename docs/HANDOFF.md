@@ -31,6 +31,7 @@ the one before, and its PR's base is that branch, not `main`. Merge in this orde
 | 17 | `worktree-film-grain` | Film grain: procedural, in exposure, sized on 35 mm; browser = server |
 | 18 | `worktree-film-developer` | Black and white: the scene's light, developers and development (adjacency map) |
 | 19 | `worktree-film-hp5` | Named stocks from datasheets: HP5 Plus, Tri-X 400 and 320, SFX 200 (spectral sensitivity, toe and shoulder) |
+| 20 | `worktree-film-provia` | Colour film, spectrally: FUJICHROME PROVIA 100F from its data sheet, end to end |
 
 Held: #1 `worktree-portrait-depth` (Apple Portrait matte) and #2 `worktree-hdr-gain-map` (HDR, paused until
 the owner's Spyder X display measurements).
@@ -52,14 +53,32 @@ docker tag sidecar:local sidecar:previous && docker tag sidecar:latest-test side
 cd ~/Claude/sidecar/deploy/local && docker compose up -d
 ```
 
-`sidecar:latest-test` currently holds everything through #19.
+`sidecar:latest-test` currently holds everything through #19, so it predates #20 and the withdrawal of
+Double-X: rebuild it from the top of the stack before the next hand-over.
+
+**To get the colour stocks in a real deployment**, the image needs the owner's two ISO tables mounted and
+named, since Sidecar carries neither and will not render a stock without them. In `deploy/local/compose.yaml`,
+read-only, outside the repository:
+
+```yaml
+    volumes:
+      - /path/to/standards:/standards:ro
+    environment:
+      SIDECAR_STATUS_A: /standards/status-a.csv
+      SIDECAR_ISO_DAYLIGHT: /standards/iso-sensitometric-daylight.csv
+```
+
+Without them everything else works and the Film section simply offers no stock; the log says which file is
+missing. The worker measures each stock's profile once (about three seconds) and caches it under
+`cache/stocks`.
 
 ## Open questions
 
-- **Colour film's two ISO tables** (branch `worktree-film-provia`) are in hand and private: Status A from ANSI/ISO
-  5-3-1995 (IT2.18-1996, table 3) and ISO sensitometric daylight from ISO 7589-1984 (table 1). Copies sit in the
-  git-ignored `testdata/cache/standards/` of the depth-spike worktree; they must never enter the repository or
-  image (loaded at run time). Next: the develop pass, the editor, and the server reading the owner's files.
+- **How dark a slide should be.** PROVIA renders with a slide's own density, because viewing puts the light
+  table at the display's white — the chain is faithful and the pictures look like slides, but on a screen it is
+  a strong look, and Amount is the only way down from it. Worth deciding with pictures: keep it as it is, or
+  let the stock's white point meet the display's. See `testdata/cache/slide/` for the tractor NEF rendered
+  neutral, generic film, PROVIA, and PROVIA under tungsten.
 - **Sidecar's default rendering is darker than the camera's JPEG.** Visible with the Camera toggle. This is
   ROADMAP's "Tone curve above middle grey"; decide with pictures, against the camera rendering.
 - **Film defaults.** Colour film's interlayer default is 45 (the owner's choice). Black and white has no
@@ -76,8 +95,13 @@ Film, in three stages:
    for stage 3: Fujifilm ETERNA 250D, Superia X-TRA 400 and Fujifilm's motion picture film manual.
 2. **Alternative processes** — tintype (collodion: the blue-sensitive type plus its short tonal scale) and
    cyanotype simulation; then cyanotype *digital negatives*, calibrated from a printed and scanned step tablet.
-3. **Colour film, spectrally** — layer sensitivities → characteristic curves → dye densities → a print stock,
-   replacing the current per-channel approximation; halation and grain.
+3. **Colour film, spectrally** — **done for reversal film in #20**: FUJICHROME PROVIA 100F renders from its
+   data sheet end to end (layer sensitivities → characteristic curves → dye densities → the light table),
+   replacing the per-channel approximation wherever the stock is named. What is left of the stage: a **print
+   stock**, so a colour *negative* can be rendered the way it is actually seen — the owner's ETERNA 250D and
+   Superia X-TRA 400 sheets are negatives, and a negative without a print is only an orange mask; then
+   **halation**, and **grain per dye layer** instead of the one luminance grain colour uses now. A new
+   reversal stock, meanwhile, is data: its sheet traced into `film_data.rs` and an entry in `slide::STOCKS`.
 
 The spectral method is Jakob and Hanika's (`crates/color/src/spectral.rs`); a new stock or filter is data, not
 code.
