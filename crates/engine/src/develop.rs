@@ -538,8 +538,8 @@ mod tests {
         // Amount 0 is the neutral rendering, untouched.
         let mut off_params = p;
         off_params.slide = [0.0; 4];
-        let off = crate::read_rgba16(gpu, &pass.render(gpu, &tex, &bytemuck::bytes_of(&off_params).to_vec(), &lut, &masks).unwrap()).unwrap();
-        let plain = crate::read_rgba16(gpu, &pass.render(gpu, &tex, &bytemuck::bytes_of(&off_params).to_vec(), &lut, &Masks::none()).unwrap()).unwrap();
+        let off = crate::read_rgba16(gpu, &pass.render(gpu, &tex, bytemuck::bytes_of(&off_params), &lut, &masks).unwrap()).unwrap();
+        let plain = crate::read_rgba16(gpu, &pass.render(gpu, &tex, bytemuck::bytes_of(&off_params), &lut, &Masks::none()).unwrap()).unwrap();
         assert_eq!(off.data, plain.data, "a stock at amount 0 renders as if it were not there");
     }
 }

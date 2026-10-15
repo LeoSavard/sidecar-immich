@@ -138,10 +138,10 @@ fn measure(id: &str) -> Option<SlideProfile> {
     let started = std::time::Instant::now();
     let profile = stock.profile(meter, daylight);
     tracing::info!("film stock {id}: profile measured in {:?}", started.elapsed());
-    if let Some(path) = &path {
-        if let Err(e) = std::fs::write(path, profile.to_bytes()) {
-            tracing::warn!("film stock {id}: could not cache its profile at {}: {e:#}", path.display());
-        }
+    if let Some(path) = &path
+        && let Err(e) = std::fs::write(path, profile.to_bytes())
+    {
+        tracing::warn!("film stock {id}: could not cache its profile at {}: {e:#}", path.display());
     }
     Some(profile)
 }

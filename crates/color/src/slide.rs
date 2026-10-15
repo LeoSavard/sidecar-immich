@@ -426,7 +426,7 @@ impl SlideProfile {
     /// A profile from `to_bytes`; `None` for anything else, so a stale cache file or a truncated download is
     /// simply no profile rather than a wrong rendering.
     pub fn parse(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < 32 || bytes.len() % 4 != 0 {
+        if bytes.len() < 32 || !bytes.len().is_multiple_of(4) {
             return None;
         }
         let word = |i: usize| u32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap());
