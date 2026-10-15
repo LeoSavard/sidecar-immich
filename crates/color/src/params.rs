@@ -48,6 +48,35 @@ pub struct EditParams {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     #[cfg_attr(feature = "ts", ts(as = "Option<Vec<MaskAdjustment>>", optional))]
     pub masks: Vec<MaskAdjustment>,
+    /// A lens blur by distance, from the depth mask (DESIGN.md §15, "Depth effects"). Absent is none, and is
+    /// left out of the serialized edit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub lens_blur: Option<LensBlur>,
+    /// Haze by distance, from the depth mask: −100 takes it away, 100 adds it; 0, left out of the serialized
+    /// edit, is none.
+    #[serde(skip_serializing_if = "is_zero")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<f64>", optional))]
+    pub haze: f64,
+}
+
+/// A lens blur by distance: how far it reaches, where the focus is, and how deep the sharp band around it is.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "edit/"))]
+pub struct LensBlur {
+    /// 0–100: the blur at the farthest from the focus, up to `crate::depth::MAX_BLUR` of the long edge.
+    pub amount: f64,
+    /// 0–100: the distance in focus, as the depth mask reads it (0 farthest, 100 nearest).
+    pub focus: f64,
+    /// 0–100: how much of the depth range around the focus stays sharp.
+    pub range: f64,
+}
+
+impl Default for LensBlur {
+    fn default() -> Self {
+        Self { amount: 50.0, focus: 100.0, range: 10.0 }
+    }
 }
 
 impl Default for EditParams {
@@ -64,6 +93,8 @@ impl Default for EditParams {
             lens: None,
             geometry: None,
             masks: Vec::new(),
+            lens_blur: None,
+            haze: 0.0,
         }
     }
 }

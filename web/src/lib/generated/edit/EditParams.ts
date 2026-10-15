@@ -4,6 +4,7 @@ import type { Exposure } from "./Exposure";
 import type { Film } from "./Film";
 import type { Geometry } from "./Geometry";
 import type { Lens } from "./Lens";
+import type { LensBlur } from "./LensBlur";
 import type { MaskAdjustment } from "./MaskAdjustment";
 import type { Mixer } from "./Mixer";
 import type { Tone } from "./Tone";
@@ -35,4 +36,14 @@ geometry?: Geometry,
  * Adjustments through masks, at most `MAX_MASKS`. Left out of the serialized edit when empty, so an edit
  * without masks keeps the ETag — and the history ids and export records keyed by it — it always had.
  */
-masks?: Array<MaskAdjustment>, };
+masks?: Array<MaskAdjustment>, 
+/**
+ * A lens blur by distance, from the depth mask (DESIGN.md §15, "Depth effects"). Absent is none, and is
+ * left out of the serialized edit.
+ */
+lensBlur?: LensBlur, 
+/**
+ * Haze by distance, from the depth mask: −100 takes it away, 100 adds it; 0, left out of the serialized
+ * edit, is none.
+ */
+haze?: number, };

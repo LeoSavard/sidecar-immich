@@ -117,6 +117,14 @@ export function describeChanges(from: EditParams, to: EditParams): string[] {
 		if (from.film.amount !== to.film.amount) out.push(`Film amount ${decimals(to.film.amount)} %`);
 		if (from.film.interlayer !== to.film.interlayer) out.push(`Interlayer effects ${decimals(to.film.interlayer)}`);
 	}
+	const [b0, b1] = [from.lensBlur?.amount ?? 0, to.lensBlur?.amount ?? 0];
+	if (!b0 !== !b1) out.push(b1 ? `Lens blur ${decimals(b1)}` : 'No lens blur');
+	else if (from.lensBlur && to.lensBlur) {
+		if (b0 !== b1) out.push(`Lens blur ${decimals(b1)}`);
+		if (from.lensBlur.focus !== to.lensBlur.focus) out.push(`Focus distance ${decimals(to.lensBlur.focus)}`);
+		if (from.lensBlur.range !== to.lensBlur.range) out.push(`Depth of field ${decimals(to.lensBlur.range)}`);
+	}
+	if ((from.haze ?? 0) !== (to.haze ?? 0)) out.push(`Haze ${signed(to.haze ?? 0)}`);
 	if (ownCurve(from) !== ownCurve(to)) out.push('Curve edited');
 	out.push(...describeGeometry(from.geometry ?? NO_GEOMETRY, to.geometry ?? NO_GEOMETRY));
 	if (!!from.lens !== !!to.lens) out.push(to.lens ? 'Lens correction on' : 'Lens correction off');
@@ -211,6 +219,16 @@ export const PICKS: { id: string; label: string; take: (into: EditParams, from: 
 		}
 	},
 	{ id: 'curve', label: 'Curve', take: (e, f) => (e.tone.curve = structuredClone(f.tone.curve)) },
+	{
+		id: 'depth',
+		label: 'Depth',
+		take: (e, f) => {
+			if (f.lensBlur) e.lensBlur = structuredClone(f.lensBlur);
+			else delete e.lensBlur;
+			if (f.haze) e.haze = f.haze;
+			else delete e.haze;
+		}
+	},
 	{
 		id: 'color',
 		label: 'Color mixer',

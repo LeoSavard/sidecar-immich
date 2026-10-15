@@ -80,6 +80,25 @@ Where the code differs from the text below, the code and these notes win.
   `ProcessVersion` bump was needed: an older Sidecar keeps masks it can't render, and entries a newer one adds
   (a `kind`) are carried and skipped here. The first masks on a new install take minutes while burn tunes
   itself to the GPU; after that a photo's masks take seconds, once.
+- **Depth effects (§15): lens blur and haze by distance.** A pass between the lens pass and develop, on
+  camera-native linear light, so a blurred highlight spreads as the light it is and haze is light in the scene
+  before white balance sees it (`shaders/depth/effects.wgsl` and three `client/depth_*.wgsl` entries, the same
+  WGSL in the browser and the worker; uniform packed by `sidecar_color::depth::pack`, 64 bytes). *Haze*:
+  transmittance `t = exp(−τ·(1 − nearness))`, τ up to 3 at ±100; adding mixes toward the airlight, removing
+  inverts that with t floored at 0.2. The airlight is the mean camera RGB of the farthest 3 % of the photo,
+  estimated by the worker with the depth mask (`depth.json`, listed with the masks; `MASK_REVISION` 3).
+  *Lens blur*: the circle of confusion is linear in the difference in nearness from the focus (Depth Anything
+  gives inverse depth, which a thin lens's blur follows), minus half the depth of field, up to 2.5 % of the long
+  edge. It is gathered at a scale where the largest disc is ≤ 16 texels (downsample with the haze, a
+  160-sample golden-angle gather, then compose at full resolution), so a wide blur costs the same at any size.
+  A sample counts if its own disc reaches the texel; a farther one only as far as the texel's own disc, so a
+  sharp subject doesn't take in the blurred background behind it, while a nearer blurred one spreads over what
+  is behind it (its share is kept in alpha and lets compose blur a sharp pixel it covers). Samples weigh by the
+  inverse of their disc's area, so a bright point becomes a bright disc. A loupe tile is developed with the
+  blur's reach of margin, its corner on the gather grid, and matches the whole (engine test). Tap to focus
+  reads the depth mask under the tap. `EditParams.lensBlur` (amount, focus, range) and `haze` are left out when
+  off. Measured on the tractor photo's server previews (edge energy, higher is sharper): focus near → fence,
+  cab and trees 2.3, 2.5, 2.6; focus on the cab → 3.4, 10.8, 3.8; unblurred 5.3, 11.1, 13.8.
 - **Depth masks (§15):** Depth Anything V2 *Small* (Apache-2.0; Base and Large are CC-BY-NC and excluded),
   simplified at 518² like BiRefNet and imported by burn-onnx, gives relative inverse depth: no unit, no fixed
   origin. `Ml::depth` stretches it between the photo's own 1st and 99th percentiles to 0–255, near white, and

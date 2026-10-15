@@ -5,6 +5,7 @@
 	import { DevelopPass, requestDevice } from '$lib/gpu/develop';
 	import { CLIP_HIGHS, CLIP_LOWS, MASK_INVERTED, PEAKING, SHOW_MASK, ViewPass, type ViewGeometry, type Viewport } from '$lib/gpu/view';
 	import { BRUSH, DEPTH, MaskLibrary, brushStroke, rangeUniform, type BrushSettings, type MaskSet } from '$lib/masks';
+	import { DepthPass } from '$lib/gpu/depth';
 	import { MaskPainter, simplify } from '$lib/gpu/brush';
 	import { HistogramPass, type HistogramData } from '$lib/gpu/histogram';
 	import { LensPass, correctedPoint, sourcePoint } from '$lib/gpu/lens';
@@ -23,6 +24,7 @@
 	import WhiteBalanceSection from '$lib/ui/sections/WhiteBalanceSection.svelte';
 	import LightSection from '$lib/ui/sections/LightSection.svelte';
 	import FilmSection from '$lib/ui/sections/FilmSection.svelte';
+	import DepthSection from '$lib/ui/sections/DepthSection.svelte';
 	import CurveSection from '$lib/ui/sections/CurveSection.svelte';
 	import ColorSection from '$lib/ui/sections/ColorSection.svelte';
 	import DetailSection from '$lib/ui/sections/DetailSection.svelte';
@@ -31,7 +33,7 @@
 
 	const SPACES: DisplaySpace[] = ['srgb', 'display-p3'];
 
-	type Section = 'lens' | 'crop' | 'wb' | 'light' | 'film' | 'curve' | 'color' | 'masks' | 'detail' | 'history';
+	type Section = 'lens' | 'crop' | 'wb' | 'light' | 'film' | 'curve' | 'color' | 'depth' | 'masks' | 'detail' | 'history';
 
 	const key = page.params.key!;
 	let canvas: HTMLCanvasElement;
@@ -40,6 +42,8 @@
 	let status = $state('Opening…');
 	/** The white balance eyedropper is waiting for a tap on the photo. */
 	let pickingWhite = $state(false);
+	/** Tap-to-focus (the lens blur) is waiting for a tap on the photo. */
+	let pickingFocus = $state(false);
 	let error = $state('');
 	/**
 	 * The white balance the camera recorded, resolved once per photo. It is the Temperature slider's detent, so
@@ -116,6 +120,11 @@
 	let lensPass: LensPass;
 	/** The lens pass's outputs at proxy size — the photo and its focus mask — and what they were made from. */
 	let corrected: GPUTexture | undefined;
+	/** What the lens pass made for develop: `corrected`, or `undefined` for the proxy itself. */
+	let lensOut: GPUTexture | undefined;
+	let depthPass: DepthPass;
+	/** What the depth pass last ran on and with, so it only runs again when one of them changes. */
+	let depthMadeFrom: { key: string; base: GPUTexture; depth: GPUTexture } | undefined;
 	let correctedMask: GPUTexture | undefined;
 	let lensMadeFrom = '';
 	/** The masks the models made for this photo, fetched when a mask is first needed (`$lib/masks`). */
@@ -188,7 +197,7 @@
 	function setToolsHidden(hidden: boolean, open?: Section) {
 		toolsHidden = hidden;
 		localStorage.setItem('sidecar.toolsHidden', hidden ? '1' : '0');
-		if (hidden) pickingWhite = false;
+		if (hidden) pickingWhite = pickingFocus = false;
 		if (!open) return;
 		section = open;
 		// On the desktop every section is a <details>: open the one asked for and bring it into view.
@@ -229,6 +238,7 @@
 		if (stroke && preview) drawStroke();
 		if (developDirty) {
 			correctLens();
+			depthEffects();
 			const packed = repack();
 			develop.setUniforms(packed.uniform);
 			develop.setToneLut(packed.lut);
@@ -417,7 +427,7 @@
 		const flip = meta!.info.orientationFlip ?? 0;
 		lensUniform = proxy && profile && lens ? packer.packLens(profile, $state.snapshot(lens), sensorAspect(meta!.info), [proxy.width, proxy.height], flip) : undefined;
 		if (!proxy || !lensUniform) {
-			develop.setInput(undefined);
+			lensOut = undefined;
 			view.useFocusMask(undefined);
 			return;
 		}
@@ -426,7 +436,7 @@
 			corrected = lensPass.target(proxy, 'lens corrected');
 		}
 		lensPass.run(proxy, corrected, lensUniform);
-		develop.setInput(corrected);
+		lensOut = corrected;
 		// The mask moves with the picture, but isn't a brightness: no vignetting gain on it.
 		const maskUniform = mask.width > 1 ? packer.packLens(profile!, { ...$state.snapshot(lens!), vignetting: 0 }, sensorAspect(meta!.info), [mask.width, mask.height], flip) : undefined;
 		if (maskUniform) {
@@ -437,6 +447,30 @@
 			lensPass.run(mask, correctedMask, maskUniform);
 			view.useFocusMask(correctedMask);
 		} else view.useFocusMask(undefined);
+	}
+
+	/**
+	 * Haze and lens blur by distance over what the lens pass made, for develop to read — when the edit shown has
+	 * either, and the depth mask and the photo's airlight have arrived (asking for them if not). Cheap to call on
+	 * every develop: the pass only runs when the lens result, the settings or the depth mask changed.
+	 */
+	function depthEffects() {
+		const shown = before ? compareEdit() : edit!;
+		const base = lensOut ?? develop.proxy;
+		const wanted = (shown.haze ?? 0) !== 0 || (shown.lensBlur?.amount ?? 0) > 0;
+		if (wanted && !maskSet) loadMaskSet();
+		const airlight = maskSet?.airlight;
+		const depth = wanted && airlight ? maskTexture(DEPTH) : undefined;
+		const uniform = depth && base ? packer.packDepth($state.snapshot(shown), airlight!, [base.width, base.height]) : undefined;
+		if (!uniform || !depth || !base) {
+			depthMadeFrom = undefined;
+			develop.setInput(lensOut);
+			return;
+		}
+		const key = `${lensMadeFrom}|${uniform.join(',')}`;
+		if (depthMadeFrom?.key === key && depthMadeFrom.base === base && depthMadeFrom.depth === depth) return;
+		depthMadeFrom = { key, base, depth };
+		develop.setInput(depthPass.run(base, depth, uniform));
 	}
 
 	/**
@@ -614,6 +648,29 @@
 		const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, Math.round(v)));
 		update((ed) => {
 			ed.whiteBalance = { mode: 'custom', temperatureK: clamp(wb.temperatureK, 2000, 12000), tint: clamp(wb.tint, -150, 150) };
+		});
+		committed();
+	}
+
+	/**
+	 * Tap to focus: the depth mask's value under the tap (a 5 × 5 average) becomes the lens blur's focus
+	 * distance. The mask is in the same frame `screenToSource` maps to: oriented, before lens correction.
+	 */
+	async function pickFocus(e: PointerEvent) {
+		pickingFocus = false;
+		const p = screenToSource(px(e));
+		if (!p || !maskLibrary || p.some((v) => v < 0 || v > 1)) return;
+		const depth = await maskLibrary.values(DEPTH);
+		const [cx, cy] = [Math.round(p[0] * (depth.width - 1)), Math.round(p[1] * (depth.height - 1))];
+		let [sum, n] = [0, 0];
+		for (let y = Math.max(0, cy - 2); y <= Math.min(depth.height - 1, cy + 2); y++)
+			for (let x = Math.max(0, cx - 2); x <= Math.min(depth.width - 1, cx + 2); x++) {
+				sum += depth.data[y * depth.width + x];
+				n++;
+			}
+		const focus = Math.round((sum / n / 255) * 100);
+		update((ed) => {
+			ed.lensBlur = { ...(ed.lensBlur ?? { amount: 50, focus, range: 10 }), focus };
 		});
 		committed();
 	}
@@ -840,12 +897,13 @@
 	// Masks are asked for when a tool needs them — the section is opened, or the edit has some — not with
 	// every photo: the first ask computes them.
 	$effect(() => {
-		if (section === 'masks' || wide || (edit?.masks?.length ?? 0) > 0) loadMaskSet();
+		if (section === 'masks' || section === 'depth' || wide || (edit?.masks?.length ?? 0) > 0) loadMaskSet();
 	});
 
 	// The eyedropper belongs to the White balance section: leaving it on a phone puts the eyedropper away.
 	$effect(() => {
 		if (!wide && section !== 'wb') pickingWhite = false;
+		if (!wide && section !== 'depth') pickingFocus = false;
 	});
 
 	// The history loads when it's first looked at, not with every photo.
@@ -902,6 +960,7 @@
 				LensPass.create(device),
 				MaskPainter.create(device)
 			]);
+			depthPass = await DepthPass.create(device);
 			maskLibrary = new MaskLibrary(device, key);
 			if (section === 'masks' || wide || (edit?.masks?.length ?? 0) > 0) loadMaskSet();
 			device.lost.then((info) => (error = `The GPU was reset (${info.reason}). Reload to continue — your edits are kept as a draft.`));
@@ -951,7 +1010,7 @@
 		clearTimeout(holdTimer);
 		// With the brush on, one finger paints; a second one turns it into a pinch.
 		if (painting && pointers.size === 1) startStroke(e);
-		else if (pointers.size === 1 && !pickingWhite) holdTimer = setTimeout(() => setBefore(true), 450);
+		else if (pointers.size === 1 && !pickingWhite && !pickingFocus) holdTimer = setTimeout(() => setBefore(true), 450);
 		if (pointers.size === 2) {
 			cancelStroke();
 			clearTimeout(holdTimer);
@@ -1000,6 +1059,10 @@
 				pickWhite(e);
 				return;
 			}
+			if (pickingFocus && !fallback && develop?.output) {
+				pickFocus(e);
+				return;
+			}
 			if (fallback || !develop?.output || cropping || painting) return;
 			const r = imageRect();
 			// What is shown is the edit's output: the loupe is centred in it.
@@ -1020,8 +1083,8 @@
 
 	function keydown(e: KeyboardEvent) {
 		if ((e.target as HTMLElement)?.tagName === 'INPUT') return;
-		if (e.key === 'Escape' && pickingWhite) {
-			pickingWhite = false;
+		if (e.key === 'Escape' && (pickingWhite || pickingFocus)) {
+			pickingWhite = pickingFocus = false;
 			return;
 		}
 		if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') {
@@ -1102,6 +1165,7 @@
 		{ id: 'film', label: 'Film', short: 'Film' },
 		{ id: 'curve', label: 'Curve', short: 'Curve' },
 		{ id: 'color', label: 'Color', short: 'Color' },
+		{ id: 'depth', label: 'Depth', short: 'Depth' },
 		{ id: 'masks', label: 'Masks', short: 'Masks' },
 		{ id: 'detail', label: 'Detail', short: 'Detail' },
 		{ id: 'history', label: 'History', short: 'History' }
@@ -1177,6 +1241,10 @@
 	{/if}
 {/snippet}
 
+{#snippet depthSection()}
+	{#if edit}<DepthSection {edit} onchange={update} oncommit={committed} available={fallback ? true : maskSet ? maskSet.available && !!maskSet.airlight : null} picking={fallback || readOnly ? undefined : pickingFocus} onpick={(on) => (pickingFocus = on)} />{/if}
+{/snippet}
+
 {#snippet colorSection()}
 	{#if edit}<ColorSection {edit} onchange={update} oncommit={committed} />{/if}
 {/snippet}
@@ -1187,7 +1255,7 @@
 		     without WebGPU nothing ever draws into it and the server's JPEG sits on top. -->
 		<canvas
 			bind:this={canvas}
-			class="block h-full w-full touch-none {fallback ? 'invisible' : ''} {pickingWhite ? 'cursor-crosshair' : ''}"
+			class="block h-full w-full touch-none {fallback ? 'invisible' : ''} {pickingWhite || pickingFocus ? 'cursor-crosshair' : ''}"
 			onpointerdown={canvasDown}
 			onpointermove={canvasMove}
 			onpointerup={canvasUp}
@@ -1361,7 +1429,7 @@
 
 			{#if !toolsHidden}
 			<div class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-6 pt-1">
-				{#if section === 'lens'}{@render lensSection()}{:else if section === 'crop'}{@render cropSection()}{:else if section === 'wb'}{@render wbSection()}{:else if section === 'light'}{@render lightSection()}{:else if section === 'film'}{@render filmSection()}{:else if section === 'curve'}{@render curveSection()}{:else if section === 'color'}{@render colorSection()}{:else if section === 'masks'}{@render masksSection()}{:else if section === 'history'}{@render historySection()}{:else}{@render detailSection()}{/if}
+				{#if section === 'lens'}{@render lensSection()}{:else if section === 'crop'}{@render cropSection()}{:else if section === 'wb'}{@render wbSection()}{:else if section === 'light'}{@render lightSection()}{:else if section === 'film'}{@render filmSection()}{:else if section === 'curve'}{@render curveSection()}{:else if section === 'color'}{@render colorSection()}{:else if section === 'depth'}{@render depthSection()}{:else if section === 'masks'}{@render masksSection()}{:else if section === 'history'}{@render historySection()}{:else}{@render detailSection()}{/if}
 			</div>
 			{/if}
 
@@ -1381,7 +1449,7 @@
 					>
 						<summary class="cursor-pointer py-1 text-xs font-medium">{s.label}</summary>
 						<div class="pt-2">
-							{#if s.id === 'lens'}{@render lensSection()}{:else if s.id === 'crop'}{@render cropSection()}{:else if s.id === 'wb'}{@render wbSection()}{:else if s.id === 'light'}{@render lightSection()}{:else if s.id === 'film'}{@render filmSection()}{:else if s.id === 'curve'}{@render curveSection()}{:else if s.id === 'color'}{@render colorSection()}{:else if s.id === 'masks'}{@render masksSection()}{:else if s.id === 'history'}{@render historySection()}{:else if detailOpen}{@render detailSection()}{/if}
+							{#if s.id === 'lens'}{@render lensSection()}{:else if s.id === 'crop'}{@render cropSection()}{:else if s.id === 'wb'}{@render wbSection()}{:else if s.id === 'light'}{@render lightSection()}{:else if s.id === 'film'}{@render filmSection()}{:else if s.id === 'curve'}{@render curveSection()}{:else if s.id === 'color'}{@render colorSection()}{:else if s.id === 'depth'}{@render depthSection()}{:else if s.id === 'masks'}{@render masksSection()}{:else if s.id === 'history'}{@render historySection()}{:else if detailOpen}{@render detailSection()}{/if}
 						</div>
 					</details>
 				{/each}

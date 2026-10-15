@@ -69,6 +69,7 @@ pub struct Kit {
     pub lens: sidecar_engine::lens::LensPass,
     pub warp: sidecar_engine::warp::WarpPass,
     pub brush: sidecar_engine::brush::Brush,
+    pub depth: sidecar_engine::depth::DepthPass,
     pub lensfun: std::sync::Arc<crate::lensfun::Lensfun>,
 }
 
@@ -174,6 +175,30 @@ impl Rendering {
                 })
             })
             .collect()
+    }
+
+    /// The depth map in the frame a source of `frame` pixels this rendering corrects: taken back through the
+    /// orientation `flip` still has to apply and lens-corrected as the source is (without vignetting), as a
+    /// mask is.
+    pub fn depth_texture(&self, kit: &Kit, edit: &EditParams, depth: &RgbaF32, flip: i32) -> wgpu::Texture {
+        let mut geometry = edit.clone();
+        if let Some(lens) = &mut geometry.lens {
+            lens.vignetting = 0.0;
+        }
+        let base = sidecar_engine::upload_rgba16(&kit.gpu, &depth.clone().oriented(sidecar_engine::inverse_flip(flip)));
+        self.correct(kit, &geometry, base)
+    }
+
+    /// `source` — the whole frame, `frame` pixels, or a tile of it at `offset` — through the edit's haze and lens
+    /// blur, when it has either and `depth` is here. A tile needs `DepthParams::reach` of margin around what is
+    /// kept of it to come out as the whole picture would.
+    #[allow(clippy::too_many_arguments)]
+    pub fn depth_effects(&self, kit: &Kit, edit: &EditParams, depth: Option<(&crate::masks::DepthMap, &wgpu::Texture)>, source: wgpu::Texture, frame: [u32; 2], offset: [u32; 2]) -> wgpu::Texture {
+        let Some((map, texture)) = depth else { return source };
+        match sidecar_color::depth::pack(edit, map.airlight, frame, [offset[0] as f32, offset[1] as f32]) {
+            Some(params) => kit.depth.apply(&kit.gpu, &source, texture, &params),
+            None => source,
+        }
     }
 
     /// Crop, straighten, keystone and turn a developed texture holding the whole picture in the orientation
@@ -336,7 +361,7 @@ fn copy_metadata(raw: &Path, out: &Path, width: u32, height: u32) -> Result<()> 
 }
 
 /// `masks` are the edit's masks from the cache, in the order it names them (`Worker::mask_images`).
-pub fn render(kit: &Kit, req: &RenderRequest, masks: &[Option<RgbaF32>], outbox: &Path, tx: &Sender<Progress>) -> Result<Progress> {
+pub fn render(kit: &Kit, req: &RenderRequest, masks: &[Option<RgbaF32>], depth: Option<&crate::masks::DepthMap>, outbox: &Path, tx: &Sender<Progress>) -> Result<Progress> {
     stage(tx, "decode", 0.02);
     stage(tx, "demosaic", 0.15);
     let (mut source, flip, rendering) = full_source_for(kit, &req.path)?;
@@ -350,6 +375,12 @@ pub fn render(kit: &Kit, req: &RenderRequest, masks: &[Option<RgbaF32>], outbox:
     if req.edit.lens.is_some() {
         stage(tx, "lens", 0.42);
         source = rendering.correct(kit, &req.edit, source);
+    }
+    if let Some(map) = depth {
+        stage(tx, "depth", 0.44);
+        let frame = [source.width(), source.height()];
+        let texture = rendering.depth_texture(kit, &req.edit, &map.image, flip);
+        source = rendering.depth_effects(kit, &req.edit, Some((map, &texture)), source, frame, [0, 0]);
     }
 
     stage(tx, "develop", 0.45);

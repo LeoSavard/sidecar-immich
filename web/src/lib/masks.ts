@@ -14,7 +14,8 @@ export type Face = {
 	landmarks: [number, number][];
 };
 
-export type MaskSet = { available: boolean; names: string[]; faces: Face[] };
+/** `airlight`: the light haze tends to, camera RGB (the farthest part of the photo's colour), for haze by distance. */
+export type MaskSet = { available: boolean; names: string[]; faces: Face[]; airlight?: [number, number, number] | null };
 
 export const MASK_LABELS: Record<string, string> = {
 	subject: 'Subject',
@@ -77,6 +78,7 @@ export class MaskLibrary {
 	private set?: Promise<MaskSet>;
 	private loading = new Map<string, Promise<GPUTexture>>();
 	private loaded = new Map<string, GPUTexture>();
+	private decoded = new Map<string, Promise<{ width: number; height: number; data: Uint8Array }>>();
 
 	constructor(
 		private device: GPUDevice,
@@ -112,6 +114,19 @@ export class MaskLibrary {
 				});
 			p.catch(() => this.loading.delete(name));
 			this.loading.set(name, p);
+		}
+		return p;
+	}
+
+	/** A mask's values on the CPU, 0…255 — to read one point, as tapping to focus reads the depth. */
+	values(name: string): Promise<{ width: number; height: number; data: Uint8Array }> {
+		let p = this.decoded.get(name);
+		if (!p) {
+			p = api(`/api/assets/${this.key}/masks/${name}`)
+				.then((r) => r.arrayBuffer())
+				.then(decodeGrey);
+			p.catch(() => this.decoded.delete(name));
+			this.decoded.set(name, p);
 		}
 		return p;
 	}

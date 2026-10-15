@@ -151,7 +151,8 @@ impl Worker {
             let lens = sidecar_engine::lens::LensPass::new(&gpu)?;
             let warp = sidecar_engine::warp::WarpPass::new(&gpu)?;
             let brush = sidecar_engine::brush::Brush::new(&gpu)?;
-            Ok(export::Kit { gpu, ingest, develop, detail, lens, warp, brush, lensfun: lensfun.clone() })
+            let depth = sidecar_engine::depth::DepthPass::new(&gpu)?;
+            Ok(export::Kit { gpu, ingest, develop, detail, lens, warp, brush, depth, lensfun: lensfun.clone() })
         });
         let gpu = match kit {
             Ok(k) => {
@@ -461,10 +462,12 @@ pub struct PreviewRequest {
 /// The develop pass the browser would have run, run here instead, over the same cached proxy and with the
 /// same parameters and shaders — so a browser without WebGPU sees the same picture, just later. See
 /// docs/ROADMAP.md, "Browsers without WebGPU".
-fn preview_jpeg(kit: &export::Kit, rendering: &export::Rendering, req: &PreviewRequest, proxy: (u32, u32, Bytes), masks: &[Option<sidecar_engine::RgbaF32>]) -> Result<Vec<u8>> {
+fn preview_jpeg(kit: &export::Kit, rendering: &export::Rendering, req: &PreviewRequest, proxy: (u32, u32, Bytes), masks: &[Option<sidecar_engine::RgbaF32>], depth: Option<&masks::DepthMap>) -> Result<Vec<u8>> {
     let (width, height, bytes) = proxy;
     let source = sidecar_engine::upload_rgba16(&kit.gpu, &sidecar_engine::RgbaF32::from_f16_bytes(width, height, &bytes));
     let source = rendering.correct(kit, &req.edit, source);
+    let depth_texture = depth.map(|d| rendering.depth_texture(kit, &req.edit, &d.image, 0));
+    let source = rendering.depth_effects(kit, &req.edit, depth.zip(depth_texture.as_ref()), source, [width, height], [0, 0]);
     let packed = rendering.pack(&req.edit, req.color_space);
     // The proxy is oriented already, as the masks are.
     let mask_textures = rendering.mask_textures(kit, &req.edit, masks, 0, [width, height]);
@@ -496,7 +499,8 @@ async fn preview(State(w): State<Arc<Worker>>, Json(req): Json<PreviewRequest>) 
         Err(e) => return internal(e),
     };
     let masks = w.mask_images(&req.key, &req.edit).await;
-    match tokio::task::spawn_blocking(move || preview_jpeg(&kit, &rendering, &req, proxy, &masks)).await {
+    let depth = w.depth_map(&req.key, &req.edit).await;
+    match tokio::task::spawn_blocking(move || preview_jpeg(&kit, &rendering, &req, proxy, &masks, depth.as_ref())).await {
         Ok(Ok(jpeg)) => ([("content-type", "image/jpeg"), ("cache-control", "no-store")], jpeg).into_response(),
         Ok(Err(e)) => internal(e),
         Err(e) => internal(e.into()),
@@ -516,7 +520,7 @@ pub struct LoupeRequest {
     pub color_space: sidecar_color::DisplaySpace,
 }
 
-fn loupe_png(w: &Worker, kit: &export::Kit, req: &LoupeRequest, masks: &[Option<sidecar_engine::RgbaF32>]) -> Result<Vec<u8>> {
+fn loupe_png(w: &Worker, kit: &export::Kit, req: &LoupeRequest, masks: &[Option<sidecar_engine::RgbaF32>], depth: Option<&masks::DepthMap>) -> Result<Vec<u8>> {
     let session = {
         let mut sessions = w.sessions.lock().unwrap();
         sessions.iter().position(|s| s.key == req.key).map(|i| {
@@ -548,12 +552,12 @@ fn loupe_png(w: &Worker, kit: &export::Kit, req: &LoupeRequest, masks: &[Option<
     // Masks cover the whole frame; each develop below says where its tile sits in it.
     let mask_textures = rendering.mask_textures(kit, &req.edit, masks, flip, [sw, sh]);
     let masks_at = |x: u32, y: u32| export::masks_for(&packed, &mask_textures, [x as f32, y as f32, sw as f32, sh as f32]);
-    // A rectangle of the picture (oriented pixels), developed as export develops it: denoised, sharpened,
-    // lens-corrected, through the masks.
-    let region = |ox: u32, oy: u32, tw: u32, th: u32| -> Result<sidecar_engine::RgbaF32> {
-        // Same rectangle in sensor (unoriented) pixels.
-        let (ux, uy, uw, uh) = sidecar_engine::source_rect(flip, sw, sh, (ox, oy, tw, th));
-        let data = match rendering.lens_params(&req.edit, [sw, sh], [ux as f64, uy as f64], [0.0; 2]) {
+    let depth_texture = depth.map(|d| rendering.depth_texture(kit, &req.edit, &d.image, flip));
+    let depth_params = depth.and_then(|d| sidecar_color::depth::pack(&req.edit, d.airlight, [sw, sh], [0.0; 2]));
+    // A rectangle of the sensor's pixels, developed as export develops it: denoised, sharpened, lens-corrected,
+    // hazed and blurred by distance, through the masks.
+    let develop_rect = |ux: u32, uy: u32, uw: u32, uh: u32| -> Result<Vec<f32>> {
+        let tile = match rendering.lens_params(&req.edit, [sw, sh], [ux as f64, uy as f64], [0.0; 2]) {
             // The tile reads a region of the source the lens decides: find it, cut it with the detail filters'
             // margin and the bicubic read's reach around it, denoise and sharpen that, then correct it into the
             // tile — the order export uses, on less of the image.
@@ -567,23 +571,39 @@ fn loupe_png(w: &Worker, kit: &export::Kit, req: &LoupeRequest, masks: &[Option<
                 let region = kit.detail.crop(&kit.gpu, &source, cx, cy, cw, ch);
                 let region = kit.detail.apply(&kit.gpu, region, sigma, &settings);
                 let params = rendering.lens_params(&req.edit, [sw, sh], [ux as f64, uy as f64], [cx as f64, cy as f64]).unwrap_or(frame);
-                let tile = kit.lens.apply(&kit.gpu, &region, &params, [uw, uh]);
-                let developed = kit.develop.render(&kit.gpu, &tile, &packed.uniform, &packed.lut, &masks_at(ux, uy))?;
-                sidecar_engine::read_rgba16(&kit.gpu, &developed)?.data
+                kit.lens.apply(&kit.gpu, &region, &params, [uw, uh])
             }
+            // Denoised and sharpened with the filters' margin, which is then cut.
             None => {
                 let (cx, cy) = (ux.saturating_sub(m), uy.saturating_sub(m));
                 let (cw, ch) = ((ux + uw + m).min(sw) - cx, (uy + uh + m).min(sh) - cy);
                 let tile = kit.detail.crop(&kit.gpu, &source, cx, cy, cw, ch);
                 let tile = kit.detail.apply(&kit.gpu, tile, sigma, &settings);
-                let developed = kit.develop.render(&kit.gpu, &tile, &packed.uniform, &packed.lut, &masks_at(cx, cy))?;
-                let img = sidecar_engine::read_rgba16(&kit.gpu, &developed)?;
-                // Cut the margin.
-                let (mx, my) = (ux - cx, uy - cy);
+                kit.detail.crop(&kit.gpu, &tile, ux - cx, uy - cy, uw, uh)
+            }
+        };
+        let tile = rendering.depth_effects(kit, &req.edit, depth.zip(depth_texture.as_ref()), tile, [sw, sh], [ux, uy]);
+        let developed = kit.develop.render(&kit.gpu, &tile, &packed.uniform, &packed.lut, &masks_at(ux, uy))?;
+        Ok(sidecar_engine::read_rgba16(&kit.gpu, &developed)?.data)
+    };
+    // A rectangle of the picture (oriented pixels), developed.
+    let region = |ox: u32, oy: u32, tw: u32, th: u32| -> Result<sidecar_engine::RgbaF32> {
+        // Same rectangle in sensor (unoriented) pixels.
+        let (ux, uy, uw, uh) = sidecar_engine::source_rect(flip, sw, sh, (ox, oy, tw, th));
+        let data = match depth_params.filter(|p| p.blurs()) {
+            None => develop_rect(ux, uy, uw, uh)?,
+            // The blur reads around the tile: develop it with the blur's reach of margin, the margin's corner on
+            // the low-resolution grid the whole picture's blur uses, then keep the tile.
+            Some(p) => {
+                let (k, reach) = (p.scale(), p.reach());
+                let (ex, ey) = (ux.saturating_sub(reach) / k * k, uy.saturating_sub(reach) / k * k);
+                let (ew, eh) = ((ux + uw + reach).min(sw) - ex, (uy + uh + reach).min(sh) - ey);
+                let wide = develop_rect(ex, ey, ew, eh)?;
+                let (mx, my) = (ux - ex, uy - ey);
                 let mut data = Vec::with_capacity((uw * uh * 4) as usize);
                 for y in 0..uh {
-                    let row = ((my + y) * cw + mx) as usize * 4;
-                    data.extend_from_slice(&img.data[row..row + uw as usize * 4]);
+                    let row = ((my + y) * ew + mx) as usize * 4;
+                    data.extend_from_slice(&wide[row..row + uw as usize * 4]);
                 }
                 data
             }
@@ -637,7 +657,8 @@ async fn loupe(State(w): State<Arc<Worker>>, Json(req): Json<LoupeRequest>) -> R
     };
     let w2 = w.clone();
     let masks = w.mask_images(&req.key, &req.edit).await;
-    match tokio::task::spawn_blocking(move || loupe_png(&w2, &kit, &req, &masks)).await {
+    let depth = w.depth_map(&req.key, &req.edit).await;
+    match tokio::task::spawn_blocking(move || loupe_png(&w2, &kit, &req, &masks, depth.as_ref())).await {
         Ok(Ok(png)) => ([("content-type", "image/png"), ("cache-control", "no-store")], png).into_response(),
         Ok(Err(e)) => internal(e),
         Err(e) => internal(e.into()),
@@ -665,7 +686,8 @@ async fn render(State(w): State<Arc<Worker>>, Json(req): Json<export::RenderRequ
         let outbox = w2.cache.join("outbox");
         let tx2 = tx.clone();
         let masks = w2.mask_images(&req.key, &req.edit).await;
-        let result = tokio::task::spawn_blocking(move || export::render(&kit, &req, &masks, &outbox, &tx2)).await;
+        let depth = w2.depth_map(&req.key, &req.edit).await;
+        let result = tokio::task::spawn_blocking(move || export::render(&kit, &req, &masks, depth.as_ref(), &outbox, &tx2)).await;
         let last = match result {
             Ok(Ok(done)) => done,
             Ok(Err(e)) => export::Progress::Failed { message: format!("{e:#}") },

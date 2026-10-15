@@ -650,3 +650,25 @@ fn film_switched_off_is_off_in_the_file_and_the_history() {
     assert_eq!(doc.history().edit_of(&heads[0]).unwrap(), film);
     assert_eq!(doc.history().edit_of(&heads[1]).unwrap().film, None);
 }
+
+/// Haze and lens blur turned off (no fields) reach the file and the history.
+#[test]
+fn depth_effects_turned_off_are_off_in_the_file_and_the_history() {
+    let tmp = tempfile::tempdir().unwrap();
+    let roots = [tmp.path().canonicalize().unwrap()];
+    let original = fixture(tmp.path(), "DSC_12.NEF");
+    let on = EditParams { haze: 30.0, lens_blur: Some(sidecar_color::params::LensBlur::default()), ..Default::default() };
+    let mut heads = Vec::new();
+    for e in [&on, &EditParams::default()] {
+        let base = SidecarDoc::load(&original).unwrap().history().head;
+        update(&original, &roots, |d| {
+            heads.push(d.commit(&Commit { edit: e, base: &base, checkpoint: false, session: None, user: None }, "sha")?.head);
+            Ok(())
+        })
+        .unwrap();
+    }
+    let doc = SidecarDoc::load(&original).unwrap();
+    assert_eq!(doc.edit(), EditParams::default(), "{}", doc.sidecar["edit"]);
+    assert_eq!(doc.history().edit_of(&heads[0]).unwrap(), on);
+    assert_eq!(doc.history().edit_of(&heads[1]).unwrap(), EditParams::default());
+}

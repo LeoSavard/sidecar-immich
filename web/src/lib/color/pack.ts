@@ -16,6 +16,7 @@ type Exports = {
 	sc_last_error(): number;
 	sc_develop_uniform_bytes(): number;
 	sc_white_from_neutral(ptr: number, len: number): number;
+	sc_pack_depth(ptr: number, len: number): number;
 };
 
 /**
@@ -92,6 +93,16 @@ export class ColorPacker {
 	 */
 	toneCurveLut(curve: [number, number][], highlights: number, shadows: number): Float32Array {
 		return new Float32Array(this.call(this.x.sc_tone_curve_lut, { curve, highlights, shadows }).buffer);
+	}
+
+	/** The depth passes' uniform (64 bytes) for the proxy, or `undefined` when the edit neither blurs nor hazes. */
+	packDepth(edit: EditParams, airlight: [number, number, number], frame: [number, number]): Uint8Array | undefined {
+		const input = new TextEncoder().encode(JSON.stringify({ edit, airlight, frame }));
+		const ptr = this.x.sc_alloc(input.length);
+		new Uint8Array(this.x.memory.buffer, ptr, input.length).set(input);
+		const out = this.framed(this.x.sc_pack_depth(ptr, input.length));
+		this.x.sc_free(ptr, input.length);
+		return out.length ? out.slice() : undefined;
 	}
 
 	/** The temperature and tint under which `neutral`, a camera RGB, is grey: the white balance eyedropper. */

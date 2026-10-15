@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 
 pub mod brush;
 pub mod compute;
+pub mod depth;
 pub mod detail;
 pub mod develop;
 pub mod focus;

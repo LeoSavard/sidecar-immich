@@ -1,0 +1,106 @@
+// SPDX-License-Identifier: Apache-2.0
+// Lens blur and haze by distance in the browser: the same composed WGSL the worker runs
+// (crates/engine/src/depth.rs), over the proxy after the lens pass, into a texture develop reads instead. The
+// uniform comes from the Rust packing through WebAssembly (ColorPacker.packDepth). Runs when a depth setting,
+// the lens correction or the proxy changes, not per frame.
+import downWgsl from './wgsl/client_depth_down.wgsl?raw';
+import gatherWgsl from './wgsl/client_depth_gather.wgsl?raw';
+import composeWgsl from './wgsl/client_depth_compose.wgsl?raw';
+
+const DEPTH_UNIFORM_BYTES = 64;
+
+type Binding = 'uniform' | 'texture' | 'filtered' | 'sampler' | 'storage';
+
+async function kernel(device: GPUDevice, label: string, code: string, bindings: Binding[]): Promise<GPUComputePipeline> {
+	const module = device.createShaderModule({ label, code });
+	const errors = (await module.getCompilationInfo()).messages.filter((m) => m.type === 'error');
+	if (errors.length) throw new Error(`${label}: ${errors.map((e) => `${e.lineNum}:${e.linePos} ${e.message}`).join('; ')}`);
+	const visibility = GPUShaderStage.COMPUTE;
+	const layout = device.createBindGroupLayout({
+		label,
+		entries: bindings.map((b, binding): GPUBindGroupLayoutEntry => {
+			switch (b) {
+				case 'uniform':
+					return { binding, visibility, buffer: { type: 'uniform' } };
+				case 'texture':
+					return { binding, visibility, texture: { sampleType: 'unfilterable-float' } };
+				case 'filtered':
+					return { binding, visibility, texture: { sampleType: 'float' } };
+				case 'sampler':
+					return { binding, visibility, sampler: { type: 'filtering' } };
+				case 'storage':
+					return { binding, visibility, storageTexture: { access: 'write-only', format: 'rgba16float' } };
+			}
+		})
+	});
+	return device.createComputePipelineAsync({ label, layout: device.createPipelineLayout({ bindGroupLayouts: [layout] }), compute: { module, entryPoint: 'main' } });
+}
+
+export class DepthPass {
+	private output?: GPUTexture;
+	private small?: GPUTexture;
+	private blurred?: GPUTexture;
+
+	private constructor(
+		private device: GPUDevice,
+		private down: GPUComputePipeline,
+		private gather: GPUComputePipeline,
+		private compose: GPUComputePipeline,
+		private ubo: GPUBuffer,
+		private sampler: GPUSampler
+	) {}
+
+	static async create(device: GPUDevice): Promise<DepthPass> {
+		const [down, gather, compose] = await Promise.all([
+			kernel(device, 'depth down', downWgsl, ['uniform', 'texture', 'filtered', 'sampler', 'storage']),
+			kernel(device, 'depth gather', gatherWgsl, ['uniform', 'filtered', 'filtered', 'sampler', 'storage']),
+			kernel(device, 'depth compose', composeWgsl, ['uniform', 'texture', 'filtered', 'filtered', 'sampler', 'storage'])
+		]);
+		const ubo = device.createBuffer({ label: 'depth params', size: DEPTH_UNIFORM_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+		const sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
+		return new DepthPass(device, down, gather, compose, ubo, sampler);
+	}
+
+	private texture(have: GPUTexture | undefined, w: number, h: number, label: string): GPUTexture {
+		if (have?.width === w && have?.height === h) return have;
+		have?.destroy();
+		return this.device.createTexture({ label, size: [w, h], format: 'rgba16float', usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING });
+	}
+
+	private dispatch(encoder: GPUCommandEncoder, pipeline: GPUComputePipeline, resources: GPUBindingResource[], size: [number, number]) {
+		const bind = this.device.createBindGroup({
+			layout: pipeline.getBindGroupLayout(0),
+			entries: [{ binding: 0, resource: { buffer: this.ubo } }, ...resources.map((resource, i) => ({ binding: i + 1, resource }))]
+		});
+		const pass = encoder.beginComputePass();
+		pass.setPipeline(pipeline);
+		pass.setBindGroup(0, bind);
+		pass.dispatchWorkgroups(Math.ceil(size[0] / 16), Math.ceil(size[1] / 16));
+		pass.end();
+	}
+
+	/** `input` hazed and blurred by distance into a texture of its size, which stays this pass's until the next run.
+	 *  `depth` is the depth mask in the same frame, lens-corrected as `input` is. */
+	run(input: GPUTexture, depth: GPUTexture, uniform: Uint8Array): GPUTexture {
+		if (uniform.byteLength !== DEPTH_UNIFORM_BYTES) throw new Error(`depth uniforms must be ${DEPTH_UNIFORM_BYTES} bytes`);
+		this.device.queue.writeBuffer(this.ubo, 0, uniform);
+		const f = new Float32Array(uniform.buffer, uniform.byteOffset, 16);
+		const blurs = f[11] > 0.5;
+		const k = Math.max(1, Math.floor(f[12]));
+		const [w, h] = [input.width, input.height];
+		this.output = this.texture(this.output, w, h, 'depth effects');
+		const encoder = this.device.createCommandEncoder();
+		let blurredView = input.createView();
+		if (blurs) {
+			const [sw, sh] = [Math.ceil(w / k), Math.ceil(h / k)];
+			this.small = this.texture(this.small, sw, sh, 'depth small');
+			this.blurred = this.texture(this.blurred, sw, sh, 'depth blurred');
+			this.dispatch(encoder, this.down, [input.createView(), depth.createView(), this.sampler, this.small.createView()], [sw, sh]);
+			this.dispatch(encoder, this.gather, [this.small.createView(), depth.createView(), this.sampler, this.blurred.createView()], [sw, sh]);
+			blurredView = this.blurred.createView();
+		}
+		this.dispatch(encoder, this.compose, [input.createView(), blurredView, depth.createView(), this.sampler, this.output.createView()], [w, h]);
+		this.device.queue.submit([encoder.finish()]);
+		return this.output;
+	}
+}
