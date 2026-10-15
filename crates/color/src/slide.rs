@@ -131,9 +131,21 @@ pub fn slide(id: &str) -> Option<Slide> {
     }
 }
 
+/// CIE D50, the ISO 3664 viewing illuminant, relative, and its luminance: the light table, computed once. The
+/// response table views a quarter of a million slides through it, and CIE daylight's basis functions are not
+/// cheap.
+fn light_table() -> &'static ([f64; SAMPLES], f64) {
+    static LIGHT_TABLE: std::sync::OnceLock<([f64; SAMPLES], f64)> = std::sync::OnceLock::new();
+    LIGHT_TABLE.get_or_init(|| {
+        let spd = crate::spectral::daylight(5000.0 * 1.4388 / 1.4380);
+        let white = xyz_of(&spd)[1];
+        (spd, white)
+    })
+}
+
 /// CIE D50, the ISO 3664 viewing illuminant, relative.
 fn d50() -> [f64; SAMPLES] {
-    crate::spectral::daylight(5000.0 * 1.4388 / 1.4380)
+    light_table().0
 }
 
 fn xyz_of(spd: &[f64; SAMPLES]) -> [f64; 3] {
@@ -195,7 +207,14 @@ impl Slide {
     /// The dye amounts (cyan, magenta, yellow) whose spectra read `target` Status A densities (red, green, blue)
     /// through `meter`, by Newton's method.
     pub fn dyes_for(&self, target: [f64; 3], meter: &Densitometer) -> [f64; 3] {
-        let mut a = target;
+        self.dyes_from(target, target, meter)
+    }
+
+    /// `dyes_for` started from `start` — the dye amounts of a neighbouring entry, which are close, so the table
+    /// costs two or three iterations an entry instead of a cold solve's ten or more. The fixed point is the
+    /// same: both run to the same 1e-9 in density.
+    fn dyes_from(&self, start: [f64; 3], target: [f64; 3], meter: &Densitometer) -> [f64; 3] {
+        let mut a = start;
         for _ in 0..40 {
             let t = self.transmittance(a);
             let d = meter.density(&t);
@@ -210,7 +229,15 @@ impl Slide {
                 std::array::from_fn(|k| (0..SAMPLES).map(|i| p[i] * t[i] * self.dyes[k][i]).sum::<f64>() / den)
             });
             let step = crate::mat::apply(&crate::mat::inverse(&jac), &r);
-            a = std::array::from_fn(|k| (a[k] - step[k]).max(0.0));
+            let next: [f64; 3] = std::array::from_fn(|k| (a[k] - step[k]).max(0.0));
+            // A target no dye amount can read — a density under the film's own base, where the solve is pinned
+            // at zero — leaves the residual standing however long it iterates. Stop when the amounts stop
+            // moving: the answer is as close as this film gets.
+            let moved: f64 = (0..3).map(|k| (next[k] - a[k]).abs()).sum();
+            a = next;
+            if moved < 1e-12 {
+                break;
+            }
         }
         a
     }
@@ -222,8 +249,7 @@ impl Slide {
 
     /// The slide on the light table, seen on the display: linear Rec.2020, the light table white at 1.
     fn view(&self, t: &[f64; SAMPLES], to_display: &[[f64; 3]; 3]) -> [f64; 3] {
-        let light = d50();
-        let white = xyz_of(&light)[1];
+        let (light, white) = light_table();
         let lit: [f64; SAMPLES] = std::array::from_fn(|i| light[i] * t[i]);
         let xyz = xyz_of(&lit).map(|v| v / white);
         crate::mat::apply(to_display, &xyz)
@@ -282,14 +308,112 @@ impl Slide {
     fn response_lut_sized(&self, meter: &Densitometer, n: usize) -> Vec<f32> {
         let to_display = viewing_matrix();
         let at = |i: usize| RESPONSE_LOG_H[0] + (RESPONSE_LOG_H[1] - RESPONSE_LOG_H[0]) * i as f64 / (n - 1) as f64;
-        (0..n * n * n)
-            .flat_map(|idx| {
-                let h = [at(idx % n), at(idx / n % n), at(idx / (n * n))];
-                let d = std::array::from_fn(|k| self.density(k, h[k]));
-                let rgb = self.view(&self.transmittance(self.dyes_for(d, meter)), &to_display);
-                [rgb[0].max(1e-6).log2() as f32, rgb[1].max(1e-6).log2() as f32, rgb[2].max(1e-6).log2() as f32, 0.0]
-            })
-            .collect()
+        let mut out = Vec::with_capacity(n * n * n * 4);
+        // Red runs fastest, so each entry's solve starts from the entry before it along red, and the first of a
+        // row from the row's own start — amounts a neighbour away, which Newton reaches in two or three steps.
+        let mut along_red = [0.0; 3];
+        let mut row_start = [0.0; 3];
+        for idx in 0..n * n * n {
+            let h = [at(idx % n), at(idx / n % n), at(idx / (n * n))];
+            let d: [f64; 3] = std::array::from_fn(|k| self.density(k, h[k]));
+            let start = if idx == 0 {
+                d
+            } else if idx % n == 0 {
+                row_start
+            } else {
+                along_red
+            };
+            let a = self.dyes_from(start, d, meter);
+            if idx % n == 0 {
+                row_start = a;
+            }
+            along_red = a;
+            let rgb = self.view(&self.transmittance(a), &to_display);
+            out.extend_from_slice(&[rgb[0].max(1e-6).log2() as f32, rgb[1].max(1e-6).log2() as f32, rgb[2].max(1e-6).log2() as f32, 0.0]);
+        }
+        out
+    }
+}
+
+/// What the develop pass needs from a stock that only the licensed standards can give: the slide's colour over
+/// layer log H (`response_lut`, from ISO 5-3's Status A) and each layer's offset from log response to log H
+/// (`offsets`, from ISO 7589's sensitometric daylight), ready for the shader's lookup. The whole of a stock's
+/// chain that touches a standard is these numbers, so this is what the server hands the browser, which carries
+/// no standard of its own: the table holds the slide's colours and the offsets are three numbers — neither ISO
+/// table can be recovered from them. Everything else (the sheet's sensitivities, the scene's light) is public
+/// and `Slide::exposure_lut` builds it anywhere, per edit.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SlideProfile {
+    /// Where a layer response of 1 lands in the response table, as a fraction of its domain:
+    /// `(offset − RESPONSE_LOG_H[0]) / (RESPONSE_LOG_H[1] − RESPONSE_LOG_H[0])`.
+    pub offsets: [f32; 3],
+    /// A decade of log H as a fraction of the domain: `1 / (RESPONSE_LOG_H[1] − RESPONSE_LOG_H[0])`.
+    pub scale: f32,
+    /// The response table's side.
+    pub side: u32,
+    /// The response table, `side`³ entries of four floats (`response_lut`).
+    pub response: Vec<f32>,
+}
+
+/// `SlideProfile`'s header: `SCSL`, the format's version, the table's side, then the offsets and the scale.
+const PROFILE_MAGIC: u32 = u32::from_le_bytes(*b"SCSL");
+const PROFILE_VERSION: u32 = 1;
+
+impl Slide {
+    /// This stock's profile, measured through the owner's standards.
+    pub fn profile(&self, meter: &Densitometer, reference: &[f64; SAMPLES]) -> SlideProfile {
+        SlideProfile { response: self.response_lut(meter), ..self.profile_header(reference) }
+    }
+
+    /// Where the reference light puts each layer on its curve, as the shader reads the response table; `profile`
+    /// adds the table itself.
+    fn profile_header(&self, reference: &[f64; SAMPLES]) -> SlideProfile {
+        let (lo, hi) = (RESPONSE_LOG_H[0], RESPONSE_LOG_H[1]);
+        SlideProfile {
+            offsets: self.offsets(reference).map(|o| ((o - lo) / (hi - lo)) as f32),
+            scale: (1.0 / (hi - lo)) as f32,
+            side: RESPONSE_SIDE as u32,
+            response: Vec::new(),
+        }
+    }
+}
+
+impl SlideProfile {
+    /// The profile as bytes, for the cache and the wire.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(32 + self.response.len() * 4);
+        for v in [PROFILE_MAGIC, PROFILE_VERSION, self.side, 0] {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        for v in [self.offsets[0], self.offsets[1], self.offsets[2], self.scale] {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        out.extend_from_slice(bytemuck::cast_slice(&self.response));
+        out
+    }
+
+    /// A profile from `to_bytes`; `None` for anything else, so a stale cache file or a truncated download is
+    /// simply no profile rather than a wrong rendering.
+    pub fn parse(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < 32 || bytes.len() % 4 != 0 {
+            return None;
+        }
+        let word = |i: usize| u32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap());
+        let float = |i: usize| f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap());
+        if word(0) != PROFILE_MAGIC || word(1) != PROFILE_VERSION {
+            return None;
+        }
+        let side = word(2) as usize;
+        let entries = side.checked_pow(3)?.checked_mul(4)?;
+        if side == 0 || bytes.len() != 32 + entries * 4 {
+            return None;
+        }
+        Some(Self {
+            offsets: [float(4), float(5), float(6)],
+            scale: float(7),
+            side: side as u32,
+            response: (8..8 + entries).map(float).collect(),
+        })
     }
 }
 
@@ -409,6 +533,34 @@ mod tests {
             }
         }
         assert!(worst < 0.03, "worst log₂ error between lattice points: {worst}");
+    }
+
+    /// A profile survives the trip to bytes and back, and nothing else parses as one.
+    #[test]
+    fn profiles_round_trip_through_bytes() {
+        let s = slide("provia-100f").unwrap();
+        let (meter, light) = (test_meter(), test_daylight());
+        let p = SlideProfile { side: 2, response: s.response_lut_sized(&meter, 2), ..s.profile_header(&light) };
+        let bytes = p.to_bytes();
+        assert_eq!(bytes.len(), 32 + 8 * 4 * 4);
+        assert_eq!(SlideProfile::parse(&bytes).as_ref(), Some(&p));
+        assert!(SlideProfile::parse(&bytes[..bytes.len() - 4]).is_none(), "a truncated profile is no profile");
+        assert!(SlideProfile::parse(&[0; 64]).is_none(), "zeroes are no profile");
+        let mut wrong = bytes.clone();
+        wrong[4] = 9;
+        assert!(SlideProfile::parse(&wrong).is_none(), "another version is no profile");
+    }
+
+    /// The whole response table, as the server builds it once per stock: the slowest part of the chain, so it is
+    /// cached rather than packed per edit. Run with `--ignored --nocapture` to time it.
+    #[test]
+    #[ignore = "builds the full 65³ table"]
+    fn the_response_table_is_worth_caching() {
+        let s = slide("provia-100f").unwrap();
+        let t = std::time::Instant::now();
+        let lut = s.response_lut(&test_meter());
+        eprintln!("{}³ response table in {:?}", RESPONSE_SIDE, t.elapsed());
+        assert_eq!(lut.len(), RESPONSE_SIDE.pow(3) * 4);
     }
 
     /// With the owner's standards: a metered middle grey in the film's own daylight comes out near neutral. Skipped
