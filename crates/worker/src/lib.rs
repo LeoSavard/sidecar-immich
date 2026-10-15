@@ -8,6 +8,7 @@
 
 pub mod export;
 pub mod lensfun;
+pub mod camera;
 pub mod masks;
 pub mod ml;
 
@@ -766,6 +767,7 @@ pub fn router(worker: Arc<Worker>) -> Router {
         .route("/v1/assets/{key}/focus", get(focus_handler))
         .route("/v1/assets/{key}/masks", get(masks_handler))
         .route("/v1/assets/{key}/masks/{name}", get(mask_handler))
+        .route("/v1/assets/{key}/camera", get(camera_handler))
         .route("/v1/lensfun", get(lensfun_status))
         .route("/v1/lensfun/done", post(lensfun_done))
         .route("/v1/lensfun/{name}", axum::routing::put(lensfun_put))
@@ -852,6 +854,14 @@ async fn mask_handler(State(w): State<Arc<Worker>>, Path((key, name)): Path<(Str
     match w.mask(&key, &name).await {
         Ok(Some(png)) => ([("content-type", "image/png")], png).into_response(),
         Ok(None) => (StatusCode::NOT_FOUND, "no such mask here").into_response(),
+        Err(e) => internal(e),
+    }
+}
+
+async fn camera_handler(State(w): State<Arc<Worker>>, Path(key): Path<String>) -> Response {
+    match w.camera_jpeg(&key).await {
+        Ok(Some(jpeg)) => ([("content-type", "image/jpeg"), ("cache-control", "private, max-age=86400")], jpeg).into_response(),
+        Ok(None) => (StatusCode::NOT_FOUND, "this photo has no camera rendering").into_response(),
         Err(e) => internal(e),
     }
 }

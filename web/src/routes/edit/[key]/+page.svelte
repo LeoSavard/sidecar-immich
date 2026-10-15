@@ -136,6 +136,12 @@
 	let brush = $state<BrushSettings>({ mode: 'off', size: 50, feather: 50, flow: 100 });
 	/** Painting happens on the photo while a layer is selected and the brush is on. */
 	const painting = $derived(!fallback && !readOnly && !toolsHidden && !cropping && brush.mode !== 'off' && maskSelected !== null && (wide || section === 'masks'));
+	/** The camera's own rendering beside the edit (a RAW's embedded JPEG); false once it turned out to have none. */
+	let showCamera = $state(false);
+	let cameraMissing = $state(false);
+	const cameraOffered = $derived(!developed && !cameraMissing && !fallback);
+	/** The photo and the camera's rendering side by side — not while cropping or painting, which need the canvas whole. */
+	const sideBySide = $derived(showCamera && cameraOffered && !cropping && !painting);
 	/** Masks lens-corrected as the picture is, and the correction each was made with. */
 	const correctedMasks = new Map<string, { madeFrom: string; texture: GPUTexture }>();
 	let painter: MaskPainter;
@@ -1287,7 +1293,7 @@
 		     without WebGPU nothing ever draws into it and the server's JPEG sits on top. -->
 		<canvas
 			bind:this={canvas}
-			class="block h-full w-full touch-none {fallback ? 'invisible' : ''} {pickingWhite || pickingFocus ? 'cursor-crosshair' : ''}"
+			class="block touch-none {sideBySide ? (wide ? 'h-full w-1/2' : 'h-1/2 w-full') : 'h-full w-full'} {fallback ? 'invisible' : ''} {pickingWhite || pickingFocus ? 'cursor-crosshair' : ''}"
 			onpointerdown={canvasDown}
 			onpointermove={canvasMove}
 			onpointerup={canvasUp}
@@ -1295,6 +1301,13 @@
 			onpointerleave={() => (brushCursor = null)}
 			oncontextmenu={(e) => e.preventDefault()}
 		></canvas>
+		{#if sideBySide}
+			<!-- After the canvas, so the canvas keeps its corner and everything drawn over it keeps its place. -->
+			<div class="absolute flex items-center justify-center border-line bg-ground p-2 {wide ? 'inset-y-0 right-0 w-1/2 border-l' : 'inset-x-0 bottom-0 h-1/2 border-t'}">
+				<img src="/api/assets/{key}/camera" alt="The camera's own rendering" class="max-h-full max-w-full object-contain" onerror={() => { cameraMissing = true; showCamera = false; }} />
+				<span class="absolute top-2 left-2 rounded bg-ground/80 px-2 py-1 text-xs text-fg-2">Camera</span>
+			</div>
+		{/if}
 		{#if fallback}
 			<div class="absolute inset-0 flex items-center justify-center p-2">
 				{#if previewUrl}
@@ -1360,6 +1373,9 @@
 			{/if}
 			{#if !wide && !fallback}
 				<button type="button" aria-pressed={peaking} class="rounded-full px-2.5 py-1 text-[0.6875rem] {peaking ? 'bg-fg text-ground' : 'bg-ground/80 text-fg-2'}" onclick={() => { peaking = !peaking; schedule(); }}>Focus</button>
+				{#if cameraOffered}
+					<button type="button" aria-pressed={showCamera} class="rounded-full px-2.5 py-1 text-[0.6875rem] {showCamera ? 'bg-fg text-ground' : 'bg-ground/80 text-fg-2'}" onclick={() => (showCamera = !showCamera)}>Camera</button>
+				{/if}
 				{/if}
 				{#if !wide}
 					<button type="button" class="rounded-full bg-ground/80 px-2.5 py-1 text-[0.6875rem] text-fg-2" aria-label="Viewing and exporting in {SPACE_LABELS[displaySpace]}: switch to {displaySpace === 'srgb' ? 'Display P3' : 'sRGB'}" onclick={() => setOutputSpace(displaySpace === 'srgb' ? 'display-p3' : 'srgb')}>{displaySpace === 'srgb' ? 'sRGB' : 'P3'}</button>
@@ -1436,6 +1452,9 @@
 					<div class="flex items-center gap-2">
 						{#if !fallback}
 						<button type="button" aria-pressed={peaking} class="rounded-full px-2 py-0.5 {peaking ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" onclick={() => { peaking = !peaking; schedule(); }}>Focus peaking</button>
+							{#if cameraOffered}
+								<button type="button" aria-pressed={showCamera} class="rounded-full px-2 py-0.5 {showCamera ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" title="The camera's own rendering beside the edit" onclick={() => (showCamera = !showCamera)}>Camera</button>
+							{/if}
 						{#if meta?.info.afPoint}
 							<button type="button" aria-pressed={showAfPoint} class="rounded-full px-2 py-0.5 {showAfPoint ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" onclick={() => (showAfPoint = !showAfPoint)}>AF point</button>
 						{/if}

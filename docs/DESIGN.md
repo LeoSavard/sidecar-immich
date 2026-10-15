@@ -80,6 +80,11 @@ Where the code differs from the text below, the code and these notes win.
   `ProcessVersion` bump was needed: an older Sidecar keeps masks it can't render, and entries a newer one adds
   (a `kind`) are carried and skipped here. The first masks on a new install take minutes while burn tunes
   itself to the GPU; after that a photo's masks take seconds, once.
+- **The camera's rendering beside the edit:** the worker extracts the largest JPEG the camera embedded in a RAW
+  (`JpgFromRaw`, `PreviewImage` or `OtherImage`, by ExifTool), copies the RAW's orientation tag onto it and
+  caches it (`GET /api/assets/{key}/camera`). The editor's Camera toggle splits the view — the canvas keeps the
+  left half (top on a phone) so everything drawn over it keeps its place — and is off while cropping or
+  painting. Developed files have none: they are their own rendering.
 - **Mask edges (§15):** a layer's optional `edge` (width, feather, shift) blurs its finished mask — after the
   range and the strokes — over up to 5 % of the long edge and thresholds it again: the threshold moves the edge
   out or in (0.5 ± 0.45), the ramp around it sets how soft it is (feather 0 keeps it crisp, only moved and
