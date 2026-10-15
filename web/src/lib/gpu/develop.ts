@@ -14,10 +14,9 @@ const MAX_MASKS = 8;
 const LUT = 4096;
 /** The adjacency map's long edge, at most: `sidecar_color::developer::MAP_LONG`. */
 const MAP_LONG = 1024;
-/** Float offsets in `DevelopParams` (shaders/develop/params.wgsl): `mono`, `developer` and `slide`. */
+/** Float offsets in `DevelopParams` (shaders/develop/params.wgsl): `mono` and `developer`. */
 const MONO = 72;
 const DEVELOPER = 80;
-const SLIDE = 92;
 
 /** One of a spectral stock's tables: `side`³ of four floats, read corner by corner (rgba32float can't filter). */
 function slideTexture(device: GPUDevice, label: string, side: number): GPUTexture {

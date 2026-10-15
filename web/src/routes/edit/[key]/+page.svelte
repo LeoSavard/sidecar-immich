@@ -228,7 +228,8 @@
 		// A spectral colour stock needs its profile, which only the server can measure; until it arrives the
 		// edit renders as the per-channel film approximation, and the fetch marks the develop dirty again.
 		const stock = source.film?.stock;
-		if (stock) loadProfile(stock, () => (developDirty = true));
+		// `schedule`, not the flag alone: the profile lands in a promise, with no frame on the way.
+		if (stock) loadProfile(stock, () => schedule(true));
 		slideProfile = stock ? cachedProfile(stock) : undefined;
 		const packed = packer.pack(source, meta!.info.color, meta!.info.sourceKind ?? 'raw', display, slideProfile);
 		if (!before) {

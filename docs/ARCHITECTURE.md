@@ -69,6 +69,7 @@ edged by the brush passes before develop samples them.
 | Depth: the model, the mask, airlight | `crates/ml` (Depth Anything V2 Small), `crates/worker/src/masks.rs` |
 | Lens blur and haze by distance | `shaders/depth/`, `shaders/client/depth_*.wgsl`, `crates/color/src/depth.rs`, `crates/engine/src/depth.rs`, `web/src/lib/gpu/depth.ts` |
 | Film rendering (colour) | `film_curve_in` in `shaders/develop/tone.wgsl`, `Film` in `crates/color/src/params.rs` |
+| Colour film from a data sheet (PROVIA 100F) | `crates/color/src/slide.rs` (the chain and `SlideProfile`), `shaders/develop/slide.wgsl`, `crates/worker/src/stocks.rs` (the operator's standards, the profile cache, `/v1/film/stocks`), `web/src/lib/film.ts`, the Film section |
 | Black and white: spectra, film types, filters | `crates/color/src/spectral.rs` (+ `spectral_data.rs`), `shaders/develop/mono.wgsl` |
 | Named stocks (HP5 Plus, Tri-X, SFX 200) | `crates/color/src/stock.rs` (curves), `film_sensitivity` in `spectral.rs`, `crates/color/src/film_data.rs` (the sheets' data), `shaders/develop/stock.wgsl`, `crates/color/film-data/` (tracing scripts), `STOCKS` in the Film section |
 | Grain | `Grain` in `crates/color/src/params.rs`, `shaders/develop/grain.wgsl`, the Film section |

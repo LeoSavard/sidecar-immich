@@ -12,6 +12,7 @@ use sidecar_color::{DisplaySpace, EditParams, SourceKind};
 use std::cell::RefCell;
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Request {
     edit: EditParams,
     camera: CameraColor,
@@ -105,9 +106,14 @@ pub unsafe extern "C" fn sc_pack(ptr: *const u8, len: usize) -> *const u8 {
         out.extend_from_slice(&p.tint.to_le_bytes());
         out.extend_from_slice(bytemuck::bytes_of(&p.masks));
         out.extend_from_slice(bytemuck::cast_slice(&p.mask_curves));
+        // Two tables over the colour cube follow, at most one of them non-empty: black and white's exposures,
+        // and a spectral stock's layer responses — the latter built here from the sheet's sensitivities and the
+        // scene's light, all public (its *response* table is not in this stream; the browser already has it).
+        // Each is preceded by its length in floats, so the reader never has to guess from the uniform or from
+        // the sizes.
+        out.extend_from_slice(&(p.mono_lut.len() as u32).to_le_bytes());
         out.extend_from_slice(bytemuck::cast_slice(&p.mono_lut));
-        // A spectral stock's exposure table, built here from the sheet's sensitivities and the scene's light —
-        // all public. Its response table is not in this stream: the browser already has it.
+        out.extend_from_slice(&(p.slide_exposure.len() as u32).to_le_bytes());
         out.extend_from_slice(bytemuck::cast_slice(&p.slide_exposure));
         out
     }))

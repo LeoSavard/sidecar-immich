@@ -46,8 +46,6 @@ export type SlideProfile = { offsets: [number, number, number]; scale: number; s
  *  struct that grew on one side fails here, by name, rather than as a garbled render. */
 export const DEVELOP_UNIFORM_BYTES = 400;
 const MASK_UNIFORM_BYTES = 1568;
-/** Byte offset of `mono.x` in `DevelopParams`: whether black and white's table follows the uniform. */
-const MONO_FLAG = 288;
 const EMPTY = new Float32Array(0);
 const LUT = 4096;
 const MAX_MASKS = 8;
@@ -148,8 +146,17 @@ export class ColorPacker {
 		const lutBytes = 4096 * 4;
 		const U = DEVELOP_UNIFORM_BYTES;
 		const view = new DataView(out.buffer, out.byteOffset);
-		const tail = new Float32Array(out.slice(U + 16 + lutBytes + MASK_UNIFORM_BYTES + MAX_MASKS * LUT * 4).buffer);
-		const mono = view.getFloat32(MONO_FLAG, true) > 0.5;
+		// Two length-prefixed tables over the colour cube close the stream: black and white's exposures, then a
+		// spectral stock's layer responses. At most one is ever non-empty.
+		let at = U + 16 + lutBytes + MASK_UNIFORM_BYTES + MAX_MASKS * LUT * 4;
+		const table = () => {
+			const floats = view.getUint32(at, true);
+			const start = at + 4;
+			at = start + floats * 4;
+			return floats ? new Float32Array(out.slice(start, at).buffer) : EMPTY;
+		};
+		const monoLut = table();
+		const slideExposure = table();
 		return {
 			uniform: out.slice(0, U),
 			lut: new Float32Array(out.slice(U, U + lutBytes).buffer),
@@ -157,11 +164,8 @@ export class ColorPacker {
 			tint: view.getFloat64(U + 8 + lutBytes, true),
 			masks: out.slice(U + 16 + lutBytes, U + 16 + lutBytes + MASK_UNIFORM_BYTES),
 			maskCurves: new Float32Array(out.slice(U + 16 + lutBytes + MASK_UNIFORM_BYTES, U + 16 + lutBytes + MASK_UNIFORM_BYTES + MAX_MASKS * LUT * 4).buffer),
-			// Whatever follows is one table over the colour cube: black and white's exposures, or a spectral
-			// stock's layer responses — never both, since `pack` renders at most one of them — and nothing at
-			// all in plain colour. The uniform's own flag says which, so neither has to be measured by length.
-			monoLut: mono ? tail : EMPTY,
-			slideExposure: mono ? EMPTY : tail
+			monoLut,
+			slideExposure
 		};
 	}
 }

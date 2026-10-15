@@ -7,6 +7,15 @@ Source: the architecture plan (PWA entry, XMP sidecars, server-side demosaic, We
 
 Where the code differs from the text below, the code and these notes win.
 
+- **Colour film, spectrally** (§7, "Colour film, spectrally"): FUJICHROME PROVIA 100F renders through its own
+  data sheet — layer sensitivities, characteristic curves, dyes, light table — in the browser and on the
+  server, from two tables the develop pass reads (`develop/slide.wgsl`). The licensed half of the chain is
+  measured on the server from the operator's own copies of ISO 5-3 and ISO 7589 and served as a per-stock
+  profile; a deployment without those files offers no stock. Checked: the pass agrees with `Slide::render` on
+  the CPU within 0.06 stop over greys and saturated colours, and at amount 0 renders bit-identically to no
+  stock; the uniform grew to 400 bytes, verified against the WGSL by naga; parity cases `slide-provia` and
+  `slide-provia-mixed`. The stock replaces the neutral tone map, so the tone controls act only on the neutral
+  rendering `Film.amount` mixes in, and `Film.interlayer` is not part of a sheet's chain.
 - **Named stocks** (§7, "Stocks"): ILFORD HP5 Plus and SFX 200, KODAK TRI-X 400 and 320, from
   the datasheets the owner supplied — spectral sensitivity and the characteristic curve's toe and shoulder.
   EASTMAN DOUBLE-X was traced and then dropped: its sheet's spectral curve stops at 420 nm and the owner found
@@ -745,7 +754,7 @@ data or a published standard — never another product's curves. The generic ite
 Double-X's sheet plots its sensitivity from 420 nm and the trace is held flat below, which carries 15 % of a
 daylight exposure (Tri-X, measured to 300 nm, carries 18 % there): it needs the owner's decision.
 
-**Colour film, spectrally (stage 3; in progress).** `crate::slide` renders a colour reversal stock from its data
+**Colour film, spectrally (stage 3).** `crate::slide` renders a colour reversal stock from its data
 sheet alone — FUJICHROME PROVIA 100F first, whose sheet (AF3-036E) gives each layer's spectral sensitivity, the
 three characteristic curves and each dye's spectral density, all traced (`crates/color/film-data/provia-100f/`):
 
@@ -765,11 +774,31 @@ listed range; ISO 5-3:2009 keeps the same 10 nm values), and ISO sensitometric d
 a lux) — the current edition is ISO 7589:2002; its daylight table is still to be compared. With both: a metered
 middle grey in ISO daylight renders [0.074, 0.080, 0.089] — equal Status A densities of about 1.1, slightly cool
 on the D50 light table. They are
-read at run time from the owner's files (`Densitometer::parse`, `parse_spectrum`; tests use `SIDECAR_STATUS_A` and
-`SIDECAR_ISO_DAYLIGHT`). The tests run the mechanics with a stand-in densitometer and D55, which never render. The
-develop pass will read the chain from two tables: each colour's layer responses over the colour cube
-(`exposure_lut`), and the slide's colour over layer log H, 65³, stored in log₂ (`response_lut`; within 2 % between
-lattice points). Edges, stated: sensitivities beyond the sheet's plotted floor (about 1/30 of each peak) are 0;
+read at run time from the operator's own files, named by `SIDECAR_STATUS_A` and `SIDECAR_ISO_DAYLIGHT`
+(`Densitometer::parse`, `parse_spectrum`). Tests run the mechanics through a stand-in densitometer and D55
+(`slide::stand_in_standards`), which render no real slide.
+
+*What the develop pass reads.* Two tables (`develop/slide.wgsl`, eight corners each, since rgba32float does not
+filter): each colour's three layer responses over the colour cube (`exposure_lut`), and the slide's colour over
+layer log H, 65³, in log₂ (`response_lut`; within 2 % between lattice points). A pixel's responses are its
+largest channel times the table's at its chromaticity, as light is linear; `SlideProfile`'s three offsets put
+each layer's response on its own curve, and clamping to the table's domain is what holds every curve flat past
+its ends — so an unexposed frame comes out at full density, as a reversal stock does. The stock takes the place
+of the neutral tone map, and `Film.amount` mixes the two; `Film.interlayer` has no part in a sheet's chain and
+is ignored (the editor hides it for a stock). Because viewing puts the light table at the display's white, the
+tone controls and the user's curve reach the picture only through the neutral rendering being mixed in.
+
+*Which side holds what, and why.* `pack` is compiled to wasm so the browser packs the same uniforms, and the
+browser must hold no ISO table. So a stock splits in two. The **profile** — the response table and the three
+offsets, all a standard touches — is measured on the server from the operator's files, cached per stock
+(`sidecar_worker::stocks`, in memory and under `cache/stocks`; about four seconds, a quarter of a million dye
+solves) and served by `GET /api/film/stocks/{id}`; the browser fetches it once and uploads the table straight to
+the GPU. Neither standard can be recovered from it: it is a table of colours and three numbers. Everything else
+— the sheet's sensitivities and the scene's light — is public, so `exposure_lut` is built per edit on whichever
+side is rendering. A deployment without the two files renders no stock and offers none: `GET /api/film/stocks`
+reports what it has, and the editor shows the choice only for those.
+
+Edges, stated: sensitivities beyond the sheet's plotted floor (about 1/30 of each peak) are 0;
 dyes beyond 388–719 nm hold their end values, where the eye sees under 0.1 % of the light. Viewing places the light
 table at the display's white, so the slide keeps its density: a slide's middle grey is darker than Sidecar's
 neutral rendering of the same exposure, as it is on a light table.
