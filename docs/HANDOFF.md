@@ -33,6 +33,13 @@ the one before, and its PR's base is that branch, not `main`. Merge in this orde
 | 19 | `worktree-film-hp5` | Named stocks from datasheets: HP5 Plus, Tri-X 400 and 320, SFX 200 (spectral sensitivity, toe and shoulder) |
 | 20 | `worktree-film-provia` | Colour film, spectrally: FUJICHROME PROVIA 100F from its data sheet, end to end |
 
+Two branches sit on #20, independently of each other — either can merge first, and each needs #20 under it:
+
+| # | Branch | What |
+|---|---|---|
+| 21 | `worktree-tone-curve` | The log-log straight segment above middle grey, built and measured. **Changes no pixels**: it waits on two decisions (see Open questions) |
+| 22 | `worktree-depth-edges` | The depth map upsampled against the photo, so a blur's edge follows the subject; and the roadmap corrected where focus peaking and AF points were already done |
+
 Held: #1 `worktree-portrait-depth` (Apple Portrait matte) and #2 `worktree-hdr-gain-map` (HDR, paused until
 the owner's Spyder X display measurements).
 
@@ -80,7 +87,11 @@ missing. The worker measures each stock's profile once (about three seconds) and
   let the stock's white point meet the display's. See `testdata/cache/slide/` for the tractor NEF rendered
   neutral, generic film, PROVIA, and PROVIA under tungsten.
 - **Sidecar's default rendering is darker than the camera's JPEG.** Visible with the Camera toggle. This is
-  ROADMAP's "Tone curve above middle grey"; decide with pictures, against the camera rendering.
+  ROADMAP's "Tone curve above middle grey", and the candidate curve is now built and measured on #21 — but it
+  renders nothing until two things are settled, both with pictures rather than slopes: **which shoulder order**
+  (how far the straight segment runs against how hard the top is squeezed; the table is in ROADMAP), and
+  **what Contrast should mean above grey**, since it is the logistic's own steepness today and a straight
+  segment has none. Then it is a `ProcessVersion` bump, the WGSL mirror, a migration and a parity case.
 - **Film defaults.** Colour film's interlayer default is 45 (the owner's choice). Black and white has no
   per-stock tone curve yet.
 
