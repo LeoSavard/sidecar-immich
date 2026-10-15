@@ -52,7 +52,7 @@ docker tag sidecar:local sidecar:previous && docker tag sidecar:latest-test side
 cd ~/Claude/sidecar/deploy/local && docker compose up -d
 ```
 
-`sidecar:latest-test` currently holds everything through #18.
+`sidecar:latest-test` currently holds everything through #19.
 
 ## Open questions
 
