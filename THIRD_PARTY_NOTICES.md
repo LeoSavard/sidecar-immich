@@ -49,6 +49,14 @@ Linked for OpenMP in LibRaw; the exception permits distribution with non-GPL sof
 ## ACES Reference Gamut Compression — formulas and constants
 Academy Software Foundation, aces-core, Apache-2.0. Implemented in `shaders/develop/gamut.wgsl`.
 
+## Spectra for black and white — colour-science (BSD-3-Clause) data; Jakob and Hanika (2019)
+`crates/color/src/spectral_data.rs` holds the CIE 1931 2° colour-matching functions and the D65 illuminant at
+380–730 nm in 10 nm steps, exported from colour-science 0.4.7 (Copyright 2013 Colour Developers, BSD-3-Clause,
+https://github.com/colour-science/colour), which distributes the CIE's standard data; and a few of its Jakob
+2019 spectra as test references. `crates/color/src/spectral.rs` implements the spectral upsampling of W. Jakob
+and J. Hanika, "A Low-Dimensional Function Space for Efficient Spectral Upsampling", Computer Graphics Forum
+38(2), 2019, from the paper; no code was copied.
+
 ## OKLab
 Björn Ottosson, "A perceptual color space for image processing" (2020). Constants in `shaders/common/color.wgsl`.
 

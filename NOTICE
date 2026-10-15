@@ -10,6 +10,9 @@ THIRD_PARTY_NOTICES.md, which ships in the Docker image at /usr/share/doc/sideca
 - vkdt — Johannes Hanika (BSD-2-Clause): demosaic, highlight, denoise and deconvolution shaders ported to WGSL.
 - ACES Reference Gamut Compression — Academy Software Foundation (Apache-2.0).
 - OKLab — Björn Ottosson.
+- colour-science — Colour Developers (BSD-3-Clause): the CIE 1931 colour-matching functions and D65 tables used
+  for black and white, taken from its data; the CIE standard data itself is the CIE's.
+- Jakob and Hanika's spectral upsampling (2019) — implemented from the paper.
 - Adobe XMP Toolkit — Adobe (BSD-3-Clause), via xmp_toolkit (MIT OR Apache-2.0).
 - ExifTool — Phil Harvey (Perl licence: Artistic or GPL), run as a separate program.
 - lensfun database — the lensfun contributors (CC BY-SA 3.0): lens calibrations downloaded at run time for

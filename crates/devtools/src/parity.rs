@@ -29,6 +29,9 @@ struct Case {
     masks: u32,
     #[serde(default)]
     mask_size: [u32; 2],
+    /// `<name>.mono.f32` holds black and white's table over the colour cube.
+    #[serde(default)]
+    mono: bool,
 }
 
 /// Masks for the parity case, at half the image's size so both renderers interpolate them: a soft disc and a
@@ -172,6 +175,10 @@ fn cases() -> Vec<Fixture> {
     let film = |e: &EditParams| EditParams { film: Some(sidecar_color::params::Film { amount: 80.0, interlayer: 60.0 }), ..e.clone() };
     let (graded_film, layered_film) = (film(&graded), film(&layered));
 
+    // Black and white: a film type behind a filter, read from the table over the colour cube; with layers too.
+    let mono = |e: &EditParams, film: &str, filter: &str| EditParams { monochrome: Some(sidecar_color::params::Monochrome { film: film.into(), filter: filter.into() }), ..e.clone() };
+    let (graded_mono, layered_mono) = (mono(&graded, "panchromatic", "red"), mono(&layered, "orthochromatic", "none"));
+
     let mut lens = EditParams { lens: Some(sidecar_color::params::Lens { profile: "sony".into(), ..Default::default() }), ..graded.clone() };
     lens.lens.as_mut().unwrap().lateral_ca = 150.0;
 
@@ -187,6 +194,8 @@ fn cases() -> Vec<Fixture> {
         ("heic-layers".into(), heic(), SourceKind::Developed, phone_layered, DisplaySpace::DisplayP3, None),
         ("film".into(), nikon_d850(), SourceKind::Raw, graded_film, DisplaySpace::Srgb, None),
         ("film-layers".into(), nikon_d850(), SourceKind::Raw, layered_film, DisplaySpace::DisplayP3, None),
+        ("mono-red".into(), nikon_d850(), SourceKind::Raw, graded_mono, DisplaySpace::Srgb, None),
+        ("mono-ortho-layers".into(), nikon_d850(), SourceKind::Raw, layered_mono, DisplaySpace::Srgb, None),
     ]
 }
 
@@ -208,6 +217,10 @@ pub fn fixtures(dir: &Path) -> Result<()> {
             }
             _ => false,
         };
+        let mono = !packed.mono_lut.is_empty();
+        if mono {
+            std::fs::write(dir.join(format!("{name}.mono.f32")), bytemuck::cast_slice(&packed.mono_lut))?;
+        }
         let masks = edit.masks.len().min(2) as u32;
         if masks > 0 {
             for (i, m) in synthetic_masks().iter().take(masks as usize).enumerate() {
@@ -217,7 +230,7 @@ pub fn fixtures(dir: &Path) -> Result<()> {
             std::fs::write(dir.join(format!("{name}.curves.f32")), bytemuck::cast_slice(&packed.mask_curves))?;
         }
         println!("{name}: white balance {:.0} K, tint {:+.1}{}{}", packed.temperature_k, packed.tint, if lens { ", lens pass" } else { "" }, if masks > 0 { format!(", {masks} masks") } else { String::new() });
-        index.push(Case { name, width: src.width, height: src.height, lens, masks, mask_size: if masks > 0 { MASK_SIZE } else { [0; 2] } });
+        index.push(Case { name, width: src.width, height: src.height, lens, masks, mask_size: if masks > 0 { MASK_SIZE } else { [0; 2] }, mono });
     }
     std::fs::write(dir.join("index.json"), serde_json::to_vec_pretty(&index)?)?;
     Ok(())
@@ -250,11 +263,12 @@ pub fn native(dir: &Path, out: &Path) -> Result<()> {
             mask_textures.push(Some(sidecar_engine::upload_rgba16(&gpu, &img)));
         }
         let curves: Vec<f32> = if case.masks > 0 { bytemuck::cast_slice(&std::fs::read(dir.join(format!("{}.curves.f32", case.name)))?).to_vec() } else { Vec::new() };
+        let mono: Vec<f32> = if case.mono { bytemuck::cast_slice(&std::fs::read(dir.join(format!("{}.mono.f32", case.name)))?).to_vec() } else { Vec::new() };
         let masks = if case.masks > 0 {
             let params: sidecar_color::params::MaskParams = bytemuck::pod_read_unaligned(&std::fs::read(dir.join(format!("{}.masks.bin", case.name)))?);
-            sidecar_engine::Masks { params, textures: mask_textures.iter().map(Option::as_ref).collect(), curves: &curves }
+            sidecar_engine::Masks { params, textures: mask_textures.iter().map(Option::as_ref).collect(), curves: &curves, mono: &mono }
         } else {
-            sidecar_engine::Masks::none()
+            sidecar_engine::Masks { mono: &mono, ..sidecar_engine::Masks::none() }
         };
         let img = sidecar_engine::read_rgba16(&gpu, &pass.render(&gpu, &tex, &uniform, &lut, &masks)?)?;
         std::fs::write(out.join(format!("{}.native.f16", case.name)), img.to_f16_bytes())?;

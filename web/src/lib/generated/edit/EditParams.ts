@@ -7,6 +7,7 @@ import type { Lens } from "./Lens";
 import type { LensBlur } from "./LensBlur";
 import type { MaskAdjustment } from "./MaskAdjustment";
 import type { Mixer } from "./Mixer";
+import type { Monochrome } from "./Monochrome";
 import type { Tone } from "./Tone";
 import type { WhiteBalance } from "./WhiteBalance";
 
@@ -22,7 +23,12 @@ saturation?: number,
  * Film rendering instead of the neutral one (DESIGN.md §7, "Film"), for a RAW. Absent means neutral, and
  * is left out of the serialized edit, so every edit made before it renders and hashes as it did.
  */
-film?: Film, detail: Detail, 
+film?: Film, 
+/**
+ * Black and white, as a film type sees the light (DESIGN.md §7, "Black and white"): absent is colour, and
+ * is left out of the serialized edit. Takes the place of film rendering when both are set.
+ */
+monochrome?: Monochrome, detail: Detail, 
 /**
  * Absent means off: photos edited before this field existed render unchanged. See DESIGN.md §15.
  */

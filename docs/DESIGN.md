@@ -601,6 +601,33 @@ four stops under the black point, where the curve is flat. Developed files ignor
 curve was already applied. Judged on ten RAWs from the library: 30 reads as natural, 70 is strong (skin goes
 orange-red); the user chose 45 as the default. Halation, grain and monochrome film are later steps.
 
+**Black and white.** `EditParams.monochrome { film, filter }` renders the light as a black-and-white film type
+would see it, instead of taking a weighted sum of RGB. Three numbers can't say which spectrum a colour came
+from; Sidecar picks the one of Jakob and Hanika's family (2019: a sigmoid of a quadratic in wavelength) whose
+colour under D65 is the pixel's — always a valid reflectance, smooth as surfaces are, and exactly the colour
+it came from — implemented from the paper in `sidecar_color::spectral` (Newton's method on the CIELAB
+difference, from grey out in steps), with CIE 1931 colour matching functions and D65 at 10 nm taken from
+colour-science (BSD-3). colour-science's own implementation was too slow for this (minutes for a coarse table);
+ours fits a 17³ table in about 0.16 s, once per process, and matches its spectra within 0.01.
+
+Each colour is fitted at a surface's brightness (luminance at middle grey's, no channel above 0.95), not
+scaled until a channel reaches 1: the family's spectrum depends on brightness, and an implausibly bright,
+saturated colour comes back as a red that rises again in the violet — unseen by the eye, seen by blue-sensitive
+film, which then rendered red paint lighter than panchromatic did. Light is linear, so the scale divides back
+out. The film's exposure is the spectrum lit by D65 (the picture is white-balanced), through the filter's
+transmission and the film type's sensitivity, white at 1; tabulated over the colour cube for the chosen
+film and filter (`mono_lut`, rebuilt per pack in well under a millisecond), read by the develop pass right
+after the camera matrix (`develop/mono.wgsl`, eight corners, since r32float isn't filterable), and passed on as a
+neutral to the tone map. Film rendering gives way when both are set; developed files can be black and white too.
+
+Film types are the classes' sensitivities — panchromatic (HP5/Tri-X-like), extended-red panchromatic
+(T-grain), orthochromatic, blue-sensitive (collodion; the ultraviolet real plates saw is not in any RAW) — not
+measured curves of named stocks, which need their datasheets digitised. Filters are generic yellow, orange,
+red (long-pass edges at 500, 555, 600 nm) and green (a band). Measured on everyday colours: blue-sensitive film
+darkens skin 0.7 stop against panchromatic and lifts the sky; orthochromatic takes a saturated red to near
+black; a red filter darkens a blue sky 1.6 stops. Not yet: illuminants other than daylight, the stock's own
+characteristic curve, grain, developers.
+
 Uniform buffer:
 
 ```wgsl
@@ -617,10 +644,11 @@ struct DevelopParams {            // offset  size
   _pad1      : f32,               //  140      4
   mixer      : array<vec4f, 8>,   //  144    128   per band: hue, sat, lum, unused
   film       : vec4f,             //  272     16   amount 0–1 (0 neutral), interlayer spread, unused ×2
-}                                 //  total 288 bytes
+  mono       : vec4f,             //  288     16   black and white: 1 on, the table's side, unused ×2
+}                                 //  total 304 bytes
 ```
 
-**Struct layouts.** The 288-byte table above documents the layout; code never hard-codes it. `encase` (MIT-0) derives it on the Rust side and `webgpu-utils` (MIT) reads it from the WGSL source in the browser, so a field added to the struct can't silently shift the offsets.
+**Struct layouts.** The 304-byte table above documents the layout; code never hard-codes it. `encase` (MIT-0) derives it on the Rust side and `webgpu-utils` (MIT) reads it from the WGSL source in the browser, so a field added to the struct can't silently shift the offsets.
 
 **Parameter flow.** Slider input → params store (Svelte 5 `$state`) → derived CPU values (WASM: WB → multipliers and matrix; curve → LUT) → `queue.writeBuffer` → dirty flag → next `requestAnimationFrame` runs develop → view → histogram. Undo snapshots on `pointerup`, not per input event.
 

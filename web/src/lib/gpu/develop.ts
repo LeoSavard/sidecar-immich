@@ -30,6 +30,8 @@ export class DevelopPass {
 	private maskBind?: GPUBindGroup;
 	/** The layers' curves, `MAX_MASKS` rows. */
 	private layerCurves: GPUTexture;
+	/** Black and white's table over the colour cube; 1×1×1 in colour. */
+	private mono: GPUTexture;
 
 	private constructor(device: GPUDevice, pipeline: GPURenderPipeline, layout: GPUBindGroupLayout, maskLayout: GPUBindGroupLayout) {
 		this.device = device;
@@ -44,6 +46,7 @@ export class DevelopPass {
 		this.layerCurves = device.createTexture({ label: 'layer curves', size: [LUT, MAX_MASKS], format: 'r32float', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
 		const identity = new Float32Array(LUT * MAX_MASKS).map((_, i) => (i % LUT) / (LUT - 1));
 		device.queue.writeTexture({ texture: this.layerCurves }, identity, { bytesPerRow: LUT * 4 }, [LUT, MAX_MASKS]);
+		this.mono = device.createTexture({ label: 'mono table', size: [1, 1, 1], dimension: '3d', format: 'r32float', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
 	}
 
 	static async create(device: GPUDevice): Promise<DevelopPass> {
@@ -56,7 +59,8 @@ export class DevelopPass {
 			entries: [
 				{ binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
 				{ binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '2d' } },
-				{ binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '1d' } }
+				{ binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '1d' } },
+				{ binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '3d' } }
 			]
 		});
 		// Mirrors crates/engine/src/develop.rs: the mask uniforms, a linear sampler, a texture per slot.
@@ -125,6 +129,18 @@ export class DevelopPass {
 		this.device.queue.writeTexture({ texture: this.lut }, lut, {}, [lut.length]);
 	}
 
+	/** Black and white's table over the colour cube (`Packed.monoLut`); empty in colour, which keeps a 1×1×1 one. */
+	setMono(table: Float32Array) {
+		const side = Math.round(Math.cbrt(table.length));
+		const want = side > 0 && side ** 3 === table.length ? side : 1;
+		if (this.mono.width !== want) {
+			this.mono.destroy();
+			this.mono = this.device.createTexture({ label: 'mono table', size: [want, want, want], dimension: '3d', format: 'r32float', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+			this.bindGroup = undefined;
+		}
+		if (want > 1) this.device.queue.writeTexture({ texture: this.mono }, table, { bytesPerRow: want * 4, rowsPerImage: want }, [want, want, want]);
+	}
+
 	/**
 	 * The edit's masks: `params` and `curves` from the packer (`Packed.masks`, `Packed.maskCurves`), and a
 	 * texture per mask in the frame being developed — `undefined` for one not loaded yet, which then weighs
@@ -159,7 +175,8 @@ export class DevelopPass {
 			entries: [
 				{ binding: 0, resource: { buffer: this.ubo } },
 				{ binding: 1, resource: (this.input ?? this.source).createView() },
-				{ binding: 2, resource: this.lut.createView() }
+				{ binding: 2, resource: this.lut.createView() },
+				{ binding: 3, resource: this.mono.createView() }
 			]
 		});
 		const encoder = this.device.createCommandEncoder();

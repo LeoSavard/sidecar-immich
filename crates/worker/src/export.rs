@@ -228,7 +228,7 @@ pub fn oriented_size(size: [u32; 2], flip: i32) -> [u32; 2] {
 pub fn masks_for<'a>(packed: &'a Packed, textures: &'a [Option<wgpu::Texture>], frame: [f32; 4]) -> sidecar_engine::Masks<'a> {
     let mut params = packed.masks;
     params.frame = frame;
-    sidecar_engine::Masks { params, textures: textures.iter().map(Option::as_ref).collect(), curves: &packed.mask_curves }
+    sidecar_engine::Masks { params, textures: textures.iter().map(Option::as_ref).collect(), curves: &packed.mask_curves, mono: &packed.mono_lut }
 }
 
 /// Full-resolution linear RGB on the GPU, the orientation still to apply, and how to develop it. RAW comes
