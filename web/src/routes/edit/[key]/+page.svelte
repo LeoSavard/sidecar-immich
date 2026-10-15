@@ -205,7 +205,8 @@
 			tick().then(() => {
 				const d = document.getElementById(`section-${open}`) as HTMLDetailsElement | null;
 				if (d) {
-					d.open = true;
+					// The section and the group it sits in.
+					for (let at: HTMLDetailsElement | null = d; at; at = at.parentElement?.closest('details') ?? null) at.open = true;
 					d.scrollIntoView({ block: 'start' });
 				}
 			});
@@ -1158,18 +1159,28 @@
 			.filter(Boolean)
 			.join(' · ');
 	const sections: { id: Section; label: string; short: string }[] = [
-		{ id: 'lens', label: 'Lens', short: 'Lens' },
-		{ id: 'crop', label: 'Crop and straighten', short: 'Crop' },
 		{ id: 'wb', label: 'White balance', short: 'WB' },
-		{ id: 'light', label: 'Light', short: 'Light' },
 		{ id: 'film', label: 'Film', short: 'Film' },
-		{ id: 'curve', label: 'Curve', short: 'Curve' },
 		{ id: 'color', label: 'Color', short: 'Color' },
+		{ id: 'light', label: 'Light', short: 'Light' },
+		{ id: 'curve', label: 'Curve', short: 'Curve' },
+		{ id: 'crop', label: 'Crop and straighten', short: 'Crop' },
 		{ id: 'depth', label: 'Depth', short: 'Depth' },
 		{ id: 'masks', label: 'Masks', short: 'Masks' },
 		{ id: 'detail', label: 'Detail', short: 'Detail' },
+		{ id: 'lens', label: 'Lens', short: 'Lens' },
 		{ id: 'history', label: 'History', short: 'History' }
 	];
+	const sectionById = (id: Section) => sections.find((x) => x.id === id)!;
+	/** The tools as the panel groups them: a group with one section is that section. */
+	const groups: { id: string; label: string; short: string; children: Section[] }[] = [
+		{ id: 'colour', label: 'Colour', short: 'Colour', children: ['wb', 'film', 'color'] },
+		{ id: 'light', label: 'Light', short: 'Light', children: ['light', 'curve'] },
+		{ id: 'crop', label: 'Crop and straighten', short: 'Crop', children: ['crop'] },
+		{ id: 'processing', label: 'Processing', short: 'Processing', children: ['depth', 'masks', 'detail', 'lens'] },
+		{ id: 'history', label: 'History', short: 'History', children: ['history'] }
+	];
+	const groupOf = (id: Section) => groups.find((g) => g.children.includes(id))!;
 </script>
 
 <svelte:head><title>{meta?.fileName ?? 'Sidecar'}</title></svelte:head>
@@ -1243,6 +1254,24 @@
 
 {#snippet depthSection()}
 	{#if edit}<DepthSection {edit} onchange={update} oncommit={committed} available={fallback ? true : maskSet ? maskSet.available && !!maskSet.airlight : null} picking={fallback || readOnly ? undefined : pickingFocus} onpick={(on) => (pickingFocus = on)} />{/if}
+{/snippet}
+
+{#snippet sectionDetails(s: { id: Section; label: string }, top: boolean)}
+	<details
+		id="section-{s.id}"
+		class="{top ? 'border-t border-line' : 'border-t border-line/50'} py-2"
+		open={s.id === 'wb' || s.id === 'light' || (s.id === 'crop' && cropOpen)}
+		ontoggle={(e) => {
+			const open = (e.currentTarget as HTMLDetailsElement).open;
+			if (s.id === 'detail') detailOpen = open;
+			if (s.id === 'crop') cropOpen = open;
+		}}
+	>
+		<summary class="cursor-pointer py-1 text-xs font-medium">{s.label}</summary>
+		<div class="pt-2">
+			{#if s.id === 'lens'}{@render lensSection()}{:else if s.id === 'crop'}{@render cropSection()}{:else if s.id === 'wb'}{@render wbSection()}{:else if s.id === 'light'}{@render lightSection()}{:else if s.id === 'film'}{@render filmSection()}{:else if s.id === 'curve'}{@render curveSection()}{:else if s.id === 'color'}{@render colorSection()}{:else if s.id === 'depth'}{@render depthSection()}{:else if s.id === 'masks'}{@render masksSection()}{:else if s.id === 'history'}{@render historySection()}{:else if detailOpen}{@render detailSection()}{/if}
+		</div>
+	</details>
 {/snippet}
 
 {#snippet colorSection()}
@@ -1419,14 +1448,22 @@
 
 			{:else}
 			<nav class="flex items-center gap-2 overflow-x-auto px-6 py-2" aria-label="Tools">
-				{#each sections as s (s.id)}
-					<button type="button" aria-pressed={section === s.id && !toolsHidden} class="h-8 shrink-0 rounded-full px-3 text-xs {section === s.id && !toolsHidden ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" aria-label={s.label} onclick={() => setToolsHidden(false, s.id)}>{s.short}</button>
+				{#each groups as g (g.id)}
+					{@const on = groupOf(section).id === g.id && !toolsHidden}
+					<button type="button" aria-pressed={on} class="h-8 shrink-0 rounded-full px-3 text-xs {on ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" aria-label={g.label} onclick={() => setToolsHidden(false, groupOf(section).id === g.id ? section : g.children[0])}>{g.short}</button>
 				{/each}
 				<button type="button" aria-pressed={showPhoneHistogram} aria-label="Show histogram" class="ml-auto grid size-8 shrink-0 place-items-center rounded-full {showPhoneHistogram ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" onclick={() => (showPhoneHistogram = !showPhoneHistogram)}>
 					<svg viewBox="0 0 16 16" class="size-4" aria-hidden="true"><path d="M1 14 L4 8 L7 10 L10 3 L13 9 L15 6 L15 14 Z" fill="currentColor" /></svg>
 				</button>
 			</nav>
 
+			{#if !toolsHidden && groupOf(section).children.length > 1}
+				<div class="flex gap-1.5 overflow-x-auto px-6 pb-1" role="tablist" aria-label={groupOf(section).label}>
+					{#each groupOf(section).children as id (id)}
+						<button type="button" role="tab" aria-selected={section === id} class="h-7 shrink-0 rounded-full px-2.5 text-[0.6875rem] {section === id ? 'bg-raised text-fg' : 'text-fg-2'}" aria-label={sectionById(id).label} onclick={() => (section = id)}>{sectionById(id).short}</button>
+					{/each}
+				</div>
+			{/if}
 			{#if !toolsHidden}
 			<div class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-6 pt-1">
 				{#if section === 'lens'}{@render lensSection()}{:else if section === 'crop'}{@render cropSection()}{:else if section === 'wb'}{@render wbSection()}{:else if section === 'light'}{@render lightSection()}{:else if section === 'film'}{@render filmSection()}{:else if section === 'curve'}{@render curveSection()}{:else if section === 'color'}{@render colorSection()}{:else if section === 'depth'}{@render depthSection()}{:else if section === 'masks'}{@render masksSection()}{:else if section === 'history'}{@render historySection()}{:else}{@render detailSection()}{/if}
@@ -1436,22 +1473,17 @@
 			{/if}
 			{#if wide}
 			<div class="min-h-0 flex-1 overflow-y-auto px-4">
-				{#each sections as s (s.id)}
-					<details
-						id="section-{s.id}"
-						class="border-t border-line py-2"
-						open={s.id === 'wb' || s.id === 'light' || (s.id === 'crop' && cropOpen)}
-						ontoggle={(e) => {
-							const open = (e.currentTarget as HTMLDetailsElement).open;
-							if (s.id === 'detail') detailOpen = open;
-							if (s.id === 'crop') cropOpen = open;
-						}}
-					>
-						<summary class="cursor-pointer py-1 text-xs font-medium">{s.label}</summary>
-						<div class="pt-2">
-							{#if s.id === 'lens'}{@render lensSection()}{:else if s.id === 'crop'}{@render cropSection()}{:else if s.id === 'wb'}{@render wbSection()}{:else if s.id === 'light'}{@render lightSection()}{:else if s.id === 'film'}{@render filmSection()}{:else if s.id === 'curve'}{@render curveSection()}{:else if s.id === 'color'}{@render colorSection()}{:else if s.id === 'depth'}{@render depthSection()}{:else if s.id === 'masks'}{@render masksSection()}{:else if s.id === 'history'}{@render historySection()}{:else if detailOpen}{@render detailSection()}{/if}
-						</div>
-					</details>
+				{#each groups as g (g.id)}
+					{#if g.children.length === 1}
+						{@render sectionDetails(sectionById(g.children[0]), true)}
+					{:else}
+						<details class="border-t border-line py-2" open={g.id === 'colour' || g.id === 'light'}>
+							<summary class="cursor-pointer py-1 text-[11px] font-semibold tracking-wide text-fg-2 uppercase">{g.label}</summary>
+							<div class="pl-2">
+								{#each g.children as id (id)}{@render sectionDetails(sectionById(id), false)}{/each}
+							</div>
+						</details>
+					{/if}
 				{/each}
 			</div>
 			{/if}

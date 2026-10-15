@@ -46,15 +46,22 @@ try {
 	if (mode === 'webgpu' && fallback) throw new Error('expected the fallback');
 	if (mode === 'fallback' && !fallback) throw new Error('no WebGPU adapter: run on the GPU host, or pass --fallback');
 
+	/** The group each section sits in (the editor's `groups`). */
+	const GROUP = { 'White balance': 'Colour', Film: 'Colour', Color: 'Colour', Light: 'Light', Curve: 'Light', 'Crop and straighten': 'Crop and straighten', Depth: 'Processing', Masks: 'Processing', Detail: 'Processing', Lens: 'Processing', History: 'History' };
 	async function section(label) {
 		if (narrow) {
-			await page.getByRole('button', { name: label, exact: true }).first().click();
+			// The group's tab, then — in a group of several — the section's tab in the row below.
+			await page.getByRole('button', { name: GROUP[label], exact: true }).first().click();
+			if (GROUP[label] !== label || label === 'Light') await page.getByRole('tab', { name: label, exact: true }).click();
 			return;
 		}
-		const summary = await visible(page.locator('summary', { hasText: label }));
-		if (!summary) throw new Error(`no section ${label}`);
-		const open = await summary.evaluate((s) => s.parentElement.open);
-		if (!open) await summary.click();
+		// The section's own header (a group can share its name, as Light does), opened with the group around it.
+		const summary = page.locator('summary').filter({ hasText: new RegExp(`^${label}$`) }).last();
+		if (!(await summary.count())) throw new Error(`no section ${label}`);
+		await summary.evaluate((s) => {
+			for (let d = s.parentElement; d; d = d.parentElement?.closest('details') ?? null) if (!d.open) d.open = true;
+		});
+		await summary.scrollIntoViewIfNeeded();
 	}
 	async function set(id, value) {
 		const button = await visible(page.locator(`#${id}-label`).locator('xpath=following-sibling::button'));

@@ -87,7 +87,9 @@ The global Saturation slider (PR #4: one commit for the core, one for the UI) is
 6. `web/src/lib/state/edit-view.ts` — a `CONTROLS` entry (history summaries) and the right `PICKS` section
    ("use its …" in History, and what a copied look carries).
 7. The slider in its section component (`web/src/lib/ui/sections/`), changing the edit through
-   `onchange((e) => { … })` — never by mutating `edit` directly.
+   `onchange((e) => { … })` — never by mutating `edit` directly. A new section also goes in the page's
+   `sections` and in one of its `groups` (Colour, Light, Crop and straighten, Processing, History), and in
+   `editor-smoke.mjs`'s `GROUP`.
 8. If old edits would render differently, bump `PROCESS_VERSION` and migrate in `sidecar-xmp` — both where
    the current edit is read (`SidecarDoc::edit`) and where history rebuilds one (`History::edit_of`).
    Purely additive fields don't need a bump.
