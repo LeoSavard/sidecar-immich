@@ -185,6 +185,25 @@ pub(crate) fn merge(dst: &mut Value, src: Value) {
     }
 }
 
+/// Copy into `fresh` what `stored` holds that this version doesn't know, at any depth. `round_trip` is
+/// `stored` read as an `EditParams` and written back: a key this version knows comes back from that unless
+/// it was at its default, so a key missing from it is a newer version's — or a known one at its default,
+/// which is harmless to carry and is only carried where `fresh` doesn't set it. Arrays are `fresh`'s alone
+/// (a mask layer keeps a newer version's fields in its own `other`).
+fn carry_unknown(fresh: &mut Value, stored: &Value, round_trip: &Value) {
+    let (Value::Object(f), Value::Object(s)) = (fresh, stored) else { return };
+    let r = round_trip.as_object();
+    for (k, v) in s {
+        match (r.and_then(|r| r.get(k)), f.get_mut(k)) {
+            (None, None) => {
+                f.insert(k.clone(), v.clone());
+            }
+            (Some(known), Some(now)) => carry_unknown(now, v, known),
+            _ => {}
+        }
+    }
+}
+
 pub fn etag_of(edit: &EditParams) -> String {
     use sha2::Digest;
     hex::encode(sha2::Sha256::digest(serde_json::to_vec(edit).expect("edit params serialize")))
@@ -300,18 +319,15 @@ impl SidecarDoc {
         obj.insert("processVersion".into(), Value::from(PROCESS_VERSION));
         obj.insert("sourceSha1".into(), Value::from(source_sha1));
         obj.insert("modified".into(), Value::from(utc_now()));
-        let stored = obj.entry("edit").or_insert(Value::Object(Map::new()));
-        merge(stored, serde_json::to_value(edit)?);
-        // The merge keeps what the new edit leaves out, which is how an edit without masks or geometry is written
-        // (so its ETag stays what it was): the last mask removed, or a geometry reset, has to be removed here.
-        if let Some(o) = stored.as_object_mut() {
-            if edit.masks.is_empty() {
-                o.remove("masks");
-            }
-            if edit.geometry.is_none() {
-                o.remove("geometry");
-            }
+        // The edit as it is now, plus whatever a newer Sidecar wrote that this version doesn't know. Not a merge
+        // into what was stored: a field left out at its default (no masks, no geometry, saturation 0, film off)
+        // must leave the file, or turning something off would never be saved.
+        let stored = obj.get("edit").cloned().unwrap_or(Value::Null);
+        let mut fresh = serde_json::to_value(edit)?;
+        if let Some(round_trip) = serde_json::from_value::<EditParams>(stored.clone()).ok().and_then(|e| serde_json::to_value(e).ok()) {
+            carry_unknown(&mut fresh, &stored, &round_trip);
         }
+        obj.insert("edit".into(), fresh);
         Ok(())
     }
 
