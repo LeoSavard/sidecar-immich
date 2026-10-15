@@ -25,7 +25,6 @@ sees the light, through a filter. -->
 		{ id: 'hp5-plus', type: 'panchromatic', label: 'ILFORD HP5 Plus', note: "HARMAN's datasheet: its spectral sensitivity and characteristic curve, a toe four stops under grey and an almost straight line above." },
 		{ id: 'tri-x-400', type: 'panchromatic', label: 'KODAK TRI-X 400', note: "Kodak's datasheet (D-76): its spectral sensitivity, a short toe and a gentle shoulder well above white." },
 		{ id: 'tri-x-320', type: 'panchromatic', label: 'KODAK TRI-X 320', note: "Kodak's datasheet (D-76, sheet film): the long toe it is known for, so shadows ease in softly instead of falling off. Same spectral curve as Tri-X 400, the only one the sheet gives." },
-		{ id: 'double-x', type: 'panchromatic', label: 'EASTMAN DOUBLE-X', note: "Kodak's motion picture stock (D-96, gamma 0.66): its spectral sensitivity and curve, with a slight shoulder two stops over grey." },
 		{ id: 'sfx-200', type: 'panchromatic-extended', label: 'ILFORD SFX 200', note: "HARMAN's datasheet: sees out to 740 nm, so a red filter darkens skies hard and lightens foliage; its curve rolls off into a shoulder at the white point. Cameras record little past 700 nm." }
 	];
 	/** The film type a film id belongs to: a stock's type, or the id itself for a type. */

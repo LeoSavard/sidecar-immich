@@ -90,7 +90,6 @@ const FILM_NAMES: Record<string, string> = {
 	'hp5-plus': 'ILFORD HP5 Plus',
 	'tri-x-400': 'KODAK TRI-X 400',
 	'tri-x-320': 'KODAK TRI-X 320',
-	'double-x': 'EASTMAN DOUBLE-X',
 	'sfx-200': 'ILFORD SFX 200'
 };
 

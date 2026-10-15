@@ -7,8 +7,11 @@ Source: the architecture plan (PWA entry, XMP sidecars, server-side demosaic, We
 
 Where the code differs from the text below, the code and these notes win.
 
-- **Named stocks** (§7, "Stocks"): ILFORD HP5 Plus and SFX 200, KODAK TRI-X 400 and 320, EASTMAN DOUBLE-X, from
+- **Named stocks** (§7, "Stocks"): ILFORD HP5 Plus and SFX 200, KODAK TRI-X 400 and 320, from
   the datasheets the owner supplied — spectral sensitivity and the characteristic curve's toe and shoulder.
+  EASTMAN DOUBLE-X was traced and then dropped: its sheet's spectral curve stops at 420 nm and the owner found
+  sources describing a strong response below that, so the held-flat trace would misreport the film. A named
+  stock stands on its own sheet; where the sheet runs out, the stock is not offered.
   HP5's spectrogram was first read divided by its tungsten light; SFX 200's filter factors showed that wrong
   (×9 against the sheet's ×2.8 behind red) and it is now read as drawn. Checked: every fit within 0.015 density
   of its trace; Tri-X 400's speed point on ISO 400's (−2.701 against −2.699 log lux·s); each stock's red filter
@@ -699,7 +702,7 @@ tile, so a tile's edges are the whole picture's (engine test: within 0.001). Dep
 filters are not in the loupe's map; at a fraction of a millimetre's reach this doesn't show.
 
 **Stocks.** A named stock is a film type with its maker's measured curves, offered under its type in the
-editor (the edit names the stock). Five so far, read from the datasheets the owner supplied by the scripts in
+editor (the edit names the stock). Four so far, read from the datasheets the owner supplied by the scripts in
 `crates/color/film-data/` (its README lists the sheets and how to rerun them); the data is in
 `crates/color/src/film_data.rs`:
 
@@ -708,7 +711,6 @@ editor (the edit names the stock). Five so far, read from the datasheets the own
 | ILFORD HP5 Plus | panchromatic | spectrogram, traced | ILFOTEC HC 1+31, 6½ min |
 | KODAK TRI-X 400 | panchromatic | log sensitivity, vector | D-76, 8 min |
 | KODAK TRI-X 320 | panchromatic | Tri-X's one curve (the sheet gives no other) | D-76, 8 min, sheets |
-| EASTMAN DOUBLE-X 5222 | panchromatic | log sensitivity, traced (from 420 nm, held flat below) | D-96, 6½ min, gamma 0.66 |
 | ILFORD SFX 200 | extended red | spectrogram to 740 nm, traced | ID-11, 10 min |
 
 - *Spectral sensitivity.* Kodak plots log₁₀ of the reciprocal of the energy giving density 1.0 over fog — the
@@ -718,18 +720,17 @@ editor (the edit names the stock). Five so far, read from the datasheets the own
   filter where the sheet says ×2.8; divided by tungsten it would need ×9. (The first reading had leaned on the
   sheet's warning that cameras' meters underexpose by up to 1½ stops behind deep red: that is about meters'
   red response, not the film's spectrum.) Every stock's red (Wratten 25) factor through Sidecar's generic red
-  filter lands within 0.3 stop of its sheet: SFX 2.9 / 2.8, Tri-X 9.0 / 8 in daylight and 4.1 / 5 in tungsten,
-  Double-X 8.7 / 8. Our yellow is a long-pass at 500 nm, deeper than a Wratten 8 (Tri-X 2.4 / 2, Double-X
-  2.3 / 1.5, SFX 1.6 / 2). HP5 read as drawn renders yellow 0.6 stop darker and a blue sky 0.4 stop lighter than
+  filter lands within 0.3 stop of its sheet: SFX 2.9 / 2.8, Tri-X 9.0 / 8 in daylight and 4.1 / 5 in tungsten.
+  Our yellow is a long-pass at 500 nm, deeper than a Wratten 8 (Tri-X 2.4 / 2, SFX 1.6 / 2). HP5 read as drawn renders yellow 0.6 stop darker and a blue sky 0.4 stop lighter than
   the eye — the classic panchromatic its sheet describes; its red factor, 6.3, sits with Tri-X's.
 - *Characteristic curve.* Each is fitted (`sheets/fit.py`, Nelder–Mead) as
   `fog + G·(w·sp((log E − e₀)/w) − c·v·sp((log E − e₁)/v))`, `sp(u) = ln(1 + eᵘ)`: a toe that becomes the
   straight line, and a shoulder taking `c` of the gradient away — within 0.015 density of every trace. Middle
   grey sits 1.2 log E (Zone V four stops over Zone I) above the speed point at fog + 0.1; Kodak's curves are in
   lux·s, and Tri-X 400's speed point falls at log −2.701, where ISO 400 (0.8 / 400 lux·s) puts it: −2.699. In
-  stops from grey the toes sit near −3.7 to −4 (HP5, Tri-X 400, Double-X, SFX), Tri-X 320's at −1.4 and twice
+  stops from grey the toes sit near −3.7 to −4 (HP5, Tri-X 400, SFX), Tri-X 320's at −1.4 and twice
   as wide — the long toe it is known for; shoulders: SFX 200 rolls fully over around the white point, Tri-X 400
-  takes 30 % off above +4.4, Double-X 16 % above +2.4, HP5 is nearly straight.
+  takes 30 % off above +4.4, HP5 is nearly straight.
 - *Rendering.* `stock = [1, toe at, toe width, shoulder strength]` and `shoulder = [at, width]` reach the develop
   pass, which bends exposure after grain (`develop/stock.wgsl`): the curve's shape, scaled to slope 1 at grey,
   so the deepest shadows flatten into fog, grain with them, and the highlights go over the shoulder, while

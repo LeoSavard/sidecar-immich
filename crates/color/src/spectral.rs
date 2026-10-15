@@ -187,7 +187,6 @@ pub fn film_sensitivity(id: &str) -> Option<[f64; SAMPLES]> {
         "hp5-plus" => return Some(normalised(data::HP5_PLUS_SPECTROGRAM)),
         "sfx-200" => return Some(normalised(data::SFX_200_SPECTROGRAM)),
         "tri-x-400" | "tri-x-320" => return Some(normalised(data::TRI_X_LOG_SENSITIVITY.map(|l| 10f64.powf(l)))),
-        "double-x" => return Some(normalised(data::DOUBLE_X_LOG_SENSITIVITY.map(|l| 10f64.powf(l)))),
         _ => {}
     }
     Some(sampled(match id {
@@ -446,7 +445,7 @@ mod tests {
     #[test]
     fn stocks_filter_factors_match_their_sheets() {
         let tungsten = planck(3200.0, 1.4388e-2);
-        let checks: [(&str, &str, &[f64; SAMPLES], f64); 9] = [
+        let checks: [(&str, &str, &[f64; SAMPLES], f64); 7] = [
             ("sfx-200", "yellow", &D65, 2.0),
             ("sfx-200", "orange", &D65, 2.4),
             ("sfx-200", "red", &D65, 2.8),
@@ -454,8 +453,6 @@ mod tests {
             ("tri-x-400", "red", &D65, 8.0),
             ("tri-x-400", "yellow", &tungsten, 1.5),
             ("tri-x-400", "red", &tungsten, 5.0),
-            ("double-x", "yellow", &D65, 1.5),
-            ("double-x", "red", &D65, 8.0),
         ];
         for (film, filter, light, sheet) in checks {
             let ours = factor(&film_sensitivity(film).unwrap(), filter, light);
