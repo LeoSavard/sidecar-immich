@@ -7,6 +7,10 @@ Source: the architecture plan (PWA entry, XMP sidecars, server-side demosaic, We
 
 Where the code differs from the text below, the code and these notes win.
 
+- **Black and white under other light** (§7, "The scene's light"): daylight, tungsten, or the white balance's
+  temperature. Checked: illuminants against colour-science's A and D50; tungsten's effect on a red and a sky;
+  old edits without `light` read as daylight; the tractor in both film types under each light.
+
 - **Grain** (§7, "Grain"): procedural, in exposure before the tone map, sized on a 35 mm frame and averaged by
   Selwyn's law where finer than a pixel. Checked: packing tests; parity `grain-mono`, `grain-film`, `grain-heic`
   identical browser to server (16/16 pass); a portrait developed at 1600 px and 5584 px with grain 0/40/80
@@ -632,8 +636,17 @@ Film types are the classes' sensitivities — panchromatic (HP5/Tri-X-like), ext
 measured curves of named stocks, which need their datasheets digitised. Filters are generic yellow, orange,
 red (long-pass edges at 500, 555, 600 nm) and green (a band). Measured on everyday colours: blue-sensitive film
 darkens skin 0.7 stop against panchromatic and lifts the sky; orthochromatic takes a saturated red to near
-black; a red filter darkens a blue sky 1.6 stops. Not yet: illuminants other than daylight, the stock's own
-characteristic curve, developers.
+black; a red filter darkens a blue sky 1.6 stops. Not yet: the stock's own characteristic curve.
+
+**The scene's light.** `Monochrome.light` names what lit the scene: `daylight` (D65, the default, left out of
+the serialized edit), `tungsten` (CIE illuminant A: Planck's law at 2,848 K with CIE's older constant 1.435e-2),
+or `white-balance` — the temperature the edit's white balance resolves to, as a black body below 5,000 K and CIE
+daylight above (the split CIE's colour-rendering index uses; daylight from CIE 15's chromaticity formula and
+basis functions S0, S1, S2, taken from colour-science). The white-balanced pixel says what the surface is; film
+has no white balance, so it sees that reflectance times the light, and the meter (white at 1) evens out the
+total. Under tungsten, panchromatic film renders a saturated red 0.86 stop lighter and a blue sky 0.55 stop
+darker than in daylight, against the same grey. Checked against colour-science: A within 0.1 %, D50 within 0.1
+of 100.
 
 **Grain.** `EditParams.grain { amount, size }` makes each spot's exposure flicker as a negative's grains make
 it, before the tone map, in colour or black and white, on a RAW or a developed file (`develop/grain.wgsl`). The

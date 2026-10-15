@@ -70,8 +70,8 @@ cd ~/Claude/sidecar/deploy/local && docker compose up -d
 Film, in three stages:
 
 1. **Black and white** — done in #16: film types (class sensitivities), filters; grain in #17 (colour too).
-   Remaining: each stock's characteristic curve, developer effects (compensating, staining), named stocks once their datasheet
-   curves are digitised, illuminants other than daylight.
+   The scene's light (daylight, tungsten, from white balance) in #18. Remaining: developer effects (compensating,
+   staining), each stock's characteristic curve, named stocks once their datasheet curves are digitised.
 2. **Alternative processes** — tintype (collodion: the blue-sensitive type plus its short tonal scale) and
    cyanotype simulation; then cyanotype *digital negatives*, calibrated from a printed and scanned step tablet.
 3. **Colour film, spectrally** — layer sensitivities → characteristic curves → dye densities → a print stock,

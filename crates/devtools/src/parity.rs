@@ -176,7 +176,7 @@ fn cases() -> Vec<Fixture> {
     let (graded_film, layered_film) = (film(&graded), film(&layered));
 
     // Black and white: a film type behind a filter, read from the table over the colour cube; with layers too.
-    let mono = |e: &EditParams, film: &str, filter: &str| EditParams { monochrome: Some(sidecar_color::params::Monochrome { film: film.into(), filter: filter.into() }), ..e.clone() };
+    let mono = |e: &EditParams, film: &str, filter: &str| EditParams { monochrome: Some(sidecar_color::params::Monochrome { film: film.into(), filter: filter.into(), ..Default::default() }), ..e.clone() };
     let (graded_mono, layered_mono) = (mono(&graded, "panchromatic", "red"), mono(&layered, "orthochromatic", "none"));
 
     // Grain: the hash and both octaves, in black and white, in film colour and on a developed file.

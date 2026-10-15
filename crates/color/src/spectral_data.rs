@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! CIE data at 380–730 nm in 10 nm steps, as colour-science 0.4.7 (BSD-3-Clause) distributes it: the CIE 1931
-//! 2° standard observer's colour-matching functions and the D65 illuminant (CIE standard data), exported
-//! from colour-science's tables. Used by crates/color/src/spectral.rs.
+//! 2° standard observer's colour-matching functions, the D65 illuminant and the CIE daylight basis functions
+//! S0, S1, S2 (CIE standard data), exported from colour-science's tables. Used by crates/color/src/spectral.rs.
 
 /// x̄, ȳ, z̄ per wavelength.
 pub const CMF: [[f64; 3]; 36] = [
@@ -82,6 +82,17 @@ pub const D65: [f64; 36] = [
     61.604,
     69.8856,
 ];
+
+/// CIE daylight's basis functions (CIE 15): a daylight of any temperature is S0 + M1·S1 + M2·S2.
+pub const DAYLIGHT_S0: [f64; 36] = [63.4, 65.8, 94.8, 104.8, 105.9, 96.8, 113.9, 125.6, 125.5, 121.3, 121.3, 113.5, 113.1, 110.8, 106.5, 108.8, 105.3, 104.4, 100.0, 96.0, 95.1, 89.1, 90.5, 90.3, 88.4, 84.0, 85.1, 81.9, 82.6, 84.9, 81.3, 71.9, 74.3, 76.4, 63.3, 71.7];
+pub const DAYLIGHT_S1: [f64; 36] = [38.5, 35.0, 43.4, 46.3, 43.9, 37.1, 36.7, 35.9, 32.6, 27.9, 24.3, 20.1, 16.2, 13.2, 8.6, 6.1, 4.2, 1.9, 0.0, -1.6, -3.5, -3.5, -5.8, -7.2, -8.6, -9.5, -10.9, -10.7, -12.0, -14.0, -13.6, -12.0, -13.3, -12.9, -10.6, -11.6];
+pub const DAYLIGHT_S2: [f64; 36] = [3.0, 1.2, -1.1, -0.5, -0.7, -1.2, -2.6, -2.9, -2.8, -2.6, -2.6, -1.8, -1.5, -1.3, -1.2, -1.0, -0.5, -0.3, 0.0, 0.2, 0.5, 2.1, 3.2, 4.1, 4.7, 5.1, 6.7, 7.3, 8.6, 9.8, 10.2, 8.3, 9.6, 8.5, 7.0, 7.6];
+
+/// colour-science's CIE illuminant A, and its D50 (computed at 5003 K × 1.4388 / 1.4380), for the illuminants' test.
+#[cfg(test)]
+pub const ILLUMINANT_A: [f64; 36] = [9.7951, 12.0853, 14.708, 17.6753, 20.995, 24.6709, 28.7027, 33.0859, 37.8121, 42.8693, 48.2423, 53.9132, 59.8611, 66.0635, 72.4959, 79.1326, 85.947, 92.912, 100.0, 107.184, 114.436, 121.731, 129.043, 136.346, 143.618, 150.836, 157.979, 165.028, 171.963, 178.769, 185.429, 191.931, 198.261, 204.409, 210.365, 216.12];
+#[cfg(test)]
+pub const D50: [f64; 36] = [24.5495, 29.9346, 49.4004, 56.6079, 60.1251, 57.8977, 74.9113, 87.3335, 90.6914, 91.4369, 95.1701, 92.0119, 95.7636, 96.6462, 97.1522, 102.1163, 100.7656, 102.3223, 100.0, 97.7308, 98.9085, 93.4813, 97.6602, 99.2342, 99.0008, 95.6773, 98.8019, 95.6093, 98.1228, 102.9264, 99.0548, 87.3154, 91.5289, 92.8203, 76.7982, 86.45];
 
 /// colour-science's own Jakob 2019 spectra for a few linear Rec.2020 colours, for the fit's test.
 #[cfg(test)]

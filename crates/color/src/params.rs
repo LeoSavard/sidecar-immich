@@ -503,11 +503,21 @@ impl Default for MaskEdge {
 pub struct Monochrome {
     pub film: String,
     pub filter: String,
+    /// The light the scene was lit by (`crate::spectral::light`): `daylight`, `tungsten` or `white-balance`.
+    /// Daylight, the default, is left out of the serialized edit, so black and white made before this renders
+    /// and hashes as it did.
+    #[serde(skip_serializing_if = "is_daylight")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<String>", optional))]
+    pub light: String,
+}
+
+fn is_daylight(v: &str) -> bool {
+    v == "daylight"
 }
 
 impl Default for Monochrome {
     fn default() -> Self {
-        Self { film: "panchromatic".into(), filter: "none".into() }
+        Self { film: "panchromatic".into(), filter: "none".into(), light: "daylight".into() }
     }
 }
 
@@ -791,7 +801,11 @@ pub fn pack(edit: &EditParams, camera: &CameraColor, source: SourceKind, display
     };
     let wb = camera::resolve(camera, white_xy);
     let developed = source == SourceKind::Developed;
-    let mono_lut = edit.monochrome.as_ref().and_then(|m| crate::spectral::mono_lut(&m.film, &m.filter)).unwrap_or_default();
+    let mono_lut = edit
+        .monochrome
+        .as_ref()
+        .and_then(|m| crate::spectral::mono_lut(&m.film, &m.filter, &crate::spectral::light(&m.light, wb.temperature_k)?))
+        .unwrap_or_default();
     let mono = !mono_lut.is_empty();
     let tone = tone_params(edit, developed);
     let params = DevelopParams {
@@ -978,9 +992,15 @@ mod tests {
         assert_eq!(p.mono_lut.len(), crate::spectral::GRID.pow(3));
         assert_eq!(params.mono, [1.0, crate::spectral::GRID as f32, 0.0, 0.0]);
         assert_eq!(params.film, [0.0; 4], "film rendering gives way");
-        let unknown = EditParams { monochrome: Some(Monochrome { film: "velvia".into(), filter: "none".into() }), ..Default::default() };
+        let unknown = EditParams { monochrome: Some(Monochrome { film: "velvia".into(), ..Default::default() }), ..Default::default() };
         assert!(pack(&unknown, &cam, SourceKind::Raw, DisplaySpace::Srgb).mono_lut.is_empty(), "an unknown film is colour");
         assert!(serde_json::to_value(EditParams::default()).unwrap().get("monochrome").is_none());
+        // Daylight is left out; an edit written before `light` existed reads as daylight.
+        assert_eq!(serde_json::to_value(Monochrome::default()).unwrap(), serde_json::json!({ "film": "panchromatic", "filter": "none" }));
+        let old: Monochrome = serde_json::from_value(serde_json::json!({ "film": "orthochromatic", "filter": "red" })).unwrap();
+        assert_eq!(old.light, "daylight");
+        let candle = EditParams { monochrome: Some(Monochrome { light: "candle".into(), ..Default::default() }), ..Default::default() };
+        assert!(pack(&candle, &cam, SourceKind::Raw, DisplaySpace::Srgb).mono_lut.is_empty(), "an unknown light is colour");
     }
 
     /// Grain packs its strength and its size on the frame; none, or none at amount 0, packs zeros.

@@ -4,4 +4,10 @@
  * Black and white: a film type (`crate::spectral::film_sensitivity`) behind a filter
  * (`crate::spectral::filter_transmission`), by id. One this version doesn't know renders in colour.
  */
-export type Monochrome = { film: string, filter: string, };
+export type Monochrome = { film: string, filter: string, 
+/**
+ * The light the scene was lit by (`crate::spectral::light`): `daylight`, `tungsten` or `white-balance`.
+ * Daylight, the default, is left out of the serialized edit, so black and white made before this renders
+ * and hashes as it did.
+ */
+light?: string, };

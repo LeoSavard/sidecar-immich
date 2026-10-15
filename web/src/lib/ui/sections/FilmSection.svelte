@@ -38,9 +38,18 @@ sees the light, through a filter. -->
 		oncommit();
 	}
 
-	function setMono(field: 'film' | 'filter', value: string) {
+	/** The scene's light, as `sidecar_color::spectral::light` knows it. */
+	const LIGHTS = [
+		{ id: 'daylight', label: 'Daylight' },
+		{ id: 'tungsten', label: 'Tungsten' },
+		{ id: 'white-balance', label: 'From white balance' }
+	];
+
+	function setMono(field: 'film' | 'filter' | 'light', value: string) {
 		onchange((e) => {
-			if (e.monochrome) e.monochrome[field] = value;
+			if (!e.monochrome) return;
+			if (field === 'light' && value === 'daylight') delete e.monochrome.light;
+			else e.monochrome[field] = value;
 		});
 		oncommit();
 	}
@@ -83,6 +92,13 @@ sees the light, through a filter. -->
 			{/each}
 		</div>
 		<p class="text-xs text-muted">A filter on the lens lets its own colour through: yellow and orange darken skies a little and a lot, red darkens them to drama and lightens skin, green lightens foliage and darkens lips.</p>
+		<p class="pt-1 text-[11px] font-medium tracking-wide text-muted uppercase">Light</p>
+		<div class="flex flex-wrap gap-1.5 text-xs" role="radiogroup" aria-label="Light">
+			{#each LIGHTS as l (l.id)}
+				<button type="button" role="radio" aria-checked={(mono.light ?? 'daylight') === l.id} class={choice((mono.light ?? 'daylight') === l.id)} onclick={() => setMono('light', l.id)}>{l.label}</button>
+			{/each}
+		</div>
+		<p class="text-xs text-muted">Film has no white balance: under a tungsten bulb it gets plenty of red and little blue, so reds and skin print lighter and blues darker than in daylight. From white balance takes the light the white balance names.</p>
 		<p class="text-xs text-muted">Each colour's spectrum is estimated from the photo, then seen as the film type would. The types are the classes' sensitivities, not any one brand's measured curve.</p>
 	{:else if edit.film}
 		<Slider id="film-amount" label="Amount" value={edit.film.amount} min={0} max={100} defaultValue={100} format={(v) => `${decimals(v)} %`} onchange={(v) => onchange((e) => { if (e.film) e.film.amount = v; })} {oncommit} />
