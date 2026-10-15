@@ -757,13 +757,21 @@ three characteristic curves and each dye's spectral density, all traced (`crates
 4. The dye amounts that read those densities through **ISO 5-3's Status A spectral products**, by Newton's method.
 5. The slide on the sheet's ISO 3664 light table (CIE D50), the eye adapted to it (Bradford), on the display.
 
-Both ISO tables are licensed: the owner is obtaining them, and they stay **out of the public repository and image** —
+Both ISO tables are licensed and stay **out of the public repository and image**. The owner found them: Status A
+in ANSI/ISO 5-3-1995 (ANSI/NAPM IT2.18-1996, table 3: log₁₀ spectral products at 10 nm, with slopes beyond each
+listed range; ISO 5-3:2009 keeps the same 10 nm values), and ISO sensitometric daylight in ISO 7589-1984, table 1
+(D55 × the ISO standard lens, 350–690 nm; 0 beyond, where Provia's layers see nothing and the eye under 0.1 % of
+a lux) — the current edition is ISO 7589:2002; its daylight table is still to be compared. With both: a metered
+middle grey in ISO daylight renders [0.074, 0.080, 0.089] — equal Status A densities of about 1.1, slightly cool
+on the D50 light table. They are
 read at run time from the owner's files (`Densitometer::parse`, `parse_spectrum`; tests use `SIDECAR_STATUS_A` and
 `SIDECAR_ISO_DAYLIGHT`). The tests run the mechanics with a stand-in densitometer and D55, which never render. The
 develop pass will read the chain from two tables: each colour's layer responses over the colour cube
 (`exposure_lut`), and the slide's colour over layer log H, 65³, stored in log₂ (`response_lut`; within 2 % between
 lattice points). Edges, stated: sensitivities beyond the sheet's plotted floor (about 1/30 of each peak) are 0;
-dyes beyond 388–719 nm hold their end values, where the eye sees under 0.1 % of the light.
+dyes beyond 388–719 nm hold their end values, where the eye sees under 0.1 % of the light. Viewing places the light
+table at the display's white, so the slide keeps its density: a slide's middle grey is darker than Sidecar's
+neutral rendering of the same exposure, as it is on a light table.
 
 **Grain.** `EditParams.grain { amount, size }` makes each spot's exposure flicker as a negative's grains make
 it, before the tone map, in colour or black and white, on a RAW or a developed file (`develop/grain.wgsl`). The

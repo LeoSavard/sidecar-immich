@@ -56,10 +56,10 @@ cd ~/Claude/sidecar/deploy/local && docker compose up -d
 
 ## Open questions
 
-- **Colour film needs two ISO tables** (branch `worktree-film-provia`): Status A spectral products (ISO 5-3:2009,
-  Annex A) and ISO sensitometric daylight (ISO 7589). The owner is obtaining them; they must stay out of the
-  public repository and image (loaded at run time). `crate::slide` has the rest of Provia 100F's chain; the
-  develop pass, the editor and the loading of the owner's files come next.
+- **Colour film's two ISO tables** (branch `worktree-film-provia`) are in hand and private: Status A from ANSI/ISO
+  5-3-1995 (IT2.18-1996, table 3) and ISO sensitometric daylight from ISO 7589-1984 (table 1). Copies sit in the
+  git-ignored `testdata/cache/standards/` of the depth-spike worktree; they must never enter the repository or
+  image (loaded at run time). Next: the develop pass, the editor, and the server reading the owner's files.
 - **Double-X below 420 nm**: its sheet stops there; the held-flat trace carries 15 % of a daylight exposure.
   Owner's decision: better data, or another treatment.
 - **A photo drawn stretched in Immich's desktop viewer.** A portrait NEF (`_D5N5343.nef`, landscape pixels,
