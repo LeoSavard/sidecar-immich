@@ -11,7 +11,8 @@ Where the code differs from the text below, the code and these notes win.
   spectral sensitivity from its spectrogram to tungsten light, and its characteristic curve's toe. Checked: the
   curve fit within 0.02 density; HP5 behind red and orange needs 1.65 and 1.9 stops more than an eye-like meter
   (the sheet warns of up to 1½); packing tests for the toe and the moved black point; parity `stock-hp5`
-  (20/20 pass); generic panchromatic against HP5 on the tractor and the portrait; the editor chooses it.
+  (20/20 pass); generic panchromatic against HP5 on the tractor and the portrait. In the editor a stock is a
+  choice under its film type (Panchromatic: Generic or ILFORD HP5 Plus); the edit still names the stock.
 
 - **Developers** (§7, "Developers"): adjacency through a low-resolution map of the whole frame, development N±2,
   compensation, grain per developer and a staining developer's grain masking. Checked: packing tests; an engine

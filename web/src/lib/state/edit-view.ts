@@ -81,6 +81,15 @@ const cap = (s: string) => s[0].toUpperCase() + s.slice(1);
 /** One control that reads as a number; `show` formats it as its slider does. */
 type Control = { label: string; get: (e: EditParams) => number; show: (v: number) => string };
 
+/** Black and white's film types and stocks, as History names them. */
+const FILM_NAMES: Record<string, string> = {
+	panchromatic: 'Panchromatic',
+	'panchromatic-extended': 'Extended red',
+	orthochromatic: 'Orthochromatic',
+	'blue-sensitive': 'Blue-sensitive',
+	'hp5-plus': 'ILFORD HP5 Plus'
+};
+
 /** Black and white's lights, as History names them. */
 const LIGHT_NAMES: Record<string, string> = { daylight: 'Daylight', tungsten: 'Tungsten light', 'white-balance': 'Light from white balance' };
 
@@ -122,7 +131,7 @@ export function describeChanges(from: EditParams, to: EditParams): string[] {
 	}
 	if (!!from.monochrome !== !!to.monochrome) out.push(to.monochrome ? 'Black and white' : 'Colour');
 	else if (from.monochrome && to.monochrome) {
-		if (from.monochrome.film !== to.monochrome.film) out.push(`Film type ${to.monochrome.film}`);
+		if (from.monochrome.film !== to.monochrome.film) out.push(FILM_NAMES[to.monochrome.film] ?? `Film type ${to.monochrome.film}`);
 		if ((from.monochrome.developer ?? 'standard') !== (to.monochrome.developer ?? 'standard')) out.push(`Developer ${to.monochrome.developer ?? 'standard'}`);
 		if ((from.monochrome.development ?? 0) !== (to.monochrome.development ?? 0)) out.push(to.monochrome.development ? `Development N${signed(to.monochrome.development, 1)}` : 'Normal development');
 		if ((from.monochrome.light ?? 'daylight') !== (to.monochrome.light ?? 'daylight')) out.push(LIGHT_NAMES[to.monochrome.light ?? 'daylight'] ?? `Light ${to.monochrome.light}`);

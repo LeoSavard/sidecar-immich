@@ -18,9 +18,21 @@ sees the light, through a filter. -->
 		{ id: 'panchromatic', label: 'Panchromatic', note: 'Classic black-and-white film (the HP5 and Tri-X kind): sees every colour, a little more of blue, reds somewhat darker than the eye sees them.' },
 		{ id: 'panchromatic-extended', label: 'Extended red', note: 'Modern T-grain film: flatter, sees further into the red, so skin and reds come out lighter.' },
 		{ id: 'orthochromatic', label: 'Orthochromatic', note: 'Blind to red: reds and lips go dark, skies stay bright, skin shows every freckle.' },
-		{ id: 'hp5-plus', label: 'ILFORD HP5 Plus', note: "From HARMAN's datasheet: its measured spectral sensitivity and the toe of its characteristic curve, so shadows fall off into the film's fog as an HP5 print's do. The curve is from a RAW only." },
 		{ id: 'blue-sensitive', label: 'Blue-sensitive', note: "Wet collodion and the earliest plates: sees only blue, so warm colours go near black and blue skies blow out. Real plates also saw ultraviolet, which no camera records." }
 	];
+	/** Named stocks, each under its film type: the maker's measured curves (`sidecar_color::stock`). */
+	const STOCKS = [
+		{ id: 'hp5-plus', type: 'panchromatic', label: 'ILFORD HP5 Plus', note: "From HARMAN's datasheet: its measured spectral sensitivity, strongly blue, and the toe of its characteristic curve, so shadows fall off into the film's fog as an HP5 print's do. The curve is from a RAW only." }
+	];
+	/** The film type a film id belongs to: a stock's type, or the id itself for a type. */
+	const typeOf = (film: string) => STOCKS.find((s) => s.id === film)?.type ?? film;
+
+	/** A film type: the type itself (its class's curve), or the stock already chosen if it is of that type. */
+	function setType(type: string) {
+		if (edit.monochrome && typeOf(edit.monochrome.film) === type) return;
+		setMono('film', type);
+	}
+
 	const FILTERS = [
 		{ id: 'none', label: 'None' },
 		{ id: 'yellow', label: 'Yellow' },
@@ -96,10 +108,22 @@ sees the light, through a filter. -->
 		<p class="pt-1 text-[11px] font-medium tracking-wide text-muted uppercase">Film type</p>
 		<div class="grid gap-1 text-xs" role="radiogroup" aria-label="Film type">
 			{#each FILMS as f (f.id)}
-				<button type="button" role="radio" aria-checked={mono.film === f.id} class="rounded px-2 py-1.5 text-left {mono.film === f.id ? 'bg-raised text-fg' : 'text-fg-2 hover:bg-raised/60'}" onclick={() => setMono('film', f.id)}>
+				{@const on = typeOf(mono.film) === f.id}
+				{@const stocks = STOCKS.filter((s) => s.type === f.id)}
+				{@const stock = STOCKS.find((s) => s.id === mono.film)}
+				<button type="button" role="radio" aria-checked={on} class="rounded px-2 py-1.5 text-left {on ? 'bg-raised text-fg' : 'text-fg-2 hover:bg-raised/60'}" onclick={() => setType(f.id)}>
 					<span class="font-medium">{f.label}</span>
-					{#if mono.film === f.id}<span class="block pt-0.5 text-muted">{f.note}</span>{/if}
+					{#if on}<span class="block pt-0.5 text-muted">{f.note}</span>{/if}
 				</button>
+				{#if on && stocks.length}
+					<div class="flex flex-wrap gap-1.5 pb-1 pl-2" role="radiogroup" aria-label="Stock">
+						<button type="button" role="radio" aria-checked={!stock} class={choice(!stock)} onclick={() => setMono('film', f.id)}>Generic</button>
+						{#each stocks as s (s.id)}
+							<button type="button" role="radio" aria-checked={mono.film === s.id} class={choice(mono.film === s.id)} onclick={() => setMono('film', s.id)}>{s.label}</button>
+						{/each}
+					</div>
+					{#if stock}<p class="pb-1 pl-2 text-muted">{stock.note}</p>{/if}
+				{/if}
 			{/each}
 		</div>
 		<p class="pt-1 text-[11px] font-medium tracking-wide text-muted uppercase">Filter</p>
