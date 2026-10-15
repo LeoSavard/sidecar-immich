@@ -1,6 +1,7 @@
 # Sidecar — working rules
 
-Read `docs/DESIGN.md` before changing behaviour; it is the specification. `docs/ARCHITECTURE.md` maps the code:
+Start with `docs/HANDOFF.md`: where the work stands, the open pull requests and the order to merge them, open
+questions and what comes next. Read `docs/DESIGN.md` before changing behaviour; it is the specification. `docs/ARCHITECTURE.md` maps the code:
 where things live, the checklist for adding a develop control, and the testing pitfalls. Build and test only
 inside the dev container: `./dev/run <command>` (GPU, Rust, Node and Chromium are there; nothing is installed on
 the host). In a fresh clone or worktree, run `./dev/bootstrap` first. `./dev/serve` prints the port it chose;

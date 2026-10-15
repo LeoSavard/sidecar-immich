@@ -18,13 +18,14 @@ sidecar (the binary: `api`, `worker`, `dev`)
 │   ├── sidecar-template storage-template rendering, date/name lookup
 │   └── sidecar-color
 └── sidecar-worker   decode, proxies, loupe, preview, export, masks (spawns sidecar-ml)
-    ├── sidecar-engine   wgpu device and passes: ingest, develop, detail, lens, warp, brush, focus
+    ├── sidecar-engine   wgpu device and passes: ingest, develop, detail, lens, depth, warp, brush, focus
     ├── sidecar-raw      LibRaw wrapper (sidecar-libraw-sys), JPEG/PNG/TIFF/HEIC, JPEG XL DNGs, lens tables
     ├── sidecar-xmp
     └── sidecar-color
 
 sidecar-color        the hub: EditParams, white balance, camera matrices, curve LUTs, lens model, geometry,
-                     and `pack()` — EditParams → the develop uniform. Also compiled to wasm (sidecar-color-wasm)
+                     spectra for black and white (`spectral`), depth-effect packing (`depth`), and `pack()` —
+                     EditParams → the develop uniform. Also compiled to wasm (sidecar-color-wasm)
                      so the browser packs uniforms with the same code.
 sidecar-shaders      embeds shaders/ and composes `//! requires:`; its binary writes the browser's WGSL
 sidecar-ml           its own program (burn on Vulkan), started by the worker on demand; not a library dep
@@ -45,6 +46,11 @@ browser ──POST /api/exports──▶ api ──/v1/render──▶ worker (f
 no WebGPU: POST …/preview → worker develops the proxy with the same shaders → JPEG
 ```
 
+Per pixel, in order: decode/ingest (worker) → detail (worker only) → lens pass → depth pass (haze, lens blur;
+needs the depth mask) → develop (white balance, exposure, camera matrix, black and white, tone map with film or
+neutral, masks, mixer, output) → warp (crop and straighten) → view. Masks are seeded, ranged, painted and
+edged by the brush passes before develop samples them.
+
 `assetKey` is the SHA-1 of the original's bytes. The edit lives in the XMP next to the original, found by
 *path* (`DSC_1234.NEF.xmp`, then `DSC_1234.xmp`).
 
@@ -59,10 +65,16 @@ no WebGPU: POST …/preview → worker develops the proxy with the same shaders 
 | Crop, straighten, keystone | `crates/color/src/geometry.rs`, `shaders/server/warp.wgsl`, `web/src/lib/ui/CropOverlay.svelte` |
 | Lens correction | `crates/color/src/lens.rs`, `crates/raw/src/{lens,lensfun}.rs`, `shaders/lens/` |
 | Masks | `shaders/develop/masks.wgsl`, `crates/worker/src/{masks,ml}.rs`, `crates/ml`, `web/src/lib/masks.ts` |
+| A mask's range, strokes and edge | `shaders/client/{brush_composite,brush,mask_edge}.wgsl`, `crates/engine/src/brush.rs`, `web/src/lib/gpu/brush.ts` |
+| Depth: the model, the mask, airlight | `crates/ml` (Depth Anything V2 Small), `crates/worker/src/masks.rs` |
+| Lens blur and haze by distance | `shaders/depth/`, `shaders/client/depth_*.wgsl`, `crates/color/src/depth.rs`, `crates/engine/src/depth.rs`, `web/src/lib/gpu/depth.ts` |
+| Film rendering (colour) | `film_curve_in` in `shaders/develop/tone.wgsl`, `Film` in `crates/color/src/params.rs` |
+| Black and white: spectra, film types, filters | `crates/color/src/spectral.rs` (+ `spectral_data.rs`), `shaders/develop/mono.wgsl` |
+| The camera's own rendering beside the edit | `crates/worker/src/camera.rs`, the Camera toggle in the editor page |
 | What's stored in the sidecar | `crates/xmp` — it serializes `EditParams` generically, field names in PascalCase |
 | Edit history and versions | `crates/xmp/src/history.rs`, `web/src/lib/ui/HistoryPanel.svelte` |
 | Export, versions, stacking | `crates/api/src/export.rs`, `crates/worker/src/export.rs` |
-| The editor's sections (sliders, buttons) | `web/src/lib/ui/sections/*` — one component per section |
+| The editor's sections (sliders, buttons) | `web/src/lib/ui/sections/*` — one component per section; grouped by the page's `groups` |
 | Loading, saving, drafts, undo, versions | `web/src/lib/state/edit-session.svelte.ts` |
 | Drawing: develop, view, geometry, brush, gestures | `web/src/routes/edit/[key]/+page.svelte` (the next thing worth splitting out) |
 | What a section offers History and a copied look | `web/src/lib/state/edit-view.ts` (`CONTROLS`, `PICKS`) |
