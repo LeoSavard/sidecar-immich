@@ -20,6 +20,7 @@ pub const WEB_ENTRIES: &[&str] = &[
     "client/depth_down.wgsl",
     "client/depth_gather.wgsl",
     "client/depth_compose.wgsl",
+    "client/mask_edge.wgsl",
 ];
 
 pub fn source(path: &str) -> Result<&'static str> {

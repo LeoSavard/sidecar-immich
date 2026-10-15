@@ -514,7 +514,7 @@
 	 * while something it needs is loading; that redraws when it arrives.
 	 */
 	function layerTexture(i: number, m: MaskAdjustment): GPUTexture | undefined {
-		if (!m.strokes?.length && !m.range && stroke?.layer !== i) return m.mask === BRUSH ? undefined : maskTexture(m.mask);
+		if (!m.strokes?.length && !m.range && !m.edge && stroke?.layer !== i) return m.mask === BRUSH ? undefined : maskTexture(m.mask);
 		const entry = layerEntry(i, m);
 		if (!entry) return undefined;
 		const size: [number, number] = [entry.painted.width, entry.painted.height];
@@ -548,9 +548,12 @@
 			entry = { key: '', version: 0, painted: painter.mask([proxy.width, proxy.height], `layer ${i}`), correctedFrom: '' };
 			layerTextures.set(i, entry);
 		}
-		const key = JSON.stringify([m.mask, m.range ?? null, m.strokes ?? []]);
+		const key = JSON.stringify([m.mask, m.range ?? null, m.edge ?? null, m.strokes ?? []]);
 		if (entry.key !== key && stroke?.layer !== i) {
 			painter.paint(entry.painted, base, $state.snapshot(m.strokes) ?? [], rangeUniform(m.range));
+			// The edge last, over the range and the strokes. (While a stroke is drawn it shows without the edge.)
+			const plan = m.edge ? packer.edgePlan($state.snapshot(m.edge), [proxy.width, proxy.height]) : null;
+			if (plan) painter.edge(entry.painted, plan);
 			entry.key = key;
 		}
 		return entry;

@@ -235,6 +235,22 @@ pub unsafe extern "C" fn sc_pack_depth(ptr: *const u8, len: usize) -> *const u8 
     }))
 }
 
+#[derive(Deserialize)]
+struct EdgeRequest {
+    edge: sidecar_color::params::MaskEdge,
+    size: [u32; 2],
+}
+
+/// `{ edge, size }` → the edge passes' plan as JSON (`MaskEdge::plan`), `null` when the edge is too narrow to show.
+///
+/// # Safety
+/// `ptr` must point to `len` readable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sc_mask_edge(ptr: *const u8, len: usize) -> *const u8 {
+    let input = unsafe { std::slice::from_raw_parts(ptr, len) };
+    respond(serde_json::from_slice::<EdgeRequest>(input).map_err(|e| e.to_string()).and_then(|req| serde_json::to_vec(&req.edge.plan(req.size)).map_err(|e| e.to_string())))
+}
+
 /// Default edit parameters as length-prefixed JSON, so the web app never duplicates them.
 #[unsafe(no_mangle)]
 pub extern "C" fn sc_default_edit() -> *const u8 {

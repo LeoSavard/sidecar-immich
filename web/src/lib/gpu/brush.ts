@@ -5,11 +5,15 @@
 // proxy's size, in the photo's frame before lens correction — where strokes are stored.
 import brushWgsl from './wgsl/client_brush.wgsl?raw';
 import compositeWgsl from './wgsl/client_brush_composite.wgsl?raw';
+import edgeWgsl from './wgsl/client_mask_edge.wgsl?raw';
+import type { EdgePlan } from '$lib/color/pack';
 import lensMaskWgsl from './wgsl/client_lens_mask.wgsl?raw';
 import previewWgsl from './wgsl/client_mask_preview.wgsl?raw';
 import type { Stroke } from '$lib/types';
 
 const MASK: GPUTextureFormat = 'r8unorm';
+/** What a mask's edge is blurred in: finer than the mask's 8 bits, so moving the threshold doesn't band. */
+const EDGE: GPUTextureFormat = 'r16float';
 const PAINT = 0;
 const ERASE = 1;
 const COPY = 2;
@@ -37,6 +41,9 @@ export class MaskPainter {
 	private brushUbo: GPUBuffer;
 	private lensUbo: GPUBuffer;
 	private compositeUbo: GPUBuffer;
+	/** One per edge pass, all four in one submission. */
+	private edgeUbos: GPUBuffer[];
+	private edgeSmall?: [GPUTexture, GPUTexture];
 	private previewUbo: GPUBuffer;
 	/** Segments for one draw, grown as needed: every pointer move reuses it. */
 	private segments?: GPUBuffer;
@@ -50,6 +57,8 @@ export class MaskPainter {
 		private device: GPUDevice,
 		private brush: GPURenderPipeline,
 		private composite: GPURenderPipeline,
+		private edgeBlur: GPURenderPipeline,
+		private edgeMask: GPURenderPipeline,
 		private lens: GPURenderPipeline,
 		private preview: GPURenderPipeline
 	) {
@@ -58,19 +67,21 @@ export class MaskPainter {
 		this.brushUbo = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 		this.lensUbo = device.createBuffer({ size: 1072, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 		this.compositeUbo = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+		this.edgeUbos = [0, 1, 2, 3].map(() => device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }));
 		this.previewUbo = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 	}
 
 	static async create(device: GPUDevice): Promise<MaskPainter> {
-		const [b, c, l, v] = await Promise.all([
+		const [b, c, l, v, e] = await Promise.all([
 			compiled(device, 'brush', brushWgsl),
 			compiled(device, 'brush composite', compositeWgsl),
 			compiled(device, 'lens mask', lensMaskWgsl),
-			compiled(device, 'mask preview', previewWgsl)
+			compiled(device, 'mask preview', previewWgsl),
+			compiled(device, 'mask edge', edgeWgsl)
 		]);
 		const target = (blend?: GPUBlendState): GPUColorTargetState => ({ format: MASK, blend });
 		const max: GPUBlendComponent = { operation: 'max', srcFactor: 'one', dstFactor: 'one' };
-		const [brush, composite, lens, preview] = await Promise.all([
+		const [brush, composite, lens, preview, edgeBlur, edgeMask] = await Promise.all([
 			device.createRenderPipelineAsync({
 				label: 'brush',
 				layout: 'auto',
@@ -79,9 +90,11 @@ export class MaskPainter {
 			}),
 			device.createRenderPipelineAsync({ label: 'brush composite', layout: 'auto', vertex: { module: c, entryPoint: 'vs' }, fragment: { module: c, entryPoint: 'fs', targets: [target()] } }),
 			device.createRenderPipelineAsync({ label: 'lens mask', layout: 'auto', vertex: { module: l, entryPoint: 'vs' }, fragment: { module: l, entryPoint: 'fs', targets: [target()] } }),
-			device.createRenderPipelineAsync({ label: 'mask preview', layout: 'auto', vertex: { module: v, entryPoint: 'vs' }, fragment: { module: v, entryPoint: 'fs', targets: [{ format: 'rgba16float' }] } })
+			device.createRenderPipelineAsync({ label: 'mask preview', layout: 'auto', vertex: { module: v, entryPoint: 'vs' }, fragment: { module: v, entryPoint: 'fs', targets: [{ format: 'rgba16float' }] } }),
+			device.createRenderPipelineAsync({ label: 'mask edge blur', layout: 'auto', vertex: { module: e, entryPoint: 'vs' }, fragment: { module: e, entryPoint: 'fs', targets: [{ format: EDGE }] } }),
+			device.createRenderPipelineAsync({ label: 'mask edge', layout: 'auto', vertex: { module: e, entryPoint: 'vs' }, fragment: { module: e, entryPoint: 'fs', targets: [target()] } })
 		]);
-		return new MaskPainter(device, brush, composite, lens, preview);
+		return new MaskPainter(device, brush, composite, edgeBlur, edgeMask, lens, preview);
 	}
 
 	/** A mask texture the painter can draw into and develop can read. */
@@ -182,6 +195,47 @@ export class MaskPainter {
 			this.compose(encoder, target, this.before!, this.coverage!, px.erase ? ERASE : PAINT);
 			this.device.queue.submit([encoder.finish()]);
 		}
+	}
+
+	/**
+	 * `target`'s edge feathered and moved (`MaskEdge`, planned for its size by `ColorPacker.edgePlan`), in
+	 * place: averaged down, blurred across and down, then thresholded back into it.
+	 */
+	edge(target: GPUTexture, plan: EdgePlan) {
+		const [sw, sh] = plan.small;
+		if (this.edgeSmall?.[0].width !== sw || this.edgeSmall?.[0].height !== sh) {
+			this.edgeSmall?.forEach((t) => t.destroy());
+			const make = () => this.device.createTexture({ label: 'mask edge', size: [sw, sh], format: EDGE, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
+			this.edgeSmall = [make(), make()];
+		}
+		const [a, b] = this.edgeSmall;
+		// EdgeParams: size, mode, scale, dir, radius, _pad, ramp.
+		const params = (size: [number, number], mode: number, dir: [number, number] = [0, 0]) => {
+			const buf = new ArrayBuffer(48);
+			new Float32Array(buf, 0, 2).set(size);
+			new Uint32Array(buf, 8, 1)[0] = mode;
+			new Float32Array(buf, 12, 1)[0] = plan.scale;
+			new Float32Array(buf, 16, 2).set(dir);
+			new Float32Array(buf, 24, 1)[0] = plan.radius;
+			new Float32Array(buf, 32, 2).set([plan.threshold, plan.ramp]);
+			return buf;
+		};
+		const passes: [GPURenderPipeline, ArrayBuffer, GPUTexture, GPUTexture][] = [
+			[this.edgeBlur, params([sw, sh], 0), target, a],
+			[this.edgeBlur, params([sw, sh], 1, [1, 0]), a, b],
+			[this.edgeBlur, params([sw, sh], 1, [0, 1]), b, a],
+			[this.edgeMask, params([target.width, target.height], 2), a, target]
+		];
+		const encoder = this.device.createCommandEncoder();
+		passes.forEach(([pipeline, data, src, dst], i) => {
+			this.device.queue.writeBuffer(this.edgeUbos[i], 0, data);
+			const pass = encoder.beginRenderPass({ colorAttachments: [{ view: dst.createView(), loadOp: 'clear', storeOp: 'store', clearValue: [0, 0, 0, 0] }] });
+			pass.setPipeline(pipeline);
+			pass.setBindGroup(0, this.device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: this.edgeUbos[i] } }, { binding: 1, resource: src.createView() }, { binding: 2, resource: this.sampler }] }));
+			pass.draw(3);
+			pass.end();
+		});
+		this.device.queue.submit([encoder.finish()]);
 	}
 
 	/** Start a stroke drawn as it is made, onto `target` as it is now. */

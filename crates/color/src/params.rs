@@ -348,6 +348,10 @@ pub struct MaskAdjustment {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub range: Option<MaskRange>,
+    /// The layer's edge feathered and moved, after the range and the strokes. None is the mask as painted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub edge: Option<MaskEdge>,
     /// Brush strokes over the mask, in the order they were painted.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     #[cfg_attr(feature = "ts", ts(as = "Option<Vec<Stroke>>", optional))]
@@ -383,6 +387,7 @@ impl Default for MaskAdjustment {
             curve: Vec::new(),
             mixer: Mixer::default(),
             range: None,
+            edge: None,
             strokes: Vec::new(),
             other: Default::default(),
         }
@@ -412,6 +417,87 @@ impl MaskRange {
             }
             None => [0.0; 4],
         }
+    }
+}
+
+/// A layer's edge (DESIGN.md §15, "Mask edges"): the mask blurred over `width` and thresholded again, which
+/// moves the edge by `shift` and softens it by `feather`.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "edit/"))]
+pub struct MaskEdge {
+    /// 0–100: how far the edge reaches, up to `MAX_EDGE` of the long edge.
+    pub width: f64,
+    /// 0–100: how soft it is across that width; 0 is a crisp edge, only moved and smoothed.
+    pub feather: f64,
+    /// −100–100: the edge pushed inward (−) or outward (+), within the width.
+    pub shift: f64,
+}
+
+impl Default for MaskEdge {
+    fn default() -> Self {
+        Self { width: 20.0, feather: 100.0, shift: 0.0 }
+    }
+}
+
+/// The widest an edge reaches, as a fraction of the mask's long edge.
+pub const MAX_EDGE: f64 = 0.05;
+
+/// The edge passes for a mask of some size (`MaskEdge::plan`): averaged down by `scale`, blurred over
+/// `radius` texels of that, then thresholded at `threshold` with a ramp `ramp` wide.
+#[derive(Clone, Copy, Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct EdgePlan {
+    pub scale: u32,
+    pub small: [u32; 2],
+    pub radius: f32,
+    pub threshold: f32,
+    pub ramp: f32,
+}
+
+impl MaskEdge {
+    /// The passes for a mask `size` pixels big; `None` when the edge reaches less than half a pixel.
+    pub fn plan(&self, size: [u32; 2]) -> Option<EdgePlan> {
+        let reach = self.width.clamp(0.0, 100.0) / 100.0 * MAX_EDGE * size[0].max(size[1]) as f64;
+        if reach < 0.5 {
+            return None;
+        }
+        let scale = (reach / 16.0).ceil().max(1.0) as u32;
+        Some(EdgePlan {
+            scale,
+            small: size.map(|v| v.div_ceil(scale)),
+            radius: (reach / scale as f64) as f32,
+            threshold: (0.5 - self.shift.clamp(-100.0, 100.0) / 100.0 * 0.45) as f32,
+            ramp: (self.feather.clamp(0.0, 100.0) / 100.0).max(0.02) as f32,
+        })
+    }
+}
+
+/// Byte-for-byte mirror of `struct EdgeParams` in shaders/client/mask_edge.wgsl (48 bytes); checked by naga.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct EdgeParams {
+    pub size: [f32; 2],
+    pub mode: u32,
+    pub scale: f32,
+    pub dir: [f32; 2],
+    pub radius: f32,
+    pub _pad: f32,
+    pub ramp: [f32; 4],
+}
+
+impl EdgePlan {
+    /// Pass 0: average the mask down into `small`.
+    pub fn down(&self) -> EdgeParams {
+        EdgeParams { size: self.small.map(|v| v as f32), mode: 0, scale: self.scale as f32, ..Default::default() }
+    }
+    /// Pass 1: blur across (`down` false) or down.
+    pub fn blur(&self, down: bool) -> EdgeParams {
+        EdgeParams { size: self.small.map(|v| v as f32), mode: 1, dir: if down { [0.0, 1.0] } else { [1.0, 0.0] }, radius: self.radius, ..Default::default() }
+    }
+    /// Pass 2: threshold into the mask, `size` pixels.
+    pub fn threshold(&self, size: [u32; 2]) -> EdgeParams {
+        EdgeParams { size: size.map(|v| v as f32), mode: 2, ramp: [self.threshold, self.ramp, 0.0, 0.0], ..Default::default() }
     }
 }
 
@@ -756,6 +842,32 @@ mod tests {
         let edit = EditParams { film: Some(Film { amount: 50.0, interlayer: 100.0 }), ..Default::default() };
         assert_eq!(at(&edit, SourceKind::Raw).film, [0.5, FILM_INTERLAYER as f32, 0.0, 0.0]);
         assert_eq!(at(&edit, SourceKind::Developed).film, [0.0; 4]);
+    }
+
+    #[test]
+    fn edge_params_layout_matches_wgsl() {
+        let src = sidecar_shaders::compose("client/mask_edge.wgsl").unwrap();
+        let module = naga::front::wgsl::parse_str(&src).unwrap();
+        let (_, ty) = module.types.iter().find(|(_, t)| t.name.as_deref() == Some("EdgeParams")).unwrap();
+        let naga::TypeInner::Struct { members, span } = &ty.inner else { panic!("not a struct") };
+        assert_eq!(*span as usize, std::mem::size_of::<EdgeParams>());
+        for (name, off) in [("size", std::mem::offset_of!(EdgeParams, size)), ("mode", std::mem::offset_of!(EdgeParams, mode)), ("scale", std::mem::offset_of!(EdgeParams, scale)), ("dir", std::mem::offset_of!(EdgeParams, dir)), ("radius", std::mem::offset_of!(EdgeParams, radius)), ("ramp", std::mem::offset_of!(EdgeParams, ramp))] {
+            assert_eq!(members.iter().find(|m| m.name.as_deref() == Some(name)).unwrap().offset as usize, off, "{name}");
+        }
+    }
+
+    /// An edge's reach follows the mask's size; it is blurred at a scale that keeps the radius within 16
+    /// texels; shifting out lowers the threshold; an edge too narrow to see is none.
+    #[test]
+    fn edge_plans_follow_the_mask_size() {
+        let edge = MaskEdge { width: 100.0, feather: 50.0, shift: 100.0 };
+        let p = edge.plan([4000, 3000]).unwrap();
+        assert_eq!((p.scale, p.small, p.radius), (13, [308, 231], 200.0 / 13.0));
+        assert!((p.threshold - 0.05).abs() < 1e-6 && p.ramp == 0.5);
+        let proxy = edge.plan([1000, 750]).unwrap();
+        assert_eq!((proxy.scale, proxy.radius), (4, 12.5), "the same edge on a proxy, in its pixels");
+        assert_eq!(MaskEdge { width: 0.0, ..edge }.plan([4000, 3000]), None);
+        assert_eq!(MaskEdge { shift: -100.0, ..edge }.plan([100, 100]).unwrap().threshold, 0.95);
     }
 
     /// A layer's range stays out of the edit until set, packs low end first, and a depth layer renders.

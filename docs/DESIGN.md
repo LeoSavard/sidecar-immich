@@ -80,6 +80,12 @@ Where the code differs from the text below, the code and these notes win.
   `ProcessVersion` bump was needed: an older Sidecar keeps masks it can't render, and entries a newer one adds
   (a `kind`) are carried and skipped here. The first masks on a new install take minutes while burn tunes
   itself to the GPU; after that a photo's masks take seconds, once.
+- **Mask edges (§15):** a layer's optional `edge` (width, feather, shift) blurs its finished mask — after the
+  range and the strokes — over up to 5 % of the long edge and thresholds it again: the threshold moves the edge
+  out or in (0.5 ± 0.45), the ramp around it sets how soft it is (feather 0 keeps it crisp, only moved and
+  smoothed). Averaged down so the Gaussian's radius is at most 16 texels, in 16-bit textures so a moved
+  threshold doesn't band; render passes (`client/mask_edge.wgsl`), since r8unorm can't be a storage texture.
+  The browser's painter and the worker run the same passes from one plan (`MaskEdge::plan`, through wasm).
 - **Depth effects (§15): lens blur and haze by distance.** A pass between the lens pass and develop, on
   camera-native linear light, so a blurred highlight spreads as the light it is and haze is light in the scene
   before white balance sees it (`shaders/depth/effects.wgsl` and three `client/depth_*.wgsl` entries, the same
