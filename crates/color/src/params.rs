@@ -739,8 +739,11 @@ pub struct DevelopParams {
     /// Black and white's developer (`crate::developer`): adjacency, its reach as a share of the long edge,
     /// development's contrast factor, compensation. `[0, 0, 1, 0]` does nothing; all zero in colour.
     pub developer: [f32; 4],
-    /// A named stock's toe (`crate::stock::Toe`), from a RAW: 1 on, the toe in stops from grey, its width, unused.
+    /// A named stock's curve (`crate::stock::Curve`), from a RAW: 1 on, the toe in stops from grey, its width,
+    /// the shoulder's strength.
     pub stock: [f32; 4],
+    /// The stock's shoulder in stops from grey, its width, unused ×2.
+    pub shoulder: [f32; 4],
 }
 
 /// Contrast slider value → logistic steepness.
@@ -787,23 +790,23 @@ fn tone_params(edit: &EditParams, developed: bool) -> [f32; 4] {
     // A named stock's print puts its fog just above paper black, half a stop under the floor its toe flattens the
     // shadows into, as a printer chooses exposure and grade for a negative; Blacks still moves it from there. The
     // steepness follows the narrower range, so Contrast means the same midtone contrast it does in colour.
-    if let Some(toe) = stock_toe(edit, developed) {
-        let moved = black - DEFAULT_BLACK_EV + crate::stock::floor(&toe) - 0.5;
+    if let Some(curve) = stock_curve(edit, developed) {
+        let moved = black - DEFAULT_BLACK_EV + curve.floor() - 0.5;
         black = moved.min(t.white_ev - 1.0);
         k *= (t.white_ev - black) / (t.white_ev - t.black_ev);
     }
     [black as f32, t.white_ev as f32, k as f32, tone::pivot_for(black, t.white_ev, k) as f32]
 }
 
-/// The toe of the named stock this edit renders in black and white, from a RAW (a developed file's tones were
+/// The curve of the named stock this edit renders in black and white, from a RAW (a developed file's tones were
 /// already set by whatever wrote it).
-fn stock_toe(edit: &EditParams, developed: bool) -> Option<crate::stock::Toe> {
+fn stock_curve(edit: &EditParams, developed: bool) -> Option<crate::stock::Curve> {
     if developed {
         return None;
     }
     let m = edit.monochrome.as_ref()?;
     crate::spectral::film_sensitivity(&m.film)?;
-    crate::stock::toe(&m.film)
+    crate::stock::curve(&m.film)
 }
 
 fn mixer_params(mixer: &Mixer) -> [[f32; 4]; 8] {
@@ -870,9 +873,13 @@ pub fn pack(edit: &EditParams, camera: &CameraColor, source: SourceKind, display
         mono: if mono { [1.0, crate::spectral::GRID as f32, 0.0, 0.0] } else { [0.0; 4] },
         grain: Grain::uniform(edit.grain.as_ref()),
         developer: [0.0; 4],
-        stock: match stock_toe(edit, developed) {
-            Some(t) => [1.0, t.at as f32, t.width as f32, 0.0],
+        stock: match stock_curve(edit, developed) {
+            Some(c) => [1.0, c.toe_at as f32, c.toe_width as f32, c.shoulder as f32],
             None => [0.0; 4],
+        },
+        shoulder: match stock_curve(edit, developed) {
+            Some(c) => [c.shoulder_at as f32, c.shoulder_width as f32, 0.0, 0.0],
+            None => [0.0, 1.0, 0.0, 0.0],
         },
     };
     // Black and white's developer and development, and what they do to the grain.
@@ -943,7 +950,7 @@ mod tests {
         let (handle, ty) = module.types.iter().find(|(_, t)| t.name.as_deref() == Some("DevelopParams")).unwrap();
         let naga::TypeInner::Struct { members, span } = &ty.inner else { panic!("not a struct") };
         assert_eq!(*span as usize, std::mem::size_of::<DevelopParams>());
-        assert_eq!(layouter[handle].size as usize, 352);
+        assert_eq!(layouter[handle].size as usize, 368);
         let rust = [
             ("wb_mul", std::mem::offset_of!(DevelopParams, wb_mul)),
             ("exposure", std::mem::offset_of!(DevelopParams, exposure)),
@@ -959,13 +966,14 @@ mod tests {
             ("grain", std::mem::offset_of!(DevelopParams, grain)),
             ("developer", std::mem::offset_of!(DevelopParams, developer)),
             ("stock", std::mem::offset_of!(DevelopParams, stock)),
+            ("shoulder", std::mem::offset_of!(DevelopParams, shoulder)),
         ];
         for (name, off) in rust {
             let m = members.iter().find(|m| m.name.as_deref() == Some(name)).unwrap();
             assert_eq!(m.offset as usize, off, "{name}");
         }
         let p = pack(&EditParams::default(), &crate::camera::nikon_d850(), SourceKind::Raw, DisplaySpace::Srgb);
-        assert_eq!(p.uniform.len(), 352);
+        assert_eq!(p.uniform.len(), 368);
         assert_eq!(p.lut.len(), LUT_SIZE);
         // exposure sits at byte 12
         assert_eq!(f32::from_le_bytes(p.uniform[12..16].try_into().unwrap()), 1.0);
@@ -1056,16 +1064,17 @@ mod tests {
         assert!(pack(&candle, &cam, SourceKind::Raw, DisplaySpace::Srgb).mono_lut.is_empty(), "an unknown light is colour");
     }
 
-    /// A named stock packs its toe for a RAW and moves the black point to its fog, keeping grey; a film class and
+    /// A named stock packs its curve for a RAW and moves the black point to its fog, keeping grey; a film class and
     /// a developed file pack none.
     #[test]
     fn a_stock_packs_its_toe_and_black_point() {
         let cam = crate::camera::nikon_d850();
         let at = |film: &str, source| *bytemuck::from_bytes::<DevelopParams>(&pack(&EditParams { monochrome: Some(Monochrome { film: film.into(), ..Default::default() }), ..Default::default() }, &cam, source, DisplaySpace::Srgb).uniform);
         let hp5 = at("hp5-plus", SourceKind::Raw);
-        let toe = crate::stock::toe("hp5-plus").unwrap();
-        assert_eq!(hp5.stock, [1.0, toe.at as f32, toe.width as f32, 0.0]);
-        assert!((hp5.tone[0] as f64 - (crate::stock::floor(&toe) - 0.5)).abs() < 1e-5, "black {}", hp5.tone[0]);
+        let c = crate::stock::curve("hp5-plus").unwrap();
+        assert_eq!(hp5.stock, [1.0, c.toe_at as f32, c.toe_width as f32, c.shoulder as f32]);
+        assert_eq!(hp5.shoulder, [c.shoulder_at as f32, c.shoulder_width as f32, 0.0, 0.0]);
+        assert!((hp5.tone[0] as f64 - (c.floor() - 0.5)).abs() < 1e-5, "black {}", hp5.tone[0]);
         assert!(hp5.tone[2] < at("panchromatic", SourceKind::Raw).tone[2], "steepness follows the narrower range");
         assert_eq!(at("panchromatic", SourceKind::Raw).stock, [0.0; 4]);
         assert_eq!(at("hp5-plus", SourceKind::Developed).stock, [0.0; 4]);

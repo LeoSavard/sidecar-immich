@@ -197,6 +197,9 @@ fn cases() -> Vec<Fixture> {
     // A named stock: HP5 Plus's sensitivity and toe, with grain and a developer.
     let mut stock_hp5 = developed_mono(&grain_mono, "staining", 0.0, "daylight");
     stock_hp5.monochrome.as_mut().unwrap().film = "hp5-plus".into();
+    // SFX 200 behind a red filter: its spectrogram past 700 nm, its shoulder.
+    let mut stock_sfx = graded_mono.clone();
+    stock_sfx.monochrome.as_mut().unwrap().film = "sfx-200".into();
 
     let mut lens = EditParams { lens: Some(sidecar_color::params::Lens { profile: "sony".into(), ..Default::default() }), ..graded.clone() };
     lens.lens.as_mut().unwrap().lateral_ca = 150.0;
@@ -222,6 +225,7 @@ fn cases() -> Vec<Fixture> {
         ("dev-staining-layers".into(), nikon_d850(), SourceKind::Raw, dev_staining, DisplaySpace::Srgb, None),
         ("dev-compensating".into(), nikon_d850(), SourceKind::Raw, dev_compensating, DisplaySpace::DisplayP3, None),
         ("stock-hp5".into(), nikon_d850(), SourceKind::Raw, stock_hp5, DisplaySpace::Srgb, None),
+        ("stock-sfx-red".into(), nikon_d850(), SourceKind::Raw, stock_sfx, DisplaySpace::Srgb, None),
     ]
 }
 

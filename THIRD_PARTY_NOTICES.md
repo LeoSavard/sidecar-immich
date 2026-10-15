@@ -58,12 +58,13 @@ and J. Hanika, "A Low-Dimensional Function Space for Efficient Spectral Upsampli
 38(2), 2019, from the paper; no code was copied.
 
 ## Film stocks — makers' datasheets
-ILFORD HP5 Plus: the wedge spectrogram to tungsten light and the characteristic curve (ILFOTEC HC 1+31) were
-traced from HARMAN technology's *ILFORD HP5 Plus technical information*, Nov 2018
-(https://www.ilfordphoto.com/amfile/file/download/file/1903/product/691/), by the scripts in
-`crates/color/film-data/`; the traced values are in `crates/color/src/spectral_data.rs` and
-`crates/color/src/stock.rs`. The datasheet is not redistributed. ILFORD and HP5 are trademarks of HARMAN
-technology Ltd, named here to say whose film the curves describe.
+Spectral sensitivities and characteristic curves read, by the scripts in `crates/color/film-data/`, from:
+HARMAN technology's *ILFORD HP5 Plus technical information* and *ILFORD SFX 200 technical information*
+(Nov 2018; https://www.ilfordphoto.com/amfile/file/download/file/1903/product/691/ for HP5 Plus); Kodak Alaris's
+*KODAK PROFESSIONAL TRI-X 320 and 400 Films* (F-4017, Feb 2016); and Eastman Kodak's *EASTMAN DOUBLE-X Negative
+Film 5222 / 7222* (H-1-5222, March 2022). The values are in `crates/color/src/film_data.rs`; the datasheets are
+not redistributed. ILFORD, HP5 and SFX are trademarks of HARMAN technology Ltd; Kodak, Kodak Professional,
+Tri-X, Eastman and Double-X of Eastman Kodak Company — named here to say whose films the curves describe.
 
 ## OKLab
 Björn Ottosson, "A perceptual color space for image processing" (2020). Constants in `shaders/common/color.wgsl`.

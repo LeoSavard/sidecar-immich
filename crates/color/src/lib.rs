@@ -4,6 +4,7 @@
 
 pub mod cct;
 pub mod depth;
+mod film_data;
 pub mod developer;
 pub mod geometry;
 pub mod lens;

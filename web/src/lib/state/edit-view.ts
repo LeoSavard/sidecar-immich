@@ -87,7 +87,11 @@ const FILM_NAMES: Record<string, string> = {
 	'panchromatic-extended': 'Extended red',
 	orthochromatic: 'Orthochromatic',
 	'blue-sensitive': 'Blue-sensitive',
-	'hp5-plus': 'ILFORD HP5 Plus'
+	'hp5-plus': 'ILFORD HP5 Plus',
+	'tri-x-400': 'KODAK TRI-X 400',
+	'tri-x-320': 'KODAK TRI-X 320',
+	'double-x': 'EASTMAN DOUBLE-X',
+	'sfx-200': 'ILFORD SFX 200'
 };
 
 /** Black and white's lights, as History names them. */

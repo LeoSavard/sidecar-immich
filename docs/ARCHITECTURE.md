@@ -70,7 +70,7 @@ edged by the brush passes before develop samples them.
 | Lens blur and haze by distance | `shaders/depth/`, `shaders/client/depth_*.wgsl`, `crates/color/src/depth.rs`, `crates/engine/src/depth.rs`, `web/src/lib/gpu/depth.ts` |
 | Film rendering (colour) | `film_curve_in` in `shaders/develop/tone.wgsl`, `Film` in `crates/color/src/params.rs` |
 | Black and white: spectra, film types, filters | `crates/color/src/spectral.rs` (+ `spectral_data.rs`), `shaders/develop/mono.wgsl` |
-| Named stocks (HP5 Plus) | `crates/color/src/stock.rs`, `HP5_PLUS_SPECTROGRAM` in `spectral_data.rs`, `shaders/develop/stock.wgsl`, `crates/color/film-data/` (traces) |
+| Named stocks (HP5 Plus, Tri-X, Double-X, SFX 200) | `crates/color/src/stock.rs` (curves), `film_sensitivity` in `spectral.rs`, `crates/color/src/film_data.rs` (the sheets' data), `shaders/develop/stock.wgsl`, `crates/color/film-data/` (tracing scripts), `STOCKS` in the Film section |
 | Grain | `Grain` in `crates/color/src/params.rs`, `shaders/develop/grain.wgsl`, the Film section |
 | Developers, development, the adjacency map | `crates/color/src/developer.rs`, `shaders/develop/developer.wgsl`, `shaders/client/density_*.wgsl`, `DevelopPass::density_map` (engine) and `buildDensityMap` (`web/src/lib/gpu/develop.ts`), the loupe in `crates/worker/src/lib.rs` |
 | The camera's own rendering beside the edit | `crates/worker/src/camera.rs`, the Camera toggle in the editor page |

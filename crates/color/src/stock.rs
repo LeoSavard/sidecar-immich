@@ -1,18 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Named black-and-white stocks' characteristic curves, from their makers' datasheets (DESIGN.md §7, "Stocks").
 //!
-//! A datasheet's curve is density over relative log exposure: fog, a toe, a straight line and, for some stocks,
-//! a shoulder. Sidecar keeps its shape and not its numbers: the straight line's gradient is the print's to set
-//! (Contrast does that), so what a stock brings is where its toe flattens the shadows into fog, how gradually,
-//! and its shoulder. The curve is fitted as `fog + G·w·ln(1 + exp((log E − e₀)/w))` (a toe that becomes the
-//! straight line), then expressed in stops from middle grey, which the zone system places 1.2 log E (four
-//! stops) above the speed point at fog + 0.1.
+//! A datasheet's curve is density over log exposure: fog, a toe, a straight line and, for some stocks, a
+//! shoulder. Each is fitted (by `crates/color/film-data/fit.py`) as
+//! `D = fog + G·(w·sp((E − e₀)/w) − c·v·sp((E − e₁)/v))`, `sp(u) = ln(1 + eᵘ)`: a toe that becomes the straight
+//! line, then a shoulder taking `c` of its gradient away. Middle grey sits 1.2 log E (Zone V four stops over
+//! Zone I) above the speed point at fog + 0.1 — where Kodak's Tri-X 400 curve puts it, its speed point falling
+//! on ISO 400's 0.8 / 400 lux·s. Sidecar keeps the curve's shape, not its gradient, which is the print's to set
+//! (Contrast): the curve in stops from grey, scaled to slope 1 at grey.
 
-/// A stock's toe in stops from middle grey: where it is and how wide it bends. `DevelopParams.stock`.
+/// A stock's curve in stops from middle grey: its toe, and its shoulder taking `shoulder` of the gradient away.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Toe {
-    pub at: f64,
-    pub width: f64,
+pub struct Curve {
+    pub toe_at: f64,
+    pub toe_width: f64,
+    pub shoulder_at: f64,
+    pub shoulder_width: f64,
+    pub shoulder: f64,
 }
 
 /// One stop in log₁₀ exposure.
@@ -21,90 +25,142 @@ const STOP: f64 = std::f64::consts::LOG10_2;
 /// Middle grey above the speed point (fog + 0.1), in log exposure: Zone V four stops over Zone I.
 const GREY_ABOVE_SPEED_POINT: f64 = 1.2;
 
-/// A curve fitted to a datasheet: fog, gradient, the toe's log exposure and width.
+fn sp(u: f64) -> f64 {
+    if u > 0.0 { u + (-u).exp().ln_1p() } else { u.exp().ln_1p() }
+}
+
+fn sigmoid(u: f64) -> f64 {
+    1.0 / (1.0 + (-u).exp())
+}
+
+/// A curve fitted to a datasheet.
 struct Fit {
-    /// Only the fit's test reads it: the toe's shape doesn't depend on it.
-    #[cfg_attr(not(test), allow(dead_code))]
     fog: f64,
     gradient: f64,
     e0: f64,
     w: f64,
+    e1: f64,
+    v: f64,
+    c: f64,
 }
 
 impl Fit {
-    #[cfg(test)]
-    fn density(&self, log_e: f64) -> f64 {
-        self.fog + self.gradient * self.w * ((log_e - self.e0) / self.w).exp().ln_1p()
+    fn density(&self, e: f64) -> f64 {
+        self.fog + self.gradient * (self.w * sp((e - self.e0) / self.w) - self.c * self.v * sp((e - self.e1) / self.v))
     }
 
     /// The log exposure where density is fog + 0.1.
     fn speed_point(&self) -> f64 {
-        // fog + G·w·ln(1 + eᵘ) = fog + 0.1 ⇒ u = ln(exp(0.1 / (G·w)) − 1).
-        self.e0 + self.w * ((0.1 / (self.gradient * self.w)).exp() - 1.0).ln()
+        let (mut lo, mut hi) = (self.e0 - 5.0, self.e1 + 5.0);
+        for _ in 0..100 {
+            let mid = (lo + hi) / 2.0;
+            if self.density(mid) < self.fog + 0.1 { lo = mid } else { hi = mid }
+        }
+        lo
     }
 
-    fn toe(&self) -> Toe {
+    fn curve(&self) -> Curve {
         let grey = self.speed_point() + GREY_ABOVE_SPEED_POINT;
-        Toe { at: (self.e0 - grey) / STOP, width: self.w / STOP }
+        Curve { toe_at: (self.e0 - grey) / STOP, toe_width: self.w / STOP, shoulder_at: (self.e1 - grey) / STOP, shoulder_width: self.v / STOP, shoulder: self.c }
     }
 }
 
-/// ILFORD HP5 Plus, developed in ILFOTEC HC 1+31 for 6½ minutes at 20 °C (HARMAN technology's technical
-/// information sheet, Nov 2018, page 5), traced from the sheet's graph: (relative log exposure, density).
-pub const HP5_PLUS_CURVE: [(f64, f64); 40] = [
-    (0.1, 0.179), (0.2, 0.179), (0.3, 0.179), (0.4, 0.179), (0.5, 0.179), (0.6, 0.188), (0.7, 0.199), (0.8, 0.210),
-    (0.9, 0.230), (1.0, 0.253), (1.1, 0.285), (1.2, 0.319), (1.3, 0.361), (1.4, 0.410), (1.5, 0.464), (1.6, 0.518),
-    (1.7, 0.588), (1.8, 0.656), (1.9, 0.724), (2.0, 0.791), (2.1, 0.858), (2.2, 0.924), (2.3, 0.987), (2.4, 1.050),
-    (2.5, 1.116), (2.6, 1.182), (2.7, 1.246), (2.8, 1.308), (2.9, 1.374), (3.0, 1.437), (3.1, 1.499), (3.2, 1.564),
-    (3.3, 1.627), (3.4, 1.690), (3.5, 1.754), (3.6, 1.818), (3.7, 1.880), (3.8, 1.941), (3.9, 2.002), (4.0, 2.067),
-];
+/// ILFORD HP5 Plus, ILFOTEC HC 1+31, 6½ min (`film_data::HP5_PLUS_CURVE`; RMS 0.0025 density).
+const HP5_PLUS: Fit = Fit { fog: 0.171, gradient: 0.750, e0: 1.169, w: 0.258, e1: 2.082, v: 0.212, c: 0.157 };
+/// KODAK TRI-X 400, D-76, 8 min (`film_data::TRI_X_400_CURVE`; RMS 0.0034).
+const TRI_X_400: Fit = Fit { fog: 0.278, gradient: 0.637, e0: -2.658, w: 0.256, e1: -0.192, v: 0.143, c: 0.295 };
+/// KODAK TRI-X 320, D-76, 8 min (`film_data::TRI_X_320_CURVE`; RMS 0.0066): its long toe.
+const TRI_X_320: Fit = Fit { fog: 0.009, gradient: 0.900, e0: -2.056, w: 0.531, e1: -0.254, v: 0.104, c: 0.204 };
+/// EASTMAN DOUBLE-X 5222, D-96, 6½ min, gamma 0.66 (`film_data::DOUBLE_X_CURVE`; RMS 0.0044).
+const DOUBLE_X: Fit = Fit { fog: 0.189, gradient: 0.664, e0: -2.665, w: 0.219, e1: -0.737, v: 0.050, c: 0.159 };
+/// ILFORD SFX 200, ID-11, 10 min (`film_data::SFX_200_CURVE`; RMS 0.0040): its shoulder.
+const SFX_200: Fit = Fit { fog: 0.276, gradient: 0.735, e0: 1.001, w: 0.230, e1: 3.931, v: 0.452, c: 1.000 };
 
-/// HP5 Plus's curve, fitted to `HP5_PLUS_CURVE` by least squares (RMS 0.0065 density); no shoulder within the
-/// sheet's 4 log E.
-const HP5_PLUS: Fit = Fit { fog: 0.182, gradient: 0.645, e0: 1.06, w: 0.18 };
+fn fit(film: &str) -> Option<&'static Fit> {
+    Some(match film {
+        "hp5-plus" => &HP5_PLUS,
+        "tri-x-400" => &TRI_X_400,
+        "tri-x-320" => &TRI_X_320,
+        "double-x" => &DOUBLE_X,
+        "sfx-200" => &SFX_200,
+        _ => return None,
+    })
+}
 
-/// The toe of a named stock, by film id; `None` for the film classes, which have no one curve.
-pub fn toe(film: &str) -> Option<Toe> {
-    match film {
-        "hp5-plus" => Some(HP5_PLUS.toe()),
-        _ => None,
+/// The curve of a named stock, by film id; `None` for the film classes, which have no one curve.
+pub fn curve(film: &str) -> Option<Curve> {
+    fit(film).map(Fit::curve)
+}
+
+impl Curve {
+    /// The curve's shape in stops: the toe's softplus less the shoulder's.
+    fn f(&self, x: f64) -> f64 {
+        self.toe_width * sp((x - self.toe_at) / self.toe_width) - self.shoulder * self.shoulder_width * sp((x - self.shoulder_at) / self.shoulder_width)
     }
-}
 
-/// Where a toe's shadows end up, in stops from middle grey: the fog the deepest shadows flatten into.
-pub fn floor(toe: &Toe) -> f64 {
-    -toe.width * (-toe.at / toe.width).exp().ln_1p()
-}
+    fn slope(&self, x: f64) -> f64 {
+        sigmoid((x - self.toe_at) / self.toe_width) - self.shoulder * sigmoid((x - self.shoulder_at) / self.shoulder_width)
+    }
 
-/// The stops from middle grey a print gives exposure `x` (stops from grey) through `toe`: the straight line
-/// through grey, bent into the fog below the toe. `develop/stock.wgsl` is the same.
-pub fn print_stops(toe: &Toe, x: f64) -> f64 {
-    let sp = |u: f64| u.exp().ln_1p();
-    toe.width * (sp((x - toe.at) / toe.width) - sp(-toe.at / toe.width))
+    /// The stops from middle grey a print gives exposure `x` (stops from grey): through grey with slope 1, bent
+    /// into fog below the toe and over above the shoulder. `develop/stock.wgsl` is the same.
+    pub fn print_stops(&self, x: f64) -> f64 {
+        (self.f(x) - self.f(0.0)) / self.slope(0.0)
+    }
+
+    /// Where the deepest shadows end up, in stops from grey: the fog they flatten into.
+    pub fn floor(&self) -> f64 {
+        -self.f(0.0) / self.slope(0.0)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::film_data;
 
-    /// The fit follows the traced curve within 0.02 density.
+    /// Each fit follows its traced curve within 0.02 density.
     #[test]
-    fn hp5_fit_follows_the_datasheet() {
-        let worst = HP5_PLUS_CURVE.iter().map(|&(e, d)| (HP5_PLUS.density(e) - d).abs()).fold(0.0, f64::max);
-        assert!(worst < 0.02, "worst {worst}");
+    fn fits_follow_their_datasheets() {
+        let sets: [(&str, &[(f64, f64)]); 5] = [
+            ("hp5-plus", &film_data::HP5_PLUS_CURVE),
+            ("tri-x-400", &film_data::TRI_X_400_CURVE),
+            ("tri-x-320", &film_data::TRI_X_320_CURVE),
+            ("double-x", &film_data::DOUBLE_X_CURVE),
+            ("sfx-200", &film_data::SFX_200_CURVE),
+        ];
+        for (film, data) in sets {
+            let f = fit(film).unwrap();
+            let worst = data.iter().map(|&(e, d)| (f.density(e) - d).abs()).fold(0.0, f64::max);
+            assert!(worst < 0.02, "{film}: worst {worst}");
+        }
     }
 
-    /// HP5's toe sits about four stops under grey: Zone I is at the speed point by construction, the shadows
-    /// flatten below it, and grey and the straight line above it are kept.
+    /// Kodak's Tri-X 400 curve is in lux·seconds: its speed point falls where ISO 400 puts it, 0.8 / 400 lux·s,
+    /// which is what places middle grey.
     #[test]
-    fn hp5_toe_sits_where_zone_one_is() {
-        let t = toe("hp5-plus").unwrap();
-        assert!((-4.5..-3.5).contains(&t.at), "toe at {}", t.at);
-        assert!(print_stops(&t, 0.0).abs() < 1e-12);
-        assert!((print_stops(&t, 3.0) - 3.0).abs() < 0.01, "straight above: {}", print_stops(&t, 3.0));
-        // Zone I (four stops down) prints about 0.1 density over fog: well into the toe.
-        let zone_one = print_stops(&t, -4.0);
-        assert!(zone_one > -4.0 && zone_one - floor(&t) < 0.6, "zone I at {zone_one}, floor {}", floor(&t));
-        assert!(toe("panchromatic").is_none());
+    fn tri_x_speed_point_is_iso_400() {
+        let speed = TRI_X_400.speed_point();
+        assert!((speed - (0.8f64 / 400.0).log10()).abs() < 0.05, "speed point {speed}");
+    }
+
+    /// Every stock's print keeps grey and its slope there; HP5's toe sits about four stops under grey, Tri-X
+    /// 320's long toe nearer, and SFX 200's shoulder bends the highlights over.
+    #[test]
+    fn curves_keep_grey_and_bend_at_their_ends() {
+        for film in ["hp5-plus", "tri-x-400", "tri-x-320", "double-x", "sfx-200"] {
+            let c = curve(film).unwrap();
+            assert!(c.print_stops(0.0).abs() < 1e-12);
+            let slope = (c.print_stops(0.01) - c.print_stops(-0.01)) / 0.02;
+            assert!((slope - 1.0).abs() < 1e-3, "{film}: slope {slope}");
+            assert!(c.floor() < -2.5, "{film}: floor {}", c.floor());
+        }
+        let hp5 = curve("hp5-plus").unwrap();
+        assert!((-4.5..-3.0).contains(&hp5.toe_at), "HP5 toe at {}", hp5.toe_at);
+        assert!(curve("tri-x-320").unwrap().toe_at > hp5.toe_at + 1.0, "Tri-X 320's toe is longer");
+        let sfx = curve("sfx-200").unwrap();
+        let top = (sfx.print_stops(6.01) - sfx.print_stops(5.99)) / 0.02;
+        assert!(top < 0.6, "SFX 200's shoulder: slope {top} six stops over grey");
+        assert!(curve("panchromatic").is_none());
     }
 }

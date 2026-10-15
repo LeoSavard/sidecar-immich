@@ -7,12 +7,14 @@ Source: the architecture plan (PWA entry, XMP sidecars, server-side demosaic, We
 
 Where the code differs from the text below, the code and these notes win.
 
-- **ILFORD HP5 Plus** (§7, "Stocks"): the first named stock, from the datasheet the owner supplied —
-  spectral sensitivity from its spectrogram to tungsten light, and its characteristic curve's toe. Checked: the
-  curve fit within 0.02 density; HP5 behind red and orange needs 1.65 and 1.9 stops more than an eye-like meter
-  (the sheet warns of up to 1½); packing tests for the toe and the moved black point; parity `stock-hp5`
-  (20/20 pass); generic panchromatic against HP5 on the tractor and the portrait. In the editor a stock is a
-  choice under its film type (Panchromatic: Generic or ILFORD HP5 Plus); the edit still names the stock.
+- **Named stocks** (§7, "Stocks"): ILFORD HP5 Plus and SFX 200, KODAK TRI-X 400 and 320, EASTMAN DOUBLE-X, from
+  the datasheets the owner supplied — spectral sensitivity and the characteristic curve's toe and shoulder.
+  HP5's spectrogram was first read divided by its tungsten light; SFX 200's filter factors showed that wrong
+  (×9 against the sheet's ×2.8 behind red) and it is now read as drawn. Checked: every fit within 0.015 density
+  of its trace; Tri-X 400's speed point on ISO 400's (−2.701 against −2.699 log lux·s); each stock's red filter
+  factor within 0.3 stop of its sheet; packing tests; parity `stock-hp5` and `stock-sfx-red` (21/21 pass);
+  the six renderings of the tractor and the portrait, and SFX 200 against generic panchromatic behind red. In
+  the editor a stock is a choice under its film type; the edit still names the stock.
 
 - **Developers** (§7, "Developers"): adjacency through a low-resolution map of the whole frame, development N±2,
   compensation, grain per developer and a staining developer's grain masking. Checked: packing tests; an engine
@@ -696,29 +698,45 @@ the loupe builds one from the whole session source, lens-corrected at the map's 
 tile, so a tile's edges are the whole picture's (engine test: within 0.001). Depth effects and the detail
 filters are not in the loupe's map; at a fraction of a millimetre's reach this doesn't show.
 
-**Stocks.** A named stock is a film type with its maker's measured curves. The first is ILFORD HP5 Plus
-(`hp5-plus`), from HARMAN's technical information sheet (Nov 2018); the traces, the scripts that made them and how
-to rerun them are in `crates/color/film-data/`.
+**Stocks.** A named stock is a film type with its maker's measured curves, offered under its type in the
+editor (the edit names the stock). Five so far, read from the datasheets the owner supplied by the scripts in
+`crates/color/film-data/` (its README lists the sheets and how to rerun them); the data is in
+`crates/color/src/film_data.rs`:
 
-- *Spectral sensitivity.* The sheet gives a wedge spectrogram *to tungsten light (2,850 K)*, drawn 0 to 1. Sidecar
-  reads it as drawn and divides out the light (Planck at 2,850 K), giving the film's own sensitivity, which the
-  black-and-white table then lights as the scene was lit. The check is the sheet's own warning, that behind deep
-  red and orange filters a camera's meter "can produce negatives under exposed by as much as 1½ stops": read
-  this way, HP5 needs 1.65 stops more than an eye-like meter behind Sidecar's red filter and 1.9 behind orange.
-  Read as the film's own sensitivity it would need 0–0.5 stop, which contradicts the sheet; read as log
-  sensitivity (a wedge's height) it would need a scale the sheet doesn't give, and lands within 0.3 stop of
-  the linear reading. In daylight HP5 renders yellow 1.6 stops and foliage 1.2 stops darker than the eye, and a
-  blue sky 0.8 stop lighter — the strongly blue-sensitive classic panchromatic a yellow filter is for.
-- *Characteristic curve.* Traced (ILFOTEC HC 1+31, 6½ min) and fitted as `fog + G·w·ln(1 + exp((log E − e₀)/w))`:
-  fog 0.182, G 0.645, e₀ 1.06, w 0.18, within 0.02 density everywhere (RMS 0.0065); no shoulder within the
-  sheet's 4 log E. Sidecar keeps its shape: middle grey sits 1.2 log E (Zone V four stops over Zone I) above the
-  speed point at fog + 0.1, and the toe becomes `stock = [1, at, width]` in stops from grey (HP5: about −4.1
-  and 0.6). The develop pass bends exposure through it after grain (`develop/stock.wgsl`), so the deepest
-  shadows flatten into the film's fog, grain with them, while grey and the straight line above are unchanged.
-  The print puts the fog half a stop over the tone map's black point (`tone_params`): the black point moves to
-  the toe's floor, Blacks still moves it from there, and the steepness follows the narrower range so Contrast
-  keeps its midtone meaning. The gradient itself is the print's: a darkroom printer picks the paper grade.
-  From a RAW only; a developed file keeps its own tones and takes just the sensitivity.
+| stock | type | spectral sensitivity | characteristic curve |
+|---|---|---|---|
+| ILFORD HP5 Plus | panchromatic | spectrogram, traced | ILFOTEC HC 1+31, 6½ min |
+| KODAK TRI-X 400 | panchromatic | log sensitivity, vector | D-76, 8 min |
+| KODAK TRI-X 320 | panchromatic | Tri-X's one curve (the sheet gives no other) | D-76, 8 min, sheets |
+| EASTMAN DOUBLE-X 5222 | panchromatic | log sensitivity, traced (from 420 nm, held flat below) | D-96, 6½ min, gamma 0.66 |
+| ILFORD SFX 200 | extended red | spectrogram to 740 nm, traced | ID-11, 10 min |
+
+- *Spectral sensitivity.* Kodak plots log₁₀ of the reciprocal of the energy giving density 1.0 over fog — the
+  film's own sensitivity, used as it is. ILFORD plots a "wedge spectrogram to tungsten light (2,850 K)", 0 to
+  1; it is read as drawn, the film's relative sensitivity. *That corrects the first reading of HP5*, which
+  divided the light out: SFX 200's filter-factor table decides it — read as drawn, SFX needs ×2.9 behind a red
+  filter where the sheet says ×2.8; divided by tungsten it would need ×9. (The first reading had leaned on the
+  sheet's warning that cameras' meters underexpose by up to 1½ stops behind deep red: that is about meters'
+  red response, not the film's spectrum.) Every stock's red (Wratten 25) factor through Sidecar's generic red
+  filter lands within 0.3 stop of its sheet: SFX 2.9 / 2.8, Tri-X 9.0 / 8 in daylight and 4.1 / 5 in tungsten,
+  Double-X 8.7 / 8. Our yellow is a long-pass at 500 nm, deeper than a Wratten 8 (Tri-X 2.4 / 2, Double-X
+  2.3 / 1.5, SFX 1.6 / 2). HP5 read as drawn renders yellow 0.6 stop darker and a blue sky 0.4 stop lighter than
+  the eye — the classic panchromatic its sheet describes; its red factor, 6.3, sits with Tri-X's.
+- *Characteristic curve.* Each is fitted (`sheets/fit.py`, Nelder–Mead) as
+  `fog + G·(w·sp((log E − e₀)/w) − c·v·sp((log E − e₁)/v))`, `sp(u) = ln(1 + eᵘ)`: a toe that becomes the
+  straight line, and a shoulder taking `c` of the gradient away — within 0.015 density of every trace. Middle
+  grey sits 1.2 log E (Zone V four stops over Zone I) above the speed point at fog + 0.1; Kodak's curves are in
+  lux·s, and Tri-X 400's speed point falls at log −2.701, where ISO 400 (0.8 / 400 lux·s) puts it: −2.699. In
+  stops from grey the toes sit near −3.7 to −4 (HP5, Tri-X 400, Double-X, SFX), Tri-X 320's at −1.4 and twice
+  as wide — the long toe it is known for; shoulders: SFX 200 rolls fully over around the white point, Tri-X 400
+  takes 30 % off above +4.4, Double-X 16 % above +2.4, HP5 is nearly straight.
+- *Rendering.* `stock = [1, toe at, toe width, shoulder strength]` and `shoulder = [at, width]` reach the develop
+  pass, which bends exposure after grain (`develop/stock.wgsl`): the curve's shape, scaled to slope 1 at grey,
+  so the deepest shadows flatten into fog, grain with them, and the highlights go over the shoulder, while
+  grey and Contrast's midtone slope are kept. The print puts the fog half a stop over the tone map's black
+  point (`tone_params`): the black point moves to the curve's floor, Blacks still moves it from there, and the
+  steepness follows the narrower range. The gradient itself is the print's: a darkroom printer picks the
+  paper grade. From a RAW only; a developed file keeps its own tones and takes just the sensitivity.
 
 **Grain.** `EditParams.grain { amount, size }` makes each spot's exposure flicker as a negative's grains make
 it, before the tone map, in colour or black and white, on a RAW or a developed file (`develop/grain.wgsl`). The
@@ -763,11 +781,12 @@ struct DevelopParams {            // offset  size
                                   //                adjacency map's log exposure, unused
   grain      : vec4f,             //  304     16   σ in stops (0 none), size ÷ long edge, stain masking, unused
   developer  : vec4f,             //  320     16   adjacency, reach ÷ long edge, development contrast, compensation
-  stock      : vec4f,             //  336     16   a named stock's toe: 1 on, where (stops from grey), width, unused
-}                                 //  total 352 bytes
+  stock      : vec4f,             //  336     16   a named stock's curve: 1 on, toe at, toe width, shoulder strength
+  shoulder   : vec4f,             //  352     16   the stock's shoulder: at, width (stops from grey), unused ×2
+}                                 //  total 368 bytes
 ```
 
-**Struct layouts.** The 352-byte table above documents the layout; code never hard-codes it. `encase` (MIT-0) derives it on the Rust side and `webgpu-utils` (MIT) reads it from the WGSL source in the browser, so a field added to the struct can't silently shift the offsets.
+**Struct layouts.** The 368-byte table above documents the layout; code never hard-codes it. `encase` (MIT-0) derives it on the Rust side and `webgpu-utils` (MIT) reads it from the WGSL source in the browser, so a field added to the struct can't silently shift the offsets.
 
 **Parameter flow.** Slider input → params store (Svelte 5 `$state`) → derived CPU values (WASM: WB → multipliers and matrix; curve → LUT) → `queue.writeBuffer` → dirty flag → next `requestAnimationFrame` runs develop → view → histogram. Undo snapshots on `pointerup`, not per input event.
 

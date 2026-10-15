@@ -84,8 +84,8 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   if (P.grain.x > 0.0) {
     c = grain_apply(c, grain_noise(at, P.grain.y * max(frame.x, frame.y)), P.grain.x, P.grain.z, P.tone, developed);
   }
-  // A named stock's toe: the shadows, grain and all, bent into its fog.
-  if (P.stock.x > 0.5) { c = vec3f(stock_print(c.r, P.stock)); }
+  // A named stock's curve: the shadows, grain and all, bent into its fog, the highlights over its shoulder.
+  if (P.stock.x > 0.5) { c = vec3f(stock_print(c.r, P.stock, P.shoulder)); }
   var e: f32;
   // Film rendering (RAW only; `pack` leaves it at 0 for a developed file): the curves per channel, blended
   // with the neutral rendering by its amount. At 0 none of it runs, so the neutral path is unchanged.
