@@ -602,3 +602,29 @@ fn saving_drops_known_fields_left_out_and_keeps_unknown_ones() {
     assert_eq!(stored["tone"]["knee"], 0.25);
     assert_eq!(doc.edit(), EditParams::default());
 }
+
+/// Saturation and Highlights/Shadows are written only when set: setting them back to 0 must reach the file and
+/// the history, not leave the last value standing.
+#[test]
+fn settings_left_out_at_zero_are_turned_off_in_the_file_and_the_history() {
+    let tmp = tempfile::tempdir().unwrap();
+    let roots = [tmp.path().canonicalize().unwrap()];
+    let original = fixture(tmp.path(), "DSC_10.NEF");
+    let mut set = EditParams { saturation: 15.0, ..Default::default() };
+    set.tone.highlights = -30.0;
+    set.tone.shadows = 20.0;
+    let mut heads = Vec::new();
+    for e in [&set, &EditParams::default()] {
+        let base = SidecarDoc::load(&original).unwrap().history().head;
+        update(&original, &roots, |d| {
+            heads.push(d.commit(&Commit { edit: e, base: &base, checkpoint: false, session: None, user: None }, "sha")?.head);
+            Ok(())
+        })
+        .unwrap();
+    }
+    let doc = SidecarDoc::load(&original).unwrap();
+    assert_eq!(doc.edit(), EditParams::default(), "{}", doc.sidecar["edit"]);
+    let h = doc.history();
+    assert_eq!(h.edit_of(&heads[0]).unwrap(), set);
+    assert_eq!(h.edit_of(&heads[1]).unwrap(), EditParams::default());
+}
