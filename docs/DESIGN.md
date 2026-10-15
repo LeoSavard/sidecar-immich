@@ -627,8 +627,8 @@ film and filter (`mono_lut`, rebuilt per pack in well under a millisecond), read
 after the camera matrix (`develop/mono.wgsl`, eight corners, since r32float isn't filterable), and passed on as a
 neutral to the tone map. Film rendering gives way when both are set; developed files can be black and white too.
 
-Film types are the classes' sensitivities — panchromatic (HP5/Tri-X-like), extended-red panchromatic
-(T-grain), orthochromatic, blue-sensitive (collodion; the ultraviolet real plates saw is not in any RAW) — not
+Film types are the classes' sensitivities — panchromatic (classic), extended-red panchromatic
+(modern flat-grain), orthochromatic, blue-sensitive (collodion; the ultraviolet real plates saw is not in any RAW) — not
 measured curves of named stocks, which need their datasheets digitised. Filters are generic yellow, orange,
 red (long-pass edges at 500, 555, 600 nm) and green (a band). Measured on everyday colours: blue-sensitive film
 darkens skin 0.7 stop against panchromatic and lifts the sky; orthochromatic takes a saturated red to near
