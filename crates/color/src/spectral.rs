@@ -191,10 +191,10 @@ pub fn film_sensitivity(id: &str) -> Option<[f64; SAMPLES]> {
         _ => {}
     }
     Some(sampled(match id {
-        // Classic panchromatic (HP5, Tri-X and their kind): blue-heavy, a dip in the green, sensitising out to
+        // Classic panchromatic, as the class's datasheets draw it: blue-heavy, a dip in the green, sensitising out to
         // the orange-red and gone by about 680 nm, which is why reds print darker than the eye sees them.
         "panchromatic" => &[(380.0, 0.55), (400.0, 0.8), (430.0, 0.95), (460.0, 1.0), (490.0, 0.85), (510.0, 0.7), (530.0, 0.75), (560.0, 0.85), (590.0, 0.9), (620.0, 0.9), (640.0, 0.7), (660.0, 0.3), (680.0, 0.05), (700.0, 0.0)],
-        // Modern panchromatic with an extended red (T-grain films): flatter, seeing further into the red.
+        // Modern panchromatic with an extended red: flatter, seeing further into the red.
         "panchromatic-extended" => &[(380.0, 0.5), (400.0, 0.75), (440.0, 0.9), (480.0, 0.9), (510.0, 0.8), (540.0, 0.85), (580.0, 0.95), (620.0, 1.0), (650.0, 0.9), (670.0, 0.65), (690.0, 0.3), (710.0, 0.05), (720.0, 0.0)],
         // Orthochromatic: blind to red past about 600 nm — reds go black, skies stay bright.
         "orthochromatic" => &[(380.0, 0.6), (400.0, 0.85), (440.0, 1.0), (480.0, 0.95), (520.0, 0.85), (550.0, 0.8), (570.0, 0.6), (590.0, 0.2), (600.0, 0.05), (610.0, 0.0)],

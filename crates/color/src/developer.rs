@@ -35,16 +35,16 @@ pub struct Developer {
 pub fn developer(id: &str) -> Developer {
     let d = |adjacency, reach_mm, compensation, grain, stain| Developer { adjacency, reach_mm, compensation, grain, stain };
     match id {
-        // A solvent fine-grain developer (Perceptol and Microdol's kind): finer grain, no edge effects.
+        // A solvent fine-grain developer: finer grain, no edge effects.
         "fine-grain" => d(0.0, 0.1, 0.0, 0.75, 0.0),
-        // A dilute high-acutance developer (Rodinal's kind): strong edges over a short reach, grain shown off.
+        // A dilute high-acutance developer: strong edges over a short reach, grain shown off.
         "acutance" => d(0.35, 0.08, 0.1, 1.2, 0.0),
         // A compensating developer (two-bath, highly dilute or stand development): highlights held, broad edges.
         "compensating" => d(0.25, 0.3, 0.45, 1.0, 0.0),
         // A staining developer (pyro's kind): the stain compensates and hides the highlights' grain; tanning
         // sharpens edges a little.
         "staining" => d(0.2, 0.15, 0.3, 1.0, 0.5),
-        // Standard (D-76's kind): none of it.
+        // A standard general-purpose developer: none of it.
         _ => d(0.0, 0.1, 0.0, 1.0, 0.0),
     }
 }
