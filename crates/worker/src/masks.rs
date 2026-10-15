@@ -75,7 +75,10 @@ impl Worker {
         if !self.masks_done(key) {
             // The proxy first: it takes this photo's decode turn itself, so it can't be held around it.
             let (w, h, bytes) = self.proxy(key, DEFAULT_EDGE).await?;
-            let _turn = self.decode_guard(key).await;
+            // One computation per photo at a time, under a lock of its own: under the decode turn, every proxy
+            // the editor asks for while the models run (seconds; minutes on a new install while they tune)
+            // waited for them.
+            let _turn = self.decode_guard(&format!("masks:{key}")).await;
             if !self.masks_done(key) {
                 let info = self.cached_meta(key).await?.info;
                 let mut paths: Vec<(&'static str, PathBuf)> = NAMES.iter().map(|n| (*n, self.mask_path(key, &format!("{n}.png")))).collect();
