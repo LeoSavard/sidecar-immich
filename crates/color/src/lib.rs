@@ -4,6 +4,7 @@
 
 pub mod cct;
 pub mod depth;
+pub mod developer;
 pub mod geometry;
 pub mod lens;
 pub mod mat;

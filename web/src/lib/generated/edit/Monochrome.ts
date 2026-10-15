@@ -10,4 +10,14 @@ export type Monochrome = { film: string, filter: string,
  * Daylight, the default, is left out of the serialized edit, so black and white made before this renders
  * and hashes as it did.
  */
-light?: string, };
+light?: string, 
+/**
+ * The developer (`crate::developer::developer`): `standard`, the default and left out of the serialized
+ * edit, `fine-grain`, `acutance`, `compensating` or `staining`.
+ */
+developer?: string, 
+/**
+ * Development, −2 … 2: the zone system's N−2 … N+2, longer development for more contrast above the
+ * shadows. 0, left out of the serialized edit, is normal development.
+ */
+development?: number, };

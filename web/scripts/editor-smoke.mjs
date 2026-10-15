@@ -121,6 +121,13 @@ try {
 		await set('grain-amount', 30);
 		await set('grain-size', 40);
 	});
+	await step('black and white', async () => {
+		await section('Film');
+		await (await visible(page.getByRole('radio', { name: 'Black & white' }))).click();
+		await (await visible(page.getByRole('radio', { name: /^High acutance/ }))).click();
+		await (await visible(page.getByRole('radio', { name: 'Tungsten' }))).click();
+		await set('mono-development', 1);
+	});
 	await step('curve', async () => {
 		await section('Curve');
 		const s = await visible(page.locator('svg[aria-label^="Tone curve"]'));

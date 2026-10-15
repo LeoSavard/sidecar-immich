@@ -57,9 +57,10 @@ const GRAIN_LN2 = 0.6931471806;
 
 // `c` with its exposure moved by `n` grains of `stops` standard deviation, keeping hue. A negative's grain grows
 // with its density, so a RAW's is strongest toward the white point and least at the black point (the tone curve
-// then flattens both ends); a developed file is already a print, so its grain is shaped to fade at black and
-// white. The mean exposure is kept: exp2 of a Gaussian would otherwise brighten by σ² ln 2 / 2.
-fn grain_apply(c: vec3f, n: f32, stops: f32, tone: vec4f, developed: bool) -> vec3f {
+// then flattens both ends); a staining developer's stain hides `stain` of it at the white point, less below. A
+// developed file is already a print, so its grain is shaped to fade at black and white. The mean exposure is
+// kept: exp2 of a Gaussian would otherwise brighten by σ² ln 2 / 2.
+fn grain_apply(c: vec3f, n: f32, stops: f32, stain: f32, tone: vec4f, developed: bool) -> vec3f {
   let y = max(dot(c, LUMA_2020), 0.0);
   var sigma: f32;
   if (developed) {
@@ -67,7 +68,7 @@ fn grain_apply(c: vec3f, n: f32, stops: f32, tone: vec4f, developed: bool) -> ve
     sigma = stops * 4.0 * e * (1.0 - e);
   } else {
     let t = clamp((log2(max(y, 1e-10) / 0.18) - tone.x) / (tone.y - tone.x), 0.0, 1.0);
-    sigma = stops * sqrt((0.2 + t) / 1.2);
+    sigma = stops * sqrt((0.2 + t) / 1.2) * (1.0 - stain * t);
   }
   return c * exp2(sigma * n - 0.5 * sigma * sigma * GRAIN_LN2);
 }

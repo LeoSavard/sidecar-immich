@@ -2,13 +2,21 @@
 // Develop pass in the browser. Bind group layout, formats and the draw mirror crates/engine/src/develop.rs,
 // and the WGSL is the same composed file, so the parity harness can compare the two renders directly.
 import developWgsl from './wgsl/client_develop.wgsl?raw';
+import densityDownWgsl from './wgsl/client_density_down.wgsl?raw';
+import densityBlurWgsl from './wgsl/client_density_blur.wgsl?raw';
 import { DEVELOP_UNIFORM_BYTES } from '$lib/color/pack';
+import { kernel } from './depth';
 
 /** `MaskParams` (shaders/develop/masks.wgsl), and the texture slots it describes. */
 const MASK_UNIFORM_BYTES = 1568;
 const MAX_MASKS = 8;
 /** Each layer's curve: a row of this many entries. */
 const LUT = 4096;
+/** The adjacency map's long edge, at most: `sidecar_color::developer::MAP_LONG`. */
+const MAP_LONG = 1024;
+/** Float offsets in `DevelopParams` (shaders/develop/params.wgsl): `mono` and `developer`. */
+const MONO = 72;
+const DEVELOPER = 80;
 
 export class DevelopPass {
 	readonly device: GPUDevice;
@@ -32,12 +40,22 @@ export class DevelopPass {
 	private layerCurves: GPUTexture;
 	/** Black and white's table over the colour cube; 1×1×1 in colour. */
 	private mono: GPUTexture;
+	/** The uniforms last set, which say whether the developer needs its adjacency map. */
+	private uniform = new Float32Array(DEVELOP_UNIFORM_BYTES / 4);
+	/** Black and white's adjacency map and the textures it is made in (`sidecar_color::developer`). */
+	private density?: { small: GPUTexture; exposure: GPUTexture; across: GPUTexture; map: GPUTexture; ubo: GPUBuffer; params: GPUBuffer[] };
+	/** The map the main bind group holds, so it is rebuilt when the map comes or goes. */
+	private boundDensity?: GPUTexture;
+	private densityDown: GPUComputePipeline;
+	private densityBlur: GPUComputePipeline;
 
-	private constructor(device: GPUDevice, pipeline: GPURenderPipeline, layout: GPUBindGroupLayout, maskLayout: GPUBindGroupLayout) {
+	private constructor(device: GPUDevice, pipeline: GPURenderPipeline, layout: GPUBindGroupLayout, maskLayout: GPUBindGroupLayout, densityDown: GPUComputePipeline, densityBlur: GPUComputePipeline) {
 		this.device = device;
 		this.pipeline = pipeline;
 		this.layout = layout;
 		this.maskLayout = maskLayout;
+		this.densityDown = densityDown;
+		this.densityBlur = densityBlur;
 		this.ubo = device.createBuffer({ label: 'develop params', size: DEVELOP_UNIFORM_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 		// Zeroed on creation: no masks until `setMasks` says otherwise.
 		this.maskUbo = device.createBuffer({ label: 'develop masks', size: MASK_UNIFORM_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
@@ -60,7 +78,8 @@ export class DevelopPass {
 				{ binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
 				{ binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '2d' } },
 				{ binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '1d' } },
-				{ binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '3d' } }
+				{ binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '3d' } },
+				{ binding: 4, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '2d' } }
 			]
 		});
 		// Mirrors crates/engine/src/develop.rs: the mask uniforms, a linear sampler, a texture per slot.
@@ -80,7 +99,11 @@ export class DevelopPass {
 			fragment: { module, entryPoint: 'fs', targets: [{ format: 'rgba16float' }] },
 			primitive: { topology: 'triangle-list' }
 		});
-		return new DevelopPass(device, pipeline, layout, maskLayout);
+		const [densityDown, densityBlur] = await Promise.all([
+			kernel(device, 'density down', densityDownWgsl, ['uniform', 'texture', 'storage']),
+			kernel(device, 'density blur', densityBlurWgsl, ['uniform', 'texture', 'storage'])
+		]);
+		return new DevelopPass(device, pipeline, layout, maskLayout, densityDown, densityBlur);
 	}
 
 	get output(): GPUTexture | undefined {
@@ -118,6 +141,75 @@ export class DevelopPass {
 	setUniforms(bytes: ArrayBuffer | ArrayBufferView) {
 		if (bytes.byteLength !== DEVELOP_UNIFORM_BYTES) throw new Error(`develop uniforms must be ${DEVELOP_UNIFORM_BYTES} bytes`);
 		this.device.queue.writeBuffer(this.ubo, 0, bytes);
+		const view = ArrayBuffer.isView(bytes) ? bytes : new Uint8Array(bytes);
+		new Uint8Array(this.uniform.buffer).set(new Uint8Array(view.buffer, view.byteOffset, view.byteLength));
+	}
+
+	/** Black and white, a developer with adjacency: `crates/engine`'s `needs_density_map`. */
+	private get needsDensityMap(): boolean {
+		const u = this.uniform;
+		return u[MONO] > 0.5 && u[MONO + 2] < 0.5 && u[DEVELOPER] !== 0;
+	}
+
+	private storage(label: string, w: number, h: number, usage = 0): GPUTexture {
+		return this.device.createTexture({ label, size: [w, h], format: 'rgba16float', usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING | usage });
+	}
+
+	private dispatch(encoder: GPUCommandEncoder, pipeline: GPUComputePipeline, params: GPUBuffer, from: GPUTexture, to: GPUTexture) {
+		const bind = this.device.createBindGroup({
+			layout: pipeline.getBindGroupLayout(0),
+			entries: [
+				{ binding: 0, resource: { buffer: params } },
+				{ binding: 1, resource: from.createView() },
+				{ binding: 2, resource: to.createView() }
+			]
+		});
+		const pass = encoder.beginComputePass();
+		pass.setPipeline(pipeline);
+		pass.setBindGroup(0, bind);
+		pass.dispatchWorkgroups(Math.ceil(to.width / 16), Math.ceil(to.height / 16));
+		pass.end();
+	}
+
+	/**
+	 * The adjacency map over the picture develop reads, as `DevelopPass::density_map` makes it on the server:
+	 * averaged down by a whole number, developed to the film's log exposure, blurred over the developer's reach.
+	 */
+	private buildDensityMap(masks: GPUBindGroup) {
+		const input = this.input ?? this.source!;
+		const [w, h] = [input.width, input.height];
+		const k = Math.max(1, Math.ceil(Math.max(w, h) / MAP_LONG));
+		const [mw, mh] = [Math.ceil(w / k), Math.ceil(h / k)];
+		if (this.density?.map.width !== mw || this.density?.map.height !== mh) {
+			if (this.density) for (const t of [this.density.small, this.density.exposure, this.density.across, this.density.map]) t.destroy();
+			const small = (label: string) => this.storage(label, mw, mh);
+			const params = [0, 1, 2].map(() => this.device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }));
+			this.density = {
+				small: small('density source'),
+				exposure: this.device.createTexture({ label: 'density exposure', size: [mw, mh], format: 'rgba16float', usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING }),
+				across: small('density across'),
+				map: small('density map'),
+				ubo: this.density?.ubo ?? this.device.createBuffer({ label: 'density develop params', size: DEVELOP_UNIFORM_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }),
+				params
+			};
+			this.bindGroup = undefined;
+		}
+		const d = this.density;
+		const own = this.uniform.slice();
+		own[MONO + 2] = 1;
+		this.device.queue.writeBuffer(d.ubo, 0, own);
+		const sigma = (this.uniform[DEVELOPER + 1] * Math.max(w, h)) / k;
+		this.device.queue.writeBuffer(d.params[0], 0, new Float32Array([k, 0, 0, 0]));
+		this.device.queue.writeBuffer(d.params[1], 0, new Float32Array([sigma, 1, 0, 0]));
+		this.device.queue.writeBuffer(d.params[2], 0, new Float32Array([sigma, 0, 1, 0]));
+		let encoder = this.device.createCommandEncoder();
+		this.dispatch(encoder, this.densityDown, d.params[0], input, d.small);
+		this.device.queue.submit([encoder.finish()]);
+		this.drawWith(this.groupFor(d.ubo, d.small, this.noMask), d.exposure, masks);
+		encoder = this.device.createCommandEncoder();
+		this.dispatch(encoder, this.densityBlur, d.params[1], d.exposure, d.across);
+		this.dispatch(encoder, this.densityBlur, d.params[2], d.across, d.map);
+		this.device.queue.submit([encoder.finish()]);
 	}
 
 	setToneLut(lut: Float32Array) {
@@ -168,21 +260,34 @@ export class DevelopPass {
 		});
 	}
 
-	private draw(target: GPUTexture, masks: GPUBindGroup) {
-		if (!this.source || !this.lut) throw new Error('develop pass needs a source and a tone LUT');
-		this.bindGroup ??= this.device.createBindGroup({
+	private groupFor(ubo: GPUBuffer, input: GPUTexture, density: GPUTexture): GPUBindGroup {
+		return this.device.createBindGroup({
 			layout: this.layout,
 			entries: [
-				{ binding: 0, resource: { buffer: this.ubo } },
-				{ binding: 1, resource: (this.input ?? this.source).createView() },
-				{ binding: 2, resource: this.lut.createView() },
-				{ binding: 3, resource: this.mono.createView() }
+				{ binding: 0, resource: { buffer: ubo } },
+				{ binding: 1, resource: input.createView() },
+				{ binding: 2, resource: this.lut!.createView() },
+				{ binding: 3, resource: this.mono.createView() },
+				{ binding: 4, resource: density.createView() }
 			]
 		});
+	}
+
+	private draw(target: GPUTexture, masks: GPUBindGroup) {
+		if (!this.source || !this.lut) throw new Error('develop pass needs a source and a tone LUT');
+		if (this.needsDensityMap) this.buildDensityMap(masks);
+		const density = this.needsDensityMap && this.density ? this.density.map : this.noMask;
+		if (density !== this.boundDensity) this.bindGroup = undefined;
+		this.boundDensity = density;
+		this.bindGroup ??= this.groupFor(this.ubo, this.input ?? this.source, density);
+		this.drawWith(this.bindGroup, target, masks);
+	}
+
+	private drawWith(group: GPUBindGroup, target: GPUTexture, masks: GPUBindGroup) {
 		const encoder = this.device.createCommandEncoder();
 		const pass = encoder.beginRenderPass({ colorAttachments: [{ view: target.createView(), loadOp: 'clear', storeOp: 'store', clearValue: [0, 0, 0, 1] }] });
 		pass.setPipeline(this.pipeline);
-		pass.setBindGroup(0, this.bindGroup);
+		pass.setBindGroup(0, group);
 		pass.setBindGroup(1, masks);
 		pass.draw(3);
 		pass.end();

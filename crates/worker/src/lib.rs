@@ -552,7 +552,21 @@ fn loupe_png(w: &Worker, kit: &export::Kit, req: &LoupeRequest, masks: &[Option<
     let packed = rendering.pack(&req.edit, req.color_space);
     // Masks cover the whole frame; each develop below says where its tile sits in it.
     let mask_textures = rendering.mask_textures(kit, &req.edit, masks, flip, [sw, sh]);
-    let masks_at = |x: u32, y: u32| export::masks_for(&packed, &mask_textures, [x as f32, y as f32, sw as f32, sh as f32]);
+    // Black and white's adjacency map covers the whole frame too: averaged down, lens-corrected at that size as
+    // export corrects the whole, then developed and blurred.
+    let density = match sidecar_engine::needs_density_map(&packed.uniform) {
+        true => {
+            let small = kit.develop.density_source(&kit.gpu, &source);
+            let size = [small.width(), small.height()];
+            let small = match rendering.lens_params(&req.edit, size, [0.0; 2], [0.0; 2]) {
+                Some(p) => kit.lens.apply(&kit.gpu, &small, &p, size),
+                None => small,
+            };
+            Some(kit.develop.density_map(&kit.gpu, &small, [sw, sh], &packed.uniform, &packed.lut, &export::masks_for(&packed, &mask_textures, [0.0; 4]))?)
+        }
+        false => None,
+    };
+    let masks_at = |x: u32, y: u32| sidecar_engine::Masks { density: density.as_ref(), ..export::masks_for(&packed, &mask_textures, [x as f32, y as f32, sw as f32, sh as f32]) };
     let depth_texture = depth.map(|d| rendering.depth_texture(kit, &req.edit, &d.image, flip));
     let depth_params = depth.and_then(|d| sidecar_color::depth::pack(&req.edit, d.airlight, [sw, sh], [0.0; 2]));
     // A rectangle of the sensor's pixels, developed as export develops it: denoised, sharpened, lens-corrected,

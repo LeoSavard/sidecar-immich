@@ -123,6 +123,8 @@ export function describeChanges(from: EditParams, to: EditParams): string[] {
 	if (!!from.monochrome !== !!to.monochrome) out.push(to.monochrome ? 'Black and white' : 'Colour');
 	else if (from.monochrome && to.monochrome) {
 		if (from.monochrome.film !== to.monochrome.film) out.push(`Film type ${to.monochrome.film}`);
+		if ((from.monochrome.developer ?? 'standard') !== (to.monochrome.developer ?? 'standard')) out.push(`Developer ${to.monochrome.developer ?? 'standard'}`);
+		if ((from.monochrome.development ?? 0) !== (to.monochrome.development ?? 0)) out.push(to.monochrome.development ? `Development N${signed(to.monochrome.development, 1)}` : 'Normal development');
 		if ((from.monochrome.light ?? 'daylight') !== (to.monochrome.light ?? 'daylight')) out.push(LIGHT_NAMES[to.monochrome.light ?? 'daylight'] ?? `Light ${to.monochrome.light}`);
 		if (from.monochrome.filter !== to.monochrome.filter) out.push(to.monochrome.filter === 'none' ? 'No filter' : `${to.monochrome.filter[0].toUpperCase()}${to.monochrome.filter.slice(1)} filter`);
 	}

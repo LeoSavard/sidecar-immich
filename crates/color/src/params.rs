@@ -509,15 +509,29 @@ pub struct Monochrome {
     #[serde(skip_serializing_if = "is_daylight")]
     #[cfg_attr(feature = "ts", ts(as = "Option<String>", optional))]
     pub light: String,
+    /// The developer (`crate::developer::developer`): `standard`, the default and left out of the serialized
+    /// edit, `fine-grain`, `acutance`, `compensating` or `staining`.
+    #[serde(skip_serializing_if = "is_standard")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<String>", optional))]
+    pub developer: String,
+    /// Development, −2 … 2: the zone system's N−2 … N+2, longer development for more contrast above the
+    /// shadows. 0, left out of the serialized edit, is normal development.
+    #[serde(skip_serializing_if = "is_zero")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<f64>", optional))]
+    pub development: f64,
 }
 
 fn is_daylight(v: &str) -> bool {
     v == "daylight"
 }
 
+fn is_standard(v: &str) -> bool {
+    v == "standard"
+}
+
 impl Default for Monochrome {
     fn default() -> Self {
-        Self { film: "panchromatic".into(), filter: "none".into(), light: "daylight".into() }
+        Self { film: "panchromatic".into(), filter: "none".into(), light: "daylight".into(), developer: "standard".into(), development: 0.0 }
     }
 }
 
@@ -719,8 +733,12 @@ pub struct DevelopParams {
     pub film: [f32; 4],
     /// Black and white: x 1 when on, y the side of `Packed::mono_lut`'s cube, unused ×2.
     pub mono: [f32; 4],
-    /// Grain (`Grain::uniform`): standard deviation in stops (0 none), size as a share of the long edge, unused ×2.
+    /// Grain (`Grain::uniform`): standard deviation in stops (0 none), size as a share of the long edge, the
+    /// share a staining developer hides at the white point, unused.
     pub grain: [f32; 4],
+    /// Black and white's developer (`crate::developer`): adjacency, its reach as a share of the long edge,
+    /// development's contrast factor, compensation. `[0, 0, 1, 0]` does nothing; all zero in colour.
+    pub developer: [f32; 4],
 }
 
 /// Contrast slider value → logistic steepness.
@@ -808,7 +826,7 @@ pub fn pack(edit: &EditParams, camera: &CameraColor, source: SourceKind, display
         .unwrap_or_default();
     let mono = !mono_lut.is_empty();
     let tone = tone_params(edit, developed);
-    let params = DevelopParams {
+    let mut params = DevelopParams {
         wb_mul: wb.mul.map(|v| v as f32),
         exposure: 2f64.powf(edit.exposure.ev) as f32,
         cam_to_work: to_mat3(&wb.cam_to_rec2020),
@@ -830,7 +848,15 @@ pub fn pack(edit: &EditParams, camera: &CameraColor, source: SourceKind, display
         },
         mono: if mono { [1.0, crate::spectral::GRID as f32, 0.0, 0.0] } else { [0.0; 4] },
         grain: Grain::uniform(edit.grain.as_ref()),
+        developer: [0.0; 4],
     };
+    // Black and white's developer and development, and what they do to the grain.
+    if let Some(m) = edit.monochrome.as_ref().filter(|_| mono) {
+        let d = crate::developer::developer(&m.developer);
+        params.developer = [d.adjacency as f32, (d.reach_mm * 1000.0 / FRAME_MICRONS) as f32, crate::developer::gamma(m.development) as f32, d.compensation as f32];
+        params.grain[0] *= (d.grain * crate::developer::development_grain(m.development)) as f32;
+        params.grain[2] = d.stain as f32;
+    }
     let mut masks = MaskParams { frame: [0.0; 4], count: 0, _pad: [0; 3], layers: [MaskLayer::default(); MAX_MASKS] };
     let mut mask_curves = Vec::with_capacity(MAX_MASKS * LUT_SIZE);
     for i in 0..MAX_MASKS {
@@ -892,7 +918,7 @@ mod tests {
         let (handle, ty) = module.types.iter().find(|(_, t)| t.name.as_deref() == Some("DevelopParams")).unwrap();
         let naga::TypeInner::Struct { members, span } = &ty.inner else { panic!("not a struct") };
         assert_eq!(*span as usize, std::mem::size_of::<DevelopParams>());
-        assert_eq!(layouter[handle].size as usize, 320);
+        assert_eq!(layouter[handle].size as usize, 336);
         let rust = [
             ("wb_mul", std::mem::offset_of!(DevelopParams, wb_mul)),
             ("exposure", std::mem::offset_of!(DevelopParams, exposure)),
@@ -906,13 +932,14 @@ mod tests {
             ("film", std::mem::offset_of!(DevelopParams, film)),
             ("mono", std::mem::offset_of!(DevelopParams, mono)),
             ("grain", std::mem::offset_of!(DevelopParams, grain)),
+            ("developer", std::mem::offset_of!(DevelopParams, developer)),
         ];
         for (name, off) in rust {
             let m = members.iter().find(|m| m.name.as_deref() == Some(name)).unwrap();
             assert_eq!(m.offset as usize, off, "{name}");
         }
         let p = pack(&EditParams::default(), &crate::camera::nikon_d850(), SourceKind::Raw, DisplaySpace::Srgb);
-        assert_eq!(p.uniform.len(), 320);
+        assert_eq!(p.uniform.len(), 336);
         assert_eq!(p.lut.len(), LUT_SIZE);
         // exposure sits at byte 12
         assert_eq!(f32::from_le_bytes(p.uniform[12..16].try_into().unwrap()), 1.0);
@@ -1001,6 +1028,25 @@ mod tests {
         assert_eq!(old.light, "daylight");
         let candle = EditParams { monochrome: Some(Monochrome { light: "candle".into(), ..Default::default() }), ..Default::default() };
         assert!(pack(&candle, &cam, SourceKind::Raw, DisplaySpace::Srgb).mono_lut.is_empty(), "an unknown light is colour");
+    }
+
+    /// A developer packs its effects in black and white only, scales the grain, and stays out of the edit at
+    /// its defaults.
+    #[test]
+    fn a_developer_packs_its_effects_and_grain() {
+        let cam = crate::camera::nikon_d850();
+        let at = |edit: &EditParams| *bytemuck::from_bytes::<DevelopParams>(&pack(edit, &cam, SourceKind::Raw, DisplaySpace::Srgb).uniform);
+        let grain = Some(Grain { amount: 50.0, size: 50.0 });
+        assert_eq!(at(&EditParams { grain: grain.clone(), ..Default::default() }).developer, [0.0; 4], "colour has none");
+        let plain = at(&EditParams { grain: grain.clone(), monochrome: Some(Monochrome::default()), ..Default::default() });
+        assert_eq!(plain.developer, [0.0, (0.1 * 1000.0 / FRAME_MICRONS) as f32, 1.0, 0.0]);
+        let pushed = Monochrome { developer: "acutance".into(), development: 1.0, ..Default::default() };
+        let p = at(&EditParams { grain, monochrome: Some(pushed), ..Default::default() });
+        assert_eq!((p.developer[0], p.developer[2]), (0.35, 1.25));
+        assert!((p.grain[0] / plain.grain[0] - 1.2 * 1.15).abs() < 1e-5, "grain {} vs {}", p.grain[0], plain.grain[0]);
+        let staining = at(&EditParams { monochrome: Some(Monochrome { developer: "staining".into(), ..Default::default() }), ..Default::default() });
+        assert_eq!(staining.grain[2], 0.5);
+        assert_eq!(serde_json::to_value(Monochrome::default()).unwrap(), serde_json::json!({ "film": "panchromatic", "filter": "none" }));
     }
 
     /// Grain packs its strength and its size on the frame; none, or none at amount 0, packs zeros.

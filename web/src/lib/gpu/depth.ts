@@ -9,9 +9,9 @@ import composeWgsl from './wgsl/client_depth_compose.wgsl?raw';
 
 const DEPTH_UNIFORM_BYTES = 64;
 
-type Binding = 'uniform' | 'texture' | 'filtered' | 'sampler' | 'storage';
+export type Binding = 'uniform' | 'texture' | 'filtered' | 'sampler' | 'storage';
 
-async function kernel(device: GPUDevice, label: string, code: string, bindings: Binding[]): Promise<GPUComputePipeline> {
+export async function kernel(device: GPUDevice, label: string, code: string, bindings: Binding[]): Promise<GPUComputePipeline> {
 	const module = device.createShaderModule({ label, code });
 	const errors = (await module.getCompilationInfo()).messages.filter((m) => m.type === 'error');
 	if (errors.length) throw new Error(`${label}: ${errors.map((e) => `${e.lineNum}:${e.linePos} ${e.message}`).join('; ')}`);
