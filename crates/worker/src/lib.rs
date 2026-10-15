@@ -10,6 +10,7 @@ pub mod export;
 pub mod lensfun;
 pub mod camera;
 pub mod masks;
+pub mod stocks;
 pub mod ml;
 
 use anyhow::{Context, Result};
@@ -144,6 +145,7 @@ impl Worker {
         std::fs::create_dir_all(cache.join("outbox"))?;
         std::fs::create_dir_all(cache.join("masks"))?;
         sweep_stale_cache(&cache);
+        stocks::set_cache_dir(&cache);
         let lensfun = Arc::new(lensfun::Lensfun::open(cache.join("lensfun")));
         let kit = sidecar_engine::Gpu::new_headless().and_then(|gpu| {
             let ingest = sidecar_engine::Ingest::new(&gpu)?;
@@ -470,9 +472,11 @@ fn preview_jpeg(kit: &export::Kit, rendering: &export::Rendering, req: &PreviewR
     let depth_texture = depth.map(|d| rendering.depth_texture(kit, &req.edit, &d.image, 0));
     let source = rendering.depth_effects(kit, &req.edit, depth.zip(depth_texture.as_ref()), source, [width, height], [0, 0]);
     let packed = rendering.pack(&req.edit, req.color_space);
+    let profile = stocks::for_edit(&req.edit);
+    let slide_response = stocks::response(&profile);
     // The proxy is oriented already, as the masks are.
     let mask_textures = rendering.mask_textures(kit, &req.edit, masks, 0, [width, height]);
-    let developed = kit.develop.render(&kit.gpu, &source, &packed.uniform, &packed.lut, &export::masks_for(&packed, &mask_textures, [0.0; 4]))?;
+    let developed = kit.develop.render(&kit.gpu, &source, &packed.uniform, &packed.lut, &export::masks_for(&packed, &mask_textures, [0.0; 4], slide_response))?;
     let developed = rendering.warp(kit, &req.edit, &developed, 0).unwrap_or(developed);
     let img = sidecar_engine::read_rgba16(&kit.gpu, &developed)?;
     export::jpeg_bytes(&img, 88, req.color_space)
@@ -550,6 +554,8 @@ fn loupe_png(w: &Worker, kit: &export::Kit, req: &LoupeRequest, masks: &[Option<
     let settings = export::detail_settings(&req.edit);
     let m = settings.margin();
     let packed = rendering.pack(&req.edit, req.color_space);
+    let profile = stocks::for_edit(&req.edit);
+    let slide_response = stocks::response(&profile);
     // Masks cover the whole frame; each develop below says where its tile sits in it.
     let mask_textures = rendering.mask_textures(kit, &req.edit, masks, flip, [sw, sh]);
     // Black and white's adjacency map covers the whole frame too: averaged down, lens-corrected at that size as
@@ -562,11 +568,11 @@ fn loupe_png(w: &Worker, kit: &export::Kit, req: &LoupeRequest, masks: &[Option<
                 Some(p) => kit.lens.apply(&kit.gpu, &small, &p, size),
                 None => small,
             };
-            Some(kit.develop.density_map(&kit.gpu, &small, [sw, sh], &packed.uniform, &packed.lut, &export::masks_for(&packed, &mask_textures, [0.0; 4]))?)
+            Some(kit.develop.density_map(&kit.gpu, &small, [sw, sh], &packed.uniform, &packed.lut, &export::masks_for(&packed, &mask_textures, [0.0; 4], slide_response))?)
         }
         false => None,
     };
-    let masks_at = |x: u32, y: u32| sidecar_engine::Masks { density: density.as_ref(), ..export::masks_for(&packed, &mask_textures, [x as f32, y as f32, sw as f32, sh as f32]) };
+    let masks_at = |x: u32, y: u32| sidecar_engine::Masks { density: density.as_ref(), ..export::masks_for(&packed, &mask_textures, [x as f32, y as f32, sw as f32, sh as f32], slide_response) };
     let depth_texture = depth.map(|d| rendering.depth_texture(kit, &req.edit, &d.image, flip));
     let depth_params = depth.and_then(|d| sidecar_color::depth::pack(&req.edit, d.airlight, [sw, sh], [0.0; 2]));
     // A rectangle of the sensor's pixels, developed as export develops it: denoised, sharpened, lens-corrected,
@@ -782,10 +788,28 @@ pub fn router(worker: Arc<Worker>) -> Router {
         .route("/v1/assets/{key}/masks", get(masks_handler))
         .route("/v1/assets/{key}/masks/{name}", get(mask_handler))
         .route("/v1/assets/{key}/camera", get(camera_handler))
+        .route("/v1/film/stocks", get(film_stocks))
+        .route("/v1/film/stocks/{id}", get(film_stock))
         .route("/v1/lensfun", get(lensfun_status))
         .route("/v1/lensfun/done", post(lensfun_done))
         .route("/v1/lensfun/{name}", axum::routing::put(lensfun_put))
         .with_state(worker)
+}
+
+/// The spectral colour stocks this deployment can render: empty unless the operator's two standards are there
+/// (`stocks`). The editor offers only these, so it never shows a stock that would not render.
+async fn film_stocks() -> Response {
+    Json(serde_json::json!({ "available": stocks::available(), "stocks": stocks::offered() })).into_response()
+}
+
+/// One stock's profile (`slide::SlideProfile::to_bytes`): the slide's colours over its layers' log H, and three
+/// offsets. Measured on first use — about four seconds — then cached, so this blocks the once.
+async fn film_stock(Path(id): Path<String>) -> Response {
+    match tokio::task::spawn_blocking(move || stocks::profile(&id)).await {
+        Ok(Some(p)) => ([(axum::http::header::CONTENT_TYPE, "application/octet-stream")], p.to_bytes()).into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(e) => internal(e.into()),
+    }
 }
 
 async fn lensfun_status(State(w): State<Arc<Worker>>) -> Response {

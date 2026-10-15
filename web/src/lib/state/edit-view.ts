@@ -93,6 +93,9 @@ const FILM_NAMES: Record<string, string> = {
 	'sfx-200': 'ILFORD SFX 200'
 };
 
+/** Colour reversal stocks rendered spectrally (`sidecar_color::slide`), as History names them. */
+const SLIDE_NAMES: Record<string, string> = { 'provia-100f': 'FUJICHROME PROVIA 100F' };
+
 /** Black and white's lights, as History names them. */
 const LIGHT_NAMES: Record<string, string> = { daylight: 'Daylight', tungsten: 'Tungsten light', 'white-balance': 'Light from white balance' };
 
@@ -144,6 +147,10 @@ export function describeChanges(from: EditParams, to: EditParams): string[] {
 	else if (from.film && to.film) {
 		if (from.film.amount !== to.film.amount) out.push(`Film amount ${decimals(to.film.amount)} %`);
 		if (from.film.interlayer !== to.film.interlayer) out.push(`Interlayer effects ${decimals(to.film.interlayer)}`);
+		if ((from.film.stock ?? '') !== (to.film.stock ?? '')) {
+			out.push(to.film.stock ? (SLIDE_NAMES[to.film.stock] ?? `Colour stock ${to.film.stock}`) : 'Generic colour film');
+		}
+		if ((from.film.light ?? 'daylight') !== (to.film.light ?? 'daylight')) out.push(LIGHT_NAMES[to.film.light ?? 'daylight'] ?? `Light ${to.film.light}`);
 	}
 	const [b0, b1] = [from.lensBlur?.amount ?? 0, to.lensBlur?.amount ?? 0];
 	if (!b0 !== !b1) out.push(b1 ? `Lens blur ${decimals(b1)}` : 'No lens blur');

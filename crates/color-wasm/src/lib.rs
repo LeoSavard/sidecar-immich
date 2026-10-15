@@ -8,7 +8,7 @@
 
 use serde::Deserialize;
 use sidecar_color::camera::CameraColor;
-use sidecar_color::{DisplaySpace, EditParams, SourceKind, pack};
+use sidecar_color::{DisplaySpace, EditParams, SourceKind};
 use std::cell::RefCell;
 
 #[derive(Deserialize)]
@@ -19,6 +19,20 @@ struct Request {
     source: SourceKind,
     #[serde(default)]
     display: DisplaySpace,
+    /// A spectral colour stock's profile, as the browser downloaded it from
+    /// `GET /api/film/stocks/{id}` — its header only; the response table goes straight to the GPU. Absent
+    /// unless the edit names a stock and the server had the standards to measure it.
+    #[serde(default)]
+    slide_profile: Option<SlideHeader>,
+}
+
+/// The profile numbers the uniform needs (`slide::SlideProfile`).
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SlideHeader {
+    offsets: [f32; 3],
+    scale: f32,
+    side: u32,
 }
 
 thread_local! {
@@ -82,7 +96,8 @@ fn respond(result: Result<Vec<u8>, String>) -> *const u8 {
 pub unsafe extern "C" fn sc_pack(ptr: *const u8, len: usize) -> *const u8 {
     let input = unsafe { std::slice::from_raw_parts(ptr, len) };
     respond(serde_json::from_slice::<Request>(input).map_err(|e| e.to_string()).map(|req| {
-        let p = pack(&req.edit, &req.camera, req.source, req.display);
+        let profile = req.slide_profile.map(|h| sidecar_color::slide::SlideProfile::header(h.offsets, h.scale, h.side));
+        let p = sidecar_color::params::pack_with(&req.edit, &req.camera, req.source, req.display, profile.as_ref());
         let mut out = Vec::with_capacity(p.uniform.len() + p.lut.len() * 4 + 16);
         out.extend_from_slice(&p.uniform);
         p.lut.iter().for_each(|v| out.extend_from_slice(&v.to_le_bytes()));
@@ -91,6 +106,9 @@ pub unsafe extern "C" fn sc_pack(ptr: *const u8, len: usize) -> *const u8 {
         out.extend_from_slice(bytemuck::bytes_of(&p.masks));
         out.extend_from_slice(bytemuck::cast_slice(&p.mask_curves));
         out.extend_from_slice(bytemuck::cast_slice(&p.mono_lut));
+        // A spectral stock's exposure table, built here from the sheet's sensitivities and the scene's light —
+        // all public. Its response table is not in this stream: the browser already has it.
+        out.extend_from_slice(bytemuck::cast_slice(&p.slide_exposure));
         out
     }))
 }

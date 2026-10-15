@@ -35,11 +35,23 @@ pub struct Masks<'a> {
     pub curves: &'a [f32],
     pub mono: &'a [f32],
     pub density: Option<&'a wgpu::Texture>,
+    /// A spectral colour stock's two tables (`Packed::slide_exposure` and the stock profile's response table);
+    /// both empty unless one is being rendered.
+    pub slide_exposure: &'a [f32],
+    pub slide_response: &'a [f32],
 }
 
 impl Masks<'_> {
     pub fn none() -> Self {
-        Self { params: bytemuck::Zeroable::zeroed(), textures: Vec::new(), curves: &[], mono: &[], density: None }
+        Self {
+            params: bytemuck::Zeroable::zeroed(),
+            textures: Vec::new(),
+            curves: &[],
+            mono: &[],
+            density: None,
+            slide_exposure: &[],
+            slide_response: &[],
+        }
     }
 }
 
@@ -54,15 +66,27 @@ pub fn needs_density_map(uniform: &[u8]) -> bool {
 fn mono_texture(gpu: &Gpu, data: &[f32]) -> wgpu::Texture {
     let side = (data.len() as f64).cbrt().round() as u32;
     let (side, data) = if side > 0 && (side as usize).pow(3) == data.len() { (side, data) } else { (1, &[0.0f32][..]) };
+    cube_texture(gpu, "mono table", wgpu::TextureFormat::R32Float, side, data)
+}
+
+/// One of a spectral stock's tables as a 3D texture of four-float entries, `side`³; a single zero entry when
+/// there is no stock, so the binding is always there.
+fn slide_texture(gpu: &Gpu, label: &str, data: &[f32]) -> wgpu::Texture {
+    let side = (data.len() as f64 / 4.0).cbrt().round() as u32;
+    let (side, data) = if side > 0 && (side as usize).pow(3) * 4 == data.len() { (side, data) } else { (1, &[0.0f32; 4][..]) };
+    cube_texture(gpu, label, wgpu::TextureFormat::Rgba32Float, side, data)
+}
+
+fn cube_texture(gpu: &Gpu, label: &str, format: wgpu::TextureFormat, side: u32, data: &[f32]) -> wgpu::Texture {
     gpu.device.create_texture_with_data(
         &gpu.queue,
         &wgpu::TextureDescriptor {
-            label: Some("mono table"),
+            label: Some(label),
             size: wgpu::Extent3d { width: side, height: side, depth_or_array_layers: side },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D3,
-            format: wgpu::TextureFormat::R32Float,
+            format,
             usage: wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         },
@@ -145,6 +169,27 @@ impl DevelopPass {
                     ty: wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Float { filterable: true },
                         view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // A spectral colour stock's exposure and response tables.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D3,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D3,
                         multisampled: false,
                     },
                     count: None,
@@ -248,7 +293,7 @@ impl DevelopPass {
         own.mono[2] = 1.0;
         let mut whole = masks.params;
         whole.frame = [0.0; 4];
-        let whole = Masks { params: whole, textures: masks.textures.clone(), curves: masks.curves, mono: masks.mono, density: None };
+        let whole = Masks { params: whole, textures: masks.textures.clone(), curves: masks.curves, mono: masks.mono, density: None, ..Masks::none() };
         let exposure = self.render(gpu, small, bytemuck::bytes_of(&own), lut, &whole)?;
         let (w, h) = (small.width(), small.height());
         let (across, map) = (texture(gpu, w, h, wgpu::TextureFormat::Rgba16Float), texture(gpu, w, h, wgpu::TextureFormat::Rgba16Float));
@@ -309,6 +354,8 @@ impl DevelopPass {
             view_formats: &[],
         });
         let mono_tex = mono_texture(gpu, masks.mono);
+        let slide_exposures = slide_texture(gpu, "slide exposures", masks.slide_exposure);
+        let slide_responses = slide_texture(gpu, "slide responses", masks.slide_response);
         let bind = d.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("develop"),
             layout: &self.layout,
@@ -324,6 +371,8 @@ impl DevelopPass {
                 },
                 wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&mono_tex.create_view(&Default::default())) },
                 wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&density.create_view(&Default::default())) },
+                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&slide_exposures.create_view(&Default::default())) },
+                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&slide_responses.create_view(&Default::default())) },
             ],
         });
         let mask_ubo = d.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -441,5 +490,56 @@ mod tests {
         let tile = crate::read_rgba16(gpu, &pass.render(gpu, &crate::upload_rgba16(gpu, &cut), &sharp, &lut, &tile_masks).unwrap()).unwrap();
         let worst = (0..128).map(|x| (at(&tile, x) - at(&whole, 960 + x)).abs()).fold(0.0, f32::max);
         assert!(worst < 1e-3, "worst difference {worst}");
+    }
+
+    /// The develop pass renders a spectral colour stock as `slide::Slide` does on the CPU: the same two tables,
+    /// read the same way. Stand-in standards, so these are not real PROVIA 100F colours — the chain is what is
+    /// being checked. At amount 0 the pass is the neutral rendering, bit for bit.
+    #[test]
+    fn a_spectral_stock_develops_as_its_chain_does() {
+        use sidecar_color::params::DevelopParams;
+        let Ok(gpu) = crate::test_gpu() else { return eprintln!("skipping: no GPU") };
+        let pass = DevelopPass::new(gpu).unwrap();
+        let stock = sidecar_color::slide::slide("provia-100f").unwrap();
+        let (meter, light) = sidecar_color::slide::stand_in_standards();
+        // 33³ keeps the table's own interpolation error well under what is being measured here.
+        let profile = stock.profile_sized(&meter, &light, 33);
+        let exposures = stock.exposure_lut(&light);
+        let colours: [[f32; 3]; 5] = [[0.18, 0.18, 0.18], [0.04, 0.04, 0.04], [0.6, 0.6, 0.6], [0.45, 0.12, 0.1], [0.1, 0.2, 0.5]];
+        let src = RgbaF32 {
+            width: colours.len() as u32,
+            height: 1,
+            data: colours.iter().flat_map(|c| [c[0], c[1], c[2], 0.0]).collect(),
+        };
+        let mut p: DevelopParams = bytemuck::Zeroable::zeroed();
+        p.wb_mul = [1.0; 3];
+        p.exposure = 1.0;
+        p.cam_to_work = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]];
+        p.work_to_disp = p.cam_to_work;
+        p.tone = [-10.0, 6.5, 7.0, 0.5];
+        p.slide = [1.0, sidecar_color::spectral::GRID as f32, profile.side as f32, 0.0];
+        p.slide_log_h = [profile.offsets[0], profile.offsets[1], profile.offsets[2], profile.scale];
+        let lut: Vec<f32> = (0..4096).map(|i| i as f32 / 4095.0).collect();
+        let tex = crate::upload_rgba16(gpu, &src);
+        let masks = Masks { slide_exposure: &exposures, slide_response: &profile.response, ..Masks::none() };
+        let on = bytemuck::bytes_of(&p).to_vec();
+        let out = crate::read_rgba16(gpu, &pass.render(gpu, &tex, &on, &lut, &masks).unwrap()).unwrap();
+        for (i, c) in colours.iter().enumerate() {
+            let want = stock.render(c.map(|v| v as f64), &light, &meter, &light);
+            let got = [out.data[i * 4], out.data[i * 4 + 1], out.data[i * 4 + 2]];
+            eprintln!("{c:?} → gpu {got:?}, chain {want:?}");
+            for k in 0..3 {
+                // In stops, so a dark slide is held to the same relative accuracy as a bright one. rgba16float
+                // output and the table's 33³ lattice are what the margin is for.
+                let off = (got[k].max(1e-6) as f64 / want[k].max(1e-6)).log2().abs();
+                assert!(off < 0.06, "{c:?} channel {k}: gpu {} chain {} ({off:+.3} stop)", got[k], want[k]);
+            }
+        }
+        // Amount 0 is the neutral rendering, untouched.
+        let mut off_params = p;
+        off_params.slide = [0.0; 4];
+        let off = crate::read_rgba16(gpu, &pass.render(gpu, &tex, &bytemuck::bytes_of(&off_params).to_vec(), &lut, &masks).unwrap()).unwrap();
+        let plain = crate::read_rgba16(gpu, &pass.render(gpu, &tex, &bytemuck::bytes_of(&off_params).to_vec(), &lut, &Masks::none()).unwrap()).unwrap();
+        assert_eq!(off.data, plain.data, "a stock at amount 0 renders as if it were not there");
     }
 }

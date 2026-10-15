@@ -117,6 +117,10 @@ pub struct Slide {
     iso: f64,
 }
 
+/// Every colour reversal stock Sidecar renders spectrally, by id. A deployment can only offer these if it has
+/// the two standards they are measured through (`sidecar_worker::stocks`).
+pub const STOCKS: &[&str] = &["provia-100f"];
+
 /// A colour reversal stock by id: `provia-100f`.
 pub fn slide(id: &str) -> Option<Slide> {
     let linear = |log: [f64; SAMPLES]| log.map(|l| if l.is_nan() { 0.0 } else { 10f64.powf(l) });
@@ -355,6 +359,21 @@ pub struct SlideProfile {
     pub response: Vec<f32>,
 }
 
+/// A densitometer and a reference light for testing the plumbing, anywhere, without a standard: narrow bands at
+/// 610, 540 and 440 nm, and CIE D55. They are **not** ISO 5-3's Status A or ISO 7589's sensitometric daylight,
+/// which Sidecar does not carry and cannot stand in for, so nothing they render is a PROVIA 100F slide — they
+/// exist so the tables, the shader and the pass can be checked against the same chain on the CPU.
+pub fn stand_in_standards() -> (Densitometer, [f64; SAMPLES]) {
+    let rows: String = (38..=73)
+        .map(|i| {
+            let l = i as f64 * 10.0;
+            let g = |c: f64| (-((l - c) / 20.0).powi(2)).exp();
+            format!("{l}, {}, {}, {}\n", g(610.0), g(540.0), g(440.0))
+        })
+        .collect();
+    (Densitometer::parse(&rows).expect("the stand-in densitometer parses"), crate::spectral::daylight(5500.0 * 1.4388 / 1.4380))
+}
+
 /// `SlideProfile`'s header: `SCSL`, the format's version, the table's side, then the offsets and the scale.
 const PROFILE_MAGIC: u32 = u32::from_le_bytes(*b"SCSL");
 const PROFILE_VERSION: u32 = 1;
@@ -362,7 +381,13 @@ const PROFILE_VERSION: u32 = 1;
 impl Slide {
     /// This stock's profile, measured through the owner's standards.
     pub fn profile(&self, meter: &Densitometer, reference: &[f64; SAMPLES]) -> SlideProfile {
-        SlideProfile { response: self.response_lut(meter), ..self.profile_header(reference) }
+        self.profile_sized(meter, reference, RESPONSE_SIDE)
+    }
+
+    /// A profile with a `side`³ response table instead of `RESPONSE_SIDE`³: the full one costs a quarter of a
+    /// million dye solves, which is worth caching but not worth a test's time.
+    pub fn profile_sized(&self, meter: &Densitometer, reference: &[f64; SAMPLES], side: usize) -> SlideProfile {
+        SlideProfile { side: side as u32, response: self.response_lut_sized(meter, side), ..self.profile_header(reference) }
     }
 
     /// Where the reference light puts each layer on its curve, as the shader reads the response table; `profile`
@@ -379,6 +404,12 @@ impl Slide {
 }
 
 impl SlideProfile {
+    /// Just the numbers the uniform needs, for a caller that holds the response table itself: the browser
+    /// uploads the table it downloaded straight to the GPU, and only needs `pack` to describe it.
+    pub fn header(offsets: [f32; 3], scale: f32, side: u32) -> Self {
+        Self { offsets, scale, side, response: Vec::new() }
+    }
+
     /// The profile as bytes, for the cache and the wire.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(32 + self.response.len() * 4);
@@ -421,22 +452,12 @@ impl SlideProfile {
 mod tests {
     use super::*;
 
-    /// A densitometer for testing the mechanics only — narrow bands at 440, 540 and 610 nm — not ISO 5-3's Status
-    /// A, which Sidecar doesn't carry.
     fn test_meter() -> Densitometer {
-        let rows: String = (38..=73)
-            .map(|i| {
-                let l = i as f64 * 10.0;
-                let g = |c: f64| (-((l - c) / 20.0).powi(2)).exp();
-                format!("{l}, {}, {}, {}\n", g(610.0), g(540.0), g(440.0))
-            })
-            .collect();
-        Densitometer::parse(&rows).unwrap()
+        stand_in_standards().0
     }
 
-    /// A daylight for testing the mechanics only: CIE D55, not ISO 7589's sensitometric daylight.
     fn test_daylight() -> [f64; SAMPLES] {
-        crate::spectral::daylight(5500.0 * 1.4388 / 1.4380)
+        stand_in_standards().1
     }
 
     /// The owner's ISO 5-3 Status A table and ISO 7589 sensitometric daylight, if `SIDECAR_STATUS_A` and
@@ -540,7 +561,7 @@ mod tests {
     fn profiles_round_trip_through_bytes() {
         let s = slide("provia-100f").unwrap();
         let (meter, light) = (test_meter(), test_daylight());
-        let p = SlideProfile { side: 2, response: s.response_lut_sized(&meter, 2), ..s.profile_header(&light) };
+        let p = s.profile_sized(&meter, &light, 2);
         let bytes = p.to_bytes();
         assert_eq!(bytes.len(), 32 + 8 * 4 * 4);
         assert_eq!(SlideProfile::parse(&bytes).as_ref(), Some(&p));

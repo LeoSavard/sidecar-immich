@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright Sidecar contributors
-//! requires: develop/params.wgsl develop/wb.wgsl develop/exposure.wgsl develop/gamut.wgsl develop/tone.wgsl develop/masks.wgsl develop/mixer.wgsl develop/mono.wgsl develop/developer.wgsl develop/grain.wgsl develop/stock.wgsl develop/output.wgsl
+//! requires: develop/params.wgsl develop/wb.wgsl develop/exposure.wgsl develop/gamut.wgsl develop/tone.wgsl develop/masks.wgsl develop/mixer.wgsl develop/mono.wgsl develop/developer.wgsl develop/grain.wgsl develop/stock.wgsl develop/slide.wgsl develop/output.wgsl
 // Develop pass: full-screen triangle into developedTex (rgba16float, proxy size). Output is display-linear.
 
 @group(0) @binding(0) var<uniform> P: DevelopParams;
@@ -11,6 +11,10 @@
 // Black and white's adjacency map (`sidecar_color::developer`): the film's log exposure around each place, over
 // the whole frame at low resolution; 1×1 when there is none.
 @group(0) @binding(4) var density_map: texture_2d<f32>;
+// A spectral colour stock's two tables (`develop/slide.wgsl`): each colour's layer responses over the colour
+// cube, and the slide's colour over the layers' log H. Both 1×1×1 unless a stock is being rendered.
+@group(0) @binding(5) var slide_exposures: texture_3d<f32>;
+@group(0) @binding(6) var slide_responses: texture_3d<f32>;
 
 // Masks: one texture per adjustment, in the frame `M.frame` describes. Unused slots hold a 1×1 texture.
 @group(1) @binding(0) var<uniform> M: MaskParams;
@@ -86,6 +90,9 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   }
   // A named stock's curve: the shadows, grain and all, bent into its fog, the highlights over its shoulder.
   if (P.stock.x > 0.5) { c = vec3f(stock_print(c.r, P.stock, P.shoulder)); }
+  // The light a spectral colour stock is exposed to: the working colour as it stands here, before the neutral
+  // path compresses it into the display's gamut and tone-maps it. Grain is already in it, as a film's is.
+  let scene = c;
   var e: f32;
   // Film rendering (RAW only; `pack` leaves it at 0 for a developed file): the curves per channel, blended
   // with the neutral rendering by its amount. At 0 none of it runs, so the neutral path is unchanged.
@@ -108,6 +115,12 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
       layer_curves(lut_sample(tone_lut, ef.b), layer_curves_tex, local.curves, M.count),
     );
     c = mix(c, vec3f(srgb_decode1(user.r), srgb_decode1(user.g), srgb_decode1(user.b)), P.film.x);
+  }
+  // Colour film, spectrally: the stock's own chain in place of the neutral rendering, mixed in by its amount.
+  // Its density is the data sheet's — the light table sits at the display's white — so the tone controls and
+  // the user's curve reach it only through the neutral rendering it is mixed with.
+  if (P.slide.x > 0.0) {
+    c = mix(c, slide_colour(scene, slide_exposures, slide_responses, P.slide, P.slide_log_h), P.slide.x);
   }
   c = mask_saturation(mask_contrast(c, local.contrast), local.saturation);
   c = color_mixer(c, local.mixer);                             // 5

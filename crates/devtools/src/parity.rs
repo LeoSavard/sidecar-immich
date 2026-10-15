@@ -7,7 +7,7 @@ use palette::{IntoColor, Lab, LinSrgb, color_difference::Ciede2000};
 use serde::{Deserialize, Serialize};
 use sidecar_color::camera::{Calibration, CameraColor};
 use sidecar_color::params::{EditParams, MaskAdjustment, MixerBand, WhiteBalanceMode};
-use sidecar_color::{DisplaySpace, SourceKind, pack};
+use sidecar_color::{DisplaySpace, SourceKind};
 use sidecar_engine::{DevelopPass, Gpu, RgbaF32};
 use std::path::Path;
 
@@ -32,6 +32,11 @@ struct Case {
     /// `<name>.mono.f32` holds black and white's table over the colour cube.
     #[serde(default)]
     mono: bool,
+    /// `<name>.slide_exposure.f32` and `<name>.slide_response.f32` hold a spectral colour stock's two tables.
+    /// Only written where the operator's standards were there to measure the profile, so a run without them
+    /// simply has no such case rather than a different rendering.
+    #[serde(default)]
+    slide: bool,
 }
 
 /// Masks for the parity case, at half the image's size so both renderers interpolate them: a soft disc and a
@@ -172,7 +177,7 @@ fn cases() -> Vec<Fixture> {
     let phone_layered = EditParams { masks: layers, ..phone.clone() };
 
     // Film rendering: the per-channel curves blended with the neutral path, with and without layers on top.
-    let film = |e: &EditParams| EditParams { film: Some(sidecar_color::params::Film { amount: 80.0, interlayer: 60.0 }), ..e.clone() };
+    let film = |e: &EditParams| EditParams { film: Some(sidecar_color::params::Film { amount: 80.0, interlayer: 60.0, ..Default::default() }), ..e.clone() };
     let (graded_film, layered_film) = (film(&graded), film(&layered));
 
     // Black and white: a film type behind a filter, read from the table over the colour cube; with layers too.
@@ -204,15 +209,15 @@ fn cases() -> Vec<Fixture> {
     let mut lens = EditParams { lens: Some(sidecar_color::params::Lens { profile: "sony".into(), ..Default::default() }), ..graded.clone() };
     lens.lens.as_mut().unwrap().lateral_ca = 150.0;
 
-    vec![
+    let mut cases: Vec<Fixture> = vec![
         ("as-shot-srgb".into(), nikon_d850(), SourceKind::Raw, EditParams::default(), DisplaySpace::Srgb, None),
-        ("graded-p3".into(), nikon_d850(), SourceKind::Raw, graded, DisplaySpace::DisplayP3, None),
+        ("graded-p3".into(), nikon_d850(), SourceKind::Raw, graded.clone(), DisplaySpace::DisplayP3, None),
         ("xtrans-dark".into(), fujifilm_xt4(), SourceKind::Raw, dark, DisplaySpace::Srgb, None),
         ("heic-default".into(), heic(), SourceKind::Developed, EditParams::default(), DisplaySpace::DisplayP3, None),
         ("heic-graded".into(), heic(), SourceKind::Developed, phone, DisplaySpace::Srgb, None),
         ("lens-zv1".into(), nikon_d850(), SourceKind::Raw, lens, DisplaySpace::Srgb, Some(zv1())),
         ("masks".into(), nikon_d850(), SourceKind::Raw, masked, DisplaySpace::Srgb, None),
-        ("layers".into(), nikon_d850(), SourceKind::Raw, layered, DisplaySpace::Srgb, None),
+        ("layers".into(), nikon_d850(), SourceKind::Raw, layered.clone(), DisplaySpace::Srgb, None),
         ("heic-layers".into(), heic(), SourceKind::Developed, phone_layered, DisplaySpace::DisplayP3, None),
         ("film".into(), nikon_d850(), SourceKind::Raw, graded_film, DisplaySpace::Srgb, None),
         ("film-layers".into(), nikon_d850(), SourceKind::Raw, layered_film, DisplaySpace::DisplayP3, None),
@@ -226,7 +231,35 @@ fn cases() -> Vec<Fixture> {
         ("dev-compensating".into(), nikon_d850(), SourceKind::Raw, dev_compensating, DisplaySpace::DisplayP3, None),
         ("stock-hp5".into(), nikon_d850(), SourceKind::Raw, stock_hp5, DisplaySpace::Srgb, None),
         ("stock-sfx-red".into(), nikon_d850(), SourceKind::Raw, stock_sfx, DisplaySpace::Srgb, None),
-    ]
+    ];
+    // Colour film, spectrally: only where this machine has the two standards the profile is measured through.
+    if slide_standards().is_some() {
+        let stock = |e: &EditParams, amount: f64, light: &str| EditParams {
+            film: Some(sidecar_color::params::Film { amount, interlayer: 45.0, stock: "provia-100f".into(), light: light.into() }),
+            ..e.clone()
+        };
+        cases.push(("slide-provia".into(), nikon_d850(), SourceKind::Raw, stock(&graded, 100.0, "daylight"), DisplaySpace::Srgb, None));
+        cases.push(("slide-provia-mixed".into(), nikon_d850(), SourceKind::Raw, stock(&layered, 70.0, "tungsten"), DisplaySpace::DisplayP3, None));
+    }
+    cases
+}
+
+/// The operator's copies of ISO 5-3's Status A and ISO 7589's sensitometric daylight, as
+/// `sidecar_worker::stocks` reads them. Neither is part of Sidecar, so a machine without them renders no
+/// spectral stock and runs no such parity case.
+fn slide_standards() -> Option<(sidecar_color::slide::Densitometer, [f64; sidecar_color::spectral::SAMPLES])> {
+    let read = |var: &str| std::fs::read_to_string(std::env::var(var).ok()?).ok();
+    let meter = sidecar_color::slide::Densitometer::parse(&read("SIDECAR_STATUS_A")?).ok()?;
+    let daylight = sidecar_color::slide::parse_spectrum(&read("SIDECAR_ISO_DAYLIGHT")?).ok()?;
+    Some((meter, daylight))
+}
+
+/// The profile for whatever stock an edit names, measured here as the worker measures it.
+fn slide_profile(edit: &EditParams) -> Option<sidecar_color::slide::SlideProfile> {
+    let film = edit.film.as_ref()?;
+    let stock = sidecar_color::slide::slide(&film.stock)?;
+    let (meter, daylight) = slide_standards()?;
+    Some(stock.profile(&meter, &daylight))
 }
 
 pub fn fixtures(dir: &Path) -> Result<()> {
@@ -234,7 +267,8 @@ pub fn fixtures(dir: &Path) -> Result<()> {
     let mut index = Vec::new();
     for (name, camera, source, edit, display, profile) in cases() {
         let src = synthetic(&camera, 512, 256);
-        let packed = pack(&edit, &camera, source, display);
+        let stock = slide_profile(&edit);
+        let packed = sidecar_color::params::pack_with(&edit, &camera, source, display, stock.as_ref());
         std::fs::write(dir.join(format!("{name}.src.f16")), src.to_f16_bytes())?;
         std::fs::write(dir.join(format!("{name}.uniform.bin")), &packed.uniform)?;
         std::fs::write(dir.join(format!("{name}.lut.f32")), bytemuck::cast_slice(&packed.lut))?;
@@ -251,6 +285,11 @@ pub fn fixtures(dir: &Path) -> Result<()> {
         if mono {
             std::fs::write(dir.join(format!("{name}.mono.f32")), bytemuck::cast_slice(&packed.mono_lut))?;
         }
+        let slide = !packed.slide_exposure.is_empty();
+        if let (true, Some(stock)) = (slide, &stock) {
+            std::fs::write(dir.join(format!("{name}.slide_exposure.f32")), bytemuck::cast_slice(&packed.slide_exposure))?;
+            std::fs::write(dir.join(format!("{name}.slide_response.f32")), bytemuck::cast_slice(&stock.response))?;
+        }
         let masks = edit.masks.len().min(2) as u32;
         if masks > 0 {
             for (i, m) in synthetic_masks().iter().take(masks as usize).enumerate() {
@@ -260,7 +299,7 @@ pub fn fixtures(dir: &Path) -> Result<()> {
             std::fs::write(dir.join(format!("{name}.curves.f32")), bytemuck::cast_slice(&packed.mask_curves))?;
         }
         println!("{name}: white balance {:.0} K, tint {:+.1}{}{}", packed.temperature_k, packed.tint, if lens { ", lens pass" } else { "" }, if masks > 0 { format!(", {masks} masks") } else { String::new() });
-        index.push(Case { name, width: src.width, height: src.height, lens, masks, mask_size: if masks > 0 { MASK_SIZE } else { [0; 2] }, mono });
+        index.push(Case { name, width: src.width, height: src.height, lens, masks, mask_size: if masks > 0 { MASK_SIZE } else { [0; 2] }, mono, slide });
     }
     std::fs::write(dir.join("index.json"), serde_json::to_vec_pretty(&index)?)?;
     Ok(())
@@ -294,11 +333,26 @@ pub fn native(dir: &Path, out: &Path) -> Result<()> {
         }
         let curves: Vec<f32> = if case.masks > 0 { bytemuck::cast_slice(&std::fs::read(dir.join(format!("{}.curves.f32", case.name)))?).to_vec() } else { Vec::new() };
         let mono: Vec<f32> = if case.mono { bytemuck::cast_slice(&std::fs::read(dir.join(format!("{}.mono.f32", case.name)))?).to_vec() } else { Vec::new() };
+        let table = |what: &str| -> Result<Vec<f32>> {
+            Ok(match case.slide {
+                true => bytemuck::cast_slice(&std::fs::read(dir.join(format!("{}.slide_{what}.f32", case.name)))?).to_vec(),
+                false => Vec::new(),
+            })
+        };
+        let (slide_exposure, slide_response) = (table("exposure")?, table("response")?);
         let masks = if case.masks > 0 {
             let params: sidecar_color::params::MaskParams = bytemuck::pod_read_unaligned(&std::fs::read(dir.join(format!("{}.masks.bin", case.name)))?);
-            sidecar_engine::Masks { params, textures: mask_textures.iter().map(Option::as_ref).collect(), curves: &curves, mono: &mono, density: None }
+            sidecar_engine::Masks {
+                params,
+                textures: mask_textures.iter().map(Option::as_ref).collect(),
+                curves: &curves,
+                mono: &mono,
+                density: None,
+                slide_exposure: &slide_exposure,
+                slide_response: &slide_response,
+            }
         } else {
-            sidecar_engine::Masks { mono: &mono, ..sidecar_engine::Masks::none() }
+            sidecar_engine::Masks { mono: &mono, slide_exposure: &slide_exposure, slide_response: &slide_response, ..sidecar_engine::Masks::none() }
         };
         let img = sidecar_engine::read_rgba16(&gpu, &pass.render(&gpu, &tex, &uniform, &lut, &masks)?)?;
         std::fs::write(out.join(format!("{}.native.f16", case.name)), img.to_f16_bytes())?;
