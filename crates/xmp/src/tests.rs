@@ -335,6 +335,24 @@ mod history {
         assert_eq!(doc.edit(), edits[2], "sc:Edit is still the current edit on its own");
     }
 
+    /// A version that drops something an earlier one had — the geometry reset, the last mask removed — comes
+    /// back without it: a field left out at its default is a change too.
+    #[test]
+    fn a_field_left_out_is_removed_in_the_version_that_left_it_out() {
+        let mut h = History::begin(&EditParams::default());
+        let shaped = EditParams {
+            geometry: Some(sidecar_color::geometry::Geometry { angle: 3.0, ..Default::default() }),
+            masks: vec![sidecar_color::params::MaskAdjustment { mask: "subject".into(), exposure: 1.0, ..Default::default() }],
+            ..ev(0.5)
+        };
+        let a = save(&mut h, &shaped, ORIGINAL).head;
+        let b = save(&mut h, &ev(0.5), &a).head;
+        assert_eq!(h.edit_of(&a).unwrap(), shaped);
+        assert_eq!(h.edit_of(&b).unwrap(), ev(0.5));
+        let removed = &h.node(&b).unwrap().removed;
+        assert!(removed.contains(&"geometry".to_string()) && removed.contains(&"masks".to_string()), "{removed:?}");
+    }
+
     #[test]
     fn reverting_to_the_original_keeps_everything() {
         let mut h = History::begin(&EditParams::default());
@@ -553,4 +571,82 @@ mod history {
         assert_eq!(h.version_of(&b).unwrap(), next);
         assert_eq!(h.checkout(&a).unwrap(), shown, "a checkout makes the migrated version current");
     }
+}
+
+/// Saving writes the edit as it is now: a field this version knows and leaves out (at its default) is gone
+/// from the file, however the last save had it, while what a newer Sidecar wrote — a field this version doesn't
+/// know, at the top or inside one it does — is carried along.
+#[test]
+fn saving_drops_known_fields_left_out_and_keeps_unknown_ones() {
+    let tmp = tempfile::tempdir().unwrap();
+    let roots = [tmp.path().canonicalize().unwrap()];
+    let original = fixture(tmp.path(), "DSC_9.NEF");
+    let shaped = EditParams {
+        geometry: Some(sidecar_color::geometry::Geometry { angle: 3.0, ..Default::default() }),
+        masks: vec![sidecar_color::params::MaskAdjustment { mask: "subject".into(), exposure: 1.0, ..Default::default() }],
+        ..Default::default()
+    };
+    update(&original, &roots, |d| {
+        d.set_edit(&shaped, "x")?;
+        let stored = d.sidecar["edit"].as_object_mut().unwrap();
+        stored.insert("fromTheFuture".into(), serde_json::json!({ "strength": 7 }));
+        stored["tone"].as_object_mut().unwrap().insert("knee".into(), serde_json::json!(0.25));
+        Ok(())
+    })
+    .unwrap();
+    update(&original, &roots, |d| d.set_edit(&EditParams::default(), "x")).unwrap();
+    let doc = SidecarDoc::load(&original).unwrap();
+    let stored = &doc.sidecar["edit"];
+    assert!(stored.get("geometry").is_none() && stored.get("masks").is_none(), "{stored}");
+    assert_eq!(stored["fromTheFuture"]["strength"], 7);
+    assert_eq!(stored["tone"]["knee"], 0.25);
+    assert_eq!(doc.edit(), EditParams::default());
+}
+
+/// Saturation and Highlights/Shadows are written only when set: setting them back to 0 must reach the file and
+/// the history, not leave the last value standing.
+#[test]
+fn settings_left_out_at_zero_are_turned_off_in_the_file_and_the_history() {
+    let tmp = tempfile::tempdir().unwrap();
+    let roots = [tmp.path().canonicalize().unwrap()];
+    let original = fixture(tmp.path(), "DSC_10.NEF");
+    let mut set = EditParams { saturation: 15.0, ..Default::default() };
+    set.tone.highlights = -30.0;
+    set.tone.shadows = 20.0;
+    let mut heads = Vec::new();
+    for e in [&set, &EditParams::default()] {
+        let base = SidecarDoc::load(&original).unwrap().history().head;
+        update(&original, &roots, |d| {
+            heads.push(d.commit(&Commit { edit: e, base: &base, checkpoint: false, session: None, user: None }, "sha")?.head);
+            Ok(())
+        })
+        .unwrap();
+    }
+    let doc = SidecarDoc::load(&original).unwrap();
+    assert_eq!(doc.edit(), EditParams::default(), "{}", doc.sidecar["edit"]);
+    let h = doc.history();
+    assert_eq!(h.edit_of(&heads[0]).unwrap(), set);
+    assert_eq!(h.edit_of(&heads[1]).unwrap(), EditParams::default());
+}
+
+/// Switching film rendering off (no `film` field) reaches the file and the history.
+#[test]
+fn film_switched_off_is_off_in_the_file_and_the_history() {
+    let tmp = tempfile::tempdir().unwrap();
+    let roots = [tmp.path().canonicalize().unwrap()];
+    let original = fixture(tmp.path(), "DSC_11.NEF");
+    let film = EditParams { film: Some(sidecar_color::params::Film::default()), ..Default::default() };
+    let mut heads = Vec::new();
+    for e in [&film, &EditParams::default()] {
+        let base = SidecarDoc::load(&original).unwrap().history().head;
+        update(&original, &roots, |d| {
+            heads.push(d.commit(&Commit { edit: e, base: &base, checkpoint: false, session: None, user: None }, "sha")?.head);
+            Ok(())
+        })
+        .unwrap();
+    }
+    let doc = SidecarDoc::load(&original).unwrap();
+    assert_eq!(doc.edit().film, None, "{}", doc.sidecar["edit"]);
+    assert_eq!(doc.history().edit_of(&heads[0]).unwrap(), film);
+    assert_eq!(doc.history().edit_of(&heads[1]).unwrap().film, None);
 }
