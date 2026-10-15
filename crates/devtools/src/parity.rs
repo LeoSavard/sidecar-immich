@@ -179,6 +179,10 @@ fn cases() -> Vec<Fixture> {
     let mono = |e: &EditParams, film: &str, filter: &str| EditParams { monochrome: Some(sidecar_color::params::Monochrome { film: film.into(), filter: filter.into() }), ..e.clone() };
     let (graded_mono, layered_mono) = (mono(&graded, "panchromatic", "red"), mono(&layered, "orthochromatic", "none"));
 
+    // Grain: the hash and both octaves, in black and white, in film colour and on a developed file.
+    let grain = |e: &EditParams, amount: f64, size: f64| EditParams { grain: Some(sidecar_color::params::Grain { amount, size }), ..e.clone() };
+    let (grain_mono, grain_film, grain_heic) = (grain(&graded_mono, 80.0, 100.0), grain(&graded_film, 60.0, 30.0), grain(&phone, 100.0, 100.0));
+
     let mut lens = EditParams { lens: Some(sidecar_color::params::Lens { profile: "sony".into(), ..Default::default() }), ..graded.clone() };
     lens.lens.as_mut().unwrap().lateral_ca = 150.0;
 
@@ -196,6 +200,9 @@ fn cases() -> Vec<Fixture> {
         ("film-layers".into(), nikon_d850(), SourceKind::Raw, layered_film, DisplaySpace::DisplayP3, None),
         ("mono-red".into(), nikon_d850(), SourceKind::Raw, graded_mono, DisplaySpace::Srgb, None),
         ("mono-ortho-layers".into(), nikon_d850(), SourceKind::Raw, layered_mono, DisplaySpace::Srgb, None),
+        ("grain-mono".into(), nikon_d850(), SourceKind::Raw, grain_mono, DisplaySpace::Srgb, None),
+        ("grain-film".into(), nikon_d850(), SourceKind::Raw, grain_film, DisplaySpace::Srgb, None),
+        ("grain-heic".into(), heic(), SourceKind::Developed, grain_heic, DisplaySpace::DisplayP3, None),
     ]
 }
 

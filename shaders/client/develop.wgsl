@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright Sidecar contributors
-//! requires: develop/params.wgsl develop/wb.wgsl develop/exposure.wgsl develop/gamut.wgsl develop/tone.wgsl develop/masks.wgsl develop/mixer.wgsl develop/mono.wgsl develop/output.wgsl
+//! requires: develop/params.wgsl develop/wb.wgsl develop/exposure.wgsl develop/gamut.wgsl develop/tone.wgsl develop/masks.wgsl develop/mixer.wgsl develop/mono.wgsl develop/grain.wgsl develop/output.wgsl
 // Develop pass: full-screen triangle into developedTex (rgba16float, proxy size). Output is display-linear.
 
 @group(0) @binding(0) var<uniform> P: DevelopParams;
@@ -58,6 +58,13 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   c = P.cam_to_work * c;                                       // 3
   // Black and white: the film's exposure in place of the colour, before the tone map, as film is exposed.
   if (P.mono.x > 0.5) { c = vec3f(mono_exposure(c, mono_lut, P.mono.y)); }
+  // Grain, in the exposure the tone map is about to take. Placed on the whole frame — `M.frame` says where a
+  // loupe's tile sits in it — so a tile's grain is the export's.
+  if (P.grain.x > 0.0) {
+    let frame = select(vec2f(textureDimensions(source_tex)), M.frame.zw, M.frame.z > 0.0);
+    let at = vec2i(pos.xy) + vec2i(M.frame.xy);
+    c = grain_apply(c, grain_noise(at, P.grain.y * max(frame.x, frame.y)), P.grain.x, P.tone, developed);
+  }
   var e: f32;
   // Film rendering (RAW only; `pack` leaves it at 0 for a developed file): the curves per channel, blended
   // with the neutral rendering by its amount. At 0 none of it runs, so the neutral path is unchanged.

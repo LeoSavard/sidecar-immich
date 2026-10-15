@@ -47,7 +47,7 @@ no WebGPU: POST …/preview → worker develops the proxy with the same shaders 
 ```
 
 Per pixel, in order: decode/ingest (worker) → detail (worker only) → lens pass → depth pass (haze, lens blur;
-needs the depth mask) → develop (white balance, exposure, camera matrix, black and white, tone map with film or
+needs the depth mask) → develop (white balance, exposure, camera matrix, black and white, grain, tone map with film or
 neutral, masks, mixer, output) → warp (crop and straighten) → view. Masks are seeded, ranged, painted and
 edged by the brush passes before develop samples them.
 
@@ -70,6 +70,7 @@ edged by the brush passes before develop samples them.
 | Lens blur and haze by distance | `shaders/depth/`, `shaders/client/depth_*.wgsl`, `crates/color/src/depth.rs`, `crates/engine/src/depth.rs`, `web/src/lib/gpu/depth.ts` |
 | Film rendering (colour) | `film_curve_in` in `shaders/develop/tone.wgsl`, `Film` in `crates/color/src/params.rs` |
 | Black and white: spectra, film types, filters | `crates/color/src/spectral.rs` (+ `spectral_data.rs`), `shaders/develop/mono.wgsl` |
+| Grain | `Grain` in `crates/color/src/params.rs`, `shaders/develop/grain.wgsl`, the Film section |
 | The camera's own rendering beside the edit | `crates/worker/src/camera.rs`, the Camera toggle in the editor page |
 | What's stored in the sidecar | `crates/xmp` — it serializes `EditParams` generically, field names in PascalCase |
 | Edit history and versions | `crates/xmp/src/history.rs`, `web/src/lib/ui/HistoryPanel.svelte` |
