@@ -7,17 +7,17 @@ import type { EditParams, Geometry, MaskAdjustment, MixerBand } from '$lib/types
 import { MASK_LABELS } from '$lib/masks';
 import { clean, decimals, signed } from '$lib/ui/format';
 
-/** Shadows and Highlights move the curve points at 25 % and 75 % — the same curve the curve editor shows. */
+/**
+ * A mask layer's Shadows and Highlights still move its curve's points at 25 % and 75 % (unlike the global
+ * curve, PROCESS_VERSION 2 gave that its own `tone.highlights`/`shadows` fields instead — see
+ * `crates/color/src/params.rs`'s `Tone` and docs/ROADMAP.md).
+ */
 export const CURVE_ANCHORS = { shadows: 0.25, highlights: 0.75 } as const;
 export type Anchor = keyof typeof CURVE_ANCHORS;
 
 const isAnchor = (x: number) => Object.values(CURVE_ANCHORS).some((a) => Math.abs(x - a) < 1e-6);
 
-export function curveOffset(e: EditParams, which: Anchor): number {
-	return curvePointOffset(e.tone.curve, which);
-}
-
-/** Highlights or Shadows as a curve holds them: its point at 75 % or 25 %, ±100 being ±0.15. */
+/** Highlights or Shadows as a mask layer's curve holds them: its point at 75 % or 25 %, ±100 being ±0.15. */
 export function curvePointOffset(curve: [number, number][], which: Anchor): number {
 	const x = CURVE_ANCHORS[which];
 	const p = curve.find((q) => Math.abs(q[0] - x) < 1e-6);
@@ -81,23 +81,48 @@ const cap = (s: string) => s[0].toUpperCase() + s.slice(1);
 /** One control that reads as a number; `show` formats it as its slider does. */
 type Control = { label: string; get: (e: EditParams) => number; show: (v: number) => string };
 
+/** Black and white's film types and stocks, as History names them. */
+const FILM_NAMES: Record<string, string> = {
+	panchromatic: 'Panchromatic',
+	'panchromatic-extended': 'Extended red',
+	orthochromatic: 'Orthochromatic',
+	'blue-sensitive': 'Blue-sensitive',
+	'hp5-plus': 'ILFORD HP5 Plus',
+	'tri-x-400': 'KODAK TRI-X 400',
+	'tri-x-320': 'KODAK TRI-X 320',
+	'sfx-200': 'ILFORD SFX 200'
+};
+
+/** Colour reversal stocks rendered spectrally (`sidecar_color::slide`), as History names them. */
+const SLIDE_NAMES: Record<string, string> = { 'provia-100f': 'FUJICHROME PROVIA 100F' };
+
+/** Black and white's lights, as History names them. */
+const LIGHT_NAMES: Record<string, string> = { daylight: 'Daylight', tungsten: 'Tungsten light', 'white-balance': 'Light from white balance' };
+
+/** A grain's size on a 35 mm frame, in µm, from its 0–100 slider: `Grain::microns` in sidecar-color. */
+export const grainMicrons = (size: number) => 5 * 8 ** (Math.min(Math.max(size, 0), 100) / 100);
+
 const CONTROLS: Control[] = [
 	{ label: 'Exposure', get: (e) => e.exposure.ev, show: (v) => `${signed(v, 2)} EV` },
 	{ label: 'Contrast', get: view.contrast, show: (v) => signed(v) },
-	{ label: 'Highlights', get: (e) => curveOffset(e, 'highlights'), show: (v) => signed(v) },
-	{ label: 'Shadows', get: (e) => curveOffset(e, 'shadows'), show: (v) => signed(v) },
+	{ label: 'Highlights', get: (e) => e.tone.highlights ?? 0, show: (v) => signed(v) },
+	{ label: 'Shadows', get: (e) => e.tone.shadows ?? 0, show: (v) => signed(v) },
 	{ label: 'Whites', get: view.whites, show: (v) => signed(v) },
 	{ label: 'Blacks', get: view.blacks, show: (v) => signed(v) },
 	{ label: 'Highlight recovery', get: view.highlightRecovery, show: (v) => `${decimals(v)} %` },
+	{ label: 'Saturation', get: (e) => e.saturation ?? 0, show: (v) => signed(v) },
 	...BANDS.flatMap((b) => FIELDS.map((f): Control => ({ label: `${cap(b)} ${f}`, get: (e) => e.mixer[b][f], show: (v) => signed(v) }))),
+	{ label: 'Grain', get: (e) => e.grain?.amount ?? 0, show: (v) => decimals(v) },
+	{ label: 'Grain size', get: (e) => e.grain?.size ?? 50, show: (v) => `${Math.round(grainMicrons(v))} µm` },
 	{ label: 'Sharpening', get: (e) => e.detail.sharpenAmount, show: (v) => decimals(v) },
 	{ label: 'Sharpening radius', get: (e) => e.detail.sharpenRadius, show: (v) => `${decimals(v, 1)} px` },
 	{ label: 'Noise reduction', get: (e) => e.detail.denoiseLuminance, show: (v) => decimals(v) },
 	{ label: 'Colour noise reduction', get: (e) => e.detail.denoiseChroma, show: (v) => decimals(v) }
 ];
 
-/** The curve apart from the two points Highlights and Shadows own, so moving those isn't also "curve edited". */
-const ownCurve = (e: EditParams) => JSON.stringify(e.tone.curve.filter((p) => !isAnchor(p[0])));
+/** The global curve is manually-drawn points only — Highlights/Shadows are `tone.highlights`/`shadows`, not
+ * points in here, so unlike a mask layer's curve (`layerCurve`) this needs no anchor filtering. */
+const ownCurve = (e: EditParams) => JSON.stringify(e.tone.curve);
 
 /** What `to` changes from `from`, in the order the editor shows its controls: "Exposure +0.30 EV". */
 export function describeChanges(from: EditParams, to: EditParams): string[] {
@@ -110,6 +135,31 @@ export function describeChanges(from: EditParams, to: EditParams): string[] {
 		const [a, b] = [c.get(from), c.get(to)];
 		if (Math.abs(a - b) > 1e-9) out.push(`${c.label} ${c.show(b)}`);
 	}
+	if (!!from.monochrome !== !!to.monochrome) out.push(to.monochrome ? 'Black and white' : 'Colour');
+	else if (from.monochrome && to.monochrome) {
+		if (from.monochrome.film !== to.monochrome.film) out.push(FILM_NAMES[to.monochrome.film] ?? `Film type ${to.monochrome.film}`);
+		if ((from.monochrome.developer ?? 'standard') !== (to.monochrome.developer ?? 'standard')) out.push(`Developer ${to.monochrome.developer ?? 'standard'}`);
+		if ((from.monochrome.development ?? 0) !== (to.monochrome.development ?? 0)) out.push(to.monochrome.development ? `Development N${signed(to.monochrome.development, 1)}` : 'Normal development');
+		if ((from.monochrome.light ?? 'daylight') !== (to.monochrome.light ?? 'daylight')) out.push(LIGHT_NAMES[to.monochrome.light ?? 'daylight'] ?? `Light ${to.monochrome.light}`);
+		if (from.monochrome.filter !== to.monochrome.filter) out.push(to.monochrome.filter === 'none' ? 'No filter' : `${to.monochrome.filter[0].toUpperCase()}${to.monochrome.filter.slice(1)} filter`);
+	}
+	if (!!from.film !== !!to.film) out.push(to.film ? 'Film rendering' : 'Neutral rendering');
+	else if (from.film && to.film) {
+		if (from.film.amount !== to.film.amount) out.push(`Film amount ${decimals(to.film.amount)} %`);
+		if (from.film.interlayer !== to.film.interlayer) out.push(`Interlayer effects ${decimals(to.film.interlayer)}`);
+		if ((from.film.stock ?? '') !== (to.film.stock ?? '')) {
+			out.push(to.film.stock ? (SLIDE_NAMES[to.film.stock] ?? `Colour stock ${to.film.stock}`) : 'Generic colour film');
+		}
+		if ((from.film.light ?? 'daylight') !== (to.film.light ?? 'daylight')) out.push(LIGHT_NAMES[to.film.light ?? 'daylight'] ?? `Light ${to.film.light}`);
+	}
+	const [b0, b1] = [from.lensBlur?.amount ?? 0, to.lensBlur?.amount ?? 0];
+	if (!b0 !== !b1) out.push(b1 ? `Lens blur ${decimals(b1)}` : 'No lens blur');
+	else if (from.lensBlur && to.lensBlur) {
+		if (b0 !== b1) out.push(`Lens blur ${decimals(b1)}`);
+		if (from.lensBlur.focus !== to.lensBlur.focus) out.push(`Focus distance ${decimals(to.lensBlur.focus)}`);
+		if (from.lensBlur.range !== to.lensBlur.range) out.push(`Depth of field ${decimals(to.lensBlur.range)}`);
+	}
+	if ((from.haze ?? 0) !== (to.haze ?? 0)) out.push(`Haze ${signed(to.haze ?? 0)}`);
 	if (ownCurve(from) !== ownCurve(to)) out.push('Curve edited');
 	out.push(...describeGeometry(from.geometry ?? NO_GEOMETRY, to.geometry ?? NO_GEOMETRY));
 	if (!!from.lens !== !!to.lens) out.push(to.lens ? 'Lens correction on' : 'Lens correction off');
@@ -191,13 +241,41 @@ export const PICKS: { id: string; label: string; take: (into: EditParams, from: 
 			e.tone.contrast = f.tone.contrast;
 			e.tone.whiteEv = f.tone.whiteEv;
 			e.tone.blackEv = f.tone.blackEv;
-			// Highlights and Shadows are curve points: take those two, keep the rest of this curve.
-			const anchors = f.tone.curve.filter((p) => isAnchor(p[0]));
-			e.tone.curve = [...e.tone.curve.filter((p) => !isAnchor(p[0])), ...structuredClone(anchors)].sort((a, b) => a[0] - b[0]);
+			e.tone.highlights = f.tone.highlights ?? 0;
+			e.tone.shadows = f.tone.shadows ?? 0;
+		}
+	},
+	{
+		id: 'film',
+		label: 'Film',
+		take: (e, f) => {
+			if (f.film) e.film = structuredClone(f.film);
+			else delete e.film;
+			if (f.monochrome) e.monochrome = structuredClone(f.monochrome);
+			else delete e.monochrome;
+			if (f.grain) e.grain = structuredClone(f.grain);
+			else delete e.grain;
 		}
 	},
 	{ id: 'curve', label: 'Curve', take: (e, f) => (e.tone.curve = structuredClone(f.tone.curve)) },
-	{ id: 'color', label: 'Color mixer', take: (e, f) => (e.mixer = structuredClone(f.mixer)) },
+	{
+		id: 'depth',
+		label: 'Depth',
+		take: (e, f) => {
+			if (f.lensBlur) e.lensBlur = structuredClone(f.lensBlur);
+			else delete e.lensBlur;
+			if (f.haze) e.haze = f.haze;
+			else delete e.haze;
+		}
+	},
+	{
+		id: 'color',
+		label: 'Color mixer',
+		take: (e, f) => {
+			e.mixer = structuredClone(f.mixer);
+			e.saturation = f.saturation ?? 0;
+		}
+	},
 	{ id: 'detail', label: 'Detail', take: (e, f) => (e.detail = structuredClone(f.detail)) },
 	{
 		id: 'masks',

@@ -4,6 +4,7 @@
 // tool calls: `library.texture('skin')`. The first request for a photo has the worker compute them all, which
 // takes a few seconds (minutes, once, on a new install while the models tune themselves to the GPU).
 import { api } from '$lib/api';
+import type { MaskRange } from '$lib/types';
 
 export type Face = {
 	score: number;
@@ -13,7 +14,8 @@ export type Face = {
 	landmarks: [number, number][];
 };
 
-export type MaskSet = { available: boolean; names: string[]; faces: Face[] };
+/** `airlight`: the light haze tends to, camera RGB (the farthest part of the photo's colour), for haze by distance. */
+export type MaskSet = { available: boolean; names: string[]; faces: Face[]; airlight?: [number, number, number] | null };
 
 export const MASK_LABELS: Record<string, string> = {
 	subject: 'Subject',
@@ -22,8 +24,20 @@ export const MASK_LABELS: Record<string, string> = {
 	'body-skin': 'Body skin',
 	hair: 'Hair',
 	clothes: 'Clothes',
+	depth: 'Depth',
 	brush: 'Brush'
 };
+
+/** The depth mask: near is white. A layer on it selects a band of distance with its `range`. */
+export const DEPTH = 'depth';
+
+/** A layer's range as the brush composite takes it — mirrors `MaskRange::uniform` in crates/color. */
+export function rangeUniform(r: MaskRange | undefined): number[] {
+	if (!r) return [0, 0, 0, 0];
+	const clamp = (v: number) => Math.min(100, Math.max(0, v));
+	const [a, b] = [clamp(r.from), clamp(r.to)];
+	return [Math.min(a, b) / 100, Math.max(a, b) / 100, clamp(r.feather) / 100, 1];
+}
 
 /** A layer painted from nothing, which needs no models. */
 export const BRUSH = 'brush';
@@ -64,6 +78,7 @@ export class MaskLibrary {
 	private set?: Promise<MaskSet>;
 	private loading = new Map<string, Promise<GPUTexture>>();
 	private loaded = new Map<string, GPUTexture>();
+	private decoded = new Map<string, Promise<{ width: number; height: number; data: Uint8Array }>>();
 
 	constructor(
 		private device: GPUDevice,
@@ -99,6 +114,19 @@ export class MaskLibrary {
 				});
 			p.catch(() => this.loading.delete(name));
 			this.loading.set(name, p);
+		}
+		return p;
+	}
+
+	/** A mask's values on the CPU, 0…255 — to read one point, as tapping to focus reads the depth. */
+	values(name: string): Promise<{ width: number; height: number; data: Uint8Array }> {
+		let p = this.decoded.get(name);
+		if (!p) {
+			p = api(`/api/assets/${this.key}/masks/${name}`)
+				.then((r) => r.arrayBuffer())
+				.then(decodeGrey);
+			p.catch(() => this.decoded.delete(name));
+			this.decoded.set(name, p);
 		}
 		return p;
 	}

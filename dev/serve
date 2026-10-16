@@ -1,17 +1,69 @@
 #!/usr/bin/env bash
 # Build the web app and run api + worker in one container, with the photo libraries read-only (and masks,
 # when ./dev/ml-models has written the model weights).
-#   ./dev/serve                         local-only config, no Immich, on 127.0.0.1:8090
+#   ./dev/serve                  local-only config, no Immich
+#   ./dev/serve --web            the same, plus Vite's dev server: Svelte and TypeScript edits apply in the
+#                                browser as you save, without a rebuild (shaders and wasm: `npm run generate`)
 #   SIDECAR_CONFIG=deploy/sidecar.dev-immich.toml ./dev/serve   against the real Immich (host network)
+#
+# Each checkout gets its own container (sidecar-serve-<worktree>), port, and server state, so several can run
+# at once. The port is SIDECAR_PORT, or the first free one from 8091 — 8090 is left to a real deployment.
 set -euo pipefail
 here="$(cd "$(dirname "$0")/.." && pwd)"
-config="${SIDECAR_CONFIG:-deploy/sidecar.dev.toml}"
-mounts="-v /mnt/storage/Photography:/mnt/storage/Photography:ro -v /mnt/storage/immich_library:/data:ro"
-if grep -q '127.0.0.1:2283' "$here/$config"; then net="--network host"; else net="-p 127.0.0.1:${SIDECAR_PORT:-8090}:8080"; fi
-# Masks too, as in the -ml image, once ./dev/ml-models has written the weights.
-ml=""
-if [ -f "$here/target/ml-models/birefnet.bpk" ]; then
-  ml="cargo build -q --release -p sidecar-ml && export SIDECAR_ML=/cache/target/release/sidecar-ml SIDECAR_ML_MODELS=/src/target/ml-models &&"
+. "$here/dev/worktree.sh"
+web=0
+for a in "$@"; do
+  case "$a" in
+    --web) web=1 ;;
+    *) echo "usage: dev/serve [--web]" >&2; exit 2 ;;
+  esac
+done
+
+free_port() {
+  local p=$1
+  while ss -ltnH "sport = :$p" | grep -q .; do p=$((p + 1)); done
+  echo "$p"
+}
+
+name="sidecar-serve-$SIDECAR_WORKTREE"
+if docker ps -q --filter "name=^${name}$" | grep -q .; then
+  echo "$name is already running; stop it with: docker stop $name" >&2
+  exit 1
 fi
-SIDECAR_DEV_EXTRA="$net $mounts ${SIDECAR_DEV_EXTRA:-}" \
-  "$here/dev/run" bash -c "cd web && npm run -s generate && npm run -s build && cd .. && $ml cargo run -q --release -p sidecar -- dev --config $config"
+
+config="${SIDECAR_CONFIG:-deploy/sidecar.dev.toml}"
+port="${SIDECAR_PORT:-$(free_port 8091)}"
+webport="$(free_port $((port + 1)))"
+mkdir -p "$here/testdata/cache/library"
+# The config this run uses: this checkout's state directory, and in host-network mode its own ports.
+derived="testdata/cache/sidecar.toml"
+sed "s|^state_dir *=.*|state_dir = \"$SIDECAR_STATE_DIR\"|" "$here/$config" > "$here/$derived"
+mounts="-v /mnt/storage/Photography:/mnt/storage/Photography:ro -v /mnt/storage/immich_library:/data:ro"
+if grep -q '127.0.0.1:2283' "$here/$config"; then
+  workerport="$(free_port $((webport + 1)))"
+  sed -i "s|^listen *=.*|listen = \"127.0.0.1:$port\"|; s|^worker_url *=.*|worker_url = \"http://127.0.0.1:$workerport\"|" "$here/$derived"
+  net="--network host"; api="127.0.0.1:$port"; webhost=127.0.0.1
+else
+  net="-p 127.0.0.1:$port:8080 -p 127.0.0.1:$webport:5173"; api="127.0.0.1:8080"; webhost=0.0.0.0
+fi
+
+# Masks too, as in the -ml image, once ./dev/ml-models has written the weights (here or in the main checkout).
+ml=""
+for d in "$here/target/ml-models" "$SIDECAR_MAIN_CHECKOUT/target/ml-models"; do
+  if [ -f "$d/birefnet.bpk" ]; then
+    mounts="$mounts -v $d:/ml-models:ro"
+    ml='cargo build -q --profile dev-serve -p sidecar-ml && export SIDECAR_ML=$SIDECAR_TARGET_DIR/dev-serve/sidecar-ml SIDECAR_ML_MODELS=/ml-models &&'
+    break
+  fi
+done
+
+setup='cd web && { [ -d node_modules ] || npm ci; } && npm run -s generate'
+server="cargo run -q --profile dev-serve -p sidecar -- dev --config $derived"
+if [ "$web" = 1 ]; then
+  run="$setup && cd .. && $ml cargo build -q --profile dev-serve -p sidecar && { $server & } && cd web && SIDECAR_API=http://$api exec npx vite dev --host $webhost --port $([ "$webhost" = 0.0.0.0 ] && echo 5173 || echo "$webport") --strictPort"
+  echo "editor (live reload): http://127.0.0.1:$webport   api: http://127.0.0.1:$port   container: $name"
+else
+  run="$setup && npm run -s build && cd .. && $ml $server"
+  echo "editor: http://127.0.0.1:$port   container: $name"
+fi
+SIDECAR_DEV_EXTRA="--name $name $net $mounts ${SIDECAR_DEV_EXTRA:-}" "$here/dev/run" bash -c "$run"

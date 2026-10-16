@@ -13,6 +13,8 @@ ADD --checksum=sha256:5600024376f572a557870a5eb0afb1e5961636bef4e1e22132025467d0
     https://huggingface.co/onnx-community/BiRefNet_lite-ONNX/resolve/main/onnx/model.onnx /w/birefnet_lite_dynamic.onnx
 ADD --checksum=sha256:c6748b1253a99067ef71f7e26ca71096cd449baefa8f101900ea23016507e0e0 \
     https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_multiclass_256x256/float32/latest/selfie_multiclass_256x256.tflite /w/multiclass.tflite
+ADD --checksum=sha256:afb6a5c28f3b6bf1618c6e43f02073ef9dfdc70e937502d51603e57b0a1df10c \
+    https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model.onnx /w/depth_dynamic.onnx
 
 # BiRefNet lite, simplified at its fixed 1024² input: that resolves the dynamic shapes burn-onnx can't import.
 FROM python:3.12-slim AS ml-birefnet
@@ -32,10 +34,19 @@ RUN cd /w && python -m tf2onnx.convert --tflite multiclass.tflite --output conve
  && python canonical_names.py converted.onnx multiclass.onnx \
  && echo "68cd929ca26e76743337685f155708672495032037277eee35af2fcaaf6a5f05  multiclass.onnx" | sha256sum -c
 
+# Depth Anything V2 Small, simplified at its 518² input like BiRefNet. Only Small is Apache-2.0; Base and Large
+# are CC-BY-NC.
+FROM python:3.12-slim AS ml-depth
+RUN pip install --no-cache-dir --root-user-action=ignore onnx==1.23.0 onnxsim==0.7.3
+COPY --from=ml-sources /w/depth_dynamic.onnx /w/
+RUN cd /w && onnxsim depth_dynamic.onnx depth.onnx --overwrite-input-shape 1,3,518,518 \
+ && echo "f2f2a6917075c03c841dc24ca46a27fa8ddbbf86cb018506fd5b6254a1da1a0a  depth.onnx" | sha256sum -c
+
 FROM scratch AS ml-onnx
 COPY --from=ml-sources /w/yunet.onnx /
 COPY --from=ml-birefnet /w/birefnet.onnx /
 COPY --from=ml-multiclass /w/multiclass.onnx /
+COPY --from=ml-depth /w/depth.onnx /
 
 FROM rust:1-trixie AS build
 RUN apt-get update && apt-get install -y --no-install-recommends zlib1g-dev libjpeg62-turbo-dev pkg-config \
@@ -46,10 +57,10 @@ RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm
 WORKDIR /src
 COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry --mount=type=cache,target=/src/target \
-    cargo build --release -p sidecar -p sidecar-devtools \
+    cargo build --release -p sidecar -p sidecar-shaders \
  && cargo build --release -p sidecar-color-wasm --target wasm32-unknown-unknown \
  && cp target/release/sidecar /usr/local/bin/sidecar \
- && ./target/release/sidecar-dev shaders web/src/lib/gpu/wgsl \
+ && ./target/release/sidecar-shaders web/src/lib/gpu/wgsl \
  && cp target/wasm32-unknown-unknown/release/sidecar_color_wasm.wasm web/src/lib/color/sidecar_color.wasm
 RUN --mount=type=cache,target=/root/.npm cd web && npm ci --no-audit --no-fund && npm run build
 

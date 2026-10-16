@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // The Rust colour maths (crates/color) running as WebAssembly. Same code the worker uses for export.
 import wasmUrl from './sidecar_color.wasm?url';
-import type { CameraColor, DisplaySpace, EditParams, Frame, Geometry, Lens, LensProfile, SourceKind } from '$lib/types';
+import type { CameraColor, DisplaySpace, EditParams, Frame, Geometry, Lens, LensProfile, MaskEdge, SourceKind } from '$lib/types';
+
+/** Mirrors `sidecar_color::params::EdgePlan`: the mask edge passes for one mask size. */
+export type EdgePlan = { scale: number; small: [number, number]; radius: number; threshold: number; ramp: number };
 
 type Exports = {
 	memory: WebAssembly.Memory;
@@ -9,19 +12,41 @@ type Exports = {
 	sc_free(ptr: number, len: number): void;
 	sc_pack(ptr: number, len: number): number;
 	sc_pack_lens(ptr: number, len: number): number;
+	sc_tone_curve_lut(ptr: number, len: number): number;
 	sc_geometry(ptr: number, len: number): number;
 	sc_geometry_fit(ptr: number, len: number): number;
 	sc_default_edit(): number;
 	sc_last_error(): number;
+	sc_develop_uniform_bytes(): number;
+	sc_white_from_neutral(ptr: number, len: number): number;
+	sc_pack_depth(ptr: number, len: number): number;
+	sc_mask_edge(ptr: number, len: number): number;
 };
 
 /**
  * `masks` are the develop pass's mask uniforms (`DevelopPass.setMasks`), texture `i` being `edit.masks[i]`'s;
  * `maskCurves` the layers' curves, a 4,096-entry row each.
  */
-export type Packed = { uniform: Uint8Array; lut: Float32Array; temperatureK: number; tint: number; masks: Uint8Array; maskCurves: Float32Array };
+export type Packed = {
+	uniform: Uint8Array;
+	lut: Float32Array;
+	temperatureK: number;
+	tint: number;
+	masks: Uint8Array;
+	maskCurves: Float32Array;
+	monoLut: Float32Array;
+	/** A spectral colour stock's layer responses over the colour cube; empty unless one is being rendered. */
+	slideExposure: Float32Array;
+};
 
+/** A spectral colour stock's profile, as `GET /api/film/stocks/{id}` sends it (`slide::SlideProfile`). */
+export type SlideProfile = { offsets: [number, number, number]; scale: number; side: number; response: Float32Array };
+
+/** `DevelopParams` (shaders/develop/params.wgsl), mirrored in crates/color. Checked against the wasm on load, so a
+ *  struct that grew on one side fails here, by name, rather than as a garbled render. */
+export const DEVELOP_UNIFORM_BYTES = 416;
 const MASK_UNIFORM_BYTES = 1568;
+const EMPTY = new Float32Array(0);
 const LUT = 4096;
 const MAX_MASKS = 8;
 
@@ -30,7 +55,10 @@ export class ColorPacker {
 
 	static async load(): Promise<ColorPacker> {
 		const { instance } = await WebAssembly.instantiateStreaming(fetch(wasmUrl), {});
-		return new ColorPacker(instance.exports as unknown as Exports);
+		const x = instance.exports as unknown as Exports;
+		const bytes = x.sc_develop_uniform_bytes();
+		if (bytes !== DEVELOP_UNIFORM_BYTES) throw new Error(`The develop uniform is ${bytes} bytes in the colour maths but ${DEVELOP_UNIFORM_BYTES} here: rebuild the wasm (npm run generate).`);
+		return new ColorPacker(x);
 	}
 
 	private framed(ptr: number): Uint8Array {
@@ -76,23 +104,68 @@ export class ColorPacker {
 		return JSON.parse(new TextDecoder().decode(this.call(this.x.sc_geometry_fit, { geometry, before, size })));
 	}
 
+	/**
+	 * The tone curve's own LUT (`sidecar_color::spline::tone_curve_lut`) — the same one `pack()` bakes into
+	 * its result, callable on its own so the curve editor can draw the "ghost" line Highlights/Shadows alone
+	 * would produce (`curve: []`) without a full `pack()` call, which needs camera colour this doesn't have.
+	 */
+	toneCurveLut(curve: [number, number][], highlights: number, shadows: number): Float32Array {
+		return new Float32Array(this.call(this.x.sc_tone_curve_lut, { curve, highlights, shadows }).buffer);
+	}
+
+	/** A mask edge's passes for a mask `size` pixels big (`MaskEdge::plan`); null when it is too narrow to show. */
+	edgePlan(edge: MaskEdge, size: [number, number]): EdgePlan | null {
+		return JSON.parse(new TextDecoder().decode(this.call(this.x.sc_mask_edge, { edge, size })));
+	}
+
+	/** The depth passes' uniform (64 bytes) for the proxy, or `undefined` when the edit neither blurs nor hazes. */
+	packDepth(edit: EditParams, airlight: [number, number, number], frame: [number, number]): Uint8Array | undefined {
+		const input = new TextEncoder().encode(JSON.stringify({ edit, airlight, frame }));
+		const ptr = this.x.sc_alloc(input.length);
+		new Uint8Array(this.x.memory.buffer, ptr, input.length).set(input);
+		const out = this.framed(this.x.sc_pack_depth(ptr, input.length));
+		this.x.sc_free(ptr, input.length);
+		return out.length ? out.slice() : undefined;
+	}
+
+	/** The temperature and tint under which `neutral`, a camera RGB, is grey: the white balance eyedropper. */
+	whiteFromNeutral(camera: CameraColor, neutral: [number, number, number]): { temperatureK: number; tint: number } {
+		return JSON.parse(new TextDecoder().decode(this.call(this.x.sc_white_from_neutral, { camera, neutral })));
+	}
+
 	/** `source` picks the develop pass's tone path: sensor light, or a picture a camera or app already rendered. */
-	pack(edit: EditParams, camera: CameraColor, source: SourceKind, display: DisplaySpace): Packed {
-		const input = new TextEncoder().encode(JSON.stringify({ edit, camera, source, display }));
+	pack(edit: EditParams, camera: CameraColor, source: SourceKind, display: DisplaySpace, slide?: SlideProfile): Packed {
+		// The profile's header is all `pack` reads; its response table goes straight to the GPU.
+		const slideProfile = slide ? { offsets: slide.offsets, scale: slide.scale, side: slide.side } : null;
+		const input = new TextEncoder().encode(JSON.stringify({ edit, camera, source, display, slideProfile }));
 		const ptr = this.x.sc_alloc(input.length);
 		new Uint8Array(this.x.memory.buffer, ptr, input.length).set(input);
 		const out = this.framed(this.x.sc_pack(ptr, input.length));
 		this.x.sc_free(ptr, input.length);
 		if (out.length === 0) throw new Error(new TextDecoder().decode(this.framed(this.x.sc_last_error())));
 		const lutBytes = 4096 * 4;
+		const U = DEVELOP_UNIFORM_BYTES;
 		const view = new DataView(out.buffer, out.byteOffset);
+		// Two length-prefixed tables over the colour cube close the stream: black and white's exposures, then a
+		// spectral stock's layer responses. At most one is ever non-empty.
+		let at = U + 16 + lutBytes + MASK_UNIFORM_BYTES + MAX_MASKS * LUT * 4;
+		const table = () => {
+			const floats = view.getUint32(at, true);
+			const start = at + 4;
+			at = start + floats * 4;
+			return floats ? new Float32Array(out.slice(start, at).buffer) : EMPTY;
+		};
+		const monoLut = table();
+		const slideExposure = table();
 		return {
-			uniform: out.slice(0, 272),
-			lut: new Float32Array(out.slice(272, 272 + lutBytes).buffer),
-			temperatureK: view.getFloat64(272 + lutBytes, true),
-			tint: view.getFloat64(280 + lutBytes, true),
-			masks: out.slice(288 + lutBytes, 288 + lutBytes + MASK_UNIFORM_BYTES),
-			maskCurves: new Float32Array(out.slice(288 + lutBytes + MASK_UNIFORM_BYTES, 288 + lutBytes + MASK_UNIFORM_BYTES + MAX_MASKS * LUT * 4).buffer)
+			uniform: out.slice(0, U),
+			lut: new Float32Array(out.slice(U, U + lutBytes).buffer),
+			temperatureK: view.getFloat64(U + lutBytes, true),
+			tint: view.getFloat64(U + 8 + lutBytes, true),
+			masks: out.slice(U + 16 + lutBytes, U + 16 + lutBytes + MASK_UNIFORM_BYTES),
+			maskCurves: new Float32Array(out.slice(U + 16 + lutBytes + MASK_UNIFORM_BYTES, U + 16 + lutBytes + MASK_UNIFORM_BYTES + MAX_MASKS * LUT * 4).buffer),
+			monoLut,
+			slideExposure
 		};
 	}
 }

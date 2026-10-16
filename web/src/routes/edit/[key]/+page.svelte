@@ -1,40 +1,50 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 <script lang="ts">
 	import { page } from '$app/state';
-	import { untrack } from 'svelte';
+	import { tick, untrack } from 'svelte';
 	import { DevelopPass, requestDevice } from '$lib/gpu/develop';
 	import { CLIP_HIGHS, CLIP_LOWS, MASK_INVERTED, PEAKING, SHOW_MASK, ViewPass, type ViewGeometry, type Viewport } from '$lib/gpu/view';
-	import { BRUSH, MaskLibrary, brushStroke, type BrushSettings, type MaskSet } from '$lib/masks';
+	import { BRUSH, DEPTH, MaskLibrary, brushStroke, rangeUniform, type BrushSettings, type MaskSet } from '$lib/masks';
+	import { DepthPass } from '$lib/gpu/depth';
 	import { MaskPainter, simplify } from '$lib/gpu/brush';
 	import { HistogramPass, type HistogramData } from '$lib/gpu/histogram';
 	import { LensPass, correctedPoint, sourcePoint } from '$lib/gpu/lens';
-	import { ColorPacker } from '$lib/color/pack';
-	import { api, HttpError } from '$lib/api';
-	import { settings, SPACE_LABELS } from '$lib/settings';
-	import { clearDraft, loadDraft, saveDraft } from '$lib/state/drafts';
-	import { UndoStack } from '$lib/state/undo';
-	import Slider from '$lib/ui/Slider.svelte';
+	import { ColorPacker, type SlideProfile } from '$lib/color/pack';
+	import { cachedProfile, loadProfile } from '$lib/film';
+	import { api } from '$lib/api';
+	import { saveSettings, settings, SPACE_LABELS } from '$lib/settings';
+	import { EditSession, type EditState } from '$lib/state/edit-session.svelte';
+	import { copyLook, pasteLook, readLookClipboard, type LookClipboard } from '$lib/state/look-clipboard';
 	import Histogram from '$lib/ui/Histogram.svelte';
-	import CurveEditor from '$lib/ui/CurveEditor.svelte';
-	import ColorMixer from '$lib/ui/ColorMixer.svelte';
 	import ExportSheet from '$lib/ui/ExportSheet.svelte';
-	import Loupe from '$lib/ui/Loupe.svelte';
 	import HistoryPanel from '$lib/ui/HistoryPanel.svelte';
 	import MasksPanel from '$lib/ui/MasksPanel.svelte';
 	import CropOverlay from '$lib/ui/CropOverlay.svelte';
-	import { CURVE_ANCHORS, NO_GEOMETRY, PICKS, curveOffset, isNoGeometry, project, twist, untwist, view as sliders, type Anchor } from '$lib/state/edit-view';
-	import { decimals, signed } from '$lib/ui/format';
-	import type { Band, Crop, DisplaySpace, EditParams, Frame, Geometry, HistoryState, Lens, MaskAdjustment, Meta, MixerBand } from '$lib/types';
+	import LensSection from '$lib/ui/sections/LensSection.svelte';
+	import CropSection from '$lib/ui/sections/CropSection.svelte';
+	import WhiteBalanceSection from '$lib/ui/sections/WhiteBalanceSection.svelte';
+	import LightSection from '$lib/ui/sections/LightSection.svelte';
+	import FilmSection from '$lib/ui/sections/FilmSection.svelte';
+	import DepthSection from '$lib/ui/sections/DepthSection.svelte';
+	import CurveSection from '$lib/ui/sections/CurveSection.svelte';
+	import ColorSection from '$lib/ui/sections/ColorSection.svelte';
+	import DetailSection from '$lib/ui/sections/DetailSection.svelte';
+	import { NO_GEOMETRY, isNoGeometry, project, twist, untwist } from '$lib/state/edit-view';
+	import type { Crop, DisplaySpace, EditParams, Frame, Geometry, MaskAdjustment, Meta } from '$lib/types';
 
-	type EditState = { edit: EditParams; etag: string; head: string; readOnly: boolean; writable?: boolean; exports: unknown[]; forked?: boolean };
-	type Section = 'lens' | 'crop' | 'wb' | 'light' | 'curve' | 'color' | 'masks' | 'detail' | 'history';
+	const SPACES: DisplaySpace[] = ['srgb', 'display-p3'];
+
+	type Section = 'lens' | 'crop' | 'wb' | 'light' | 'film' | 'curve' | 'color' | 'depth' | 'masks' | 'detail' | 'history';
 
 	const key = page.params.key!;
 	let canvas: HTMLCanvasElement;
 	let meta = $state<Meta | null>(null);
-	let edit = $state<EditParams | null>(null);
 	let defaults: EditParams;
 	let status = $state('Opening…');
+	/** The white balance eyedropper is waiting for a tap on the photo. */
+	let pickingWhite = $state(false);
+	/** Tap-to-focus (the lens blur) is waiting for a tap on the photo. */
+	let pickingFocus = $state(false);
 	let error = $state('');
 	/**
 	 * The white balance the camera recorded, resolved once per photo. It is the Temperature slider's detent, so
@@ -42,7 +52,11 @@
 	 * it every few pixels of a drag.
 	 */
 	let asShotWb = $state({ temperatureK: 5000, tint: 0 });
+	let lookClipboard = $state<LookClipboard | null>(readLookClipboard());
 	let lut = $state<Float32Array | null>(null);
+	/** The profile of the spectral colour stock this edit names, once the server has sent it. */
+	let slideProfile: SlideProfile | undefined;
+	const NO_TABLE = new Float32Array(0);
 	/** The layers' curves as they render, a 4,096-entry row each: what the selected layer's curve editor draws. */
 	let maskCurves = $state<Float32Array | null>(null);
 	let histogram = $state<HistogramData | null>(null);
@@ -52,6 +66,8 @@
 	let before = $state(false);
 	let section = $state<Section>('light');
 	let showPhoneHistogram = $state(true);
+	/** The editing tools put away so the photo has the screen: only the section tabs stay. Kept per device. */
+	let toolsHidden = $state(typeof localStorage !== 'undefined' && localStorage.getItem('sidecar.toolsHidden') === '1');
 	let wide = $state(false);
 	let exporting = $state(false);
 	let loupeCenter = $state<[number, number]>([0.5, 0.5]);
@@ -80,35 +96,26 @@
 	let displaySpace = $state<DisplaySpace>('srgb');
 	let viewport: Viewport = { zoom: 1, panX: 0, panY: 0 };
 
-	let etag = '';
-	let readOnly = $state(false);
-	/// False when the photo's folder can't take a sidecar: said here rather than at the first save.
-	let writable = $state(true);
-	let dirty = $state(false);
+	/** The edit, its saving and its versions (`$lib/state/edit-session`); the page draws what follows a change. */
+	const session = new EditSession(key, {
+		redraw: () => schedule(true),
+		settled: () => {
+			if (fallback) renderPreview();
+		},
+		compared: () => {
+			if (!before) return;
+			schedule(true);
+			if (fallback) renderPreview();
+		},
+		error: (message) => (error = message)
+	});
+	const edit = $derived(session.edit);
+	const readOnly = $derived(session.readOnly);
+	const compare = $derived(session.compare);
+	const changed = () => session.changed();
+	const committed = () => session.committed();
 	/** The crop tool is in use: the canvas shows the whole straightened picture, with the crop's frame over it. */
-	const cropping = $derived(!readOnly && (wide ? cropOpen : section === 'crop'));
-	let saving = $state(false);
-	let saveQueue: Promise<void> = Promise.resolve();
-	let restoredDraft = $state(false);
-	let draftTimer: ReturnType<typeof setTimeout> | undefined;
-	/** In-session undo: every gesture. The saved history below is coarser — saves and checkpoints. */
-	let undo: UndoStack<EditParams>;
-	let canUndo = $state(false);
-	let canRedo = $state(false);
-
-	/** The history node the edit on screen came from: what the next save names as its base. */
-	let head = '';
-	/** This tab, so the server folds its checkpoints together and never another device's. */
-	const session = globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2);
-	/** A pause after a gesture saves a checkpoint, so the history keeps up without anyone pressing Save. */
-	let checkpointTimer: ReturnType<typeof setTimeout> | undefined;
-	const CHECKPOINT_MS = 4000;
-	/** Another device saved since this one loaded: both versions were kept, as branches. */
-	let forked = $state(false);
-	let versions = $state<HistoryState | null>(null);
-	let versionsBusy = $state(false);
-	/** What pressing and holding the photo shows instead of the edit: a chosen version, or the original. */
-	let compare = $state<{ id: string; label: string; edit: EditParams } | null>(null);
+	const cropping = $derived(!readOnly && !toolsHidden && (wide ? cropOpen : section === 'crop'));
 	const compareEdit = () => compare?.edit ?? defaults;
 
 	let develop: DevelopPass;
@@ -117,6 +124,13 @@
 	let lensPass: LensPass;
 	/** The lens pass's outputs at proxy size — the photo and its focus mask — and what they were made from. */
 	let corrected: GPUTexture | undefined;
+	/** What the lens pass made for develop: `corrected`, or `undefined` for the proxy itself. */
+	let lensOut: GPUTexture | undefined;
+	let depthPass: DepthPass;
+	/** What the depth pass last ran on and with, so it only runs again when one of them changes. */
+	let depthMadeFrom: { key: string; base: GPUTexture; depth: GPUTexture } | undefined;
+	/** The refined depth map and what it was made from: the photo and the model's map, neither of them a slider. */
+	let refinedFrom: { base: GPUTexture; depth: GPUTexture; out: GPUTexture } | undefined;
 	let correctedMask: GPUTexture | undefined;
 	let lensMadeFrom = '';
 	/** The masks the models made for this photo, fetched when a mask is first needed (`$lib/masks`). */
@@ -127,7 +141,13 @@
 	let maskShown = $state(false);
 	let brush = $state<BrushSettings>({ mode: 'off', size: 50, feather: 50, flow: 100 });
 	/** Painting happens on the photo while a layer is selected and the brush is on. */
-	const painting = $derived(!fallback && !readOnly && !cropping && brush.mode !== 'off' && maskSelected !== null && (wide || section === 'masks'));
+	const painting = $derived(!fallback && !readOnly && !toolsHidden && !cropping && brush.mode !== 'off' && maskSelected !== null && (wide || section === 'masks'));
+	/** The camera's own rendering beside the edit (a RAW's embedded JPEG); false once it turned out to have none. */
+	let showCamera = $state(false);
+	let cameraMissing = $state(false);
+	const cameraOffered = $derived(!developed && !cameraMissing && !fallback);
+	/** The photo and the camera's rendering side by side — not while cropping or painting, which need the canvas whole. */
+	const sideBySide = $derived(showCamera && cameraOffered && !cropping && !painting);
 	/** Masks lens-corrected as the picture is, and the correction each was made with. */
 	const correctedMasks = new Map<string, { madeFrom: string; texture: GPUTexture }>();
 	let painter: MaskPainter;
@@ -154,12 +174,10 @@
 	const frames = new Map<string, Frame>();
 	/** The uniforms the corrected proxy was made with: they also move markers set in sensor geometry. */
 	let lensUniform: Uint8Array | undefined;
-	/**
-	 * Lens correction switched on by default for a photo never edited, without counting as a change: opening a
-	 * photo must not write a sidecar. It is saved with the first real change, or before an export.
-	 */
-	let lensDefaulted = false;
 	let packer: ColorPacker;
+	/** What Highlights/Shadows alone would do to an identity curve — the curve editor's "ghost" line, drawn
+	 * behind the real one so a slider's effect stays visible even once a manual curve has its own shape. */
+	const ghostLut = $derived.by(() => (edit ? (packer?.toneCurveLut([], edit.tone.highlights ?? 0, edit.tone.shadows ?? 0) ?? null) : null));
 	let display: DisplaySpace = 'srgb';
 	let developDirty = true;
 	let frame = 0;
@@ -170,10 +188,52 @@
 		if (!frame) frame = requestAnimationFrame(draw);
 	}
 
+	/**
+	 * View and export in another space from now on: the canvas is configured again and the develop uniforms
+	 * repacked for it. Saved as the setting, so the next photo and the Settings page agree.
+	 */
+	async function setOutputSpace(next: DisplaySpace) {
+		if (next === display) return;
+		display = next;
+		displaySpace = next;
+		view?.setDisplayP3(next === 'display-p3');
+		schedule(true);
+		if (fallback) renderPreview();
+		try {
+			await saveSettings({ ...(await settings()), outputSpace: next });
+		} catch (e) {
+			error = e instanceof Error ? e.message : String(e);
+		}
+	}
+
+	function setToolsHidden(hidden: boolean, open?: Section) {
+		toolsHidden = hidden;
+		localStorage.setItem('sidecar.toolsHidden', hidden ? '1' : '0');
+		if (hidden) pickingWhite = pickingFocus = false;
+		if (!open) return;
+		section = open;
+		// On the desktop every section is a <details>: open the one asked for and bring it into view.
+		if (wide)
+			tick().then(() => {
+				const d = document.getElementById(`section-${open}`) as HTMLDetailsElement | null;
+				if (d) {
+					// The section and the group it sits in.
+					for (let at: HTMLDetailsElement | null = d; at; at = at.parentElement?.closest('details') ?? null) at.open = true;
+					d.scrollIntoView({ block: 'start' });
+				}
+			});
+	}
+
 	/** Resolve the edit through the colour packer — wasm, so it works with or without a GPU. */
 	function repack() {
 		const source = before ? compareEdit() : $state.snapshot(edit!);
-		const packed = packer.pack(source, meta!.info.color, meta!.info.sourceKind ?? 'raw', display);
+		// A spectral colour stock needs its profile, which only the server can measure; until it arrives the
+		// edit renders as the per-channel film approximation, and the fetch marks the develop dirty again.
+		const stock = source.film?.stock;
+		// `schedule`, not the flag alone: the profile lands in a promise, with no frame on the way.
+		if (stock) loadProfile(stock, () => schedule(true));
+		slideProfile = stock ? cachedProfile(stock) : undefined;
+		const packed = packer.pack(source, meta!.info.color, meta!.info.sourceKind ?? 'raw', display, slideProfile);
 		if (!before) {
 			lut = packed.lut;
 			maskCurves = packed.maskCurves;
@@ -197,9 +257,12 @@
 		if (stroke && preview) drawStroke();
 		if (developDirty) {
 			correctLens();
+			depthEffects();
 			const packed = repack();
 			develop.setUniforms(packed.uniform);
 			develop.setToneLut(packed.lut);
+			develop.setMono(packed.monoLut);
+			develop.setSlide(packed.slideExposure, slideProfile?.response ?? NO_TABLE);
 			develop.setMasks(packed.masks, ((before ? compareEdit() : edit).masks ?? []).map((m, i) => layerTexture(i, m)), packed.maskCurves);
 			develop.render();
 			developDirty = false;
@@ -385,7 +448,7 @@
 		const flip = meta!.info.orientationFlip ?? 0;
 		lensUniform = proxy && profile && lens ? packer.packLens(profile, $state.snapshot(lens), sensorAspect(meta!.info), [proxy.width, proxy.height], flip) : undefined;
 		if (!proxy || !lensUniform) {
-			develop.setInput(undefined);
+			lensOut = undefined;
 			view.useFocusMask(undefined);
 			return;
 		}
@@ -394,7 +457,7 @@
 			corrected = lensPass.target(proxy, 'lens corrected');
 		}
 		lensPass.run(proxy, corrected, lensUniform);
-		develop.setInput(corrected);
+		lensOut = corrected;
 		// The mask moves with the picture, but isn't a brightness: no vignetting gain on it.
 		const maskUniform = mask.width > 1 ? packer.packLens(profile!, { ...$state.snapshot(lens!), vignetting: 0 }, sensorAspect(meta!.info), [mask.width, mask.height], flip) : undefined;
 		if (maskUniform) {
@@ -405,6 +468,39 @@
 			lensPass.run(mask, correctedMask, maskUniform);
 			view.useFocusMask(correctedMask);
 		} else view.useFocusMask(undefined);
+	}
+
+	/**
+	 * Haze and lens blur by distance over what the lens pass made, for develop to read — when the edit shown has
+	 * either, and the depth mask and the photo's airlight have arrived (asking for them if not). Cheap to call on
+	 * every develop: the pass only runs when the lens result, the settings or the depth mask changed.
+	 */
+	function depthEffects() {
+		const shown = before ? compareEdit() : edit!;
+		const base = lensOut ?? develop.proxy;
+		const wanted = (shown.haze ?? 0) !== 0 || (shown.lensBlur?.amount ?? 0) > 0;
+		if (wanted && !maskSet) loadMaskSet();
+		const airlight = maskSet?.airlight;
+		const coarse = wanted && airlight ? maskTexture(DEPTH) : undefined;
+		// The map with the photo's own edges, so a blur's edge follows hair rather than the model's 518².
+		// It depends on the photo and the map alone, so it is kept until one of them changes.
+		let depth = coarse;
+		if (coarse && base) {
+			if (refinedFrom?.base !== base || refinedFrom?.depth !== coarse) {
+				refinedFrom = { base, depth: coarse, out: depthPass.refine(base, coarse, [base.width, base.height]) };
+			}
+			depth = refinedFrom.out;
+		}
+		const uniform = depth && base ? packer.packDepth($state.snapshot(shown), airlight!, [base.width, base.height]) : undefined;
+		if (!uniform || !depth || !base) {
+			depthMadeFrom = undefined;
+			develop.setInput(lensOut);
+			return;
+		}
+		const key = `${lensMadeFrom}|${uniform.join(',')}`;
+		if (depthMadeFrom?.key === key && depthMadeFrom.base === base && depthMadeFrom.depth === depth) return;
+		depthMadeFrom = { key, base, depth };
+		develop.setInput(depthPass.run(base, depth, uniform));
 	}
 
 	/**
@@ -447,7 +543,7 @@
 	 * while something it needs is loading; that redraws when it arrives.
 	 */
 	function layerTexture(i: number, m: MaskAdjustment): GPUTexture | undefined {
-		if (!m.strokes?.length && stroke?.layer !== i) return m.mask === BRUSH ? undefined : maskTexture(m.mask);
+		if (!m.strokes?.length && !m.range && !m.edge && stroke?.layer !== i) return m.mask === BRUSH ? undefined : maskTexture(m.mask);
 		const entry = layerEntry(i, m);
 		if (!entry) return undefined;
 		const size: [number, number] = [entry.painted.width, entry.painted.height];
@@ -481,9 +577,12 @@
 			entry = { key: '', version: 0, painted: painter.mask([proxy.width, proxy.height], `layer ${i}`), correctedFrom: '' };
 			layerTextures.set(i, entry);
 		}
-		const key = JSON.stringify([m.mask, m.strokes ?? []]);
+		const key = JSON.stringify([m.mask, m.range ?? null, m.edge ?? null, m.strokes ?? []]);
 		if (entry.key !== key && stroke?.layer !== i) {
-			painter.paint(entry.painted, base, $state.snapshot(m.strokes) ?? []);
+			painter.paint(entry.painted, base, $state.snapshot(m.strokes) ?? [], rangeUniform(m.range));
+			// The edge last, over the range and the strokes. (While a stroke is drawn it shows without the edge.)
+			const plan = m.edge ? packer.edgePlan($state.snapshot(m.edge), [proxy.width, proxy.height]) : null;
+			if (plan) painter.edge(entry.painted, plan);
 			entry.key = key;
 		}
 		return entry;
@@ -509,6 +608,8 @@
 	function addMask(name: string) {
 		if (!edit) return;
 		const m: MaskAdjustment = { mask: name, invert: false, amount: 100, exposure: 0, contrast: 0, saturation: 0, temperature: 0, tint: 0 };
+		// Depth on its own is a gradient from far to near; a layer on it starts as the nearer half.
+		if (name === DEPTH) m.range = { from: 50, to: 100, feather: 15 };
 		edit.masks = [...(edit.masks ?? []), m];
 		maskSelected = edit.masks.length - 1;
 		maskShown = true;
@@ -554,6 +655,57 @@
 		const uv = project(displayFrame()?.frame.toPicture ?? [[1, 0, 0], [0, 1, 0], [0, 0, 1]], o);
 		const q = sourcePoint(lensUniform, proxy.width, proxy.height, { x: uv[0], y: uv[1] });
 		return [q.x, q.y];
+	}
+
+	/**
+	 * The white balance eyedropper: the camera RGB around the tapped point (lens, straighten and crop undone,
+	 * clipped pixels left out) becomes the neutral the temperature and tint are solved for.
+	 */
+	async function pickWhite(e: PointerEvent) {
+		pickingWhite = false;
+		const proxy = develop?.proxy;
+		const p = screenToSource(px(e));
+		if (!p || !proxy || !packer || !meta || p.some((v) => v < 0 || v > 1)) return;
+		// What is under the tap: a square about 9 CSS pixels across at any zoom, in proxy pixels (at least 3 × 3
+		// to average noise, at most 33 × 33 so a thin grey line still counts).
+		const outW = displayFrame()?.frame.size[0] ?? develop.output!.width;
+		const perCanvasPx = outW / imageRect().w;
+		const radius = Math.min(16, Math.max(1, Math.round(4 * devicePixelRatio * perCanvasPx)));
+		const rgb = await develop.sampleSource(p, radius);
+		if (!rgb || rgb.some((v) => v <= 0)) {
+			status = rgb ? 'That spot has no colour to balance. Pick a grey with some light in it.' : 'That spot is clipped. Pick a grey that isn\'t.';
+			setTimeout(() => (status = ''), 3000);
+			return;
+		}
+		const wb = packer.whiteFromNeutral(meta.info.color, rgb);
+		const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, Math.round(v)));
+		update((ed) => {
+			ed.whiteBalance = { mode: 'custom', temperatureK: clamp(wb.temperatureK, 2000, 12000), tint: clamp(wb.tint, -150, 150) };
+		});
+		committed();
+	}
+
+	/**
+	 * Tap to focus: the depth mask's value under the tap (a 5 × 5 average) becomes the lens blur's focus
+	 * distance. The mask is in the same frame `screenToSource` maps to: oriented, before lens correction.
+	 */
+	async function pickFocus(e: PointerEvent) {
+		pickingFocus = false;
+		const p = screenToSource(px(e));
+		if (!p || !maskLibrary || p.some((v) => v < 0 || v > 1)) return;
+		const depth = await maskLibrary.values(DEPTH);
+		const [cx, cy] = [Math.round(p[0] * (depth.width - 1)), Math.round(p[1] * (depth.height - 1))];
+		let [sum, n] = [0, 0];
+		for (let y = Math.max(0, cy - 2); y <= Math.min(depth.height - 1, cy + 2); y++)
+			for (let x = Math.max(0, cx - 2); x <= Math.min(depth.width - 1, cx + 2); x++) {
+				sum += depth.data[y * depth.width + x];
+				n++;
+			}
+		const focus = Math.round((sum / n / 255) * 100);
+		update((ed) => {
+			ed.lensBlur = { ...(ed.lensBlur ?? { amount: 50, focus, range: 10 }), focus };
+		});
+		committed();
 	}
 
 	/** The brush's radius in proxy pixels, and on screen in CSS pixels. */
@@ -775,183 +927,21 @@
 		}
 	}
 
-	/** Continuous change during a gesture: redraw, mark unsaved, keep a device draft. */
-	function changed() {
-		schedule(true);
-		dirty = true;
-		clearTimeout(checkpointTimer);
-		clearTimeout(draftTimer);
-		draftTimer = setTimeout(() => edit && saveDraft(key, { edit: $state.snapshot(edit), baseEtag: etag, savedAt: Date.now() }), 500);
-	}
-
-	/** A gesture ended: one undo step, and in fallback mode the moment to ask for a new render. */
-	function committed() {
-		if (edit) undo.commit($state.snapshot(edit));
-		syncUndo();
-		if (fallback) renderPreview();
-		scheduleCheckpoint();
-	}
-
-	function scheduleCheckpoint() {
-		clearTimeout(checkpointTimer);
-		if (writable && !readOnly) checkpointTimer = setTimeout(() => commit(false, true), CHECKPOINT_MS);
-	}
-
-	function syncUndo() {
-		canUndo = undo.canUndo;
-		canRedo = undo.canRedo;
-	}
-
-	function restore(state: EditParams | null) {
-		if (!state || !edit) return;
-		edit = state;
-		changed();
-		syncUndo();
-		if (fallback) renderPreview();
-		scheduleCheckpoint();
-	}
-
-	/**
-	 * Save the edit as a version in the photo's history. One PUT at a time, each sending the latest state: a
-	 * call made while one is out waits for it and then saves whatever is still unsaved, instead of being
-	 * dropped. `checkpoint` is the save a pause triggers; the server folds this tab's checkpoints together.
-	 */
-	function commit(keepalive = false, checkpoint = false): Promise<void> {
-		if (!checkpoint) clearTimeout(checkpointTimer);
-		saveQueue = saveQueue.then(() => save(keepalive, checkpoint));
-		return saveQueue;
-	}
-
-	async function save(keepalive: boolean, checkpoint: boolean) {
-		if (!edit || !dirty || readOnly) return;
-		saving = true;
-		try {
-			const sent = JSON.stringify($state.snapshot(edit));
-			const put = (base: string) =>
-				api(`/api/assets/${key}/edit`, {
-					method: 'PUT',
-					keepalive,
-					headers: { 'content-type': 'application/json' },
-					body: JSON.stringify({ edit: JSON.parse(sent), base, checkpoint, session })
-				});
-			let r: Response;
-			try {
-				r = await put(head);
-			} catch (e) {
-				// The version this page was built on isn't in the history any more: typically a page opened
-				// before the server was updated, holding an id the new server never gave out. Save on top of
-				// the current version instead of failing until a reload.
-				if (!(e instanceof HttpError) || e.status !== 404) throw e;
-				const current: EditState = await (await api(`/api/assets/${key}/edit`)).json();
-				if (current.head === head) throw e;
-				head = current.head;
-				r = await put(head);
-			}
-			const state: EditState = await r.json();
-			etag = state.etag;
-			head = state.head;
-			forked ||= !!state.forked;
-			lensDefaulted = false;
-			// Only what was sent is saved. A slider moved while the request was out used to be marked saved
-			// here, and its draft cleared, so the change was lost without a word.
-			if (JSON.stringify($state.snapshot(edit)) === sent) {
-				dirty = false;
-				restoredDraft = false;
-				await clearDraft(key);
-			} else {
-				await saveDraft(key, { edit: $state.snapshot(edit), baseEtag: etag, savedAt: Date.now() });
-			}
-			if (versions) loadVersions();
-		} catch (e) {
-			error = e instanceof Error ? e.message : String(e);
-		} finally {
-			saving = false;
-		}
-	}
-
-	/** Save if needed and return the ETag an export should pin, or null when saving failed. */
-	async function prepareExport(): Promise<string | null> {
-		if (readOnly) return etag;
-		// What's on screen is what gets exported: a correction switched on by default is saved first.
-		if (lensDefaulted && edit?.lens) dirty = true;
-		// Always through the queue: a save already out has to land before its ETag is the one to pin.
-		await commit();
-		return dirty ? null : etag;
-	}
-
-	async function loadVersions() {
-		try {
-			versions = await (await api(`/api/assets/${key}/history`)).json();
-			// A compared version may have been folded into a later checkpoint; keep comparing only what exists.
-			if (compare && !versions!.nodes.some((n) => n.id === compare!.id)) compare = null;
-		} catch (e) {
-			error = e instanceof Error ? e.message : String(e);
-		}
-	}
-
-	/** Make a version current. Unsaved changes are saved first, so opening something else never loses them. */
-	async function openVersion(id: string) {
-		versionsBusy = true;
-		try {
-			await commit();
-			if (dirty) return;
-			const r = await api(`/api/assets/${key}/history/checkout`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ node: id }) });
-			const state: EditState = await r.json();
-			edit = state.edit;
-			etag = state.etag;
-			head = state.head;
-			dirty = false;
-			restoredDraft = false;
-			await clearDraft(key);
-			undo.reset($state.snapshot(edit));
-			syncUndo();
-			schedule(true);
-			if (fallback) renderPreview();
-			await loadVersions();
-		} catch (e) {
-			error = e instanceof Error ? e.message : String(e);
-		} finally {
-			versionsBusy = false;
-		}
-	}
-
-	/** Take one section — white balance, light, curve, mixer, detail — from another version into this edit. */
-	function pickFrom(id: string, section: string) {
-		const from = versions?.nodes.find((n) => n.id === id);
-		const pick = PICKS.find((p) => p.id === section);
-		if (!edit || !from || !pick) return;
-		pick.take(edit, from.edit);
-		changed();
-		committed();
-	}
-
-	async function labelVersion(id: string, label: string | null) {
-		try {
-			await api(`/api/assets/${key}/history/${id}/label`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ label }) });
-			await loadVersions();
-		} catch (e) {
-			error = e instanceof Error ? e.message : String(e);
-		}
-	}
-
-	function setCompare(id: string | null) {
-		const n = id ? versions?.nodes.find((v) => v.id === id) : undefined;
-		compare = n ? { id: n.id, label: n.label ?? (n.kind === 'original' ? 'Original' : 'Compared version'), edit: n.edit } : null;
-		if (before) {
-			schedule(true);
-			if (fallback) renderPreview();
-		}
-	}
-
 	// Masks are asked for when a tool needs them — the section is opened, or the edit has some — not with
 	// every photo: the first ask computes them.
 	$effect(() => {
-		if (section === 'masks' || wide || (edit?.masks?.length ?? 0) > 0) loadMaskSet();
+		if (section === 'masks' || section === 'depth' || wide || (edit?.masks?.length ?? 0) > 0) loadMaskSet();
+	});
+
+	// The eyedropper belongs to the White balance section: leaving it on a phone puts the eyedropper away.
+	$effect(() => {
+		if (!wide && section !== 'wb') pickingWhite = false;
+		if (!wide && section !== 'depth') pickingFocus = false;
 	});
 
 	// The history loads when it's first looked at, not with every photo.
 	$effect(() => {
-		if ((section === 'history' || wide) && edit && !versions) loadVersions();
+		if ((section === 'history' || wide) && edit && !session.versions) session.loadVersions();
 	});
 
 	async function loadProxy(longEdge: number) {
@@ -984,24 +974,7 @@
 			defaults = packer.defaultEdit();
 			const asShot = packer.pack(defaults, meta!.info.color, meta!.info.sourceKind ?? 'raw', display);
 			asShotWb = { temperatureK: asShot.temperatureK, tint: asShot.tint };
-			edit = state.edit;
-			etag = state.etag;
-			head = state.head;
-			readOnly = state.readOnly;
-			writable = state.writable !== false;
-			const draft = await loadDraft(key);
-			if (draft && draft.baseEtag === state.etag && JSON.stringify(draft.edit) !== JSON.stringify(state.edit)) {
-				edit = draft.edit;
-				dirty = true;
-				restoredDraft = true;
-			}
-			// A photo never edited starts with the correction its file (or lensfun) provides (DESIGN.md §15).
-			const profile = meta!.info.lensProfile;
-			if (profile && !edit!.lens && head === 'original' && !restoredDraft && !readOnly) {
-				edit!.lens = { profile: profile.id, distortion: 100, lateralCa: 100, vignetting: 100 };
-				lensDefaulted = true;
-			}
-			undo = new UndoStack($state.snapshot(edit));
+			await session.begin(state, meta!.info.lensProfile);
 			const prefs = await settings();
 			display = prefs.outputSpace;
 			displaySpace = display;
@@ -1020,6 +993,7 @@
 				LensPass.create(device),
 				MaskPainter.create(device)
 			]);
+			depthPass = await DepthPass.create(device);
 			maskLibrary = new MaskLibrary(device, key);
 			if (section === 'masks' || wide || (edit?.masks?.length ?? 0) > 0) loadMaskSet();
 			device.lost.then((info) => (error = `The GPU was reset (${info.reason}). Reload to continue — your edits are kept as a draft.`));
@@ -1069,7 +1043,7 @@
 		clearTimeout(holdTimer);
 		// With the brush on, one finger paints; a second one turns it into a pinch.
 		if (painting && pointers.size === 1) startStroke(e);
-		else if (pointers.size === 1) holdTimer = setTimeout(() => setBefore(true), 450);
+		else if (pointers.size === 1 && !pickingWhite && !pickingFocus) holdTimer = setTimeout(() => setBefore(true), 450);
 		if (pointers.size === 2) {
 			cancelStroke();
 			clearTimeout(holdTimer);
@@ -1114,6 +1088,14 @@
 		const now = performance.now();
 		const still = Math.hypot(px(e).x - downAt.x, px(e).y - downAt.y) < 8 * devicePixelRatio && now - downAt.t < 300;
 		if (still && pointers.size === 0) {
+			if (pickingWhite && !fallback && develop?.output) {
+				pickWhite(e);
+				return;
+			}
+			if (pickingFocus && !fallback && develop?.output) {
+				pickFocus(e);
+				return;
+			}
 			if (fallback || !develop?.output || cropping || painting) return;
 			const r = imageRect();
 			// What is shown is the edit's output: the loupe is centred in it.
@@ -1134,10 +1116,16 @@
 
 	function keydown(e: KeyboardEvent) {
 		if ((e.target as HTMLElement)?.tagName === 'INPUT') return;
+		if (e.key === 'Escape' && (pickingWhite || pickingFocus)) {
+			pickingWhite = pickingFocus = false;
+			return;
+		}
 		if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') {
 			e.preventDefault();
-			restore(e.shiftKey ? undo.redo() : undo.undo());
+			if (e.shiftKey) session.redo();
+			else session.undo();
 		} else if (e.key === '\\') setBefore(!before);
+		else if (e.key.toLowerCase() === 'h' && !e.metaKey && !e.ctrlKey) setToolsHidden(!toolsHidden);
 		else if (e.key.toLowerCase() === 'e' && !e.metaKey && !e.ctrlKey) exporting = true;
 		else if (e.key.toLowerCase() === 'z' && !e.metaKey && !e.ctrlKey) {
 			section = 'detail';
@@ -1165,7 +1153,7 @@
 			schedule();
 		});
 		ro.observe(canvas);
-		const onHide = () => document.visibilityState === 'hidden' && commit(true);
+		const onHide = () => document.visibilityState === 'hidden' && session.commit(true);
 		const noGesture = (e: Event) => e.preventDefault();
 		document.addEventListener('visibilitychange', onHide);
 		canvas.addEventListener('gesturestart', noGesture);
@@ -1183,36 +1171,10 @@
 	});
 
 	// ---------- edit helpers
-	function setWb(field: 'temperatureK' | 'tint', value: number) {
+	/** What sections call to change the edit (`$lib/ui/sections`): apply it, then redraw and mark it unsaved. */
+	function update(mutate: (e: EditParams) => void) {
 		if (!edit) return;
-		if (edit.whiteBalance.mode === 'asShot') {
-			edit.whiteBalance.temperatureK = Math.round(asShotWb.temperatureK);
-			edit.whiteBalance.tint = Math.round(asShotWb.tint);
-			edit.whiteBalance.mode = 'custom';
-		}
-		edit.whiteBalance[field] = value;
-		changed();
-	}
-
-	function setCurveOffset(which: Anchor, v: number) {
-		if (!edit) return;
-		const x = CURVE_ANCHORS[which];
-		const rest = edit.tone.curve.filter((q) => Math.abs(q[0] - x) >= 1e-6);
-		edit.tone.curve = v === 0 ? rest : [...rest, [x, Math.min(1, Math.max(0, x + (v / 100) * 0.15))] as [number, number]].sort((a, b) => a[0] - b[0]);
-		changed();
-	}
-
-	function setLens(on: boolean) {
-		const profile = meta?.info.lensProfile;
-		if (!edit || !profile) return;
-		edit.lens = on ? { profile: profile.id, distortion: 100, lateralCa: 100, vignetting: 100 } : null;
-		changed();
-		committed();
-	}
-
-	function setLensStrength(field: keyof Omit<Lens, 'profile'>, v: number) {
-		if (!edit?.lens) return;
-		edit.lens[field] = v;
+		mutate(edit);
 		changed();
 	}
 
@@ -1228,137 +1190,60 @@
 		]
 			.filter(Boolean)
 			.join(' · ');
-	const TEMP_TRACK = 'linear-gradient(90deg,#5f7fb6,#9aa0a6 45%,#c9a15f)';
-	const TINT_TRACK = 'linear-gradient(90deg,#6f9f6f,#9aa0a6 50%,#b07aa6)';
 	const sections: { id: Section; label: string; short: string }[] = [
-		{ id: 'lens', label: 'Lens', short: 'Lens' },
-		{ id: 'crop', label: 'Crop and straighten', short: 'Crop' },
 		{ id: 'wb', label: 'White balance', short: 'WB' },
+		{ id: 'film', label: 'Film', short: 'Film' },
+		{ id: 'color', label: 'Color', short: 'Color' },
 		{ id: 'light', label: 'Light', short: 'Light' },
 		{ id: 'curve', label: 'Curve', short: 'Curve' },
-		{ id: 'color', label: 'Color', short: 'Color' },
+		{ id: 'crop', label: 'Crop and straighten', short: 'Crop' },
+		{ id: 'depth', label: 'Depth', short: 'Depth' },
 		{ id: 'masks', label: 'Masks', short: 'Masks' },
 		{ id: 'detail', label: 'Detail', short: 'Detail' },
+		{ id: 'lens', label: 'Lens', short: 'Lens' },
 		{ id: 'history', label: 'History', short: 'History' }
 	];
+	const sectionById = (id: Section) => sections.find((x) => x.id === id)!;
+	/** The tools as the panel groups them: a group with one section is that section. */
+	const groups: { id: string; label: string; short: string; children: Section[] }[] = [
+		{ id: 'colour', label: 'Colour', short: 'Colour', children: ['wb', 'film', 'color'] },
+		{ id: 'light', label: 'Light', short: 'Light', children: ['light', 'curve'] },
+		{ id: 'crop', label: 'Crop and straighten', short: 'Crop', children: ['crop'] },
+		{ id: 'processing', label: 'Processing', short: 'Processing', children: ['depth', 'masks', 'detail', 'lens'] },
+		{ id: 'history', label: 'History', short: 'History', children: ['history'] }
+	];
+	const groupOf = (id: Section) => groups.find((g) => g.children.includes(id))!;
 </script>
 
 <svelte:head><title>{meta?.fileName ?? 'Sidecar'}</title></svelte:head>
 <svelte:window onkeydown={keydown} />
 
 {#snippet lensSection()}
-	{#if edit && meta}
-		{@const profile = meta.info.lensProfile}
-		{@const name = meta.info.lensIdentity?.lensId ?? meta.info.lensIdentity?.lensModel ?? meta.info.lens}
-		<div class="grid gap-2">
-			{#if name}<p class="text-xs text-fg-2">{name}</p>{/if}
-			{#if !profile}
-				<p class="text-xs text-fg-2">
-					{developed ? 'This picture was already developed, lens and all.' : 'No correction for this lens: the file carries none, and no lens database profile matches it yet.'}
-				</p>
-			{:else}
-				<div class="flex items-center justify-between text-xs">
-					<span class="text-fg-2">{profile.label}</span>
-					<button type="button" aria-pressed={!!edit.lens} class="rounded-full px-3 py-1 {edit.lens ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" onclick={() => setLens(!edit!.lens)}>{edit.lens ? 'On' : 'Off'}</button>
-				</div>
-				{#if profile.required && !edit.lens}
-					<p class="text-xs text-warning">This lens is designed to be corrected in software. Without it the frame shows distortion the camera never showed.</p>
-				{/if}
-				{#if edit.lens}
-					{#if profile.distortion}
-						<Slider id="lens-distortion" label="Distortion" value={edit.lens.distortion} min={0} max={200} defaultValue={100} format={(v) => `${decimals(v)} %`} onchange={(v) => setLensStrength('distortion', v)} oncommit={committed} />
-					{/if}
-					{#if profile.caRed || profile.caBlue}
-						<Slider id="lens-ca" label="Chromatic aberration" value={edit.lens.lateralCa} min={0} max={200} defaultValue={100} format={(v) => `${decimals(v)} %`} onchange={(v) => setLensStrength('lateralCa', v)} oncommit={committed} />
-					{/if}
-					{#if profile.vignetting}
-						<Slider id="lens-vignetting" label="Vignetting" value={edit.lens.vignetting} min={0} max={200} defaultValue={100} format={(v) => `${decimals(v)} %`} onchange={(v) => setLensStrength('vignetting', v)} oncommit={committed} />
-					{/if}
-				{/if}
-			{/if}
-		</div>
-	{/if}
+	{#if edit && meta}<LensSection {edit} onchange={update} oncommit={committed} info={meta.info} {developed} />{/if}
 {/snippet}
 
 {#snippet cropSection()}
-	{#if edit && meta}
-		{@const g = edit.geometry ?? NO_GEOMETRY}
-		{@const ratios = [{ label: 'Free', value: 0 }, { label: 'Original', value: originalRatio() }, { label: '1:1', value: 1 }, { label: '4:5', value: 4 / 5 }, { label: '3:2', value: 3 / 2 }, { label: '16:9', value: 16 / 9 }]}
-		<div class="grid gap-2">
-			<div class="flex flex-wrap items-center gap-1.5 text-xs" role="radiogroup" aria-label="Crop proportions">
-				{#each ratios as r (r.label)}
-					{@const on = r.value === 0 ? !g.ratio : Math.abs(g.ratio - r.value) < 1e-3 || (r.label !== 'Original' && Math.abs(g.ratio - 1 / r.value) < 1e-3 && r.value !== 1)}
-					<button type="button" role="radio" aria-checked={on} disabled={readOnly} class="rounded-full px-2.5 py-1 {on ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" onclick={() => { setGeometry({ ratio: r.value }); committed(); }}>{r.label}</button>
-				{/each}
-				<button type="button" disabled={readOnly || !g.ratio || g.ratio === 1} class="rounded-full bg-raised px-2.5 py-1 text-fg-2 disabled:opacity-40" aria-label="Swap portrait and landscape" onclick={() => { setGeometry({ ratio: 1 / g.ratio }); committed(); }}>⇄</button>
-			</div>
-			<div class="flex flex-wrap gap-1.5 text-xs">
-				<button type="button" disabled={readOnly} class="rounded-full bg-raised px-2.5 py-1 text-fg" onclick={() => turn(-1)}>⟲ Left</button>
-				<button type="button" disabled={readOnly} class="rounded-full bg-raised px-2.5 py-1 text-fg" onclick={() => turn(1)}>⟳ Right</button>
-				<button type="button" disabled={readOnly} aria-pressed={g.flip} class="rounded-full px-2.5 py-1 {g.flip ? 'bg-fg text-ground' : 'bg-raised text-fg'}" onclick={() => { setGeometry({ flip: !g.flip }); committed(); }}>Mirror</button>
-				<button type="button" disabled={readOnly || !edit.geometry} class="ml-auto rounded-full bg-raised px-2.5 py-1 text-fg-2 disabled:opacity-40" onclick={resetGeometry}>Reset</button>
-			</div>
-			<Slider id="geo-angle" label="Straighten" value={g.angle} min={-45} max={45} step={0.1} defaultValue={0} bipolar disabled={readOnly} format={(v) => `${signed(v, 1)}°`} onchange={(v) => setGeometry({ angle: v })} oncommit={committed} />
-			<Slider id="geo-vertical" label="Vertical" value={g.vertical} min={-100} max={100} defaultValue={0} bipolar disabled={readOnly} format={(v) => signed(v)} onchange={(v) => setGeometry({ vertical: v })} oncommit={committed} />
-			<Slider id="geo-horizontal" label="Horizontal" value={g.horizontal} min={-100} max={100} defaultValue={0} bipolar disabled={readOnly} format={(v) => signed(v)} onchange={(v) => setGeometry({ horizontal: v })} oncommit={committed} />
-			<Slider id="geo-aspect" label="Aspect" value={g.aspect} min={-100} max={100} defaultValue={0} bipolar disabled={readOnly} format={(v) => signed(v)} onchange={(v) => setGeometry({ aspect: v })} oncommit={committed} />
-			<p class="text-xs text-muted">Drag the frame's corners and edges to crop, or inside it to move it. Straighten and keystone keep the crop inside the photo.</p>
-		</div>
-	{/if}
+	{#if edit && meta}<CropSection {edit} {readOnly} originalRatio={originalRatio()} ongeometry={setGeometry} onturn={turn} onreset={resetGeometry} oncommit={committed} />{/if}
 {/snippet}
 
 {#snippet wbSection()}
-	{#if edit}
-		<div class="grid gap-2">
-			<div class="flex items-center justify-between text-xs">
-				<span class="text-fg-2">{edit.whiteBalance.mode === 'asShot' ? (developed ? 'As saved' : 'As shot') : 'Custom'}</span>
-				<button type="button" class="rounded px-2 py-1 text-fg-2 hover:bg-raised disabled:opacity-40" disabled={edit.whiteBalance.mode === 'asShot'} onclick={() => { edit!.whiteBalance.mode = 'asShot'; changed(); committed(); }}>Reset to {developed ? 'as saved' : 'as shot'}</button>
-			</div>
-			<Slider id="wb-temp" label="Temperature" value={edit.whiteBalance.mode === 'asShot' ? Math.round(asShotWb.temperatureK) : edit.whiteBalance.temperatureK} min={2000} max={12000} step={10} defaultValue={Math.round(asShotWb.temperatureK)} trackGradient={TEMP_TRACK} format={(v) => `${decimals(v)} K`} onchange={(v) => setWb('temperatureK', v)} oncommit={committed} />
-			<Slider id="wb-tint" label="Tint" value={edit.whiteBalance.mode === 'asShot' ? Math.round(asShotWb.tint) : edit.whiteBalance.tint} min={-150} max={150} defaultValue={0} bipolar trackGradient={TINT_TRACK} format={(v) => signed(v)} onchange={(v) => setWb('tint', v)} oncommit={committed} />
-		</div>
-	{/if}
+	{#if edit}<WhiteBalanceSection {edit} onchange={update} oncommit={committed} {developed} asShot={asShotWb} picking={fallback || readOnly ? undefined : pickingWhite} onpick={(on) => (pickingWhite = on)} />{/if}
 {/snippet}
 
 {#snippet lightSection()}
-	{#if edit}
-		<div class="grid gap-2">
-			<!-- A developed file has no headroom past white to recover: ±2 EV is already most of what it holds. -->
-			<Slider id="exposure" label="Exposure" value={edit.exposure.ev} min={developed ? -2 : -5} max={developed ? 2 : 5} step={0.01} defaultValue={0} bipolar format={(v) => `${signed(v, 2)} EV`} onchange={(v) => { edit!.exposure.ev = v; changed(); }} oncommit={committed} />
-			<Slider id="contrast" label="Contrast" value={sliders.contrast(edit)} min={-70} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => { edit!.tone.contrast = 1 + v / 100; changed(); }} oncommit={committed} />
-			<Slider id="highlights" label="Highlights" value={curveOffset(edit, 'highlights')} min={-100} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => setCurveOffset('highlights', v)} oncommit={committed} />
-			<Slider id="shadows" label="Shadows" value={curveOffset(edit, 'shadows')} min={-100} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => setCurveOffset('shadows', v)} oncommit={committed} />
-			<Slider id="whites" label="Whites" value={sliders.whites(edit)} min={-100} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => { edit!.tone.whiteEv = 4.5 - (v / 100) * 2; changed(); }} oncommit={committed} />
-			<Slider id="blacks" label="Blacks" value={sliders.blacks(edit)} min={-100} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => { edit!.tone.blackEv = -8 - (v / 100) * 3; changed(); }} oncommit={committed} />
-			<!-- Highlight recovery reconstructs clipped sensor channels; an already-developed file has none to
-			     reconstruct, so the control would sit there doing nothing. -->
-			{#if !developed}
-				<Slider id="hl-blend" label="Highlight recovery" value={sliders.highlightRecovery(edit)} min={0} max={100} defaultValue={50} format={(v) => `${decimals(v)} %`} onchange={(v) => { edit!.exposure.highlightBlend = v / 100; changed(); }} oncommit={committed} />
-			{/if}
-		</div>
-	{/if}
+	{#if edit}<LightSection {edit} onchange={update} oncommit={committed} {developed} />{/if}
+{/snippet}
+
+{#snippet filmSection()}
+	{#if edit}<FilmSection {edit} onchange={update} oncommit={committed} {developed} />{/if}
 {/snippet}
 
 {#snippet curveSection()}
-	{#if edit}
-		<div class="grid gap-2">
-			<CurveEditor points={edit.tone.curve} {lut} onchange={(p) => { edit!.tone.curve = p; changed(); }} oncommit={committed} />
-			<button type="button" class="justify-self-end rounded px-2 py-1 text-xs text-fg-2 hover:bg-raised" onclick={() => { edit!.tone.curve = [[0, 0], [1, 1]]; changed(); committed(); }}>Reset curve</button>
-		</div>
-	{/if}
+	{#if edit}<CurveSection {edit} onchange={update} oncommit={committed} {lut} {ghostLut} />{/if}
 {/snippet}
 
 {#snippet detailSection()}
-	{#if edit}
-		<div class="grid gap-2">
-			<Loupe assetKey={key} edit={$state.snapshot(edit)} center={loupeCenter} colorSpace={displaySpace} />
-			<p class="text-xs text-muted">Tap the photo to move the loupe.</p>
-			<Slider id="sharpen" label="Sharpening" value={edit.detail.sharpenAmount} min={0} max={100} defaultValue={0} format={(v) => decimals(v)} onchange={(v) => { edit!.detail.sharpenAmount = v; changed(); }} oncommit={committed} />
-			<Slider id="sharpen-radius" label="Sharpening radius" value={edit.detail.sharpenRadius} min={0.5} max={2} step={0.1} defaultValue={1} format={(v) => `${decimals(v, 1)} px`} onchange={(v) => { edit!.detail.sharpenRadius = v; changed(); }} oncommit={committed} />
-			<Slider id="denoise-luma" label="Noise reduction" value={edit.detail.denoiseLuminance} min={0} max={100} defaultValue={0} format={(v) => decimals(v)} onchange={(v) => { edit!.detail.denoiseLuminance = v; changed(); }} oncommit={committed} />
-			<Slider id="denoise-chroma" label="Colour noise reduction" value={edit.detail.denoiseChroma} min={0} max={100} defaultValue={0} format={(v) => decimals(v)} onchange={(v) => { edit!.detail.denoiseChroma = v; changed(); }} oncommit={committed} />
-		</div>
-	{/if}
+	{#if edit}<DetailSection {edit} onchange={update} oncommit={committed} assetKey={key} {loupeCenter} colorSpace={displaySpace} />{/if}
 {/snippet}
 
 {#snippet masksSection()}
@@ -1384,17 +1269,45 @@
 {/snippet}
 
 {#snippet historySection()}
-	{#if versions}
-		<HistoryPanel history={versions} compareId={compare?.id ?? null} busy={versionsBusy || saving} onopen={openVersion} oncompare={setCompare} onpick={pickFrom} onlabel={labelVersion} />
+	<!-- The colour sections as a look: copied here, pasted onto another photo (`$lib/state/look-clipboard`). -->
+	<div class="mb-2 flex flex-wrap items-center gap-1.5 text-xs">
+		<span class="text-fg-2">Look</span>
+		<button type="button" class="rounded-full bg-raised px-2.5 py-1 text-fg disabled:opacity-40" disabled={!edit} title="Copy this photo's white balance, light, curve, colour and detail" onclick={() => { if (edit && meta) { copyLook($state.snapshot(edit), meta.fileName); lookClipboard = readLookClipboard(); } }}>Copy look</button>
+		<button type="button" class="rounded-full bg-raised px-2.5 py-1 text-fg disabled:opacity-40" disabled={!edit || !lookClipboard || readOnly} onclick={() => { if (edit && pasteLook(edit)) { changed(); committed(); } }}>Paste look</button>
+		{#if lookClipboard}<span class="min-w-0 truncate text-fg-2">from {lookClipboard.from}</span>{/if}
+	</div>
+	{#if session.versions}
+		<HistoryPanel history={session.versions} compareId={compare?.id ?? null} busy={session.versionsBusy || session.saving} onopen={(id) => session.openVersion(id)} oncompare={(id) => session.setCompare(id)} onpick={(id, section) => session.pickFrom(id, section)} onlabel={(id, label) => session.labelVersion(id, label)} />
+
 	{:else}
 		<p class="text-xs text-fg-2">Loading history…</p>
 	{/if}
 {/snippet}
 
+{#snippet depthSection()}
+	{#if edit}<DepthSection {edit} onchange={update} oncommit={committed} available={fallback ? true : maskSet ? maskSet.available && !!maskSet.airlight : null} picking={fallback || readOnly ? undefined : pickingFocus} onpick={(on) => (pickingFocus = on)} />{/if}
+{/snippet}
+
+{#snippet sectionDetails(s: { id: Section; label: string }, top: boolean)}
+	<details
+		id="section-{s.id}"
+		class="{top ? 'border-t border-line' : 'border-t border-line/50'} py-2"
+		open={s.id === 'wb' || s.id === 'light' || (s.id === 'crop' && cropOpen)}
+		ontoggle={(e) => {
+			const open = (e.currentTarget as HTMLDetailsElement).open;
+			if (s.id === 'detail') detailOpen = open;
+			if (s.id === 'crop') cropOpen = open;
+		}}
+	>
+		<summary class="cursor-pointer py-1 text-xs font-medium">{s.label}</summary>
+		<div class="pt-2">
+			{#if s.id === 'lens'}{@render lensSection()}{:else if s.id === 'crop'}{@render cropSection()}{:else if s.id === 'wb'}{@render wbSection()}{:else if s.id === 'light'}{@render lightSection()}{:else if s.id === 'film'}{@render filmSection()}{:else if s.id === 'curve'}{@render curveSection()}{:else if s.id === 'color'}{@render colorSection()}{:else if s.id === 'depth'}{@render depthSection()}{:else if s.id === 'masks'}{@render masksSection()}{:else if s.id === 'history'}{@render historySection()}{:else if detailOpen}{@render detailSection()}{/if}
+		</div>
+	</details>
+{/snippet}
+
 {#snippet colorSection()}
-	{#if edit}
-		<ColorMixer mixer={edit.mixer} onchange={(band: Band, field: keyof MixerBand, v: number) => { edit!.mixer[band][field] = v; changed(); }} oncommit={committed} />
-	{/if}
+	{#if edit}<ColorSection {edit} onchange={update} oncommit={committed} />{/if}
 {/snippet}
 
 <div class="flex h-dvh flex-col overflow-hidden bg-ground text-fg select-none [-webkit-touch-callout:none] lg:flex-row">
@@ -1403,7 +1316,7 @@
 		     without WebGPU nothing ever draws into it and the server's JPEG sits on top. -->
 		<canvas
 			bind:this={canvas}
-			class="block h-full w-full touch-none {fallback ? 'invisible' : ''}"
+			class="block touch-none {sideBySide ? (wide ? 'h-full w-1/2' : 'h-1/2 w-full') : 'h-full w-full'} {fallback ? 'invisible' : ''} {pickingWhite || pickingFocus ? 'cursor-crosshair' : ''}"
 			onpointerdown={canvasDown}
 			onpointermove={canvasMove}
 			onpointerup={canvasUp}
@@ -1411,6 +1324,13 @@
 			onpointerleave={() => (brushCursor = null)}
 			oncontextmenu={(e) => e.preventDefault()}
 		></canvas>
+		{#if sideBySide}
+			<!-- After the canvas, so the canvas keeps its corner and everything drawn over it keeps its place. -->
+			<div class="absolute flex items-center justify-center border-line bg-ground p-2 {wide ? 'inset-y-0 right-0 w-1/2 border-l' : 'inset-x-0 bottom-0 h-1/2 border-t'}">
+				<img src="/api/assets/{key}/camera" alt="The camera's own rendering" class="max-h-full max-w-full object-contain" onerror={() => { cameraMissing = true; showCamera = false; }} />
+				<span class="absolute top-2 left-2 rounded bg-ground/80 px-2 py-1 text-xs text-fg-2">Camera</span>
+			</div>
+		{/if}
 		{#if fallback}
 			<div class="absolute inset-0 flex items-center justify-center p-2">
 				{#if previewUrl}
@@ -1450,7 +1370,24 @@
 		{#if status || error}
 			<p class="absolute inset-x-4 top-[max(1rem,env(safe-area-inset-top))] text-center text-sm {error ? 'text-danger' : 'text-fg-2'}">{error || status}</p>
 		{/if}
-		{#if before}<span class="absolute top-[max(1rem,env(safe-area-inset-top))] left-4 rounded bg-ground/80 px-2 py-1 text-xs">{compare?.label ?? (developed ? 'As saved' : 'As shot')}</span>{/if}
+		<button
+			type="button"
+			class="absolute top-[max(0.75rem,env(safe-area-inset-top))] left-3 grid size-8 place-items-center rounded-full {toolsHidden ? 'bg-fg text-ground' : 'bg-ground/80 text-fg-2'}"
+			aria-pressed={toolsHidden}
+			aria-label={toolsHidden ? 'Show the editing tools' : 'Hide the editing tools'}
+			title={toolsHidden ? 'Show the editing tools (H)' : 'Hide the editing tools (H)'}
+			onclick={() => setToolsHidden(!toolsHidden)}
+		>
+			<svg viewBox="0 0 16 16" class="size-4" aria-hidden="true"><circle cx="8" cy="8" r="6.75" fill="none" stroke="currentColor" stroke-width="1.5" /><path d="M8 7.25v4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" /><circle cx="8" cy="4.9" r="0.95" fill="currentColor" /></svg>
+		</button>
+		{#if wide && toolsHidden && edit && meta}
+			<nav class="absolute bottom-3 left-1/2 flex max-w-[calc(100%-1.5rem)] -translate-x-1/2 gap-1 overflow-x-auto rounded-full bg-panel/90 p-1" aria-label="Tools">
+				{#each sections as s (s.id)}
+					<button type="button" class="h-8 shrink-0 rounded-full px-3 text-xs text-fg-2 hover:bg-raised" aria-label={s.label} onclick={() => setToolsHidden(false, s.id)}>{s.short}</button>
+				{/each}
+			</nav>
+		{/if}
+		{#if before}<span class="absolute top-[max(1rem,env(safe-area-inset-top))] left-14 rounded bg-ground/80 px-2 py-1 text-xs">{compare?.label ?? (developed ? 'As saved' : 'As shot')}</span>{/if}
 		<div class="absolute top-[max(0.75rem,env(safe-area-inset-top))] right-3 grid justify-items-end gap-1.5">
 			{#if !wide && showPhoneHistogram && !fallback}
 				<div class="transition-opacity {painting ? 'opacity-30' : ''}" title={painting ? 'Paused while painting' : undefined}>
@@ -1459,6 +1396,14 @@
 			{/if}
 			{#if !wide && !fallback}
 				<button type="button" aria-pressed={peaking} class="rounded-full px-2.5 py-1 text-[0.6875rem] {peaking ? 'bg-fg text-ground' : 'bg-ground/80 text-fg-2'}" onclick={() => { peaking = !peaking; schedule(); }}>Focus</button>
+				{#if cameraOffered}
+					<button type="button" aria-pressed={showCamera} class="rounded-full px-2.5 py-1 text-[0.6875rem] {showCamera ? 'bg-fg text-ground' : 'bg-ground/80 text-fg-2'}" onclick={() => (showCamera = !showCamera)}>Camera</button>
+				{/if}
+				{/if}
+				{#if !wide}
+					<button type="button" class="rounded-full bg-ground/80 px-2.5 py-1 text-[0.6875rem] text-fg-2" aria-label="Viewing and exporting in {SPACE_LABELS[displaySpace]}: switch to {displaySpace === 'srgb' ? 'Display P3' : 'sRGB'}" onclick={() => setOutputSpace(displaySpace === 'srgb' ? 'display-p3' : 'srgb')}>{displaySpace === 'srgb' ? 'sRGB' : 'P3'}</button>
+				{/if}
+				{#if !wide && !fallback}
 				{#if meta?.info.afPoint}
 					<button type="button" aria-pressed={showAfPoint} class="rounded-full px-2.5 py-1 text-[0.6875rem] {showAfPoint ? 'bg-fg text-ground' : 'bg-ground/80 text-fg-2'}" onclick={() => (showAfPoint = !showAfPoint)}>AF</button>
 				{/if}
@@ -1466,24 +1411,26 @@
 		</div>
 	</div>
 
-	{#if edit && meta}
-		<!-- Phone: one tool at a time in a bottom sheet. Desktop: all sections in pipeline order. -->
+	{#if edit && meta && !(wide && toolsHidden)}
+		<!-- Phone: one tool at a time in a bottom sheet. Desktop: all sections in pipeline order. Tools hidden:
+		     the phone keeps its tab row, the desktop a strip of tabs over the photo. -->
 		<aside class="flex max-h-[48dvh] shrink-0 flex-col bg-panel pb-[max(0.75rem,env(safe-area-inset-bottom))] lg:max-h-none lg:w-80 lg:pb-3">
-			<header class="flex items-center justify-between gap-3 px-6 pt-3 pb-2 lg:px-4">
+			{#if !toolsHidden}
+			<header class="flex items-center justify-between gap-3 px-6 pt-3 pb-2 lg:flex-col lg:items-stretch lg:gap-2 lg:px-4">
 				<div class="min-w-0 text-xs text-fg-2">
 					<p class="truncate text-sm text-fg">{meta.fileName}</p>
 					<p class="truncate">{cameraLine(meta.info)}</p>
 				</div>
 				<div class="flex shrink-0 gap-2">
-					<button type="button" class="grid size-9 place-items-center rounded bg-raised text-fg-2 disabled:opacity-40" aria-label="Undo" disabled={!canUndo || readOnly} onclick={() => restore(undo.undo())}>
+					<button type="button" class="grid size-9 place-items-center rounded bg-raised text-fg-2 disabled:opacity-40" aria-label="Undo" disabled={!session.canUndo || readOnly} onclick={() => session.undo()}>
 						<svg viewBox="0 0 16 16" class="size-4" aria-hidden="true"><path d="M6 3 2 7l4 4M2.5 7H10a4 4 0 0 1 0 8H8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></svg>
 					</button>
-					<button type="button" class="grid size-9 place-items-center rounded bg-raised text-fg-2 disabled:opacity-40" aria-label="Redo" disabled={!canRedo || readOnly} onclick={() => restore(undo.redo())}>
+					<button type="button" class="grid size-9 place-items-center rounded bg-raised text-fg-2 disabled:opacity-40" aria-label="Redo" disabled={!session.canRedo || readOnly} onclick={() => session.redo()}>
 						<svg viewBox="0 0 16 16" class="size-4 -scale-x-100" aria-hidden="true"><path d="M6 3 2 7l4 4M2.5 7H10a4 4 0 0 1 0 8H8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></svg>
 					</button>
 					<button type="button" class="h-9 rounded bg-raised px-3 text-sm" onclick={() => (exporting = true)}>Export</button>
-					<button type="button" class="h-9 rounded bg-fg px-4 text-sm font-medium text-ground disabled:bg-raised disabled:text-muted" disabled={!dirty || saving || readOnly} onclick={() => commit()}>
-						{saving ? 'Saving…' : dirty ? 'Save' : 'Saved'}
+					<button type="button" class="h-9 rounded bg-fg px-4 text-sm font-medium text-ground disabled:bg-raised disabled:text-muted" disabled={!session.dirty || session.saving || readOnly} onclick={() => session.commit()}>
+						{session.saving ? 'Saving…' : session.dirty ? 'Save' : 'Saved'}
 					</button>
 				</div>
 			</header>
@@ -1496,64 +1443,92 @@
 					</p>
 				{/if}
 				{#if readOnly}<p class="rounded bg-raised p-2 text-xs">A newer Sidecar edited this photo. Update Sidecar to change it.</p>{/if}
-				{#if !readOnly && !writable}<p class="rounded bg-raised p-2 text-xs text-warning">Sidecar can't write in this photo's folder, so edits here can't be saved. Give the account Sidecar runs as write access to it.</p>{/if}
-				{#if restoredDraft && dirty}<p class="rounded bg-raised p-2 text-xs">Restored unsaved changes from this device.</p>{/if}
-				{#if forked}
+				{#if !readOnly && !session.writable}<p class="rounded bg-raised p-2 text-xs text-warning">Sidecar can't write in this photo's folder, so edits here can't be saved. Give the account Sidecar runs as write access to it.</p>{/if}
+				{#if session.restoredDraft && session.dirty}<p class="rounded bg-raised p-2 text-xs">Restored unsaved changes from this device.</p>{/if}
+				{#if session.savedFor}
+					<p class="rounded bg-raised p-2 text-xs">
+						This photo's sidecar was saved for a different file — the photo was replaced, or another one was
+						renamed into its place. Its edit is shown, and saving keeps it for this photo.
+						<button type="button" class="underline" onclick={() => session.openVersion('original')}>Start from the original</button>
+						instead; the earlier versions stay in History.
+					</p>
+				{/if}
+				{#if session.forked}
 					<p class="rounded bg-raised p-2 text-xs">
 						This photo was also saved somewhere else since you opened it. Both versions are kept —
-						<button type="button" class="underline" onclick={() => { section = 'history'; forked = false; }}>see History</button>.
+						<button type="button" class="underline" onclick={() => { section = 'history'; session.forked = false; }}>see History</button>.
 					</p>
 				{/if}
 			</div>
+			{/if}
 
-			{#if wide && !fallback}
+			{#if wide}
 			<div class="px-4 pb-2">
+				<!-- Without WebGPU there's no histogram or overlay (the view pass draws them), but it's still the
+				     desktop layout: the phone's tab bar below isn't for it. -->
+				{#if !fallback}
 				<div class="transition-opacity {painting ? 'opacity-30' : ''}" title={painting ? 'Paused while painting' : undefined}>
 					<Histogram data={histogram} {clipHigh} {clipLow} ontoggle={(w) => { if (w === 'high') clipHigh = !clipHigh; else clipLow = !clipLow; schedule(); }} />
 				</div>
+				{/if}
 				<div class="mt-1 flex items-center justify-between gap-2 text-[0.6875rem]">
 					<div class="flex items-center gap-2">
+						{#if !fallback}
 						<button type="button" aria-pressed={peaking} class="rounded-full px-2 py-0.5 {peaking ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" onclick={() => { peaking = !peaking; schedule(); }}>Focus peaking</button>
+							{#if cameraOffered}
+								<button type="button" aria-pressed={showCamera} class="rounded-full px-2 py-0.5 {showCamera ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" title="The camera's own rendering beside the edit" onclick={() => (showCamera = !showCamera)}>Camera</button>
+							{/if}
 						{#if meta?.info.afPoint}
 							<button type="button" aria-pressed={showAfPoint} class="rounded-full px-2 py-0.5 {showAfPoint ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" onclick={() => (showAfPoint = !showAfPoint)}>AF point</button>
 						{/if}
+						{/if}
 					</div>
-					<a href="/settings" class="text-fg-2">Viewing and exporting in {SPACE_LABELS[displaySpace]}</a>
+					<div class="flex items-center gap-1" role="radiogroup" aria-label="Viewing and exporting in">
+						{#each SPACES as sp (sp)}
+							<button type="button" role="radio" aria-checked={displaySpace === sp} title="View and export in {SPACE_LABELS[sp]}" class="rounded-full px-2 py-0.5 {displaySpace === sp ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" onclick={() => setOutputSpace(sp)}>{sp === 'srgb' ? 'sRGB' : 'P3'}</button>
+						{/each}
+					</div>
 				</div>
 			</div>
 
 			{:else}
 			<nav class="flex items-center gap-2 overflow-x-auto px-6 py-2" aria-label="Tools">
-				{#each sections as s (s.id)}
-					<button type="button" aria-pressed={section === s.id} class="h-8 shrink-0 rounded-full px-3 text-xs {section === s.id ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" aria-label={s.label} onclick={() => (section = s.id)}>{s.short}</button>
+				{#each groups as g (g.id)}
+					{@const on = groupOf(section).id === g.id && !toolsHidden}
+					<button type="button" aria-pressed={on} class="h-8 shrink-0 rounded-full px-3 text-xs {on ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" aria-label={g.label} onclick={() => setToolsHidden(false, groupOf(section).id === g.id ? section : g.children[0])}>{g.short}</button>
 				{/each}
 				<button type="button" aria-pressed={showPhoneHistogram} aria-label="Show histogram" class="ml-auto grid size-8 shrink-0 place-items-center rounded-full {showPhoneHistogram ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" onclick={() => (showPhoneHistogram = !showPhoneHistogram)}>
 					<svg viewBox="0 0 16 16" class="size-4" aria-hidden="true"><path d="M1 14 L4 8 L7 10 L10 3 L13 9 L15 6 L15 14 Z" fill="currentColor" /></svg>
 				</button>
 			</nav>
 
+			{#if !toolsHidden && groupOf(section).children.length > 1}
+				<div class="flex gap-1.5 overflow-x-auto px-6 pb-1" role="tablist" aria-label={groupOf(section).label}>
+					{#each groupOf(section).children as id (id)}
+						<button type="button" role="tab" aria-selected={section === id} class="h-7 shrink-0 rounded-full px-2.5 text-[0.6875rem] {section === id ? 'bg-raised text-fg' : 'text-fg-2'}" aria-label={sectionById(id).label} onclick={() => (section = id)}>{sectionById(id).short}</button>
+					{/each}
+				</div>
+			{/if}
+			{#if !toolsHidden}
 			<div class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-6 pt-1">
-				{#if section === 'lens'}{@render lensSection()}{:else if section === 'crop'}{@render cropSection()}{:else if section === 'wb'}{@render wbSection()}{:else if section === 'light'}{@render lightSection()}{:else if section === 'curve'}{@render curveSection()}{:else if section === 'color'}{@render colorSection()}{:else if section === 'masks'}{@render masksSection()}{:else if section === 'history'}{@render historySection()}{:else}{@render detailSection()}{/if}
+				{#if section === 'lens'}{@render lensSection()}{:else if section === 'crop'}{@render cropSection()}{:else if section === 'wb'}{@render wbSection()}{:else if section === 'light'}{@render lightSection()}{:else if section === 'film'}{@render filmSection()}{:else if section === 'curve'}{@render curveSection()}{:else if section === 'color'}{@render colorSection()}{:else if section === 'depth'}{@render depthSection()}{:else if section === 'masks'}{@render masksSection()}{:else if section === 'history'}{@render historySection()}{:else}{@render detailSection()}{/if}
 			</div>
+			{/if}
 
 			{/if}
 			{#if wide}
 			<div class="min-h-0 flex-1 overflow-y-auto px-4">
-				{#each sections as s (s.id)}
-					<details
-						class="border-t border-line py-2"
-						open={s.id === 'wb' || s.id === 'light' || (s.id === 'crop' && cropOpen)}
-						ontoggle={(e) => {
-							const open = (e.currentTarget as HTMLDetailsElement).open;
-							if (s.id === 'detail') detailOpen = open;
-							if (s.id === 'crop') cropOpen = open;
-						}}
-					>
-						<summary class="cursor-pointer py-1 text-xs font-medium">{s.label}</summary>
-						<div class="pt-2">
-							{#if s.id === 'lens'}{@render lensSection()}{:else if s.id === 'crop'}{@render cropSection()}{:else if s.id === 'wb'}{@render wbSection()}{:else if s.id === 'light'}{@render lightSection()}{:else if s.id === 'curve'}{@render curveSection()}{:else if s.id === 'color'}{@render colorSection()}{:else if s.id === 'masks'}{@render masksSection()}{:else if s.id === 'history'}{@render historySection()}{:else if detailOpen}{@render detailSection()}{/if}
-						</div>
-					</details>
+				{#each groups as g (g.id)}
+					{#if g.children.length === 1}
+						{@render sectionDetails(sectionById(g.children[0]), true)}
+					{:else}
+						<details class="border-t border-line py-2" open={g.id === 'colour' || g.id === 'light'}>
+							<summary class="cursor-pointer py-1 text-[11px] font-semibold tracking-wide text-fg-2 uppercase">{g.label}</summary>
+							<div class="pl-2">
+								{#each g.children as id (id)}{@render sectionDetails(sectionById(id), false)}{/each}
+							</div>
+						</details>
+					{/if}
 				{/each}
 			</div>
 			{/if}
@@ -1561,4 +1536,4 @@
 	{/if}
 </div>
 
-{#if exporting}<ExportSheet assetKey={key} colorSpace={displaySpace} prepare={prepareExport} onclose={() => (exporting = false)} />{/if}
+{#if exporting}<ExportSheet assetKey={key} colorSpace={displaySpace} prepare={() => session.prepareExport()} onclose={() => (exporting = false)} />{/if}

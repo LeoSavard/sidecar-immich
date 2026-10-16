@@ -11,7 +11,7 @@ use std::path::Path;
 const BURN_ONNX: &str = "0.22.0-pre.4";
 
 /// Each model, the licence its graph and weights are under, and where it came from.
-const MODELS: [(&str, &str, &str); 3] = [
+const MODELS: [(&str, &str, &str); 4] = [
     ("yunet", "MIT", "YuNet face detector (2023mar), OpenCV Zoo"),
     (
         "birefnet",
@@ -22,6 +22,11 @@ const MODELS: [(&str, &str, &str); 3] = [
         "multiclass",
         "Apache-2.0",
         "MediaPipe multi-class selfie segmentation 256x256, TFLite converted by tf2onnx",
+    ),
+    (
+        "depth",
+        "Apache-2.0",
+        "Depth Anything V2 Small, onnx-community export, simplified at 518x518",
     ),
 ];
 

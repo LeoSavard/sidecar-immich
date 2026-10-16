@@ -7,7 +7,7 @@
 //! A mask is in the proxy's frame: oriented, before lens correction, the same frame as the focus mask, so the
 //! editor and the export align it the way they already align that.
 //!
-//! `GET /v1/assets/{key}/masks`         `{ available, names, faces }`, computing them on first use
+//! `GET /v1/assets/{key}/masks`         `{ available, names, faces, airlight }`, computing them on first use
 //! `GET /v1/assets/{key}/masks/{name}`  one mask as an 8-bit greyscale PNG
 
 use anyhow::{Context, Result};
@@ -19,10 +19,10 @@ use crate::ml::{Face, PARTS, Picture};
 use crate::{DEFAULT_EDGE, Worker, cache_generation, export, unique_tmp};
 
 /// Bump when the models, or how masks are made from them, change: every cached mask is then made again.
-pub const MASK_REVISION: u32 = 1;
+pub const MASK_REVISION: u32 = 3;
 
 /// The masks an edit can name, in the order the editor lists them.
-pub const NAMES: [&str; 6] = ["subject", "skin", "face-skin", "body-skin", "hair", "clothes"];
+pub const NAMES: [&str; 7] = ["subject", "skin", "face-skin", "body-skin", "hair", "clothes", "depth"];
 
 /// The size the models look at: past BiRefNet's 1024² input nothing more is seen.
 const INPUT_EDGE: u32 = 1024;
@@ -30,12 +30,51 @@ const INPUT_EDGE: u32 = 1024;
 /// they know.
 const SUBJECT_EDGE: u32 = 1024;
 const PARTS_EDGE: u32 = 512;
+/// Depth comes from a 518² model, and a layer on it is a smooth band of distance.
+const DEPTH_EDGE: u32 = 518;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct MaskSet {
     pub available: bool,
     pub names: Vec<String>,
     pub faces: Vec<Face>,
+    /// The light haze tends to: the farthest part of the photo's colour, camera RGB as the proxy holds it.
+    /// What haze by distance adds toward or takes away (`sidecar_color::depth`).
+    #[serde(default)]
+    pub airlight: Option<[f32; 3]>,
+}
+
+/// The depth mask and the airlight, for the depth passes.
+pub struct DepthMap {
+    pub image: sidecar_engine::RgbaF32,
+    pub airlight: [f32; 3],
+}
+
+/// The share of the photo, farthest first, whose colour is the airlight.
+const AIRLIGHT_SHARE: f64 = 0.03;
+
+/// The mean camera RGB of the proxy over the farthest `AIRLIGHT_SHARE` of the depth map (both in the same
+/// frame, at their own sizes).
+fn airlight(proxy: &sidecar_engine::RgbaF32, depth: &[u8], dw: u32, dh: u32) -> [f32; 3] {
+    let mut sorted = depth.to_vec();
+    sorted.sort_unstable();
+    let cut = sorted[((sorted.len() - 1) as f64 * AIRLIGHT_SHARE) as usize];
+    let (mut sum, mut n) = ([0f64; 3], 0u64);
+    for y in 0..dh {
+        for x in 0..dw {
+            if depth[(y * dw + x) as usize] > cut {
+                continue;
+            }
+            let px = ((x as f64 + 0.5) / dw as f64 * proxy.width as f64) as u32;
+            let py = ((y as f64 + 0.5) / dh as f64 * proxy.height as f64) as u32;
+            let i = ((py.min(proxy.height - 1) * proxy.width + px.min(proxy.width - 1)) * 4) as usize;
+            for (c, s) in sum.iter_mut().enumerate() {
+                *s += proxy.data[i + c] as f64;
+            }
+            n += 1;
+        }
+    }
+    sum.map(|v| (v / n.max(1) as f64) as f32)
 }
 
 fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
@@ -55,7 +94,7 @@ fn grey_png(width: u32, height: u32, data: &[u8]) -> Result<Vec<u8>> {
 }
 
 impl Worker {
-    /// `file` is a mask name with `.png`, or `faces.json`.
+    /// `file` is a mask name with `.png`, `depth.json` or `faces.json` (written last: the set is done).
     fn mask_path(&self, key: &str, file: &str) -> PathBuf {
         self.cache.join("masks").join(format!("{key}-{}-m{MASK_REVISION}-{file}", cache_generation()))
     }
@@ -73,10 +112,14 @@ impl Worker {
         if !self.masks_done(key) {
             // The proxy first: it takes this photo's decode turn itself, so it can't be held around it.
             let (w, h, bytes) = self.proxy(key, DEFAULT_EDGE).await?;
-            let _turn = self.decode_guard(key).await;
+            // One computation per photo at a time, under a lock of its own: under the decode turn, every proxy
+            // the editor asks for while the models run (seconds; minutes on a new install while they tune)
+            // waited for them.
+            let _turn = self.decode_guard(&format!("masks:{key}")).await;
             if !self.masks_done(key) {
                 let info = self.cached_meta(key).await?.info;
                 let mut paths: Vec<(&'static str, PathBuf)> = NAMES.iter().map(|n| (*n, self.mask_path(key, &format!("{n}.png")))).collect();
+                paths.push(("depth.json", self.mask_path(key, "depth.json")));
                 paths.push(("faces.json", self.mask_path(key, "faces.json")));
                 let path = self.paths.lock().unwrap().get(key).cloned().unwrap_or_default();
                 tokio::task::spawn_blocking(move || -> Result<()> {
@@ -84,6 +127,8 @@ impl Worker {
                     let picture = default_rendering(&kit, &info, w, h, &bytes)?;
                     let subject = ml.subject(&picture, SUBJECT_EDGE)?;
                     let parts = ml.parts(&picture, PARTS_EDGE)?;
+                    let depth = ml.depth(&picture, DEPTH_EDGE)?;
+                    let air = airlight(&sidecar_engine::RgbaF32::from_f16_bytes(w, h, &bytes), &depth.data, depth.width, depth.height);
                     let faces = ml.faces(&picture)?;
                     let channel = |name: &str| {
                         let c = PARTS.iter().position(|p| *p == name).expect("a part");
@@ -95,6 +140,8 @@ impl Worker {
                         let bytes = match *name {
                             "subject" => grey_png(subject.width, subject.height, &subject.data)?,
                             "skin" => grey_png(parts.width, parts.height, &skin)?,
+                            "depth" => grey_png(depth.width, depth.height, &depth.data)?,
+                            "depth.json" => serde_json::to_vec(&serde_json::json!({ "airlight": air }))?,
                             "faces.json" => serde_json::to_vec(&faces)?,
                             part => grey_png(parts.width, parts.height, &channel(part))?,
                         };
@@ -107,7 +154,24 @@ impl Worker {
             }
         }
         let faces = serde_json::from_slice(&tokio::fs::read(self.mask_path(key, "faces.json")).await?)?;
-        Ok(MaskSet { available: true, names: NAMES.iter().map(|n| n.to_string()).collect(), faces })
+        let airlight = self.airlight(key).await;
+        Ok(MaskSet { available: true, names: NAMES.iter().map(|n| n.to_string()).collect(), faces, airlight })
+    }
+
+    async fn airlight(&self, key: &str) -> Option<[f32; 3]> {
+        let json: serde_json::Value = serde_json::from_slice(&tokio::fs::read(self.mask_path(key, "depth.json")).await.ok()?).ok()?;
+        serde_json::from_value(json["airlight"].clone()).ok()
+    }
+
+    /// The depth mask and airlight when `edit` blurs or hazes by distance and this worker has them; `None`
+    /// otherwise, and the depth passes don't run.
+    pub async fn depth_map(self: &Arc<Self>, key: &str, edit: &sidecar_color::EditParams) -> Option<DepthMap> {
+        sidecar_color::depth::pack(edit, [0.0; 3], [1, 1], [0.0; 2])?;
+        let png = self.mask(key, "depth").await.unwrap_or_else(|e| {
+            tracing::warn!("depth for {key}: {e:#}");
+            None
+        })?;
+        Some(DepthMap { image: decode_grey(&png).ok()?, airlight: self.airlight(key).await? })
     }
 
     /// One mask's PNG, computing the photo's masks first if needed.
