@@ -40,6 +40,11 @@ pub struct EditParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub monochrome: Option<Monochrome>,
+    /// Film grain (DESIGN.md §7, "Grain"), in colour or black and white, from a RAW or a developed file. Absent
+    /// is none, and is left out of the serialized edit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub grain: Option<Grain>,
     pub detail: Detail,
     /// Absent means off: photos edited before this field existed render unchanged. See DESIGN.md §15.
     pub lens: Option<Lens>,
@@ -95,6 +100,7 @@ impl Default for EditParams {
             saturation: 0.0,
             film: None,
             monochrome: None,
+            grain: None,
             detail: Detail::default(),
             lens: None,
             geometry: None,
@@ -279,6 +285,49 @@ impl Default for Film {
         Self { amount: 100.0, interlayer: 45.0 }
     }
 }
+
+/// Film grain: the exposure each spot of the picture got, made to flicker the way silver halide's grains,
+/// developed or not, make it; the tone curve then takes it, so grain is strongest in the midtones, fades into
+/// the deep shadows and the clipped highlights, and grows with contrast, as a harder paper grade shows more of
+/// it. Its size is measured on a 35 mm frame, so it is the same share of the picture at every resolution; where
+/// a grain is smaller than a pixel, pixels average it out (Selwyn's law) as they would a scan's.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "edit/"))]
+pub struct Grain {
+    /// 0–100: at 100, a grain's exposure varies by `GRAIN_STOPS` (one standard deviation) in the densest
+    /// parts of the negative.
+    pub amount: f64,
+    /// 0–100: the grain's size on a 35 mm frame (`Grain::microns`), 5 µm to 40 µm.
+    pub size: f64,
+}
+
+impl Default for Grain {
+    fn default() -> Self {
+        Self { amount: 40.0, size: 50.0 }
+    }
+}
+
+impl Grain {
+    /// The grain's size on a 35 mm frame, in µm: 5 at size 0, doubling every third of the slider to 40.
+    pub fn microns(&self) -> f64 {
+        5.0 * 8f64.powf(self.size.clamp(0.0, 100.0) / 100.0)
+    }
+
+    /// `DevelopParams.grain`: the standard deviation in stops (0 is none) and the grain's size as a share of
+    /// the frame's long edge.
+    pub fn uniform(grain: Option<&Grain>) -> [f32; 4] {
+        match grain.filter(|g| g.amount > 0.0) {
+            Some(g) => [(g.amount.min(100.0) / 100.0 * GRAIN_STOPS) as f32, (g.microns() / FRAME_MICRONS) as f32, 0.0, 0.0],
+            None => [0.0; 4],
+        }
+    }
+}
+
+/// Grain amount 100 → a standard deviation of this many stops in a grain's exposure.
+pub const GRAIN_STOPS: f64 = 0.6;
+/// The long edge of a 35 mm frame, which grain sizes are measured on.
+pub const FRAME_MICRONS: f64 = 36_000.0;
 
 /// Interlayer 100 → each channel moves this far again from the mean of the three, in log exposure.
 pub const FILM_INTERLAYER: f64 = 0.6;
@@ -660,6 +709,8 @@ pub struct DevelopParams {
     pub film: [f32; 4],
     /// Black and white: x 1 when on, y the side of `Packed::mono_lut`'s cube, unused ×2.
     pub mono: [f32; 4],
+    /// Grain (`Grain::uniform`): standard deviation in stops (0 none), size as a share of the long edge, unused ×2.
+    pub grain: [f32; 4],
 }
 
 /// Contrast slider value → logistic steepness.
@@ -764,6 +815,7 @@ pub fn pack(edit: &EditParams, camera: &CameraColor, source: SourceKind, display
             _ => [0.0; 4],
         },
         mono: if mono { [1.0, crate::spectral::GRID as f32, 0.0, 0.0] } else { [0.0; 4] },
+        grain: Grain::uniform(edit.grain.as_ref()),
     };
     let mut masks = MaskParams { frame: [0.0; 4], count: 0, _pad: [0; 3], layers: [MaskLayer::default(); MAX_MASKS] };
     let mut mask_curves = Vec::with_capacity(MAX_MASKS * LUT_SIZE);
@@ -826,7 +878,7 @@ mod tests {
         let (handle, ty) = module.types.iter().find(|(_, t)| t.name.as_deref() == Some("DevelopParams")).unwrap();
         let naga::TypeInner::Struct { members, span } = &ty.inner else { panic!("not a struct") };
         assert_eq!(*span as usize, std::mem::size_of::<DevelopParams>());
-        assert_eq!(layouter[handle].size as usize, 304);
+        assert_eq!(layouter[handle].size as usize, 320);
         let rust = [
             ("wb_mul", std::mem::offset_of!(DevelopParams, wb_mul)),
             ("exposure", std::mem::offset_of!(DevelopParams, exposure)),
@@ -839,13 +891,14 @@ mod tests {
             ("mixer", std::mem::offset_of!(DevelopParams, mixer)),
             ("film", std::mem::offset_of!(DevelopParams, film)),
             ("mono", std::mem::offset_of!(DevelopParams, mono)),
+            ("grain", std::mem::offset_of!(DevelopParams, grain)),
         ];
         for (name, off) in rust {
             let m = members.iter().find(|m| m.name.as_deref() == Some(name)).unwrap();
             assert_eq!(m.offset as usize, off, "{name}");
         }
         let p = pack(&EditParams::default(), &crate::camera::nikon_d850(), SourceKind::Raw, DisplaySpace::Srgb);
-        assert_eq!(p.uniform.len(), 304);
+        assert_eq!(p.uniform.len(), 320);
         assert_eq!(p.lut.len(), LUT_SIZE);
         // exposure sits at byte 12
         assert_eq!(f32::from_le_bytes(p.uniform[12..16].try_into().unwrap()), 1.0);
@@ -928,6 +981,23 @@ mod tests {
         let unknown = EditParams { monochrome: Some(Monochrome { film: "velvia".into(), filter: "none".into() }), ..Default::default() };
         assert!(pack(&unknown, &cam, SourceKind::Raw, DisplaySpace::Srgb).mono_lut.is_empty(), "an unknown film is colour");
         assert!(serde_json::to_value(EditParams::default()).unwrap().get("monochrome").is_none());
+    }
+
+    /// Grain packs its strength and its size on the frame; none, or none at amount 0, packs zeros.
+    #[test]
+    fn grain_packs_strength_and_size() {
+        let cam = crate::camera::nikon_d850();
+        let at = |grain: Option<Grain>| {
+            let p = pack(&EditParams { grain, ..Default::default() }, &cam, SourceKind::Raw, DisplaySpace::Srgb);
+            bytemuck::from_bytes::<DevelopParams>(&p.uniform).grain
+        };
+        assert_eq!(at(None), [0.0; 4]);
+        assert_eq!(at(Some(Grain { amount: 0.0, size: 50.0 })), [0.0; 4]);
+        let g = at(Some(Grain { amount: 50.0, size: 100.0 }));
+        assert!((g[0] - 0.3).abs() < 1e-6);
+        assert!((g[1] as f64 - 40.0 / 36_000.0).abs() < 1e-9);
+        assert!((Grain { amount: 0.0, size: 0.0 }.microns() - 5.0).abs() < 1e-9);
+        assert!(serde_json::to_value(EditParams::default()).unwrap().get("grain").is_none());
     }
 
     #[test]

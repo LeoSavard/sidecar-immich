@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright Sidecar contributors
-// Uniform block for the develop modules. Layout (304 bytes) is derived on the CPU by encase; see crates/color.
+// Uniform block for the develop modules. Layout (320 bytes) is derived on the CPU by encase; see crates/color.
 
 struct DevelopParams {
   wb_mul: vec3f,             // camera-space white balance multipliers, green = 1
@@ -15,4 +15,5 @@ struct DevelopParams {
   mixer: array<vec4f, 8>,    // per band: hue shift (radians), chroma gain - 1, lightness shift, unused
   film: vec4f,               // film rendering: amount 0-1 (0 = neutral), interlayer spread in log exposure, unused x2
   mono: vec4f,               // black and white: x 1 when on, y the side of the mono table's cube, unused x2
+  grain: vec4f,              // grain: standard deviation in stops (0 none), size as a share of the long edge, unused x2
 }

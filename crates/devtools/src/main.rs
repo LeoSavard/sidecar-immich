@@ -96,7 +96,8 @@ fn develop(input: &std::path::Path, out: &std::path::Path, long_edge: u32) -> Re
     let mut raw = sidecar_raw::RawFile::open(input)?;
     let info = raw.info();
     let t_open = t0.elapsed();
-    let linear = raw.develop_linear(true)?;
+    // Half-size demosaic unless more than half the sensor is asked for.
+    let linear = raw.develop_linear(long_edge * 2 <= info.width.max(info.height))?;
     let t_demosaic = t0.elapsed();
     let proxy = sidecar_engine::RgbaF32 { width: linear.width, height: linear.height, data: linear.rgba() }.downsampled(long_edge);
     let t_proxy = t0.elapsed();
@@ -109,7 +110,9 @@ fn develop(input: &std::path::Path, out: &std::path::Path, long_edge: u32) -> Re
     let packed = sidecar_color::pack(&edit, &info.color, info.source_kind, sidecar_color::DisplaySpace::Srgb);
     let src = proxy;
     let t_gpu0 = std::time::Instant::now();
-    let img = pass.run(&gpu, &src, &packed.uniform, &packed.lut)?;
+    let masks = sidecar_engine::Masks { mono: &packed.mono_lut, ..sidecar_engine::Masks::none() };
+    let developed = pass.render(&gpu, &sidecar_engine::upload_rgba16(&gpu, &src), &packed.uniform, &packed.lut, &masks)?;
+    let img = sidecar_engine::read_rgba16(&gpu, &developed)?;
     let t_gpu = t_gpu0.elapsed();
     write_png(&img, out)?;
     println!(

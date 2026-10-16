@@ -28,6 +28,7 @@ the one before, and its PR's base is that branch, not `main`. Merge in this orde
 | 13 | `worktree-depth-masks` | Depth Anything V2 Small, depth masks, mask range layers |
 | 15 | `worktree-depth-effects` | Lens blur and haze by distance; mask lock fix (slow proxies); Saturation labels; tool groups; mask edges; camera rendering beside the edit |
 | 16 | `worktree-bw-film` | Black and white from estimated spectra: film types and filters |
+| 17 | `worktree-film-grain` | Film grain: procedural, in exposure, sized on 35 mm; browser = server |
 
 Held: #1 `worktree-portrait-depth` (Apple Portrait matte) and #2 `worktree-hdr-gain-map` (HDR, paused until
 the owner's Spyder X display measurements).
@@ -49,7 +50,7 @@ docker tag sidecar:local sidecar:previous && docker tag sidecar:latest-test side
 cd ~/Claude/sidecar/deploy/local && docker compose up -d
 ```
 
-`sidecar:latest-test` currently holds everything through #16.
+`sidecar:latest-test` currently holds everything through #17.
 
 ## Open questions
 
@@ -68,8 +69,8 @@ cd ~/Claude/sidecar/deploy/local && docker compose up -d
 
 Film, in three stages:
 
-1. **Black and white** — done in #16: film types (class sensitivities), filters. Remaining: each stock's
-   characteristic curve, grain, developer effects (compensating, staining), named stocks once their datasheet
+1. **Black and white** — done in #16: film types (class sensitivities), filters; grain in #17 (colour too).
+   Remaining: each stock's characteristic curve, developer effects (compensating, staining), named stocks once their datasheet
    curves are digitised, illuminants other than daylight.
 2. **Alternative processes** — tintype (collodion: the blue-sensitive type plus its short tonal scale) and
    cyanotype simulation; then cyanotype *digital negatives*, calibrated from a printed and scanned step tablet.

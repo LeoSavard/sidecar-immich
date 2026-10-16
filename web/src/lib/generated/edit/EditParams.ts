@@ -3,6 +3,7 @@ import type { Detail } from "./Detail";
 import type { Exposure } from "./Exposure";
 import type { Film } from "./Film";
 import type { Geometry } from "./Geometry";
+import type { Grain } from "./Grain";
 import type { Lens } from "./Lens";
 import type { LensBlur } from "./LensBlur";
 import type { MaskAdjustment } from "./MaskAdjustment";
@@ -28,7 +29,12 @@ film?: Film,
  * Black and white, as a film type sees the light (DESIGN.md §7, "Black and white"): absent is colour, and
  * is left out of the serialized edit. Takes the place of film rendering when both are set.
  */
-monochrome?: Monochrome, detail: Detail, 
+monochrome?: Monochrome, 
+/**
+ * Film grain (DESIGN.md §7, "Grain"), in colour or black and white, from a RAW or a developed file. Absent
+ * is none, and is left out of the serialized edit.
+ */
+grain?: Grain, detail: Detail, 
 /**
  * Absent means off: photos edited before this field existed render unchanged. See DESIGN.md §15.
  */

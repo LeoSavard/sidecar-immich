@@ -5,6 +5,7 @@ sees the light, through a filter. -->
 <script lang="ts">
 	import Slider from '$lib/ui/Slider.svelte';
 	import { decimals } from '$lib/ui/format';
+	import { grainMicrons } from '$lib/state/edit-view';
 	import type { SectionProps } from './section';
 
 	let { edit, onchange, oncommit, developed }: SectionProps & { developed: boolean } = $props();
@@ -42,6 +43,15 @@ sees the light, through a filter. -->
 			if (e.monochrome) e.monochrome[field] = value;
 		});
 		oncommit();
+	}
+
+	/** Grain, kept while its size is set even at amount 0, so the size isn't lost on the way back up. */
+	function setGrain(field: 'amount' | 'size', v: number) {
+		onchange((e) => {
+			const g = { amount: e.grain?.amount ?? 0, size: e.grain?.size ?? 50, [field]: v };
+			if (g.amount === 0 && g.size === 50) delete e.grain;
+			else e.grain = g;
+		});
 	}
 
 	const choice = (on: boolean) => `rounded-full px-2.5 py-1 ${on ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}`;
@@ -83,4 +93,8 @@ sees the light, through a filter. -->
 	{:else}
 		<p class="text-xs text-muted">Neutral keeps every colour's hue through the tone curve. Film renders each colour channel through it separately, as film does. Black and white sees the light as a film type would.</p>
 	{/if}
+	<p class="pt-1 text-[11px] font-medium tracking-wide text-muted uppercase">Grain</p>
+	<Slider id="grain-amount" label="Amount" value={edit.grain?.amount ?? 0} min={0} max={100} defaultValue={0} format={(v) => decimals(v)} onchange={(v) => setGrain('amount', v)} {oncommit} />
+	<Slider id="grain-size" label="Size" value={edit.grain?.size ?? 50} min={0} max={100} defaultValue={50} format={(v) => `${Math.round(grainMicrons(v))} µm`} onchange={(v) => setGrain('size', v)} {oncommit} />
+	<p class="text-xs text-muted">Size is a grain on a 35 mm negative, so it keeps its share of the picture at any size. The preview, smaller than the photo, shows grain softer than the export does; zoom in to see it as exported.</p>
 </div>

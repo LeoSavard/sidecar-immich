@@ -7,6 +7,13 @@ Source: the architecture plan (PWA entry, XMP sidecars, server-side demosaic, We
 
 Where the code differs from the text below, the code and these notes win.
 
+- **Grain** (§7, "Grain"): procedural, in exposure before the tone map, sized on a 35 mm frame and averaged by
+  Selwyn's law where finer than a pixel. Checked: packing tests; parity `grain-mono`, `grain-film`, `grain-heic`
+  identical browser to server (16/16 pass); a portrait developed at 1600 px and 5584 px with grain 0/40/80
+  (midtones grainy, deep shadows and the bright fleece less so; the proxy softer, as expected); the three editor
+  smoke runs set Amount 30 and Size 40 and save them. `sidecar-dev develop` now passes black and white's table and
+  demosaics at full size when asked for more than half the sensor.
+
 - **Immich checksums:** Immich hashes file contents only for its internal library. External-library assets get `sha1("path:" + originalPath)` as their checksum, so checksum search can't find them. Resolution therefore relies on the date layout and filename search for external RAWs, confirms candidates by hashing the local files, and finds the Immich asset by `originalPath`.
 - **Immich is 3.2.0** on the server (floating `v3` tag). The API behaviour relied on is unchanged from 3.1.0. `GET /api/users/me` needs `user.read`, so the sign-in key needs `user.read, asset.read, asset.view, asset.upload, asset.update, stack.create`.
 - **Uniform layouts** are mirrored by hand in `#[repr(C)]` Rust structs and checked against the WGSL by parsing it with naga in tests. `encase` 0.12 dropped glam support and `webgpu-utils` isn't needed: the browser packs uniforms with the same Rust code compiled to WebAssembly (`crates/color-wasm`).
@@ -626,7 +633,30 @@ measured curves of named stocks, which need their datasheets digitised. Filters 
 red (long-pass edges at 500, 555, 600 nm) and green (a band). Measured on everyday colours: blue-sensitive film
 darkens skin 0.7 stop against panchromatic and lifts the sky; orthochromatic takes a saturated red to near
 black; a red filter darkens a blue sky 1.6 stops. Not yet: illuminants other than daylight, the stock's own
-characteristic curve, grain, developers.
+characteristic curve, developers.
+
+**Grain.** `EditParams.grain { amount, size }` makes each spot's exposure flicker as a negative's grains make
+it, before the tone map, in colour or black and white, on a RAW or a developed file (`develop/grain.wgsl`). The
+noise is procedural, not a stored map: two octaves of value noise — clumps at the grain's size, grains at half
+of it — whose lattice values come from an integer hash of the pixel's place in the whole frame (pcg2d, from
+Jarzynski and Olano's 2020 JCGT paper), four 16-bit uniforms summed to a near-Gaussian value. Integer maths and
+an exact multiply make it the same on every GPU: parity's grain cases are identical between browser and server.
+Interpolated value noise is divided by its own spread at that position, so the lattice leaves no pattern of
+stronger and weaker grain. Position is the frame's: the develop pass adds `MaskParams.frame`'s offset, so a
+loupe tile's grain is the export's at the same pixels.
+
+Size is a grain on a 35 mm negative, 5–40 µm (`Grain::microns`, doubling every third of the slider), turned into
+pixels from the frame's long edge at each rendering, so grain keeps its share of the picture at every size.
+Where an octave is finer than a pixel, its lattice is the pixels and its strength falls with grain size over
+pixel size — Selwyn's law, granularity × √(area seen) constant — so the proxy shows what a scaled-down export
+would, and the full-size export shows the grain itself.
+
+The flicker is in exposure, `exp2(σ·n)`, with its mean kept (`− σ² ln 2 / 2`). Grain is denser where the
+negative is, so σ grows with the pixel's place between the black and white points (`√((0.2 + t)/1.2)`); the
+tone curve then flattens it in the deep shadows and the clipped highlights, and more contrast shows more of it,
+as a harder paper grade does. A developed file is already a print: its σ is shaped `4e(1 − e)` on the encoded
+value instead. Amount 100 is a σ of 0.6 stop. Colour grain is one value for all three channels (luminance
+grain); separate grain per dye layer belongs to stage 3's spectral colour film.
 
 Uniform buffer:
 
@@ -645,10 +675,11 @@ struct DevelopParams {            // offset  size
   mixer      : array<vec4f, 8>,   //  144    128   per band: hue, sat, lum, unused
   film       : vec4f,             //  272     16   amount 0–1 (0 neutral), interlayer spread, unused ×2
   mono       : vec4f,             //  288     16   black and white: 1 on, the table's side, unused ×2
-}                                 //  total 304 bytes
+  grain      : vec4f,             //  304     16   σ in stops (0 none), size ÷ long edge, unused ×2
+}                                 //  total 320 bytes
 ```
 
-**Struct layouts.** The 304-byte table above documents the layout; code never hard-codes it. `encase` (MIT-0) derives it on the Rust side and `webgpu-utils` (MIT) reads it from the WGSL source in the browser, so a field added to the struct can't silently shift the offsets.
+**Struct layouts.** The 320-byte table above documents the layout; code never hard-codes it. `encase` (MIT-0) derives it on the Rust side and `webgpu-utils` (MIT) reads it from the WGSL source in the browser, so a field added to the struct can't silently shift the offsets.
 
 **Parameter flow.** Slider input → params store (Svelte 5 `$state`) → derived CPU values (WASM: WB → multipliers and matrix; curve → LUT) → `queue.writeBuffer` → dirty flag → next `requestAnimationFrame` runs develop → view → histogram. Undo snapshots on `pointerup`, not per input event.
 

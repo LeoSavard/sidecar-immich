@@ -118,6 +118,8 @@ try {
 		await (await visible(page.getByRole('radio', { name: 'Film' }))).click();
 		await set('film-amount', 80);
 		await set('film-interlayer', 45);
+		await set('grain-amount', 30);
+		await set('grain-size', 40);
 	});
 	await step('curve', async () => {
 		await section('Curve');

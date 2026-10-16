@@ -81,6 +81,9 @@ const cap = (s: string) => s[0].toUpperCase() + s.slice(1);
 /** One control that reads as a number; `show` formats it as its slider does. */
 type Control = { label: string; get: (e: EditParams) => number; show: (v: number) => string };
 
+/** A grain's size on a 35 mm frame, in µm, from its 0–100 slider: `Grain::microns` in sidecar-color. */
+export const grainMicrons = (size: number) => 5 * 8 ** (Math.min(Math.max(size, 0), 100) / 100);
+
 const CONTROLS: Control[] = [
 	{ label: 'Exposure', get: (e) => e.exposure.ev, show: (v) => `${signed(v, 2)} EV` },
 	{ label: 'Contrast', get: view.contrast, show: (v) => signed(v) },
@@ -91,6 +94,8 @@ const CONTROLS: Control[] = [
 	{ label: 'Highlight recovery', get: view.highlightRecovery, show: (v) => `${decimals(v)} %` },
 	{ label: 'Saturation', get: (e) => e.saturation ?? 0, show: (v) => signed(v) },
 	...BANDS.flatMap((b) => FIELDS.map((f): Control => ({ label: `${cap(b)} ${f}`, get: (e) => e.mixer[b][f], show: (v) => signed(v) }))),
+	{ label: 'Grain', get: (e) => e.grain?.amount ?? 0, show: (v) => decimals(v) },
+	{ label: 'Grain size', get: (e) => e.grain?.size ?? 50, show: (v) => `${Math.round(grainMicrons(v))} µm` },
 	{ label: 'Sharpening', get: (e) => e.detail.sharpenAmount, show: (v) => decimals(v) },
 	{ label: 'Sharpening radius', get: (e) => e.detail.sharpenRadius, show: (v) => `${decimals(v, 1)} px` },
 	{ label: 'Noise reduction', get: (e) => e.detail.denoiseLuminance, show: (v) => decimals(v) },
@@ -223,6 +228,8 @@ export const PICKS: { id: string; label: string; take: (into: EditParams, from: 
 			else delete e.film;
 			if (f.monochrome) e.monochrome = structuredClone(f.monochrome);
 			else delete e.monochrome;
+			if (f.grain) e.grain = structuredClone(f.grain);
+			else delete e.grain;
 		}
 	},
 	{ id: 'curve', label: 'Curve', take: (e, f) => (e.tone.curve = structuredClone(f.tone.curve)) },
