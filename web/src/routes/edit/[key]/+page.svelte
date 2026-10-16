@@ -12,6 +12,7 @@
 	import { api, HttpError } from '$lib/api';
 	import { settings, SPACE_LABELS } from '$lib/settings';
 	import { clearDraft, loadDraft, saveDraft } from '$lib/state/drafts';
+	import { copyLook, pasteLook, readLookClipboard, type LookClipboard } from '$lib/state/look-clipboard';
 	import { UndoStack } from '$lib/state/undo';
 	import Slider from '$lib/ui/Slider.svelte';
 	import Histogram from '$lib/ui/Histogram.svelte';
@@ -42,6 +43,7 @@
 	 * it every few pixels of a drag.
 	 */
 	let asShotWb = $state({ temperatureK: 5000, tint: 0 });
+	let lookClipboard = $state<LookClipboard | null>(readLookClipboard());
 	let lut = $state<Float32Array | null>(null);
 	/** The layers' curves as they render, a 4,096-entry row each: what the selected layer's curve editor draws. */
 	let maskCurves = $state<Float32Array | null>(null);
@@ -1379,6 +1381,13 @@
 {/snippet}
 
 {#snippet historySection()}
+	<!-- The colour sections as a look: copied here, pasted onto another photo (`$lib/state/look-clipboard`). -->
+	<div class="mb-2 flex flex-wrap items-center gap-1.5 text-xs">
+		<span class="text-fg-2">Look</span>
+		<button type="button" class="rounded-full bg-raised px-2.5 py-1 text-fg disabled:opacity-40" disabled={!edit} title="Copy this photo's white balance, light, curve, colour and detail" onclick={() => { if (edit && meta) { copyLook($state.snapshot(edit), meta.fileName); lookClipboard = readLookClipboard(); } }}>Copy look</button>
+		<button type="button" class="rounded-full bg-raised px-2.5 py-1 text-fg disabled:opacity-40" disabled={!edit || !lookClipboard || readOnly} onclick={() => { if (edit && pasteLook(edit)) { changed(); committed(); } }}>Paste look</button>
+		{#if lookClipboard}<span class="min-w-0 truncate text-fg-2">from {lookClipboard.from}</span>{/if}
+	</div>
 	{#if versions}
 		<HistoryPanel history={versions} compareId={compare?.id ?? null} busy={versionsBusy || saving} onopen={openVersion} oncompare={setCompare} onpick={pickFrom} onlabel={labelVersion} />
 	{:else}
