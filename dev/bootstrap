@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Make a fresh clone or worktree buildable: LibRaw's submodule, the dev image, the web app's packages, and
+# the files the web app generates from Rust (composed WGSL, the colour wasm). Safe to rerun.
+set -euo pipefail
+here="$(cd "$(dirname "$0")/.." && pwd)"
+git -C "$here" submodule update --init
+docker image inspect sidecar-dev >/dev/null 2>&1 || docker build -t sidecar-dev "$here/dev"
+"$here/dev/run" bash -c 'cd web && npm ci && npm run -s generate'
+echo "ready: ./dev/serve (or ./dev/serve --web for live reload), ./dev/run cargo test --workspace"
