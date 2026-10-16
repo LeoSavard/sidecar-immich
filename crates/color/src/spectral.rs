@@ -178,10 +178,17 @@ fn sampled(knots: &[(f64, f64)]) -> [f64; SAMPLES] {
     })
 }
 
-/// A black-and-white film type: its spectral sensitivity, relative, per wavelength. These are the classes'
-/// shapes — where panchromatic, orthochromatic and blue-sensitive emulsions begin and stop seeing, as their
-/// manufacturers' datasheets show them — not one stock's measured curve.
+/// A black-and-white film type: its spectral sensitivity, relative, per wavelength. The classes' shapes —
+/// where panchromatic, orthochromatic and blue-sensitive emulsions begin and stop seeing, as their
+/// manufacturers' datasheets show them — and named stocks from their own datasheets.
 pub fn film_sensitivity(id: &str) -> Option<[f64; SAMPLES]> {
+    use crate::film_data as data;
+    match id {
+        "hp5-plus" => return Some(normalised(data::HP5_PLUS_SPECTROGRAM)),
+        "sfx-200" => return Some(normalised(data::SFX_200_SPECTROGRAM)),
+        "tri-x-400" | "tri-x-320" => return Some(normalised(data::TRI_X_LOG_SENSITIVITY.map(|l| 10f64.powf(l)))),
+        _ => {}
+    }
     Some(sampled(match id {
         // Classic panchromatic, as the class's datasheets draw it: blue-heavy, a dip in the green, sensitising out to
         // the orange-red and gone by about 680 nm, which is why reds print darker than the eye sees them.
@@ -195,6 +202,15 @@ pub fn film_sensitivity(id: &str) -> Option<[f64; SAMPLES]> {
         "blue-sensitive" => &[(380.0, 1.0), (400.0, 1.0), (430.0, 0.9), (460.0, 0.6), (480.0, 0.35), (500.0, 0.12), (520.0, 0.02), (530.0, 0.0)],
         _ => return None,
     }))
+}
+
+/// A datasheet's sensitivity, largest 1. ILFORD's "wedge spectrograms to tungsten light" are read as drawn —
+/// the film's relative sensitivity — which SFX 200's filter-factor table confirms; Kodak's curves are log
+/// sensitivity per unit energy, the film's own by definition, and taken out of the log. (TRI-X's sheet gives one
+/// spectral curve for its 320 and 400.)
+fn normalised(s: [f64; SAMPLES]) -> [f64; SAMPLES] {
+    let max = s.iter().cloned().fold(0.0, f64::max);
+    s.map(|v| v / max)
 }
 
 /// A filter on the lens: its transmission per wavelength. Generic shapes after the classic yellow, orange, red
@@ -412,6 +428,53 @@ mod tests {
         assert!(e(&tungsten, sky) < 0.9 * e(&D65, sky), "{} vs {}", e(&tungsten, sky), e(&D65, sky));
         let mid = (GRID - 1) / 2;
         assert!((at(&mono_lut("panchromatic", "none", &tungsten).unwrap(), [mid, mid, mid]) - 0.5).abs() < 0.02);
+    }
+
+    /// A film's filter factor behind one of our filters, in light `light`.
+    fn factor(s: &[f64; SAMPLES], filter: &str, light: &[f64; SAMPLES]) -> f64 {
+        let t = filter_transmission(filter).unwrap();
+        let open: f64 = (0..SAMPLES).map(|i| light[i] * s[i]).sum();
+        open / (0..SAMPLES).map(|i| light[i] * s[i] * t[i]).sum::<f64>()
+    }
+
+    /// Each stock's filter factors through our generic filters land near its maker's table: red (Wratten 25) and
+    /// orange (21) within 0.45 stop, yellow (8) within 0.65, our yellow being deeper than an 8; our green is
+    /// broader than a 58, so it isn't compared. SFX 200's
+    /// table is what fixes how ILFORD's spectrograms are read: as drawn, the film's relative sensitivity; divided
+    /// by the tungsten light the title names, its red factor would be 9 where ILFORD says 2.8.
+    #[test]
+    fn stocks_filter_factors_match_their_sheets() {
+        let tungsten = planck(3200.0, 1.4388e-2);
+        let checks: [(&str, &str, &[f64; SAMPLES], f64); 7] = [
+            ("sfx-200", "yellow", &D65, 2.0),
+            ("sfx-200", "orange", &D65, 2.4),
+            ("sfx-200", "red", &D65, 2.8),
+            ("tri-x-400", "yellow", &D65, 2.0),
+            ("tri-x-400", "red", &D65, 8.0),
+            ("tri-x-400", "yellow", &tungsten, 1.5),
+            ("tri-x-400", "red", &tungsten, 5.0),
+        ];
+        for (film, filter, light, sheet) in checks {
+            let ours = factor(&film_sensitivity(film).unwrap(), filter, light);
+            let off = (ours / sheet).log2();
+            eprintln!("{film} behind {filter}: {ours:.1} (sheet {sheet}), {off:+.2} stop");
+            // Our yellow is a long-pass at 500 nm, between a Wratten 8 and a 15: compared with the 8, loosely.
+            let within = if filter == "yellow" { 0.65 } else { 0.45 };
+            assert!(off.abs() < within, "{film} {filter}: {ours} against {sheet}");
+        }
+    }
+
+    /// HP5 Plus, a classic panchromatic film, renders yellow darker and a blue sky lighter than the eye sees them.
+    #[test]
+    fn hp5_sees_more_blue_than_the_eye() {
+        let lut = mono_lut("hp5-plus", "none", &D65).unwrap();
+        let e = |rgb: [f64; 3]| {
+            let m = rgb.iter().cloned().fold(0.0, f64::max);
+            m * at(&lut, rgb.map(|v| (v / m * (GRID - 1) as f64).round() as usize)) as f64
+        };
+        let lum = |rgb: [f64; 3]| REC2020_TO_XYZ[1][0] * rgb[0] + REC2020_TO_XYZ[1][1] * rgb[1] + REC2020_TO_XYZ[1][2] * rgb[2];
+        let (yellow, sky) = ([0.6, 0.5, 0.05], [0.25, 0.42, 0.75]);
+        assert!(e(yellow) < 0.8 * lum(yellow) && e(sky) > 1.15 * lum(sky), "yellow {} / {}, sky {} / {}", e(yellow), lum(yellow), e(sky), lum(sky));
     }
 
     #[test]

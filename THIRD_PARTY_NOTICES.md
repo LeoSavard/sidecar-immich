@@ -53,9 +53,18 @@ Academy Software Foundation, aces-core, Apache-2.0. Implemented in `shaders/deve
 `crates/color/src/spectral_data.rs` holds the CIE 1931 2° colour-matching functions and the D65 illuminant at
 380–730 nm in 10 nm steps, exported from colour-science 0.4.7 (Copyright 2013 Colour Developers, BSD-3-Clause,
 https://github.com/colour-science/colour), which distributes the CIE's standard data; and a few of its Jakob
-2019 spectra as test references. `crates/color/src/spectral.rs` implements the spectral upsampling of W. Jakob
+2019 spectra as test references, and CIE daylight's basis functions S0, S1, S2. `crates/color/src/spectral.rs` implements the spectral upsampling of W. Jakob
 and J. Hanika, "A Low-Dimensional Function Space for Efficient Spectral Upsampling", Computer Graphics Forum
 38(2), 2019, from the paper; no code was copied.
+
+## Film stocks — makers' datasheets
+Spectral sensitivities and characteristic curves read, by the scripts in `crates/color/film-data/`, from:
+HARMAN technology's *ILFORD HP5 Plus technical information* and *ILFORD SFX 200 technical information*
+(Nov 2018; https://www.ilfordphoto.com/amfile/file/download/file/1903/product/691/ for HP5 Plus); and Kodak
+Alaris's *KODAK PROFESSIONAL TRI-X 320 and 400 Films* (F-4017, Feb 2016). The values are in
+`crates/color/src/film_data.rs`; the datasheets are not redistributed. ILFORD, HP5 and SFX are trademarks of
+HARMAN technology Ltd; Kodak, Kodak Professional and Tri-X of Eastman Kodak Company — named here to say whose
+films the curves describe.
 
 ## OKLab
 Björn Ottosson, "A perceptual color space for image processing" (2020). Constants in `shaders/common/color.wgsl`.

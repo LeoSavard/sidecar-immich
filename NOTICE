@@ -10,8 +10,12 @@ THIRD_PARTY_NOTICES.md, which ships in the Docker image at /usr/share/doc/sideca
 - vkdt — Johannes Hanika (BSD-2-Clause): demosaic, highlight, denoise and deconvolution shaders ported to WGSL.
 - ACES Reference Gamut Compression — Academy Software Foundation (Apache-2.0).
 - OKLab — Björn Ottosson.
-- colour-science — Colour Developers (BSD-3-Clause): the CIE 1931 colour-matching functions and D65 tables used
-  for black and white, taken from its data; the CIE standard data itself is the CIE's.
+- colour-science — Colour Developers (BSD-3-Clause): the CIE 1931 colour-matching functions, D65 and CIE
+  daylight tables used for black and white, taken from its data; the CIE standard data itself is the CIE's.
+- Film stocks' spectral sensitivities and characteristic curves — read from their makers' published datasheets:
+  HARMAN technology (ILFORD HP5 Plus, SFX 200; Nov 2018) and Kodak Alaris (KODAK PROFESSIONAL TRI-X 320 and
+  400, F-4017, 2016). ILFORD, HP5 and SFX are HARMAN technology's trademarks; Kodak, Kodak Professional and
+  Tri-X are Eastman Kodak Company's.
 - Jakob and Hanika's spectral upsampling (2019) — implemented from the paper.
 - Adobe XMP Toolkit — Adobe (BSD-3-Clause), via xmp_toolkit (MIT OR Apache-2.0).
 - ExifTool — Phil Harvey (Perl licence: Artistic or GPL), run as a separate program.

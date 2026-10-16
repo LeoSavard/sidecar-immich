@@ -20,6 +20,22 @@ sees the light, through a filter. -->
 		{ id: 'orthochromatic', label: 'Orthochromatic', note: 'Blind to red: reds and lips go dark, skies stay bright, skin shows every freckle.' },
 		{ id: 'blue-sensitive', label: 'Blue-sensitive', note: "Wet collodion and the earliest plates: sees only blue, so warm colours go near black and blue skies blow out. Real plates also saw ultraviolet, which no camera records." }
 	];
+	/** Named stocks, each under its film type: the maker's measured curves (`sidecar_color::stock`). */
+	const STOCKS = [
+		{ id: 'hp5-plus', type: 'panchromatic', label: 'ILFORD HP5 Plus', note: "HARMAN's datasheet: its spectral sensitivity and characteristic curve, a toe four stops under grey and an almost straight line above." },
+		{ id: 'tri-x-400', type: 'panchromatic', label: 'KODAK TRI-X 400', note: "Kodak's datasheet (D-76): its spectral sensitivity, a short toe and a gentle shoulder well above white." },
+		{ id: 'tri-x-320', type: 'panchromatic', label: 'KODAK TRI-X 320', note: "Kodak's datasheet (D-76, sheet film): the long toe it is known for, so shadows ease in softly instead of falling off. Same spectral curve as Tri-X 400, the only one the sheet gives." },
+		{ id: 'sfx-200', type: 'panchromatic-extended', label: 'ILFORD SFX 200', note: "HARMAN's datasheet: sees out to 740 nm, so a red filter darkens skies hard and lightens foliage; its curve rolls off into a shoulder at the white point. Cameras record little past 700 nm." }
+	];
+	/** The film type a film id belongs to: a stock's type, or the id itself for a type. */
+	const typeOf = (film: string) => STOCKS.find((s) => s.id === film)?.type ?? film;
+
+	/** A film type: the type itself (its class's curve), or the stock already chosen if it is of that type. */
+	function setType(type: string) {
+		if (edit.monochrome && typeOf(edit.monochrome.film) === type) return;
+		setMono('film', type);
+	}
+
 	const FILTERS = [
 		{ id: 'none', label: 'None' },
 		{ id: 'yellow', label: 'Yellow' },
@@ -95,10 +111,22 @@ sees the light, through a filter. -->
 		<p class="pt-1 text-[11px] font-medium tracking-wide text-muted uppercase">Film type</p>
 		<div class="grid gap-1 text-xs" role="radiogroup" aria-label="Film type">
 			{#each FILMS as f (f.id)}
-				<button type="button" role="radio" aria-checked={mono.film === f.id} class="rounded px-2 py-1.5 text-left {mono.film === f.id ? 'bg-raised text-fg' : 'text-fg-2 hover:bg-raised/60'}" onclick={() => setMono('film', f.id)}>
+				{@const on = typeOf(mono.film) === f.id}
+				{@const stocks = STOCKS.filter((s) => s.type === f.id)}
+				{@const stock = STOCKS.find((s) => s.id === mono.film)}
+				<button type="button" role="radio" aria-checked={on} class="rounded px-2 py-1.5 text-left {on ? 'bg-raised text-fg' : 'text-fg-2 hover:bg-raised/60'}" onclick={() => setType(f.id)}>
 					<span class="font-medium">{f.label}</span>
-					{#if mono.film === f.id}<span class="block pt-0.5 text-muted">{f.note}</span>{/if}
+					{#if on}<span class="block pt-0.5 text-muted">{f.note}</span>{/if}
 				</button>
+				{#if on && stocks.length}
+					<div class="flex flex-wrap gap-1.5 pb-1 pl-2" role="radiogroup" aria-label="Stock">
+						<button type="button" role="radio" aria-checked={!stock} class={choice(!stock)} onclick={() => setMono('film', f.id)}>Generic</button>
+						{#each stocks as s (s.id)}
+							<button type="button" role="radio" aria-checked={mono.film === s.id} class={choice(mono.film === s.id)} onclick={() => setMono('film', s.id)}>{s.label}</button>
+						{/each}
+					</div>
+					{#if stock}<p class="pb-1 pl-2 text-muted">{stock.note}</p>{/if}
+				{/if}
 			{/each}
 		</div>
 		<p class="pt-1 text-[11px] font-medium tracking-wide text-muted uppercase">Filter</p>
@@ -127,7 +155,7 @@ sees the light, through a filter. -->
 		</div>
 		<Slider id="mono-development" label="Development" value={mono.development ?? 0} min={-2} max={2} step={0.5} defaultValue={0} bipolar format={zone} onchange={(v) => onchange((e) => { if (!e.monochrome) return; if (v === 0) delete e.monochrome.development; else e.monochrome.development = v; })} {oncommit} />
 		<p class="text-xs text-muted">Longer development (N+) gives the negative more contrast above the shadows and coarser grain; shorter (N−) less, for a scene too contrasty to hold.</p>
-		<p class="text-xs text-muted">Each colour's spectrum is estimated from the photo, then seen as the film type would. The types are the classes' sensitivities, not any one brand's measured curve.</p>
+		<p class="text-xs text-muted">Each colour's spectrum is estimated from the photo, then seen as the film type would. The types are the classes' sensitivities; a named stock is its maker's measured curve.</p>
 	{:else if edit.film}
 		<Slider id="film-amount" label="Amount" value={edit.film.amount} min={0} max={100} defaultValue={100} format={(v) => `${decimals(v)} %`} onchange={(v) => onchange((e) => { if (e.film) e.film.amount = v; })} {oncommit} />
 		<Slider id="film-interlayer" label="Interlayer effects" value={edit.film.interlayer} min={0} max={100} defaultValue={45} format={(v) => decimals(v)} onchange={(v) => onchange((e) => { if (e.film) e.film.interlayer = v; })} {oncommit} />
