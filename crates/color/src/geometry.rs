@@ -28,6 +28,7 @@ pub const MAX_ANGLE_DEG: f64 = 45.0;
 /// A crop in the plane: fractions of the picture's width and height before any turn.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "edit/"))]
 pub struct Crop {
     pub left: f64,
     pub top: f64,
@@ -65,6 +66,7 @@ impl Crop {
 /// Stored as `sc:Geometry`. Absent means none: every photo edited before it existed renders unchanged.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "edit/"))]
 pub struct Geometry {
     /// Quarter turns clockwise, applied after the crop.
     pub rotate: u32,
@@ -290,6 +292,7 @@ pub fn fit(g: &Geometry, before: &Geometry, a: f64) -> Geometry {
 /// Everything a renderer or the editor needs about one geometry over a picture of `size` pixels.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "edit/"))]
 pub struct Frame {
     /// Output (0…1) → picture (0…1), row-major, projective.
     pub to_picture: M3,

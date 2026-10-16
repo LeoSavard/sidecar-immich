@@ -76,7 +76,9 @@ The global Saturation slider (PR #4: one commit for the core, one for the UI) is
 3. The stage in `shaders/develop/` taking the value as an argument; only `shaders/client/develop.wgsl` reads
    the uniform. Results at the default must be bit-identical to before.
 4. Tests in `params.rs`: the packing scale, and that the field is omitted at its default.
-5. `web/src/lib/types.ts` — mirror the field (hand-kept for now).
+5. `npm run types` in `web/` (part of `npm run generate`) regenerates `web/src/lib/generated/` from the Rust
+   types; commit the result — CI fails on drift. A field serde leaves out at its default also needs
+   `#[cfg_attr(feature = "ts", ts(as = "Option<…>", optional))]`, so the TypeScript says it can be absent.
 6. `web/src/lib/state/edit-view.ts` — a `CONTROLS` entry (history summaries) and the right `PICKS` section
    ("use its …" in History, and what a copied look carries).
 7. The slider in the editor's section snippet.

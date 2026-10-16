@@ -16,6 +16,7 @@ pub const PROCESS_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "edit/"))]
 pub struct EditParams {
     pub process_version: u32,
     pub white_balance: WhiteBalance,
@@ -27,6 +28,7 @@ pub struct EditParams {
     /// `shaders/develop/masks.wgsl`'s `mask_start`). Left out of the serialized edit at 0, so an edit that
     /// never touches it keeps the ETag it already had.
     #[serde(skip_serializing_if = "is_zero")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<f64>", optional))]
     pub saturation: f64,
     pub detail: Detail,
     /// Absent means off: photos edited before this field existed render unchanged. See DESIGN.md §15.
@@ -34,10 +36,12 @@ pub struct EditParams {
     /// Crop, straighten, keystone and turns, after lens correction (`crate::geometry`). Absent means none, and
     /// is left out of the serialized edit so every edit made before it keeps its ETag.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
     pub geometry: Option<crate::geometry::Geometry>,
     /// Adjustments through masks, at most `MAX_MASKS`. Left out of the serialized edit when empty, so an edit
     /// without masks keeps the ETag — and the history ids and export records keyed by it — it always had.
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<Vec<MaskAdjustment>>", optional))]
     pub masks: Vec<MaskAdjustment>,
 }
 
@@ -91,6 +95,7 @@ impl EditParams {
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "edit/"))]
 pub enum WhiteBalanceMode {
     #[default]
     AsShot,
@@ -99,6 +104,7 @@ pub enum WhiteBalanceMode {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "edit/"))]
 pub struct WhiteBalance {
     pub mode: WhiteBalanceMode,
     pub temperature_k: f64,
@@ -113,6 +119,7 @@ impl Default for WhiteBalance {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "edit/"))]
 pub struct Exposure {
     pub ev: f64,
     pub highlight_blend: f64,
@@ -126,6 +133,7 @@ impl Default for Exposure {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "edit/"))]
 pub struct Tone {
     pub black_ev: f64,
     pub white_ev: f64,
@@ -136,8 +144,10 @@ pub struct Tone {
     /// −100…100 each: a smooth additive bump on top of `curve` (`spline::tone_curve_lut`), not a point in it,
     /// so drawing a custom curve can never have a slider silently steal or move one of its points.
     #[serde(skip_serializing_if = "is_zero")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<f64>", optional))]
     pub highlights: f64,
     #[serde(skip_serializing_if = "is_zero")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<f64>", optional))]
     pub shadows: f64,
 }
 
@@ -161,6 +171,7 @@ impl Default for Tone {
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "edit/"))]
 pub struct MixerBand {
     pub hue: f64,
     pub saturation: f64,
@@ -169,6 +180,7 @@ pub struct MixerBand {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "edit/"))]
 pub struct Mixer {
     pub red: MixerBand,
     pub orange: MixerBand,
@@ -188,6 +200,7 @@ impl Mixer {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "edit/"))]
 pub struct Detail {
     pub sharpen_amount: f64,
     pub sharpen_radius: f64,
@@ -206,6 +219,7 @@ impl Default for Detail {
 /// (`crate::lens`, DESIGN.md §15).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "edit/"))]
 pub struct Lens {
     /// `LensProfile::id` of the profile it was set against: `dng`, `sony`, `fujifilm` or `lensfun:<maker>/<model>`.
     pub profile: String,
@@ -234,6 +248,7 @@ pub const MAX_MASKS: usize = 8;
 /// doesn't know and skips rendering them.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "edit/"))]
 pub struct MaskAdjustment {
     /// Which mask, by name: one of `MASK_NAMES`, which the worker's models make and cache (never stored
     /// here), or `brush`, which starts empty and is only what the strokes paint.
@@ -252,22 +267,28 @@ pub struct MaskAdjustment {
     pub tint: f64,
     /// −100…100, as the global sliders: they move this layer's white and black points from the global ones.
     #[serde(skip_serializing_if = "is_zero")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<f64>", optional))]
     pub whites: f64,
     #[serde(skip_serializing_if = "is_zero")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<f64>", optional))]
     pub blacks: f64,
     /// A curve over display-encoded values, applied after the global curve where the mask is. Highlights and
     /// Shadows move its 75 % and 25 % points, as the global sliders move the global curve's. Empty is none.
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<Vec<[f64; 2]>>", optional))]
     pub curve: Vec<[f64; 2]>,
     /// Colour mixer values added to the global ones where the mask is.
     #[serde(skip_serializing_if = "is_default_mixer")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<Mixer>", optional))]
     pub mixer: Mixer,
     /// Brush strokes over the mask, in the order they were painted.
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<Vec<Stroke>>", optional))]
     pub strokes: Vec<Stroke>,
     /// Fields a newer Sidecar wrote (another kind of mask, a shape), kept as they are so saving here doesn't
     /// lose them. An entry this version can't render is carried along and skipped (`renders`).
     #[serde(flatten)]
+    #[cfg_attr(feature = "ts", ts(skip))]
     pub other: serde_json::Map<String, serde_json::Value>,
 }
 
@@ -305,6 +326,7 @@ impl Default for MaskAdjustment {
 /// correction, crop or straighten later do.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "edit/"))]
 pub struct Stroke {
     /// Take the mask away instead of painting it in.
     pub erase: bool,
@@ -398,6 +420,7 @@ fn mask_gains(camera: &CameraColor, global: &camera::ResolvedWhiteBalance, m: &M
 /// is: identity at default settings, and no step that promises recovery the file can't give.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "kebab-case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "edit/"))]
 pub enum SourceKind {
     /// Metadata cached before this field existed is RAW.
     #[default]
@@ -407,6 +430,7 @@ pub enum SourceKind {
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "kebab-case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "edit/"))]
 pub enum DisplaySpace {
     #[default]
     Srgb,
