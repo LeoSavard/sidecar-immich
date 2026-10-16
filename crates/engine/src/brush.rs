@@ -68,12 +68,19 @@ pub struct Brush {
     stroke: wgpu::RenderPipeline,
     composite: wgpu::RenderPipeline,
     lens: wgpu::RenderPipeline,
+    /// The edge passes: into the blur's 16-bit textures, and back into a mask.
+    edge_blur: wgpu::RenderPipeline,
+    edge_mask: wgpu::RenderPipeline,
     sampler: wgpu::Sampler,
     /// What "no base" and "no coverage" read: 1×1, zero.
     empty: wgpu::Texture,
 }
 
 fn pipeline(gpu: &Gpu, entry: &str, blend: Option<wgpu::BlendState>, buffers: &[Option<wgpu::VertexBufferLayout>]) -> Result<wgpu::RenderPipeline> {
+    pipeline_to(gpu, entry, MASK, blend, buffers)
+}
+
+fn pipeline_to(gpu: &Gpu, entry: &str, format: wgpu::TextureFormat, blend: Option<wgpu::BlendState>, buffers: &[Option<wgpu::VertexBufferLayout>]) -> Result<wgpu::RenderPipeline> {
     let src = sidecar_shaders::compose(entry)?;
     let module = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some(entry), source: wgpu::ShaderSource::Wgsl(src.into()) });
     Ok(gpu.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -83,7 +90,7 @@ fn pipeline(gpu: &Gpu, entry: &str, blend: Option<wgpu::BlendState>, buffers: &[
         fragment: Some(wgpu::FragmentState {
             module: &module,
             entry_point: Some("fs"),
-            targets: &[Some(wgpu::ColorTargetState { format: MASK, blend, write_mask: wgpu::ColorWrites::ALL })],
+            targets: &[Some(wgpu::ColorTargetState { format, blend, write_mask: wgpu::ColorWrites::ALL })],
             compilation_options: Default::default(),
         }),
         primitive: wgpu::PrimitiveState::default(),
@@ -94,14 +101,21 @@ fn pipeline(gpu: &Gpu, entry: &str, blend: Option<wgpu::BlendState>, buffers: &[
     }))
 }
 
+/// What a mask's edge is blurred in: finer steps than the mask's own 8 bits, so moving the threshold doesn't band.
+const EDGE: wgpu::TextureFormat = wgpu::TextureFormat::R16Float;
+
 fn mask_texture(gpu: &Gpu, size: [u32; 2]) -> wgpu::Texture {
+    texture_as(gpu, size, MASK)
+}
+
+fn texture_as(gpu: &Gpu, size: [u32; 2], format: wgpu::TextureFormat) -> wgpu::Texture {
     gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("mask"),
         size: wgpu::Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: MASK,
+        format,
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     })
@@ -118,9 +132,11 @@ impl Brush {
         let stroke = pipeline(gpu, "client/brush.wgsl", Some(wgpu::BlendState { color: max, alpha: max }), &[Some(segment)])?;
         let composite = pipeline(gpu, "client/brush_composite.wgsl", None, &[])?;
         let lens = pipeline(gpu, "client/lens_mask.wgsl", None, &[])?;
+        let edge_blur = pipeline_to(gpu, "client/mask_edge.wgsl", EDGE, None, &[])?;
+        let edge_mask = pipeline(gpu, "client/mask_edge.wgsl", None, &[])?;
         let sampler = gpu.device.create_sampler(&wgpu::SamplerDescriptor { mag_filter: wgpu::FilterMode::Linear, min_filter: wgpu::FilterMode::Linear, ..Default::default() });
         let empty = mask_texture(gpu, [1, 1]);
-        Ok(Self { stroke, composite, lens, sampler, empty })
+        Ok(Self { stroke, composite, lens, edge_blur, edge_mask, sampler, empty })
     }
 
     /// A full-screen triangle, or with `segments` a capsule quad per segment.
@@ -187,6 +203,37 @@ impl Brush {
         }
         gpu.queue.submit([enc.finish()]);
         current
+    }
+
+    /// `mask` with its edge feathered and moved (`MaskEdge`), as a new mask; `mask` itself when the edge is too
+    /// narrow to show.
+    pub fn edge(&self, gpu: &Gpu, mask: wgpu::Texture, edge: &sidecar_color::params::MaskEdge) -> wgpu::Texture {
+        let size = [mask.width(), mask.height()];
+        let Some(plan) = edge.plan(size) else { return mask };
+        let (a, b) = (texture_as(gpu, plan.small, EDGE), texture_as(gpu, plan.small, EDGE));
+        let out = mask_texture(gpu, size);
+        let mut enc = gpu.device.create_command_encoder(&Default::default());
+        for (pipeline, params, src, dst) in [
+            (&self.edge_blur, plan.down(), &mask, &a),
+            (&self.edge_blur, plan.blur(false), &a, &b),
+            (&self.edge_blur, plan.blur(true), &b, &a),
+            (&self.edge_mask, plan.threshold(size), &a, &out),
+        ] {
+            let ubo = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::bytes_of(&params), usage: wgpu::BufferUsages::UNIFORM });
+            let view = src.create_view(&Default::default());
+            let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: None,
+                layout: &pipeline.get_bind_group_layout(0),
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: ubo.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                ],
+            });
+            self.draw(&mut enc, dst, true, pipeline, &bind, None);
+        }
+        gpu.queue.submit([enc.finish()]);
+        out
     }
 
     /// A mask moved through the lens correction (`params` packed for its own size), as a new mask.
@@ -275,6 +322,32 @@ mod tests {
         assert!(at(25) < 0.01 && at(75) < 0.01, "beyond the feather: {} {}", at(25), at(75));
         assert!((0.2..0.8).contains(&at(35)) && (0.2..0.8).contains(&at(65)), "fading: {} {}", at(35), at(65));
         assert!(at(5) > 0.99, "a stroke still paints over what the range left out");
+    }
+
+    /// A hard square's edge: at shift 0 it stays put and goes soft across the width; shifted out, the square
+    /// grows; with no feather, the edge stays crisp.
+    #[test]
+    fn an_edge_feathers_and_moves() {
+        use sidecar_color::params::MaskEdge;
+        let Ok(gpu) = crate::test_gpu() else { return eprintln!("skipping: no GPU") };
+        let brush = Brush::new(gpu).unwrap();
+        let n = 200u32;
+        let square = crate::RgbaF32 { width: n, height: n, data: (0..n * n).flat_map(|i| [if (50..150).contains(&(i % n)) && (50..150).contains(&(i / n)) { 1.0 } else { 0.0 }; 4]).collect() };
+        let painted = brush.paint(gpu, Some(&crate::upload_rgba16(gpu, &square)), [n, n], [0.0; 4], &[]);
+        let run = |edge: MaskEdge| {
+            let base = brush.paint(gpu, Some(&crate::upload_rgba16(gpu, &square)), [n, n], [0.0; 4], &[]);
+            read_mask(gpu, &brush.edge(gpu, base, &edge)).unwrap()
+        };
+        let row = |m: &[f32], x: u32| m[(100 * n + x) as usize];
+        let soft = run(MaskEdge { width: 100.0, feather: 100.0, shift: 0.0 });
+        assert!(row(&soft, 100) > 0.95 && row(&soft, 10) < 0.05, "inside and far outside: {} {}", row(&soft, 100), row(&soft, 10));
+        assert!((0.35..0.65).contains(&row(&soft, 50)), "half way at the old edge: {}", row(&soft, 50));
+        assert!((0.1..0.9).contains(&row(&soft, 48)) && (0.1..0.9).contains(&row(&soft, 52)), "soft across it: {} {}", row(&soft, 48), row(&soft, 52));
+        let grown = run(MaskEdge { width: 100.0, feather: 0.0, shift: 100.0 });
+        assert!(row(&grown, 46) > 0.9, "pushed out: {}", row(&grown, 46));
+        let crisp = run(MaskEdge { width: 100.0, feather: 0.0, shift: 0.0 });
+        assert!(row(&crisp, 46) < 0.1 && row(&crisp, 54) > 0.9, "crisp: {} {}", row(&crisp, 46), row(&crisp, 54));
+        assert_eq!(read_mask(gpu, &brush.edge(gpu, painted, &MaskEdge { width: 0.0, ..Default::default() })).unwrap(), read_mask(gpu, &brush.paint(gpu, Some(&crate::upload_rgba16(gpu, &square)), [n, n], [0.0; 4], &[])).unwrap(), "no width, no change");
     }
 
     /// The mask lens pass moves a mask as the picture's lens pass moves the picture's green channel.

@@ -213,6 +213,44 @@ pub unsafe extern "C" fn sc_white_from_neutral(ptr: *const u8, len: usize) -> *c
     }))
 }
 
+#[derive(Deserialize)]
+struct DepthRequest {
+    edit: EditParams,
+    /// The photo's airlight, camera RGB (from the mask set).
+    airlight: [f32; 3],
+    /// The texture's size: the whole proxy, which is the frame the depth map covers.
+    frame: [u32; 2],
+}
+
+/// `{ edit, airlight, frame }` → the depth passes' uniform (`sidecar_color::depth::pack`, 64 bytes), or nothing
+/// when the edit neither blurs nor hazes by distance.
+///
+/// # Safety
+/// `ptr` must point to `len` readable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sc_pack_depth(ptr: *const u8, len: usize) -> *const u8 {
+    let input = unsafe { std::slice::from_raw_parts(ptr, len) };
+    respond(serde_json::from_slice::<DepthRequest>(input).map_err(|e| e.to_string()).map(|req| {
+        sidecar_color::depth::pack(&req.edit, req.airlight, req.frame, [0.0; 2]).map(|p| bytemuck::bytes_of(&p).to_vec()).unwrap_or_default()
+    }))
+}
+
+#[derive(Deserialize)]
+struct EdgeRequest {
+    edge: sidecar_color::params::MaskEdge,
+    size: [u32; 2],
+}
+
+/// `{ edge, size }` → the edge passes' plan as JSON (`MaskEdge::plan`), `null` when the edge is too narrow to show.
+///
+/// # Safety
+/// `ptr` must point to `len` readable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sc_mask_edge(ptr: *const u8, len: usize) -> *const u8 {
+    let input = unsafe { std::slice::from_raw_parts(ptr, len) };
+    respond(serde_json::from_slice::<EdgeRequest>(input).map_err(|e| e.to_string()).and_then(|req| serde_json::to_vec(&req.edge.plan(req.size)).map_err(|e| e.to_string())))
+}
+
 /// Default edit parameters as length-prefixed JSON, so the web app never duplicates them.
 #[unsafe(no_mangle)]
 pub extern "C" fn sc_default_edit() -> *const u8 {

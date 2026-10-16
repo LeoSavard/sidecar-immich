@@ -40,7 +40,7 @@
 	</div>
 	{#key selected}
 		<Slider id="mix-hue" label="{bands.find((b) => b.band === selected)?.label} hue" value={mixer[selected].hue} min={-100} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => onchange(selected, 'hue', v)} {oncommit} />
-		<Slider id="mix-sat" label="Saturation" value={mixer[selected].saturation} min={-100} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => onchange(selected, 'saturation', v)} {oncommit} />
-		<Slider id="mix-lum" label="Luminance" value={mixer[selected].luminance} min={-100} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => onchange(selected, 'luminance', v)} {oncommit} />
+		<Slider id="mix-sat" label="{bands.find((b) => b.band === selected)?.label} saturation" value={mixer[selected].saturation} min={-100} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => onchange(selected, 'saturation', v)} {oncommit} />
+		<Slider id="mix-lum" label="{bands.find((b) => b.band === selected)?.label} luminance" value={mixer[selected].luminance} min={-100} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => onchange(selected, 'luminance', v)} {oncommit} />
 	{/key}
 </div>

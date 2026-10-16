@@ -3,7 +3,7 @@ Mask layers (DESIGN.md §15). A layer is a mask — one the models made (the sub
 a brush or not, or one painted from nothing — and its own light and colour: everything the global edit has,
 added on top of it where the mask is. "Show" greys out what the selected mask leaves out. -->
 <script lang="ts">
-	import type { Band, MaskAdjustment, MixerBand } from '$lib/types';
+	import type { Band, MaskAdjustment, MaskEdge, MixerBand } from '$lib/types';
 	import { BRUSH, DEPTH, MASK_LABELS, type BrushMode, type BrushSettings, type MaskSet } from '$lib/masks';
 	import { curvePointOffset, isIdentityCurve, withCurvePoint } from '$lib/state/edit-view';
 	import Slider from '$lib/ui/Slider.svelte';
@@ -51,6 +51,13 @@ added on top of it where the mask is. "Show" greys out what the selected mask le
 
 	const layer = $derived(selected !== null ? masks[selected] : undefined);
 	const models = $derived(set?.available ? set.names : []);
+
+	/** Change layer `i`'s edge; an edge of no width is none. Moving any control first gives it a width. */
+	function setEdge(i: number, patch: Partial<MaskEdge>) {
+		const now = masks[i]?.edge ?? { width: 0, feather: 100, shift: 0 };
+		const next = { ...now, width: now.width || 20, ...patch };
+		onchange(i, { edge: next.width > 0 ? next : undefined });
+	}
 
 	function setCurve(curve: [number, number][]) {
 		if (selected === null) return;
@@ -109,6 +116,13 @@ added on top of it where the mask is. "Show" greys out what the selected mask le
 				</div>
 			</div>
 			<Slider id="mask-amount" label="Amount" value={layer.amount} min={0} max={100} defaultValue={100} {disabled} format={(v) => `${decimals(v)} %`} onchange={(v) => onchange(i, { amount: v })} {oncommit} />
+			{@render group('Edge')}
+			<Slider id="mask-edge-width" label="Edge width" value={layer.edge?.width ?? 0} min={0} max={100} defaultValue={0} {disabled} format={(v) => decimals(v)} onchange={(v) => setEdge(i, { width: v })} {oncommit} />
+			{#if layer.edge}
+				<Slider id="mask-edge-feather" label="Feather" value={layer.edge.feather} min={0} max={100} defaultValue={100} {disabled} format={(v) => `${decimals(v)} %`} onchange={(v) => setEdge(i, { feather: v })} {oncommit} />
+				<Slider id="mask-edge-shift" label="Shift" value={layer.edge.shift} min={-100} max={100} defaultValue={0} bipolar {disabled} format={(v) => (v < 0 ? `${decimals(-v)} in` : v > 0 ? `${decimals(v)} out` : '0')} onchange={(v) => setEdge(i, { shift: v })} {oncommit} />
+				<p class="text-xs text-muted">Width is how far the edge reaches; Feather how soft it is across that width; Shift moves it inward or outward.</p>
+			{/if}
 			{#if layer.mask === DEPTH}
 				{@const r = layer.range ?? { from: 0, to: 100, feather: 0 }}
 				{@render group('Distance')}

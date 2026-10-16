@@ -514,6 +514,11 @@ async fn masks(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Path(key): P
 }
 
 /// One mask as a greyscale PNG, in the proxy's frame. Keyed by content like a proxy, so cached like one.
+/// `GET /api/assets/{key}/camera` — the JPEG the camera embedded in the RAW, upright: its own rendering.
+async fn camera(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Path(key): Path<String>) -> Response {
+    pixels(&app, &user, &key, format!("/v1/assets/{key}/camera")).await
+}
+
 async fn mask(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Path((key, name)): Path<(String, String)>) -> Response {
     if !name.bytes().all(|b| b.is_ascii_lowercase() || b == b'-') {
         return StatusCode::NOT_FOUND.into_response();
@@ -778,6 +783,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/assets/{key}/focus", get(focus))
         .route("/api/assets/{key}/masks", get(masks))
         .route("/api/assets/{key}/masks/{name}", get(mask))
+        .route("/api/assets/{key}/camera", get(camera))
         .route("/api/assets/{key}/edit", get(get_edit).put(put_edit))
         .route("/api/assets/{key}/history", get(get_history))
         .route("/api/assets/{key}/history/checkout", axum::routing::post(checkout))

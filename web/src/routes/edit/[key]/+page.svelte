@@ -5,6 +5,7 @@
 	import { DevelopPass, requestDevice } from '$lib/gpu/develop';
 	import { CLIP_HIGHS, CLIP_LOWS, MASK_INVERTED, PEAKING, SHOW_MASK, ViewPass, type ViewGeometry, type Viewport } from '$lib/gpu/view';
 	import { BRUSH, DEPTH, MaskLibrary, brushStroke, rangeUniform, type BrushSettings, type MaskSet } from '$lib/masks';
+	import { DepthPass } from '$lib/gpu/depth';
 	import { MaskPainter, simplify } from '$lib/gpu/brush';
 	import { HistogramPass, type HistogramData } from '$lib/gpu/histogram';
 	import { LensPass, correctedPoint, sourcePoint } from '$lib/gpu/lens';
@@ -23,6 +24,7 @@
 	import WhiteBalanceSection from '$lib/ui/sections/WhiteBalanceSection.svelte';
 	import LightSection from '$lib/ui/sections/LightSection.svelte';
 	import FilmSection from '$lib/ui/sections/FilmSection.svelte';
+	import DepthSection from '$lib/ui/sections/DepthSection.svelte';
 	import CurveSection from '$lib/ui/sections/CurveSection.svelte';
 	import ColorSection from '$lib/ui/sections/ColorSection.svelte';
 	import DetailSection from '$lib/ui/sections/DetailSection.svelte';
@@ -31,7 +33,7 @@
 
 	const SPACES: DisplaySpace[] = ['srgb', 'display-p3'];
 
-	type Section = 'lens' | 'crop' | 'wb' | 'light' | 'film' | 'curve' | 'color' | 'masks' | 'detail' | 'history';
+	type Section = 'lens' | 'crop' | 'wb' | 'light' | 'film' | 'curve' | 'color' | 'depth' | 'masks' | 'detail' | 'history';
 
 	const key = page.params.key!;
 	let canvas: HTMLCanvasElement;
@@ -40,6 +42,8 @@
 	let status = $state('Opening…');
 	/** The white balance eyedropper is waiting for a tap on the photo. */
 	let pickingWhite = $state(false);
+	/** Tap-to-focus (the lens blur) is waiting for a tap on the photo. */
+	let pickingFocus = $state(false);
 	let error = $state('');
 	/**
 	 * The white balance the camera recorded, resolved once per photo. It is the Temperature slider's detent, so
@@ -116,6 +120,11 @@
 	let lensPass: LensPass;
 	/** The lens pass's outputs at proxy size — the photo and its focus mask — and what they were made from. */
 	let corrected: GPUTexture | undefined;
+	/** What the lens pass made for develop: `corrected`, or `undefined` for the proxy itself. */
+	let lensOut: GPUTexture | undefined;
+	let depthPass: DepthPass;
+	/** What the depth pass last ran on and with, so it only runs again when one of them changes. */
+	let depthMadeFrom: { key: string; base: GPUTexture; depth: GPUTexture } | undefined;
 	let correctedMask: GPUTexture | undefined;
 	let lensMadeFrom = '';
 	/** The masks the models made for this photo, fetched when a mask is first needed (`$lib/masks`). */
@@ -127,6 +136,12 @@
 	let brush = $state<BrushSettings>({ mode: 'off', size: 50, feather: 50, flow: 100 });
 	/** Painting happens on the photo while a layer is selected and the brush is on. */
 	const painting = $derived(!fallback && !readOnly && !toolsHidden && !cropping && brush.mode !== 'off' && maskSelected !== null && (wide || section === 'masks'));
+	/** The camera's own rendering beside the edit (a RAW's embedded JPEG); false once it turned out to have none. */
+	let showCamera = $state(false);
+	let cameraMissing = $state(false);
+	const cameraOffered = $derived(!developed && !cameraMissing && !fallback);
+	/** The photo and the camera's rendering side by side — not while cropping or painting, which need the canvas whole. */
+	const sideBySide = $derived(showCamera && cameraOffered && !cropping && !painting);
 	/** Masks lens-corrected as the picture is, and the correction each was made with. */
 	const correctedMasks = new Map<string, { madeFrom: string; texture: GPUTexture }>();
 	let painter: MaskPainter;
@@ -188,7 +203,7 @@
 	function setToolsHidden(hidden: boolean, open?: Section) {
 		toolsHidden = hidden;
 		localStorage.setItem('sidecar.toolsHidden', hidden ? '1' : '0');
-		if (hidden) pickingWhite = false;
+		if (hidden) pickingWhite = pickingFocus = false;
 		if (!open) return;
 		section = open;
 		// On the desktop every section is a <details>: open the one asked for and bring it into view.
@@ -196,7 +211,8 @@
 			tick().then(() => {
 				const d = document.getElementById(`section-${open}`) as HTMLDetailsElement | null;
 				if (d) {
-					d.open = true;
+					// The section and the group it sits in.
+					for (let at: HTMLDetailsElement | null = d; at; at = at.parentElement?.closest('details') ?? null) at.open = true;
 					d.scrollIntoView({ block: 'start' });
 				}
 			});
@@ -229,6 +245,7 @@
 		if (stroke && preview) drawStroke();
 		if (developDirty) {
 			correctLens();
+			depthEffects();
 			const packed = repack();
 			develop.setUniforms(packed.uniform);
 			develop.setToneLut(packed.lut);
@@ -417,7 +434,7 @@
 		const flip = meta!.info.orientationFlip ?? 0;
 		lensUniform = proxy && profile && lens ? packer.packLens(profile, $state.snapshot(lens), sensorAspect(meta!.info), [proxy.width, proxy.height], flip) : undefined;
 		if (!proxy || !lensUniform) {
-			develop.setInput(undefined);
+			lensOut = undefined;
 			view.useFocusMask(undefined);
 			return;
 		}
@@ -426,7 +443,7 @@
 			corrected = lensPass.target(proxy, 'lens corrected');
 		}
 		lensPass.run(proxy, corrected, lensUniform);
-		develop.setInput(corrected);
+		lensOut = corrected;
 		// The mask moves with the picture, but isn't a brightness: no vignetting gain on it.
 		const maskUniform = mask.width > 1 ? packer.packLens(profile!, { ...$state.snapshot(lens!), vignetting: 0 }, sensorAspect(meta!.info), [mask.width, mask.height], flip) : undefined;
 		if (maskUniform) {
@@ -437,6 +454,30 @@
 			lensPass.run(mask, correctedMask, maskUniform);
 			view.useFocusMask(correctedMask);
 		} else view.useFocusMask(undefined);
+	}
+
+	/**
+	 * Haze and lens blur by distance over what the lens pass made, for develop to read — when the edit shown has
+	 * either, and the depth mask and the photo's airlight have arrived (asking for them if not). Cheap to call on
+	 * every develop: the pass only runs when the lens result, the settings or the depth mask changed.
+	 */
+	function depthEffects() {
+		const shown = before ? compareEdit() : edit!;
+		const base = lensOut ?? develop.proxy;
+		const wanted = (shown.haze ?? 0) !== 0 || (shown.lensBlur?.amount ?? 0) > 0;
+		if (wanted && !maskSet) loadMaskSet();
+		const airlight = maskSet?.airlight;
+		const depth = wanted && airlight ? maskTexture(DEPTH) : undefined;
+		const uniform = depth && base ? packer.packDepth($state.snapshot(shown), airlight!, [base.width, base.height]) : undefined;
+		if (!uniform || !depth || !base) {
+			depthMadeFrom = undefined;
+			develop.setInput(lensOut);
+			return;
+		}
+		const key = `${lensMadeFrom}|${uniform.join(',')}`;
+		if (depthMadeFrom?.key === key && depthMadeFrom.base === base && depthMadeFrom.depth === depth) return;
+		depthMadeFrom = { key, base, depth };
+		develop.setInput(depthPass.run(base, depth, uniform));
 	}
 
 	/**
@@ -479,7 +520,7 @@
 	 * while something it needs is loading; that redraws when it arrives.
 	 */
 	function layerTexture(i: number, m: MaskAdjustment): GPUTexture | undefined {
-		if (!m.strokes?.length && !m.range && stroke?.layer !== i) return m.mask === BRUSH ? undefined : maskTexture(m.mask);
+		if (!m.strokes?.length && !m.range && !m.edge && stroke?.layer !== i) return m.mask === BRUSH ? undefined : maskTexture(m.mask);
 		const entry = layerEntry(i, m);
 		if (!entry) return undefined;
 		const size: [number, number] = [entry.painted.width, entry.painted.height];
@@ -513,9 +554,12 @@
 			entry = { key: '', version: 0, painted: painter.mask([proxy.width, proxy.height], `layer ${i}`), correctedFrom: '' };
 			layerTextures.set(i, entry);
 		}
-		const key = JSON.stringify([m.mask, m.range ?? null, m.strokes ?? []]);
+		const key = JSON.stringify([m.mask, m.range ?? null, m.edge ?? null, m.strokes ?? []]);
 		if (entry.key !== key && stroke?.layer !== i) {
 			painter.paint(entry.painted, base, $state.snapshot(m.strokes) ?? [], rangeUniform(m.range));
+			// The edge last, over the range and the strokes. (While a stroke is drawn it shows without the edge.)
+			const plan = m.edge ? packer.edgePlan($state.snapshot(m.edge), [proxy.width, proxy.height]) : null;
+			if (plan) painter.edge(entry.painted, plan);
 			entry.key = key;
 		}
 		return entry;
@@ -614,6 +658,29 @@
 		const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, Math.round(v)));
 		update((ed) => {
 			ed.whiteBalance = { mode: 'custom', temperatureK: clamp(wb.temperatureK, 2000, 12000), tint: clamp(wb.tint, -150, 150) };
+		});
+		committed();
+	}
+
+	/**
+	 * Tap to focus: the depth mask's value under the tap (a 5 × 5 average) becomes the lens blur's focus
+	 * distance. The mask is in the same frame `screenToSource` maps to: oriented, before lens correction.
+	 */
+	async function pickFocus(e: PointerEvent) {
+		pickingFocus = false;
+		const p = screenToSource(px(e));
+		if (!p || !maskLibrary || p.some((v) => v < 0 || v > 1)) return;
+		const depth = await maskLibrary.values(DEPTH);
+		const [cx, cy] = [Math.round(p[0] * (depth.width - 1)), Math.round(p[1] * (depth.height - 1))];
+		let [sum, n] = [0, 0];
+		for (let y = Math.max(0, cy - 2); y <= Math.min(depth.height - 1, cy + 2); y++)
+			for (let x = Math.max(0, cx - 2); x <= Math.min(depth.width - 1, cx + 2); x++) {
+				sum += depth.data[y * depth.width + x];
+				n++;
+			}
+		const focus = Math.round((sum / n / 255) * 100);
+		update((ed) => {
+			ed.lensBlur = { ...(ed.lensBlur ?? { amount: 50, focus, range: 10 }), focus };
 		});
 		committed();
 	}
@@ -840,12 +907,13 @@
 	// Masks are asked for when a tool needs them — the section is opened, or the edit has some — not with
 	// every photo: the first ask computes them.
 	$effect(() => {
-		if (section === 'masks' || wide || (edit?.masks?.length ?? 0) > 0) loadMaskSet();
+		if (section === 'masks' || section === 'depth' || wide || (edit?.masks?.length ?? 0) > 0) loadMaskSet();
 	});
 
 	// The eyedropper belongs to the White balance section: leaving it on a phone puts the eyedropper away.
 	$effect(() => {
 		if (!wide && section !== 'wb') pickingWhite = false;
+		if (!wide && section !== 'depth') pickingFocus = false;
 	});
 
 	// The history loads when it's first looked at, not with every photo.
@@ -902,6 +970,7 @@
 				LensPass.create(device),
 				MaskPainter.create(device)
 			]);
+			depthPass = await DepthPass.create(device);
 			maskLibrary = new MaskLibrary(device, key);
 			if (section === 'masks' || wide || (edit?.masks?.length ?? 0) > 0) loadMaskSet();
 			device.lost.then((info) => (error = `The GPU was reset (${info.reason}). Reload to continue — your edits are kept as a draft.`));
@@ -951,7 +1020,7 @@
 		clearTimeout(holdTimer);
 		// With the brush on, one finger paints; a second one turns it into a pinch.
 		if (painting && pointers.size === 1) startStroke(e);
-		else if (pointers.size === 1 && !pickingWhite) holdTimer = setTimeout(() => setBefore(true), 450);
+		else if (pointers.size === 1 && !pickingWhite && !pickingFocus) holdTimer = setTimeout(() => setBefore(true), 450);
 		if (pointers.size === 2) {
 			cancelStroke();
 			clearTimeout(holdTimer);
@@ -1000,6 +1069,10 @@
 				pickWhite(e);
 				return;
 			}
+			if (pickingFocus && !fallback && develop?.output) {
+				pickFocus(e);
+				return;
+			}
 			if (fallback || !develop?.output || cropping || painting) return;
 			const r = imageRect();
 			// What is shown is the edit's output: the loupe is centred in it.
@@ -1020,8 +1093,8 @@
 
 	function keydown(e: KeyboardEvent) {
 		if ((e.target as HTMLElement)?.tagName === 'INPUT') return;
-		if (e.key === 'Escape' && pickingWhite) {
-			pickingWhite = false;
+		if (e.key === 'Escape' && (pickingWhite || pickingFocus)) {
+			pickingWhite = pickingFocus = false;
 			return;
 		}
 		if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') {
@@ -1095,17 +1168,28 @@
 			.filter(Boolean)
 			.join(' · ');
 	const sections: { id: Section; label: string; short: string }[] = [
-		{ id: 'lens', label: 'Lens', short: 'Lens' },
-		{ id: 'crop', label: 'Crop and straighten', short: 'Crop' },
 		{ id: 'wb', label: 'White balance', short: 'WB' },
-		{ id: 'light', label: 'Light', short: 'Light' },
 		{ id: 'film', label: 'Film', short: 'Film' },
-		{ id: 'curve', label: 'Curve', short: 'Curve' },
 		{ id: 'color', label: 'Color', short: 'Color' },
+		{ id: 'light', label: 'Light', short: 'Light' },
+		{ id: 'curve', label: 'Curve', short: 'Curve' },
+		{ id: 'crop', label: 'Crop and straighten', short: 'Crop' },
+		{ id: 'depth', label: 'Depth', short: 'Depth' },
 		{ id: 'masks', label: 'Masks', short: 'Masks' },
 		{ id: 'detail', label: 'Detail', short: 'Detail' },
+		{ id: 'lens', label: 'Lens', short: 'Lens' },
 		{ id: 'history', label: 'History', short: 'History' }
 	];
+	const sectionById = (id: Section) => sections.find((x) => x.id === id)!;
+	/** The tools as the panel groups them: a group with one section is that section. */
+	const groups: { id: string; label: string; short: string; children: Section[] }[] = [
+		{ id: 'colour', label: 'Colour', short: 'Colour', children: ['wb', 'film', 'color'] },
+		{ id: 'light', label: 'Light', short: 'Light', children: ['light', 'curve'] },
+		{ id: 'crop', label: 'Crop and straighten', short: 'Crop', children: ['crop'] },
+		{ id: 'processing', label: 'Processing', short: 'Processing', children: ['depth', 'masks', 'detail', 'lens'] },
+		{ id: 'history', label: 'History', short: 'History', children: ['history'] }
+	];
+	const groupOf = (id: Section) => groups.find((g) => g.children.includes(id))!;
 </script>
 
 <svelte:head><title>{meta?.fileName ?? 'Sidecar'}</title></svelte:head>
@@ -1177,6 +1261,28 @@
 	{/if}
 {/snippet}
 
+{#snippet depthSection()}
+	{#if edit}<DepthSection {edit} onchange={update} oncommit={committed} available={fallback ? true : maskSet ? maskSet.available && !!maskSet.airlight : null} picking={fallback || readOnly ? undefined : pickingFocus} onpick={(on) => (pickingFocus = on)} />{/if}
+{/snippet}
+
+{#snippet sectionDetails(s: { id: Section; label: string }, top: boolean)}
+	<details
+		id="section-{s.id}"
+		class="{top ? 'border-t border-line' : 'border-t border-line/50'} py-2"
+		open={s.id === 'wb' || s.id === 'light' || (s.id === 'crop' && cropOpen)}
+		ontoggle={(e) => {
+			const open = (e.currentTarget as HTMLDetailsElement).open;
+			if (s.id === 'detail') detailOpen = open;
+			if (s.id === 'crop') cropOpen = open;
+		}}
+	>
+		<summary class="cursor-pointer py-1 text-xs font-medium">{s.label}</summary>
+		<div class="pt-2">
+			{#if s.id === 'lens'}{@render lensSection()}{:else if s.id === 'crop'}{@render cropSection()}{:else if s.id === 'wb'}{@render wbSection()}{:else if s.id === 'light'}{@render lightSection()}{:else if s.id === 'film'}{@render filmSection()}{:else if s.id === 'curve'}{@render curveSection()}{:else if s.id === 'color'}{@render colorSection()}{:else if s.id === 'depth'}{@render depthSection()}{:else if s.id === 'masks'}{@render masksSection()}{:else if s.id === 'history'}{@render historySection()}{:else if detailOpen}{@render detailSection()}{/if}
+		</div>
+	</details>
+{/snippet}
+
 {#snippet colorSection()}
 	{#if edit}<ColorSection {edit} onchange={update} oncommit={committed} />{/if}
 {/snippet}
@@ -1187,7 +1293,7 @@
 		     without WebGPU nothing ever draws into it and the server's JPEG sits on top. -->
 		<canvas
 			bind:this={canvas}
-			class="block h-full w-full touch-none {fallback ? 'invisible' : ''} {pickingWhite ? 'cursor-crosshair' : ''}"
+			class="block touch-none {sideBySide ? (wide ? 'h-full w-1/2' : 'h-1/2 w-full') : 'h-full w-full'} {fallback ? 'invisible' : ''} {pickingWhite || pickingFocus ? 'cursor-crosshair' : ''}"
 			onpointerdown={canvasDown}
 			onpointermove={canvasMove}
 			onpointerup={canvasUp}
@@ -1195,6 +1301,13 @@
 			onpointerleave={() => (brushCursor = null)}
 			oncontextmenu={(e) => e.preventDefault()}
 		></canvas>
+		{#if sideBySide}
+			<!-- After the canvas, so the canvas keeps its corner and everything drawn over it keeps its place. -->
+			<div class="absolute flex items-center justify-center border-line bg-ground p-2 {wide ? 'inset-y-0 right-0 w-1/2 border-l' : 'inset-x-0 bottom-0 h-1/2 border-t'}">
+				<img src="/api/assets/{key}/camera" alt="The camera's own rendering" class="max-h-full max-w-full object-contain" onerror={() => { cameraMissing = true; showCamera = false; }} />
+				<span class="absolute top-2 left-2 rounded bg-ground/80 px-2 py-1 text-xs text-fg-2">Camera</span>
+			</div>
+		{/if}
 		{#if fallback}
 			<div class="absolute inset-0 flex items-center justify-center p-2">
 				{#if previewUrl}
@@ -1260,6 +1373,9 @@
 			{/if}
 			{#if !wide && !fallback}
 				<button type="button" aria-pressed={peaking} class="rounded-full px-2.5 py-1 text-[0.6875rem] {peaking ? 'bg-fg text-ground' : 'bg-ground/80 text-fg-2'}" onclick={() => { peaking = !peaking; schedule(); }}>Focus</button>
+				{#if cameraOffered}
+					<button type="button" aria-pressed={showCamera} class="rounded-full px-2.5 py-1 text-[0.6875rem] {showCamera ? 'bg-fg text-ground' : 'bg-ground/80 text-fg-2'}" onclick={() => (showCamera = !showCamera)}>Camera</button>
+				{/if}
 				{/if}
 				{#if !wide}
 					<button type="button" class="rounded-full bg-ground/80 px-2.5 py-1 text-[0.6875rem] text-fg-2" aria-label="Viewing and exporting in {SPACE_LABELS[displaySpace]}: switch to {displaySpace === 'srgb' ? 'Display P3' : 'sRGB'}" onclick={() => setOutputSpace(displaySpace === 'srgb' ? 'display-p3' : 'srgb')}>{displaySpace === 'srgb' ? 'sRGB' : 'P3'}</button>
@@ -1336,6 +1452,9 @@
 					<div class="flex items-center gap-2">
 						{#if !fallback}
 						<button type="button" aria-pressed={peaking} class="rounded-full px-2 py-0.5 {peaking ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" onclick={() => { peaking = !peaking; schedule(); }}>Focus peaking</button>
+							{#if cameraOffered}
+								<button type="button" aria-pressed={showCamera} class="rounded-full px-2 py-0.5 {showCamera ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" title="The camera's own rendering beside the edit" onclick={() => (showCamera = !showCamera)}>Camera</button>
+							{/if}
 						{#if meta?.info.afPoint}
 							<button type="button" aria-pressed={showAfPoint} class="rounded-full px-2 py-0.5 {showAfPoint ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" onclick={() => (showAfPoint = !showAfPoint)}>AF point</button>
 						{/if}
@@ -1351,39 +1470,42 @@
 
 			{:else}
 			<nav class="flex items-center gap-2 overflow-x-auto px-6 py-2" aria-label="Tools">
-				{#each sections as s (s.id)}
-					<button type="button" aria-pressed={section === s.id && !toolsHidden} class="h-8 shrink-0 rounded-full px-3 text-xs {section === s.id && !toolsHidden ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" aria-label={s.label} onclick={() => setToolsHidden(false, s.id)}>{s.short}</button>
+				{#each groups as g (g.id)}
+					{@const on = groupOf(section).id === g.id && !toolsHidden}
+					<button type="button" aria-pressed={on} class="h-8 shrink-0 rounded-full px-3 text-xs {on ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" aria-label={g.label} onclick={() => setToolsHidden(false, groupOf(section).id === g.id ? section : g.children[0])}>{g.short}</button>
 				{/each}
 				<button type="button" aria-pressed={showPhoneHistogram} aria-label="Show histogram" class="ml-auto grid size-8 shrink-0 place-items-center rounded-full {showPhoneHistogram ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" onclick={() => (showPhoneHistogram = !showPhoneHistogram)}>
 					<svg viewBox="0 0 16 16" class="size-4" aria-hidden="true"><path d="M1 14 L4 8 L7 10 L10 3 L13 9 L15 6 L15 14 Z" fill="currentColor" /></svg>
 				</button>
 			</nav>
 
+			{#if !toolsHidden && groupOf(section).children.length > 1}
+				<div class="flex gap-1.5 overflow-x-auto px-6 pb-1" role="tablist" aria-label={groupOf(section).label}>
+					{#each groupOf(section).children as id (id)}
+						<button type="button" role="tab" aria-selected={section === id} class="h-7 shrink-0 rounded-full px-2.5 text-[0.6875rem] {section === id ? 'bg-raised text-fg' : 'text-fg-2'}" aria-label={sectionById(id).label} onclick={() => (section = id)}>{sectionById(id).short}</button>
+					{/each}
+				</div>
+			{/if}
 			{#if !toolsHidden}
 			<div class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-6 pt-1">
-				{#if section === 'lens'}{@render lensSection()}{:else if section === 'crop'}{@render cropSection()}{:else if section === 'wb'}{@render wbSection()}{:else if section === 'light'}{@render lightSection()}{:else if section === 'film'}{@render filmSection()}{:else if section === 'curve'}{@render curveSection()}{:else if section === 'color'}{@render colorSection()}{:else if section === 'masks'}{@render masksSection()}{:else if section === 'history'}{@render historySection()}{:else}{@render detailSection()}{/if}
+				{#if section === 'lens'}{@render lensSection()}{:else if section === 'crop'}{@render cropSection()}{:else if section === 'wb'}{@render wbSection()}{:else if section === 'light'}{@render lightSection()}{:else if section === 'film'}{@render filmSection()}{:else if section === 'curve'}{@render curveSection()}{:else if section === 'color'}{@render colorSection()}{:else if section === 'depth'}{@render depthSection()}{:else if section === 'masks'}{@render masksSection()}{:else if section === 'history'}{@render historySection()}{:else}{@render detailSection()}{/if}
 			</div>
 			{/if}
 
 			{/if}
 			{#if wide}
 			<div class="min-h-0 flex-1 overflow-y-auto px-4">
-				{#each sections as s (s.id)}
-					<details
-						id="section-{s.id}"
-						class="border-t border-line py-2"
-						open={s.id === 'wb' || s.id === 'light' || (s.id === 'crop' && cropOpen)}
-						ontoggle={(e) => {
-							const open = (e.currentTarget as HTMLDetailsElement).open;
-							if (s.id === 'detail') detailOpen = open;
-							if (s.id === 'crop') cropOpen = open;
-						}}
-					>
-						<summary class="cursor-pointer py-1 text-xs font-medium">{s.label}</summary>
-						<div class="pt-2">
-							{#if s.id === 'lens'}{@render lensSection()}{:else if s.id === 'crop'}{@render cropSection()}{:else if s.id === 'wb'}{@render wbSection()}{:else if s.id === 'light'}{@render lightSection()}{:else if s.id === 'film'}{@render filmSection()}{:else if s.id === 'curve'}{@render curveSection()}{:else if s.id === 'color'}{@render colorSection()}{:else if s.id === 'masks'}{@render masksSection()}{:else if s.id === 'history'}{@render historySection()}{:else if detailOpen}{@render detailSection()}{/if}
-						</div>
-					</details>
+				{#each groups as g (g.id)}
+					{#if g.children.length === 1}
+						{@render sectionDetails(sectionById(g.children[0]), true)}
+					{:else}
+						<details class="border-t border-line py-2" open={g.id === 'colour' || g.id === 'light'}>
+							<summary class="cursor-pointer py-1 text-[11px] font-semibold tracking-wide text-fg-2 uppercase">{g.label}</summary>
+							<div class="pl-2">
+								{#each g.children as id (id)}{@render sectionDetails(sectionById(id), false)}{/each}
+							</div>
+						</details>
+					{/if}
 				{/each}
 			</div>
 			{/if}
