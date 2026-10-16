@@ -4,7 +4,7 @@
 	import { tick, untrack } from 'svelte';
 	import { DevelopPass, requestDevice } from '$lib/gpu/develop';
 	import { CLIP_HIGHS, CLIP_LOWS, MASK_INVERTED, PEAKING, SHOW_MASK, ViewPass, type ViewGeometry, type Viewport } from '$lib/gpu/view';
-	import { BRUSH, MaskLibrary, brushStroke, type BrushSettings, type MaskSet } from '$lib/masks';
+	import { BRUSH, DEPTH, MaskLibrary, brushStroke, rangeUniform, type BrushSettings, type MaskSet } from '$lib/masks';
 	import { MaskPainter, simplify } from '$lib/gpu/brush';
 	import { HistogramPass, type HistogramData } from '$lib/gpu/histogram';
 	import { LensPass, correctedPoint, sourcePoint } from '$lib/gpu/lens';
@@ -479,7 +479,7 @@
 	 * while something it needs is loading; that redraws when it arrives.
 	 */
 	function layerTexture(i: number, m: MaskAdjustment): GPUTexture | undefined {
-		if (!m.strokes?.length && stroke?.layer !== i) return m.mask === BRUSH ? undefined : maskTexture(m.mask);
+		if (!m.strokes?.length && !m.range && stroke?.layer !== i) return m.mask === BRUSH ? undefined : maskTexture(m.mask);
 		const entry = layerEntry(i, m);
 		if (!entry) return undefined;
 		const size: [number, number] = [entry.painted.width, entry.painted.height];
@@ -513,9 +513,9 @@
 			entry = { key: '', version: 0, painted: painter.mask([proxy.width, proxy.height], `layer ${i}`), correctedFrom: '' };
 			layerTextures.set(i, entry);
 		}
-		const key = JSON.stringify([m.mask, m.strokes ?? []]);
+		const key = JSON.stringify([m.mask, m.range ?? null, m.strokes ?? []]);
 		if (entry.key !== key && stroke?.layer !== i) {
-			painter.paint(entry.painted, base, $state.snapshot(m.strokes) ?? []);
+			painter.paint(entry.painted, base, $state.snapshot(m.strokes) ?? [], rangeUniform(m.range));
 			entry.key = key;
 		}
 		return entry;
@@ -541,6 +541,8 @@
 	function addMask(name: string) {
 		if (!edit) return;
 		const m: MaskAdjustment = { mask: name, invert: false, amount: 100, exposure: 0, contrast: 0, saturation: 0, temperature: 0, tint: 0 };
+		// Depth on its own is a gradient from far to near; a layer on it starts as the nearer half.
+		if (name === DEPTH) m.range = { from: 50, to: 100, feather: 15 };
 		edit.masks = [...(edit.masks ?? []), m];
 		maskSelected = edit.masks.length - 1;
 		maskShown = true;

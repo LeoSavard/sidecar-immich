@@ -57,7 +57,7 @@ export class MaskPainter {
 		this.empty = this.mask([1, 1], 'empty mask');
 		this.brushUbo = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 		this.lensUbo = device.createBuffer({ size: 1072, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-		this.compositeUbo = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+		this.compositeUbo = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 		this.previewUbo = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 	}
 
@@ -134,11 +134,13 @@ export class MaskPainter {
 		pass.end();
 	}
 
-	/** `base` and `coverage` composited into `target` over `box` (all of it when absent). */
-	private compose(encoder: GPUCommandEncoder, target: GPUTexture, base: GPUTexture, coverage: GPUTexture, mode: number, box?: [number, number, number, number]) {
-		const params = new ArrayBuffer(16);
+	/** `base` and `coverage` composited into `target` over `box` (all of it when absent); copying, `base` goes
+	 *  through `range` (`rangeUniform`). */
+	private compose(encoder: GPUCommandEncoder, target: GPUTexture, base: GPUTexture, coverage: GPUTexture, mode: number, box?: [number, number, number, number], range: number[] = [0, 0, 0, 0]) {
+		const params = new ArrayBuffer(32);
 		new Float32Array(params, 0, 2).set([target.width, target.height]);
 		new Uint32Array(params, 8, 1)[0] = mode;
+		new Float32Array(params, 16, 4).set(range);
 		// One composite per submission at most (see `paint` and `extend`), so the uniforms can be shared.
 		const ubo = this.compositeUbo;
 		this.device.queue.writeBuffer(ubo, 0, params);
@@ -161,13 +163,14 @@ export class MaskPainter {
 		pass.end();
 	}
 
-	/** Paint `target` from scratch: `base` (a model's mask, any size; none starts empty), then every stroke. */
-	paint(target: GPUTexture, base: GPUTexture | undefined, strokes: Stroke[]) {
+	/** Paint `target` from scratch: `base` (a model's mask, any size; none starts empty) through `range`
+	 *  (`rangeUniform`), then every stroke. */
+	paint(target: GPUTexture, base: GPUTexture | undefined, strokes: Stroke[], range?: number[]) {
 		this.live = undefined;
 		this.scratch(target);
 		const size: [number, number] = [target.width, target.height];
 		let encoder = this.device.createCommandEncoder();
-		this.compose(encoder, target, base ?? this.empty, this.empty, COPY);
+		this.compose(encoder, target, base ?? this.empty, this.empty, COPY, undefined, range);
 		this.device.queue.submit([encoder.finish()]);
 		for (const s of strokes) {
 			const px = strokePx(s, size);

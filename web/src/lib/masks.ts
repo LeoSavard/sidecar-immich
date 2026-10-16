@@ -4,6 +4,7 @@
 // tool calls: `library.texture('skin')`. The first request for a photo has the worker compute them all, which
 // takes a few seconds (minutes, once, on a new install while the models tune themselves to the GPU).
 import { api } from '$lib/api';
+import type { MaskRange } from '$lib/types';
 
 export type Face = {
 	score: number;
@@ -22,8 +23,20 @@ export const MASK_LABELS: Record<string, string> = {
 	'body-skin': 'Body skin',
 	hair: 'Hair',
 	clothes: 'Clothes',
+	depth: 'Depth',
 	brush: 'Brush'
 };
+
+/** The depth mask: near is white. A layer on it selects a band of distance with its `range`. */
+export const DEPTH = 'depth';
+
+/** A layer's range as the brush composite takes it — mirrors `MaskRange::uniform` in crates/color. */
+export function rangeUniform(r: MaskRange | undefined): number[] {
+	if (!r) return [0, 0, 0, 0];
+	const clamp = (v: number) => Math.min(100, Math.max(0, v));
+	const [a, b] = [clamp(r.from), clamp(r.to)];
+	return [Math.min(a, b) / 100, Math.max(a, b) / 100, clamp(r.feather) / 100, 1];
+}
 
 /** A layer painted from nothing, which needs no models. */
 export const BRUSH = 'brush';

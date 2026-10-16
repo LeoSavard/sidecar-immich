@@ -140,6 +140,11 @@ impl Ml {
         self.planes("parts", picture, long_edge)
     }
 
+    /// How near each point is, one channel, 255 the nearest, at `long_edge` at most.
+    pub fn depth(&self, picture: &Picture, long_edge: u32) -> Result<Planes> {
+        self.planes("depth", picture, long_edge)
+    }
+
     pub fn faces(&self, picture: &Picture) -> Result<Vec<Face>> {
         let header = serde_json::json!({ "task": "faces", "width": picture.width, "height": picture.height });
         let (reply, _) = self.call(header, &picture.rgb)?;

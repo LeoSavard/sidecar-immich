@@ -2,7 +2,7 @@
 //! `sidecar-ml`: the models, as a program the worker starts when a task needs one.
 //!
 //!     sidecar-ml serve --models DIR --cache DIR [--idle 300]
-//!     sidecar-ml run --models DIR faces|subject|parts PICTURE [OUT.png]
+//!     sidecar-ml run --models DIR faces|subject|parts|depth PICTURE [OUT.png]
 //!
 //! **serve** answers requests on stdin, which the worker makes one end of a Unix socket pair, so replies go back
 //! on the same descriptor and stdout and stderr stay free for logs. It exits when stdin closes or after
@@ -10,7 +10,7 @@
 //!
 //! A frame is a little-endian u32 length, that many bytes of JSON, then the pixels the JSON describes.
 //!
-//!     → {"task": "faces" | "subject" | "parts", "width": W, "height": H, "longEdge": N}   W × H × 3 bytes, sRGB
+//!     → {"task": "faces" | "subject" | "parts" | "depth", "width": W, "height": H, "longEdge": N}   W × H × 3 bytes, sRGB
 //!     → {"task": "warm"}                                                                 no pixels
 //!     ← {"ok": true, "faces": [...]}                                                     no pixels
 //!     ← {"ok": true, "width": W, "height": H, "channels": C}                              W × H × C bytes
@@ -68,6 +68,7 @@ enum Task {
     Faces,
     Subject,
     Parts,
+    Depth,
     Warm,
 }
 
@@ -172,6 +173,7 @@ fn answer(ml: &mut Ml, request: &Request, pixels: &[u8]) -> Result<Answer> {
         Task::Faces => Answer::Faces(ml.faces(picture)?),
         Task::Subject => Answer::Planes(ml.subject(picture, request.long_edge)?),
         Task::Parts => Answer::Planes(ml.parts(picture, request.long_edge)?),
+        Task::Depth => Answer::Planes(ml.depth(picture, request.long_edge)?),
         Task::Warm => {
             ml.warm()?;
             Answer::Done
@@ -273,7 +275,7 @@ fn run(ml: &mut Ml, task: Task, path: &Path, out: Option<&Path>, long_edge: u32)
 }
 
 /// Parts as colours (background black, hair brown, body skin tan, face skin pink, clothes blue, other green);
-/// a subject mask as grey.
+/// a subject or depth mask as grey.
 fn write_png(path: &Path, planes: &Planes) -> Result<()> {
     const COLOURS: [[f32; 3]; 6] = [[0.0, 0.0, 0.0], [200.0, 120.0, 40.0], [240.0, 200.0, 170.0], [255.0, 150.0, 150.0], [60.0, 90.0, 220.0], [120.0, 220.0, 120.0]];
     let (colour, data) = if planes.channels as usize == PARTS.len() {

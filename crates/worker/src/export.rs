@@ -158,15 +158,16 @@ impl Rendering {
                     return None;
                 }
                 let base = masks.get(i).cloned().flatten().map(|m| sidecar_engine::upload_rgba16(&kit.gpu, &m.oriented(sidecar_engine::inverse_flip(flip))));
-                if layer.strokes.is_empty() {
+                if layer.strokes.is_empty() && layer.range.is_none() {
                     return Some(self.correct(kit, &geometry, base?));
                 }
-                // Strokes are drawn at the source's resolution up to 4,096 px on the long edge: a mask is
-                // sampled through a linear filter, and nothing a brush draws needs more.
+                // A range or strokes: painted, the range windowing the base first. At the source's resolution
+                // up to 4,096 px on the long edge: a mask is sampled through a linear filter, and nothing a
+                // brush draws needs more.
                 let scale = (MASK_EDGE as f64 / frame[0].max(frame[1]) as f64).min(1.0);
                 let size = frame.map(|v| ((v as f64 * scale).round() as u32).max(1));
                 let strokes: Vec<_> = layer.strokes.iter().map(|s| sidecar_engine::brush::stroke_px(s, size, |p| sidecar_color::geometry::map(&to_source, p))).collect();
-                let painted = kit.brush.paint(&kit.gpu, base.as_ref(), size, &strokes);
+                let painted = kit.brush.paint(&kit.gpu, base.as_ref(), size, sidecar_color::params::MaskRange::uniform(layer.range.as_ref()), &strokes);
                 Some(match self.lens_params(&geometry, size, [0.0; 2], [0.0; 2]) {
                     Some(p) => kit.brush.correct(&kit.gpu, &painted, &p),
                     None => painted,

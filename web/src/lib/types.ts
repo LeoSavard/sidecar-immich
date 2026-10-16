@@ -16,6 +16,7 @@ export type { Geometry } from './generated/edit/Geometry';
 export type { Lens } from './generated/edit/Lens';
 export type { LensProfile } from './generated/edit/LensProfile';
 export type { MaskAdjustment } from './generated/edit/MaskAdjustment';
+export type { MaskRange } from './generated/edit/MaskRange';
 export type { Mixer } from './generated/edit/Mixer';
 export type { MixerBand } from './generated/edit/MixerBand';
 export type { Stroke } from './generated/edit/Stroke';
