@@ -36,6 +36,8 @@
 	let meta = $state<Meta | null>(null);
 	let defaults: EditParams;
 	let status = $state('Opening…');
+	/** The white balance eyedropper is waiting for a tap on the photo. */
+	let pickingWhite = $state(false);
 	let error = $state('');
 	/**
 	 * The white balance the camera recorded, resolved once per photo. It is the Temperature slider's detent, so
@@ -547,6 +549,34 @@
 		return [q.x, q.y];
 	}
 
+	/**
+	 * The white balance eyedropper: the camera RGB around the tapped point (lens, straighten and crop undone,
+	 * clipped pixels left out) becomes the neutral the temperature and tint are solved for.
+	 */
+	async function pickWhite(e: PointerEvent) {
+		pickingWhite = false;
+		const proxy = develop?.proxy;
+		const p = screenToSource(px(e));
+		if (!p || !proxy || !packer || !meta || p.some((v) => v < 0 || v > 1)) return;
+		// What is under the tap: a square about 9 CSS pixels across at any zoom, in proxy pixels (at least 3 × 3
+		// to average noise, at most 33 × 33 so a thin grey line still counts).
+		const outW = displayFrame()?.frame.size[0] ?? develop.output!.width;
+		const perCanvasPx = outW / imageRect().w;
+		const radius = Math.min(16, Math.max(1, Math.round(4 * devicePixelRatio * perCanvasPx)));
+		const rgb = await develop.sampleSource(p, radius);
+		if (!rgb || rgb.some((v) => v <= 0)) {
+			status = rgb ? 'That spot has no colour to balance. Pick a grey with some light in it.' : 'That spot is clipped. Pick a grey that isn\'t.';
+			setTimeout(() => (status = ''), 3000);
+			return;
+		}
+		const wb = packer.whiteFromNeutral(meta.info.color, rgb);
+		const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, Math.round(v)));
+		update((ed) => {
+			ed.whiteBalance = { mode: 'custom', temperatureK: clamp(wb.temperatureK, 2000, 12000), tint: clamp(wb.tint, -150, 150) };
+		});
+		committed();
+	}
+
 	/** The brush's radius in proxy pixels, and on screen in CSS pixels. */
 	function brushRadius() {
 		const proxy = develop?.proxy;
@@ -772,6 +802,11 @@
 		if (section === 'masks' || wide || (edit?.masks?.length ?? 0) > 0) loadMaskSet();
 	});
 
+	// The eyedropper belongs to the White balance section: leaving it on a phone puts the eyedropper away.
+	$effect(() => {
+		if (!wide && section !== 'wb') pickingWhite = false;
+	});
+
 	// The history loads when it's first looked at, not with every photo.
 	$effect(() => {
 		if ((section === 'history' || wide) && edit && !session.versions) session.loadVersions();
@@ -875,7 +910,7 @@
 		clearTimeout(holdTimer);
 		// With the brush on, one finger paints; a second one turns it into a pinch.
 		if (painting && pointers.size === 1) startStroke(e);
-		else if (pointers.size === 1) holdTimer = setTimeout(() => setBefore(true), 450);
+		else if (pointers.size === 1 && !pickingWhite) holdTimer = setTimeout(() => setBefore(true), 450);
 		if (pointers.size === 2) {
 			cancelStroke();
 			clearTimeout(holdTimer);
@@ -920,6 +955,10 @@
 		const now = performance.now();
 		const still = Math.hypot(px(e).x - downAt.x, px(e).y - downAt.y) < 8 * devicePixelRatio && now - downAt.t < 300;
 		if (still && pointers.size === 0) {
+			if (pickingWhite && !fallback && develop?.output) {
+				pickWhite(e);
+				return;
+			}
 			if (fallback || !develop?.output || cropping || painting) return;
 			const r = imageRect();
 			// What is shown is the edit's output: the loupe is centred in it.
@@ -940,6 +979,10 @@
 
 	function keydown(e: KeyboardEvent) {
 		if ((e.target as HTMLElement)?.tagName === 'INPUT') return;
+		if (e.key === 'Escape' && pickingWhite) {
+			pickingWhite = false;
+			return;
+		}
 		if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') {
 			e.preventDefault();
 			if (e.shiftKey) session.redo();
@@ -1035,7 +1078,7 @@
 {/snippet}
 
 {#snippet wbSection()}
-	{#if edit}<WhiteBalanceSection {edit} onchange={update} oncommit={committed} {developed} asShot={asShotWb} />{/if}
+	{#if edit}<WhiteBalanceSection {edit} onchange={update} oncommit={committed} {developed} asShot={asShotWb} picking={fallback || readOnly ? undefined : pickingWhite} onpick={(on) => (pickingWhite = on)} />{/if}
 {/snippet}
 
 {#snippet lightSection()}
@@ -1102,7 +1145,7 @@
 		     without WebGPU nothing ever draws into it and the server's JPEG sits on top. -->
 		<canvas
 			bind:this={canvas}
-			class="block h-full w-full touch-none {fallback ? 'invisible' : ''}"
+			class="block h-full w-full touch-none {fallback ? 'invisible' : ''} {pickingWhite ? 'cursor-crosshair' : ''}"
 			onpointerdown={canvasDown}
 			onpointermove={canvasMove}
 			onpointerup={canvasUp}

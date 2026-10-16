@@ -15,6 +15,7 @@ type Exports = {
 	sc_default_edit(): number;
 	sc_last_error(): number;
 	sc_develop_uniform_bytes(): number;
+	sc_white_from_neutral(ptr: number, len: number): number;
 };
 
 /**
@@ -91,6 +92,11 @@ export class ColorPacker {
 	 */
 	toneCurveLut(curve: [number, number][], highlights: number, shadows: number): Float32Array {
 		return new Float32Array(this.call(this.x.sc_tone_curve_lut, { curve, highlights, shadows }).buffer);
+	}
+
+	/** The temperature and tint under which `neutral`, a camera RGB, is grey: the white balance eyedropper. */
+	whiteFromNeutral(camera: CameraColor, neutral: [number, number, number]): { temperatureK: number; tint: number } {
+		return JSON.parse(new TextDecoder().decode(this.call(this.x.sc_white_from_neutral, { camera, neutral })));
 	}
 
 	/** `source` picks the develop pass's tone path: sensor light, or a picture a camera or app already rendered. */

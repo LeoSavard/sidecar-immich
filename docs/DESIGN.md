@@ -516,6 +516,11 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
 Module functions take their values as arguments and never read the uniform buffer themselves, so local masks (§15) can call them with per-pixel blended values. Module bypasses compile as pipeline `override` constants, so disabled modules cost nothing.
 
 1. **White balance.** The `color` crate (compiled to WASM) turns (Temperature K, Tint) into CIE xy on the Planckian locus offset along the isotemperature line → XYZ white → camera neutral through the XYZ→camera matrix interpolated for that temperature → multipliers = 1/neutral, normalized so G = 1. For *As shot* it runs the inverse, iterating on `cam_mul` to place the sliders.
+   **Eyedropper.** The same inverse with a picked patch as the neutral (`CameraColor::neutral_xy`, wasm
+   `sc_white_from_neutral`): a tap on the photo maps back through crop, straighten and lens correction to the
+   source texture, which is still camera RGB before white balance; the editor reads back a square about 9 CSS
+   pixels across there, leaves out pixels the ingest flagged as clipped, and sets the temperature and tint under
+   which that average is grey. Needs WebGPU (the source lives on the GPU); without it the button is hidden.
 2. **Exposure.** `2^EV`, computed on the CPU. Values above 1.0 pass through untouched.
    **Highlight blend.** Where alpha > 0, blend toward the pixel's luminance-preserving neutral by `alpha × strength`, suppressing the magenta cast WB multipliers put on reconstructed highlights.
 3. **Color space.** Camera → XYZ (inverse of the interpolated XYZ → camera matrix, normalized so camera white lands on D65) then XYZ → Rec.2020, recomputed whenever WB changes. Gamut compression (distance-based, in the style of the ACES reference gamut compression) keeps saturated lights from producing negative channels.
