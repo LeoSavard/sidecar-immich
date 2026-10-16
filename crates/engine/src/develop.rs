@@ -20,19 +20,42 @@ pub struct DevelopPass {
     identity_curves: wgpu::Texture,
 }
 
-/// The masks one develop takes: their uniforms, a texture per layer in the frame `params.frame` describes —
-/// `None` for a slot whose mask isn't there (it then weighs nothing) — and the layers' curves
-/// (`Packed::mask_curves`; empty for none).
+/// What one develop takes beside its uniform and tone curve: the masks' uniforms, a texture per layer in the
+/// frame `params.frame` describes — `None` for a slot whose mask isn't there (it then weighs nothing) — the
+/// layers' curves (`Packed::mask_curves`; empty for none), and black and white's table (`Packed::mono_lut`;
+/// empty in colour).
 pub struct Masks<'a> {
     pub params: sidecar_color::params::MaskParams,
     pub textures: Vec<Option<&'a wgpu::Texture>>,
     pub curves: &'a [f32],
+    pub mono: &'a [f32],
 }
 
 impl Masks<'_> {
     pub fn none() -> Self {
-        Self { params: bytemuck::Zeroable::zeroed(), textures: Vec::new(), curves: &[] }
+        Self { params: bytemuck::Zeroable::zeroed(), textures: Vec::new(), curves: &[], mono: &[] }
     }
+}
+
+/// Black and white's table as a 3D texture, `side`³; a single zero in colour.
+fn mono_texture(gpu: &Gpu, data: &[f32]) -> wgpu::Texture {
+    let side = (data.len() as f64).cbrt().round() as u32;
+    let (side, data) = if side > 0 && (side as usize).pow(3) == data.len() { (side, data) } else { (1, &[0.0f32][..]) };
+    gpu.device.create_texture_with_data(
+        &gpu.queue,
+        &wgpu::TextureDescriptor {
+            label: Some("mono table"),
+            size: wgpu::Extent3d { width: side, height: side, depth_or_array_layers: side },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D3,
+            format: wgpu::TextureFormat::R32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        },
+        wgpu::util::TextureDataOrder::LayerMajor,
+        bytemuck::cast_slice(data),
+    )
 }
 
 fn curves_texture(gpu: &Gpu, data: &[f32]) -> wgpu::Texture {
@@ -89,6 +112,16 @@ impl DevelopPass {
                     ty: wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Float { filterable: false },
                         view_dimension: wgpu::TextureViewDimension::D1,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D3,
                         multisampled: false,
                     },
                     count: None,
@@ -207,6 +240,7 @@ impl DevelopPass {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
+        let mono_tex = mono_texture(gpu, masks.mono);
         let bind = d.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("develop"),
             layout: &self.layout,
@@ -220,6 +254,7 @@ impl DevelopPass {
                     binding: 2,
                     resource: wgpu::BindingResource::TextureView(&lut_tex.create_view(&Default::default())),
                 },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&mono_tex.create_view(&Default::default())) },
             ],
         });
         let mask_ubo = d.create_buffer_init(&wgpu::util::BufferInitDescriptor {

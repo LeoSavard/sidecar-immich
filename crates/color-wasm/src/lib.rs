@@ -3,7 +3,7 @@
 //! JSON `{ edit, camera, source, display }`, and reads back a packed result. See web/src/lib/color/pack.ts.
 //!
 //! Result layout: `[u32 len][`sc_develop_uniform_bytes` uniform bytes][4096 × f32 tone LUT][f64 temperature][f64 tint][1,568 mask
-//! uniform bytes][8 × 4096 × f32 layer curves]`, or len 0 with the error message available from `sc_last_error`.
+//! uniform bytes][8 × 4096 × f32 layer curves][f32 × n black and white table, n = 0 in colour]`, or len 0 with the error message available from `sc_last_error`.
 //! Geometry calls take and return JSON.
 
 use serde::Deserialize;
@@ -90,6 +90,7 @@ pub unsafe extern "C" fn sc_pack(ptr: *const u8, len: usize) -> *const u8 {
         out.extend_from_slice(&p.tint.to_le_bytes());
         out.extend_from_slice(bytemuck::bytes_of(&p.masks));
         out.extend_from_slice(bytemuck::cast_slice(&p.mask_curves));
+        out.extend_from_slice(bytemuck::cast_slice(&p.mono_lut));
         out
     }))
 }

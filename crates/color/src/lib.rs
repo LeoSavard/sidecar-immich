@@ -9,6 +9,8 @@ pub mod lens;
 pub mod mat;
 pub mod camera;
 pub mod params;
+pub mod spectral;
+mod spectral_data;
 pub mod spline;
 pub mod tone;
 

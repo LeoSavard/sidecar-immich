@@ -3,7 +3,7 @@
 	import { DevelopPass, requestDevice } from '$lib/gpu/develop';
 	import { LensPass } from '$lib/gpu/lens';
 
-	type Case = { name: string; width: number; height: number; lens?: boolean; masks?: number; maskSize?: [number, number] };
+	type Case = { name: string; width: number; height: number; lens?: boolean; masks?: number; maskSize?: [number, number]; mono?: boolean };
 	type Result = { name: string; status: string };
 
 	let results = $state<Result[]>([]);
@@ -43,6 +43,7 @@
 				}
 				pass.setMasks(masks.length ? new Uint8Array(await get('masks.bin')) : new Uint8Array(1568), masks, masks.length ? new Float32Array(await get('curves.f32')) : undefined);
 				pass.setUniforms(await get('uniform.bin'));
+				pass.setMono(c.mono ? new Float32Array(await get('mono.f32')) : new Float32Array(0));
 				pass.setToneLut(new Float32Array(await get('lut.f32')));
 				pass.render();
 				out[c.name] = toBase64(await pass.readback());

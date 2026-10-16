@@ -35,6 +35,11 @@ pub struct EditParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub film: Option<Film>,
+    /// Black and white, as a film type sees the light (DESIGN.md §7, "Black and white"): absent is colour, and
+    /// is left out of the serialized edit. Takes the place of film rendering when both are set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub monochrome: Option<Monochrome>,
     pub detail: Detail,
     /// Absent means off: photos edited before this field existed render unchanged. See DESIGN.md §15.
     pub lens: Option<Lens>,
@@ -89,6 +94,7 @@ impl Default for EditParams {
             mixer: Mixer::default(),
             saturation: 0.0,
             film: None,
+            monochrome: None,
             detail: Detail::default(),
             lens: None,
             geometry: None,
@@ -440,6 +446,22 @@ impl Default for MaskEdge {
     }
 }
 
+/// Black and white: a film type (`crate::spectral::film_sensitivity`) behind a filter
+/// (`crate::spectral::filter_transmission`), by id. One this version doesn't know renders in colour.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "edit/"))]
+pub struct Monochrome {
+    pub film: String,
+    pub filter: String,
+}
+
+impl Default for Monochrome {
+    fn default() -> Self {
+        Self { film: "panchromatic".into(), filter: "none".into() }
+    }
+}
+
 /// The widest an edge reaches, as a fraction of the mask's long edge.
 pub const MAX_EDGE: f64 = 0.05;
 
@@ -636,6 +658,8 @@ pub struct DevelopParams {
     pub mixer: [[f32; 4]; 8],
     /// Film rendering: amount 0…1 (0 is the neutral rendering), interlayer spread in log exposure, unused ×2.
     pub film: [f32; 4],
+    /// Black and white: x 1 when on, y the side of `Packed::mono_lut`'s cube, unused ×2.
+    pub mono: [f32; 4],
 }
 
 /// Contrast slider value → logistic steepness.
@@ -662,6 +686,8 @@ pub struct Packed {
     /// The layers' own curves, `MAX_MASKS` rows of `LUT_SIZE`: row `i` is `edit.masks[i]`'s, the identity
     /// for a layer without one.
     pub mask_curves: Vec<f32>,
+    /// Black and white's exposures over the colour cube (`crate::spectral::mono_lut`); empty in colour.
+    pub mono_lut: Vec<f32>,
 }
 
 /// Row-major 3×3 → WGSL `mat3x3f` columns.
@@ -714,6 +740,8 @@ pub fn pack(edit: &EditParams, camera: &CameraColor, source: SourceKind, display
     };
     let wb = camera::resolve(camera, white_xy);
     let developed = source == SourceKind::Developed;
+    let mono_lut = edit.monochrome.as_ref().and_then(|m| crate::spectral::mono_lut(&m.film, &m.filter)).unwrap_or_default();
+    let mono = !mono_lut.is_empty();
     let tone = tone_params(edit, developed);
     let params = DevelopParams {
         wb_mul: wb.mul.map(|v| v as f32),
@@ -731,10 +759,11 @@ pub fn pack(edit: &EditParams, camera: &CameraColor, source: SourceKind, display
         saturation: (edit.saturation.clamp(-100.0, 100.0) / 100.0) as f32,
         _pad1: 0.0,
         mixer: mixer_params(&edit.mixer),
-        film: match (&edit.film, developed) {
+        film: match (&edit.film, developed || mono) {
             (Some(f), false) => [(f.amount.clamp(0.0, 100.0) / 100.0) as f32, (f.interlayer.clamp(0.0, 100.0) / 100.0 * FILM_INTERLAYER) as f32, 0.0, 0.0],
             _ => [0.0; 4],
         },
+        mono: if mono { [1.0, crate::spectral::GRID as f32, 0.0, 0.0] } else { [0.0; 4] },
     };
     let mut masks = MaskParams { frame: [0.0; 4], count: 0, _pad: [0; 3], layers: [MaskLayer::default(); MAX_MASKS] };
     let mut mask_curves = Vec::with_capacity(MAX_MASKS * LUT_SIZE);
@@ -763,7 +792,7 @@ pub fn pack(edit: &EditParams, camera: &CameraColor, source: SourceKind, display
         };
     }
     let lut = tone_curve_lut(&edit.tone.curve, edit.tone.highlights, edit.tone.shadows, LUT_SIZE);
-    Packed { uniform: bytemuck::bytes_of(&params).to_vec(), lut, temperature_k: wb.temperature_k, tint: wb.tint, masks, mask_curves }
+    Packed { uniform: bytemuck::bytes_of(&params).to_vec(), lut, temperature_k: wb.temperature_k, tint: wb.tint, masks, mask_curves, mono_lut }
 }
 
 #[cfg(test)]
@@ -797,7 +826,7 @@ mod tests {
         let (handle, ty) = module.types.iter().find(|(_, t)| t.name.as_deref() == Some("DevelopParams")).unwrap();
         let naga::TypeInner::Struct { members, span } = &ty.inner else { panic!("not a struct") };
         assert_eq!(*span as usize, std::mem::size_of::<DevelopParams>());
-        assert_eq!(layouter[handle].size as usize, 288);
+        assert_eq!(layouter[handle].size as usize, 304);
         let rust = [
             ("wb_mul", std::mem::offset_of!(DevelopParams, wb_mul)),
             ("exposure", std::mem::offset_of!(DevelopParams, exposure)),
@@ -809,13 +838,14 @@ mod tests {
             ("saturation", std::mem::offset_of!(DevelopParams, saturation)),
             ("mixer", std::mem::offset_of!(DevelopParams, mixer)),
             ("film", std::mem::offset_of!(DevelopParams, film)),
+            ("mono", std::mem::offset_of!(DevelopParams, mono)),
         ];
         for (name, off) in rust {
             let m = members.iter().find(|m| m.name.as_deref() == Some(name)).unwrap();
             assert_eq!(m.offset as usize, off, "{name}");
         }
         let p = pack(&EditParams::default(), &crate::camera::nikon_d850(), SourceKind::Raw, DisplaySpace::Srgb);
-        assert_eq!(p.uniform.len(), 288);
+        assert_eq!(p.uniform.len(), 304);
         assert_eq!(p.lut.len(), LUT_SIZE);
         // exposure sits at byte 12
         assert_eq!(f32::from_le_bytes(p.uniform[12..16].try_into().unwrap()), 1.0);
@@ -881,6 +911,23 @@ mod tests {
         let ranged = MaskAdjustment { range: Some(r), ..plain };
         assert!(ranged.renders());
         assert_eq!(serde_json::to_value(&ranged).unwrap()["range"], serde_json::json!({ "from": 80.0, "to": 20.0, "feather": 10.0 }));
+    }
+
+    /// Black and white packs its table and switches film rendering off; colour packs none.
+    #[test]
+    fn monochrome_packs_its_table() {
+        let cam = crate::camera::nikon_d850();
+        let colour = pack(&EditParams { film: Some(Film::default()), ..Default::default() }, &cam, SourceKind::Raw, DisplaySpace::Srgb);
+        assert!(colour.mono_lut.is_empty());
+        let edit = EditParams { film: Some(Film::default()), monochrome: Some(Monochrome::default()), ..Default::default() };
+        let p = pack(&edit, &cam, SourceKind::Raw, DisplaySpace::Srgb);
+        let params: &DevelopParams = bytemuck::from_bytes(&p.uniform);
+        assert_eq!(p.mono_lut.len(), crate::spectral::GRID.pow(3));
+        assert_eq!(params.mono, [1.0, crate::spectral::GRID as f32, 0.0, 0.0]);
+        assert_eq!(params.film, [0.0; 4], "film rendering gives way");
+        let unknown = EditParams { monochrome: Some(Monochrome { film: "velvia".into(), filter: "none".into() }), ..Default::default() };
+        assert!(pack(&unknown, &cam, SourceKind::Raw, DisplaySpace::Srgb).mono_lut.is_empty(), "an unknown film is colour");
+        assert!(serde_json::to_value(EditParams::default()).unwrap().get("monochrome").is_none());
     }
 
     #[test]

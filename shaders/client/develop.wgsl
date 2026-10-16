@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright Sidecar contributors
-//! requires: develop/params.wgsl develop/wb.wgsl develop/exposure.wgsl develop/gamut.wgsl develop/tone.wgsl develop/masks.wgsl develop/mixer.wgsl develop/output.wgsl
+//! requires: develop/params.wgsl develop/wb.wgsl develop/exposure.wgsl develop/gamut.wgsl develop/tone.wgsl develop/masks.wgsl develop/mixer.wgsl develop/mono.wgsl develop/output.wgsl
 // Develop pass: full-screen triangle into developedTex (rgba16float, proxy size). Output is display-linear.
 
 @group(0) @binding(0) var<uniform> P: DevelopParams;
 @group(0) @binding(1) var source_tex: texture_2d<f32>;
 @group(0) @binding(2) var tone_lut: texture_1d<f32>;
+// Black and white's table over the colour cube; 1×1×1 in colour.
+@group(0) @binding(3) var mono_lut: texture_3d<f32>;
 
 // Masks: one texture per adjustment, in the frame `M.frame` describes. Unused slots hold a 1×1 texture.
 @group(1) @binding(0) var<uniform> M: MaskParams;
@@ -54,6 +56,8 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   c = exposure(c, P.exposure * exp2(local.ev));                // 2
   c = highlight_blend(c, src.a, P.hl_strength);
   c = P.cam_to_work * c;                                       // 3
+  // Black and white: the film's exposure in place of the colour, before the tone map, as film is exposed.
+  if (P.mono.x > 0.5) { c = vec3f(mono_exposure(c, mono_lut, P.mono.y)); }
   var e: f32;
   // Film rendering (RAW only; `pack` leaves it at 0 for a developed file): the curves per channel, blended
   // with the neutral rendering by its amount. At 0 none of it runs, so the neutral path is unchanged.

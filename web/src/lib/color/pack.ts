@@ -27,11 +27,11 @@ type Exports = {
  * `masks` are the develop pass's mask uniforms (`DevelopPass.setMasks`), texture `i` being `edit.masks[i]`'s;
  * `maskCurves` the layers' curves, a 4,096-entry row each.
  */
-export type Packed = { uniform: Uint8Array; lut: Float32Array; temperatureK: number; tint: number; masks: Uint8Array; maskCurves: Float32Array };
+export type Packed = { uniform: Uint8Array; lut: Float32Array; temperatureK: number; tint: number; masks: Uint8Array; maskCurves: Float32Array; monoLut: Float32Array };
 
 /** `DevelopParams` (shaders/develop/params.wgsl), mirrored in crates/color. Checked against the wasm on load, so a
  *  struct that grew on one side fails here, by name, rather than as a garbled render. */
-export const DEVELOP_UNIFORM_BYTES = 288;
+export const DEVELOP_UNIFORM_BYTES = 304;
 const MASK_UNIFORM_BYTES = 1568;
 const LUT = 4096;
 const MAX_MASKS = 8;
@@ -136,7 +136,9 @@ export class ColorPacker {
 			temperatureK: view.getFloat64(U + lutBytes, true),
 			tint: view.getFloat64(U + 8 + lutBytes, true),
 			masks: out.slice(U + 16 + lutBytes, U + 16 + lutBytes + MASK_UNIFORM_BYTES),
-			maskCurves: new Float32Array(out.slice(U + 16 + lutBytes + MASK_UNIFORM_BYTES, U + 16 + lutBytes + MASK_UNIFORM_BYTES + MAX_MASKS * LUT * 4).buffer)
+			maskCurves: new Float32Array(out.slice(U + 16 + lutBytes + MASK_UNIFORM_BYTES, U + 16 + lutBytes + MASK_UNIFORM_BYTES + MAX_MASKS * LUT * 4).buffer),
+			// Whatever follows is black and white's table over the colour cube; nothing in colour.
+			monoLut: new Float32Array(out.slice(U + 16 + lutBytes + MASK_UNIFORM_BYTES + MAX_MASKS * LUT * 4).buffer)
 		};
 	}
 }

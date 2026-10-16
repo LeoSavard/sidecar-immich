@@ -249,6 +249,7 @@
 			const packed = repack();
 			develop.setUniforms(packed.uniform);
 			develop.setToneLut(packed.lut);
+			develop.setMono(packed.monoLut);
 			develop.setMasks(packed.masks, ((before ? compareEdit() : edit).masks ?? []).map((m, i) => layerTexture(i, m)), packed.maskCurves);
 			develop.render();
 			developDirty = false;
