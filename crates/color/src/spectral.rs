@@ -9,10 +9,11 @@
 //! 38(2), 2019): Newton's method on the CIELAB difference, from grey out to the colour in steps, each step
 //! starting from the last. `t` is wavelength normalised to 0–1 over 380–730 nm.
 //!
-//! Black-and-white film then sees that spectrum, lit by D65, through a filter and its own spectral sensitivity:
-//! one exposure per colour. `mono_lut` tabulates it over the colour cube for the develop pass.
+//! Black-and-white film then sees that spectrum as a reflectance, lit by the scene's light (`light`), through a
+//! filter and its own spectral sensitivity: one exposure per colour. `mono_lut` tabulates it over the colour
+//! cube for the develop pass.
 
-use crate::spectral_data::{CMF, D65};
+use crate::spectral_data::{CMF, D65, DAYLIGHT_S0, DAYLIGHT_S1, DAYLIGHT_S2};
 
 /// Samples: 380–730 nm, every 10 nm.
 pub const SAMPLES: usize = 36;
@@ -213,6 +214,48 @@ pub fn filter_transmission(id: &str) -> Option<[f64; SAMPLES]> {
     })
 }
 
+/// A black body at `t` kelvin (Planck's law), 100 at 560 nm. `c2` is the second radiation constant in m·K:
+/// 1.4388e-2 today; CIE illuminant A is defined at 2,848 K with the older 1.435e-2 (2,856 K today).
+pub fn planck(t: f64, c2: f64) -> [f64; SAMPLES] {
+    let at = |nm: f64| {
+        let l = nm * 1e-9;
+        l.powi(-5) / ((c2 / (l * t)).exp() - 1.0)
+    };
+    let norm = at(560.0);
+    std::array::from_fn(|i| 100.0 * at(wavelength(i)) / norm)
+}
+
+/// CIE daylight at a correlated colour temperature `t` (4,000–25,000 K), 100 at 560 nm: its chromaticity from
+/// the temperature, then S0 + M1·S1 + M2·S2, as CIE 15 defines it.
+pub fn daylight(t: f64) -> [f64; SAMPLES] {
+    let t = t.clamp(4000.0, 25000.0);
+    let x = if t <= 7000.0 {
+        -4.6070e9 / t.powi(3) + 2.9678e6 / t.powi(2) + 0.09911e3 / t + 0.244063
+    } else {
+        -2.0064e9 / t.powi(3) + 1.9018e6 / t.powi(2) + 0.24748e3 / t + 0.237040
+    };
+    let y = -3.0 * x * x + 2.870 * x - 0.275;
+    let m = 0.0241 + 0.2562 * x - 0.7341 * y;
+    let (m1, m2) = ((-1.3515 - 1.7703 * x + 5.9114 * y) / m, (0.0300 - 31.4424 * x + 30.0717 * y) / m);
+    let raw: [f64; SAMPLES] = std::array::from_fn(|i| DAYLIGHT_S0[i] + m1 * DAYLIGHT_S1[i] + m2 * DAYLIGHT_S2[i]);
+    // 560 nm is sample 18.
+    std::array::from_fn(|i| 100.0 * raw[i] / raw[18])
+}
+
+/// The light a scene was lit by, by id: `daylight` (D65, the default), `tungsten` (CIE illuminant A, a
+/// household bulb at 2,856 K), or `white-balance` — the temperature the edit's white balance names, as a black
+/// body below 5,000 K and daylight above (the split CIE's colour-rendering index uses). `None` for a light this
+/// version doesn't know.
+pub fn light(id: &str, temperature_k: f64) -> Option<[f64; SAMPLES]> {
+    match id {
+        "daylight" => Some(D65),
+        "tungsten" => Some(planck(2848.0, 1.435e-2)),
+        "white-balance" if temperature_k < 5000.0 => Some(planck(temperature_k.max(1000.0), 1.4388e-2)),
+        "white-balance" => Some(daylight(temperature_k)),
+        _ => None,
+    }
+}
+
 /// The coefficient grid `mono_lut` reads, computed once: `GRID`³ colours over the unit cube.
 pub const GRID: usize = 17;
 
@@ -250,12 +293,14 @@ fn grid() -> &'static [([f64; 3], f64)] {
 }
 
 /// The exposure black-and-white film `film` behind filter `filter` gets from each colour of the unit cube
-/// (linear Rec.2020, white-balanced, so lit by D65), `GRID`³ values, red fastest, white at 1. A colour beyond
-/// the cube is scaled into it by its largest channel, which then scales the exposure: light is linear. `None`
-/// for a film or filter this version doesn't know.
-pub fn mono_lut(film: &str, filter: &str) -> Option<Vec<f32>> {
+/// (linear Rec.2020, white-balanced), `GRID`³ values, red fastest, white at 1. Each colour is a surface — the
+/// reflectance whose colour under D65 it is, which is what white balance makes of it — lit by `light`
+/// (`light()`): film isn't white-balanced, so under tungsten it gets far less blue than red, and the meter
+/// (white at 1) makes up the rest. A colour beyond the cube is scaled into it by its largest channel, which then
+/// scales the exposure: light is linear. `None` for a film or filter this version doesn't know.
+pub fn mono_lut(film: &str, filter: &str, light: &[f64; SAMPLES]) -> Option<Vec<f32>> {
     let (s, f) = (film_sensitivity(film)?, filter_transmission(filter)?);
-    let weight: [f64; SAMPLES] = std::array::from_fn(|i| D65[i] * s[i] * f[i]);
+    let weight: [f64; SAMPLES] = std::array::from_fn(|i| light[i] * s[i] * f[i]);
     let total: f64 = weight.iter().sum();
     let exposure = |(c, k): ([f64; 3], f64)| (0..SAMPLES).map(|i| reflectance(c, i) * weight[i]).sum::<f64>() / total / k;
     let grid = grid();
@@ -303,9 +348,9 @@ mod tests {
     /// blue lighter; a red filter lightens red and darkens blue.
     #[test]
     fn films_and_filters_behave_as_their_kinds() {
-        let pan = mono_lut("panchromatic", "none").unwrap();
-        let ortho = mono_lut("orthochromatic", "none").unwrap();
-        let red_filter = mono_lut("panchromatic", "red").unwrap();
+        let pan = mono_lut("panchromatic", "none", &D65).unwrap();
+        let ortho = mono_lut("orthochromatic", "none", &D65).unwrap();
+        let red_filter = mono_lut("panchromatic", "red", &D65).unwrap();
         let g = GRID - 1;
         assert!((at(&pan, [g, g, g]) - 1.0).abs() < 1e-6);
         let mid = g / 2;
@@ -315,7 +360,7 @@ mod tests {
         assert!(at(&ortho, red) < 0.5 * at(&pan, red), "ortho red {} pan red {}", at(&ortho, red), at(&pan, red));
         assert!(at(&ortho, blue) > at(&pan, blue));
         assert!(at(&red_filter, red) > at(&pan, red) && at(&red_filter, blue) < at(&pan, blue));
-        assert!(mono_lut("panchromatic", "purple").is_none() && mono_lut("velvia", "none").is_none());
+        assert!(mono_lut("panchromatic", "purple", &D65).is_none() && mono_lut("velvia", "none", &D65).is_none());
     }
 
     /// Everyday colours as each kind renders them, measured: blue-sensitive film darkens skin by more than half
@@ -324,7 +369,7 @@ mod tests {
     #[test]
     fn everyday_colours_go_as_the_films_do() {
         let e = |film: &str, filter: &str, rgb: [f64; 3]| {
-            let lut = mono_lut(film, filter).unwrap();
+            let lut = mono_lut(film, filter, &D65).unwrap();
             let m = rgb.iter().cloned().fold(0.0, f64::max);
             m * at(&lut, rgb.map(|v| (v / m * (GRID - 1) as f64).round() as usize)) as f64
         };
@@ -336,10 +381,43 @@ mod tests {
         assert!(e("panchromatic", "red", sky) < 0.5 * pan(sky), "{} vs {}", e("panchromatic", "red", sky), pan(sky));
     }
 
+    /// Planck's law at CIE A's defining temperature and constant is CIE A; CIE's daylight formula at D50's temperature
+    /// is colour-science's D50.
+    #[test]
+    fn illuminants_match_cie() {
+        use crate::spectral_data::{D50, ILLUMINANT_A};
+        let a = planck(2848.0, 1.435e-2);
+        let worst = (0..SAMPLES).map(|i| (a[i] - ILLUMINANT_A[i]).abs() / ILLUMINANT_A[i]).fold(0.0, f64::max);
+        assert!(worst < 1e-3, "A: worst relative {worst}");
+        let d50 = daylight(5003.0 * 1.4388 / 1.4380);
+        let worst = (0..SAMPLES).map(|i| (d50[i] - D50[i]).abs()).fold(0.0, f64::max);
+        assert!(worst < 0.1, "D50: worst {worst}");
+        assert!(light("white-balance", 3000.0).unwrap()[0] < light("white-balance", 6500.0).unwrap()[0]);
+        assert!(light("candle", 6500.0).is_none());
+    }
+
+    /// Under tungsten, film gets a red's light and little of a blue's: panchromatic film renders a red lighter and a
+    /// blue sky darker than in daylight, against the same metered grey.
+    #[test]
+    fn tungsten_lightens_reds_and_darkens_blues() {
+        let (red, sky) = ([0.55, 0.06, 0.05], [0.25, 0.42, 0.75]);
+        let e = |light: &[f64; SAMPLES], rgb: [f64; 3]| {
+            let lut = mono_lut("panchromatic", "none", light).unwrap();
+            let m = rgb.iter().cloned().fold(0.0, f64::max);
+            m * at(&lut, rgb.map(|v| (v / m * (GRID - 1) as f64).round() as usize)) as f64
+        };
+        let tungsten = planck(2848.0, 1.435e-2);
+        eprintln!("tungsten against daylight: red {:+.2} stop, sky {:+.2} stop", (e(&tungsten, red) / e(&D65, red)).log2(), (e(&tungsten, sky) / e(&D65, sky)).log2());
+        assert!(e(&tungsten, red) > 1.2 * e(&D65, red), "{} vs {}", e(&tungsten, red), e(&D65, red));
+        assert!(e(&tungsten, sky) < 0.9 * e(&D65, sky), "{} vs {}", e(&tungsten, sky), e(&D65, sky));
+        let mid = (GRID - 1) / 2;
+        assert!((at(&mono_lut("panchromatic", "none", &tungsten).unwrap(), [mid, mid, mid]) - 0.5).abs() < 0.02);
+    }
+
     #[test]
     fn the_grid_is_quick_enough() {
         let t = std::time::Instant::now();
-        let _ = mono_lut("panchromatic", "none");
+        let _ = mono_lut("panchromatic", "none", &D65);
         eprintln!("first table: {:.0} ms", t.elapsed().as_secs_f64() * 1e3);
     }
 }

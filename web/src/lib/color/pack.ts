@@ -31,7 +31,7 @@ export type Packed = { uniform: Uint8Array; lut: Float32Array; temperatureK: num
 
 /** `DevelopParams` (shaders/develop/params.wgsl), mirrored in crates/color. Checked against the wasm on load, so a
  *  struct that grew on one side fails here, by name, rather than as a garbled render. */
-export const DEVELOP_UNIFORM_BYTES = 320;
+export const DEVELOP_UNIFORM_BYTES = 336;
 const MASK_UNIFORM_BYTES = 1568;
 const LUT = 4096;
 const MAX_MASKS = 8;

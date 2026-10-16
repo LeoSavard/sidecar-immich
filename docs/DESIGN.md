@@ -7,6 +7,18 @@ Source: the architecture plan (PWA entry, XMP sidecars, server-side demosaic, We
 
 Where the code differs from the text below, the code and these notes win.
 
+- **Developers** (§7, "Developers"): adjacency through a low-resolution map of the whole frame, development N±2,
+  compensation, grain per developer and a staining developer's grain masking. Checked: packing tests; an engine
+  test of an edge (bright side 0.588 → 0.634, dark side 0.138 → 0.107, display-linear) and of a loupe tile given
+  the whole frame's map (within 0.001); parity `dev-acutance`, `dev-staining-layers` and `dev-compensating`
+  (19/19 pass); the tractor in each developer and at N±1, whole and in 100 % crops; the three editor smoke runs
+  choose a developer, tungsten and N+1 and save them. Choosing the rendering already chosen no longer resets its
+  settings.
+
+- **Black and white under other light** (§7, "The scene's light"): daylight, tungsten, or the white balance's
+  temperature. Checked: illuminants against colour-science's A and D50; tungsten's effect on a red and a sky;
+  old edits without `light` read as daylight; the tractor in both film types under each light.
+
 - **Grain** (§7, "Grain"): procedural, in exposure before the tone map, sized on a 35 mm frame and averaged by
   Selwyn's law where finer than a pixel. Checked: packing tests; parity `grain-mono`, `grain-film`, `grain-heic`
   identical browser to server (16/16 pass); a portrait developed at 1600 px and 5584 px with grain 0/40/80
@@ -632,8 +644,50 @@ Film types are the classes' sensitivities — panchromatic (classic), extended-r
 measured curves of named stocks, which need their datasheets digitised. Filters are generic yellow, orange,
 red (long-pass edges at 500, 555, 600 nm) and green (a band). Measured on everyday colours: blue-sensitive film
 darkens skin 0.7 stop against panchromatic and lifts the sky; orthochromatic takes a saturated red to near
-black; a red filter darkens a blue sky 1.6 stops. Not yet: illuminants other than daylight, the stock's own
-characteristic curve, developers.
+black; a red filter darkens a blue sky 1.6 stops. Not yet: the stock's own characteristic curve.
+
+**The scene's light.** `Monochrome.light` names what lit the scene: `daylight` (D65, the default, left out of
+the serialized edit), `tungsten` (CIE illuminant A: Planck's law at 2,848 K with CIE's older constant 1.435e-2),
+or `white-balance` — the temperature the edit's white balance resolves to, as a black body below 5,000 K and CIE
+daylight above (the split CIE's colour-rendering index uses; daylight from CIE 15's chromaticity formula and
+basis functions S0, S1, S2, taken from colour-science). The white-balanced pixel says what the surface is; film
+has no white balance, so it sees that reflectance times the light, and the meter (white at 1) evens out the
+total. Under tungsten, panchromatic film renders a saturated red 0.86 stop lighter and a blue sky 0.55 stop
+darker than in daylight, against the same grey. Checked against colour-science: A within 0.1 %, D50 within 0.1
+of 100.
+
+**Developers.** `Monochrome.developer` (`standard`, `fine-grain`, `acutance`, `compensating`, `staining`; the
+default left out of the edit) and `Monochrome.development` (−2 … 2, the zone system's N−2 … N+2) act on the film's
+exposure right after `mono_exposure`, before grain and the tone map (`develop/developer.wgsl`,
+`sidecar_color::developer`). In log exposure `x`, stops from middle grey:
+
+- *Adjacency:* `x + a·(x − local)`, where `local` is the exposure around the pixel, blurred over the developer's
+  reach on a 35 mm negative — developer exhausts in dense areas and stays fresh in thin ones, and diffusion
+  carries both across an edge (the Eberhard effect, Mackie lines).
+- *Development:* contrast × `5 / (5 − N)` above a speed point 2.5 stops under grey, rounded into the shadows
+  with a softplus hinge: N+1 fits four zones of subject into five of negative; shadows barely move.
+- *Compensation:* density grows by `1 − c` as much above a knee 1.5 stops over grey.
+
+| developer | adjacency | reach | compensation | grain |
+|---|---|---|---|---|
+| standard (general purpose) | 0 | — | 0 | × 1 |
+| fine grain (solvent) | 0 | — | 0 | × 0.75 |
+| high acutance (dilute) | 0.35 | 0.08 mm | 0.1 | × 1.2 |
+| compensating (two-bath, stand) | 0.25 | 0.3 mm | 0.45 | × 1 |
+| staining (pyro) | 0.2 | 0.15 mm | 0.3 | × 1, stain hides up to half at the white point |
+
+Development scales grain by `1 + 0.15 N`. These are the developers' kinds as the literature describes them, not
+fits to one formula's measurements. The standard developer at N returns its input exactly.
+
+`local` comes from an *adjacency map*: the frame averaged down by a whole number to at most 1,024 texels on its
+long edge (`client/density_down.wgsl`), developed by the develop pass itself with `mono.z` set — which returns
+the film's log exposure right after `mono_exposure`, through the whole frame's masks — then blurred twice
+(`client/density_blur.wgsl`, separable Gaussian, σ the reach in map texels). The develop pass samples it
+bilinearly at the pixel's place in the frame. A develop of the whole frame builds its own map (browser:
+`DevelopPass` in `develop.ts`; server: `DevelopPass::render`), so preview, export and parity need nothing new;
+the loupe builds one from the whole session source, lens-corrected at the map's size, and hands it to every
+tile, so a tile's edges are the whole picture's (engine test: within 0.001). Depth effects and the detail
+filters are not in the loupe's map; at a fraction of a millimetre's reach this doesn't show.
 
 **Grain.** `EditParams.grain { amount, size }` makes each spot's exposure flicker as a negative's grains make
 it, before the tone map, in colour or black and white, on a RAW or a developed file (`develop/grain.wgsl`). The
@@ -674,12 +728,14 @@ struct DevelopParams {            // offset  size
   _pad1      : f32,               //  140      4
   mixer      : array<vec4f, 8>,   //  144    128   per band: hue, sat, lum, unused
   film       : vec4f,             //  272     16   amount 0–1 (0 neutral), interlayer spread, unused ×2
-  mono       : vec4f,             //  288     16   black and white: 1 on, the table's side, unused ×2
-  grain      : vec4f,             //  304     16   σ in stops (0 none), size ÷ long edge, unused ×2
-}                                 //  total 320 bytes
+  mono       : vec4f,             //  288     16   black and white: 1 on, the table's side, 1 = output the
+                                  //                adjacency map's log exposure, unused
+  grain      : vec4f,             //  304     16   σ in stops (0 none), size ÷ long edge, stain masking, unused
+  developer  : vec4f,             //  320     16   adjacency, reach ÷ long edge, development contrast, compensation
+}                                 //  total 336 bytes
 ```
 
-**Struct layouts.** The 320-byte table above documents the layout; code never hard-codes it. `encase` (MIT-0) derives it on the Rust side and `webgpu-utils` (MIT) reads it from the WGSL source in the browser, so a field added to the struct can't silently shift the offsets.
+**Struct layouts.** The 336-byte table above documents the layout; code never hard-codes it. `encase` (MIT-0) derives it on the Rust side and `webgpu-utils` (MIT) reads it from the WGSL source in the browser, so a field added to the struct can't silently shift the offsets.
 
 **Parameter flow.** Slider input → params store (Svelte 5 `$state`) → derived CPU values (WASM: WB → multipliers and matrix; curve → LUT) → `queue.writeBuffer` → dirty flag → next `requestAnimationFrame` runs develop → view → histogram. Undo snapshots on `pointerup`, not per input event.
 

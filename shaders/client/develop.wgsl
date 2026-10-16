@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright Sidecar contributors
-//! requires: develop/params.wgsl develop/wb.wgsl develop/exposure.wgsl develop/gamut.wgsl develop/tone.wgsl develop/masks.wgsl develop/mixer.wgsl develop/mono.wgsl develop/grain.wgsl develop/output.wgsl
+//! requires: develop/params.wgsl develop/wb.wgsl develop/exposure.wgsl develop/gamut.wgsl develop/tone.wgsl develop/masks.wgsl develop/mixer.wgsl develop/mono.wgsl develop/developer.wgsl develop/grain.wgsl develop/output.wgsl
 // Develop pass: full-screen triangle into developedTex (rgba16float, proxy size). Output is display-linear.
 
 @group(0) @binding(0) var<uniform> P: DevelopParams;
@@ -8,6 +8,9 @@
 @group(0) @binding(2) var tone_lut: texture_1d<f32>;
 // Black and white's table over the colour cube; 1×1×1 in colour.
 @group(0) @binding(3) var mono_lut: texture_3d<f32>;
+// Black and white's adjacency map (`sidecar_color::developer`): the film's log exposure around each place, over
+// the whole frame at low resolution; 1×1 when there is none.
+@group(0) @binding(4) var density_map: texture_2d<f32>;
 
 // Masks: one texture per adjustment, in the frame `M.frame` describes. Unused slots hold a 1×1 texture.
 @group(1) @binding(0) var<uniform> M: MaskParams;
@@ -56,14 +59,30 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   c = exposure(c, P.exposure * exp2(local.ev));                // 2
   c = highlight_blend(c, src.a, P.hl_strength);
   c = P.cam_to_work * c;                                       // 3
-  // Black and white: the film's exposure in place of the colour, before the tone map, as film is exposed.
-  if (P.mono.x > 0.5) { c = vec3f(mono_exposure(c, mono_lut, P.mono.y)); }
-  // Grain, in the exposure the tone map is about to take. Placed on the whole frame — `M.frame` says where a
-  // loupe's tile sits in it — so a tile's grain is the export's.
+  // Where this pixel is in the whole frame — `M.frame` says where a loupe's tile sits in it — so a tile's grain
+  // and developer are the export's.
+  let frame = select(vec2f(textureDimensions(source_tex)), M.frame.zw, M.frame.z > 0.0);
+  let at = vec2i(pos.xy) + vec2i(M.frame.xy);
+  // Black and white: the film's exposure in place of the colour, before the tone map, as film is exposed; then
+  // what the developer makes of it.
+  if (P.mono.x > 0.5) {
+    let e = mono_exposure(c, mono_lut, P.mono.y);
+    // The adjacency map's own pass: the film's log exposure, nothing after it.
+    if (P.mono.z > 0.5) { return vec4f(vec3f(log2(max(e, 1e-6) / 0.18)), 1.0); }
+    var local = 0.0;
+    var adjacency = 0.0;
+    let map = vec2f(textureDimensions(density_map));
+    if (P.developer.x != 0.0 && map.x > 1.0) {
+      // The map averages `k` × `k` of the frame's pixels per texel (`developer::map_scale`).
+      let k = max(ceil(max(frame.x, frame.y) / 1024.0), 1.0);
+      local = textureSampleLevel(density_map, mask_sampler, (vec2f(at) + 0.5) / k / map, 0.0).r;
+      adjacency = P.developer.x;
+    }
+    c = vec3f(developer_apply(e, local, adjacency, P.developer));
+  }
+  // Grain, in the exposure the tone map is about to take, placed on the whole frame.
   if (P.grain.x > 0.0) {
-    let frame = select(vec2f(textureDimensions(source_tex)), M.frame.zw, M.frame.z > 0.0);
-    let at = vec2i(pos.xy) + vec2i(M.frame.xy);
-    c = grain_apply(c, grain_noise(at, P.grain.y * max(frame.x, frame.y)), P.grain.x, P.tone, developed);
+    c = grain_apply(c, grain_noise(at, P.grain.y * max(frame.x, frame.y)), P.grain.x, P.grain.z, P.tone, developed);
   }
   var e: f32;
   // Film rendering (RAW only; `pack` leaves it at 0 for a developed file): the curves per channel, blended

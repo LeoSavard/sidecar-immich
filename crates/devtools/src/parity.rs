@@ -176,12 +176,24 @@ fn cases() -> Vec<Fixture> {
     let (graded_film, layered_film) = (film(&graded), film(&layered));
 
     // Black and white: a film type behind a filter, read from the table over the colour cube; with layers too.
-    let mono = |e: &EditParams, film: &str, filter: &str| EditParams { monochrome: Some(sidecar_color::params::Monochrome { film: film.into(), filter: filter.into() }), ..e.clone() };
+    let mono = |e: &EditParams, film: &str, filter: &str| EditParams { monochrome: Some(sidecar_color::params::Monochrome { film: film.into(), filter: filter.into(), ..Default::default() }), ..e.clone() };
     let (graded_mono, layered_mono) = (mono(&graded, "panchromatic", "red"), mono(&layered, "orthochromatic", "none"));
 
     // Grain: the hash and both octaves, in black and white, in film colour and on a developed file.
     let grain = |e: &EditParams, amount: f64, size: f64| EditParams { grain: Some(sidecar_color::params::Grain { amount, size }), ..e.clone() };
     let (grain_mono, grain_film, grain_heic) = (grain(&graded_mono, 80.0, 100.0), grain(&graded_film, 60.0, 30.0), grain(&phone, 100.0, 100.0));
+
+    // Developers: adjacency through the map (built by each side from the picture), development, compensation,
+    // the stain's grain masking; and a light other than daylight.
+    let developed_mono = |e: &EditParams, developer: &str, development: f64, light: &str| {
+        let mut e = e.clone();
+        let m = e.monochrome.as_mut().unwrap();
+        (m.developer, m.development, m.light) = (developer.into(), development, light.into());
+        e
+    };
+    let dev_acutance = developed_mono(&grain_mono, "acutance", 1.0, "daylight");
+    let dev_staining = developed_mono(&grain(&layered_mono, 50.0, 60.0), "staining", -1.0, "tungsten");
+    let dev_compensating = developed_mono(&graded_mono, "compensating", 0.5, "white-balance");
 
     let mut lens = EditParams { lens: Some(sidecar_color::params::Lens { profile: "sony".into(), ..Default::default() }), ..graded.clone() };
     lens.lens.as_mut().unwrap().lateral_ca = 150.0;
@@ -203,6 +215,9 @@ fn cases() -> Vec<Fixture> {
         ("grain-mono".into(), nikon_d850(), SourceKind::Raw, grain_mono, DisplaySpace::Srgb, None),
         ("grain-film".into(), nikon_d850(), SourceKind::Raw, grain_film, DisplaySpace::Srgb, None),
         ("grain-heic".into(), heic(), SourceKind::Developed, grain_heic, DisplaySpace::DisplayP3, None),
+        ("dev-acutance".into(), nikon_d850(), SourceKind::Raw, dev_acutance, DisplaySpace::Srgb, None),
+        ("dev-staining-layers".into(), nikon_d850(), SourceKind::Raw, dev_staining, DisplaySpace::Srgb, None),
+        ("dev-compensating".into(), nikon_d850(), SourceKind::Raw, dev_compensating, DisplaySpace::DisplayP3, None),
     ]
 }
 
@@ -273,7 +288,7 @@ pub fn native(dir: &Path, out: &Path) -> Result<()> {
         let mono: Vec<f32> = if case.mono { bytemuck::cast_slice(&std::fs::read(dir.join(format!("{}.mono.f32", case.name)))?).to_vec() } else { Vec::new() };
         let masks = if case.masks > 0 {
             let params: sidecar_color::params::MaskParams = bytemuck::pod_read_unaligned(&std::fs::read(dir.join(format!("{}.masks.bin", case.name)))?);
-            sidecar_engine::Masks { params, textures: mask_textures.iter().map(Option::as_ref).collect(), curves: &curves, mono: &mono }
+            sidecar_engine::Masks { params, textures: mask_textures.iter().map(Option::as_ref).collect(), curves: &curves, mono: &mono, density: None }
         } else {
             sidecar_engine::Masks { mono: &mono, ..sidecar_engine::Masks::none() }
         };

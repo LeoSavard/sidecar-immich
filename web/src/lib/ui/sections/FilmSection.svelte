@@ -29,6 +29,8 @@ sees the light, through a filter. -->
 	];
 
 	function setRendering(next: Rendering) {
+		// Choosing the rendering already chosen keeps its settings.
+		if (next === rendering) return;
 		onchange((e) => {
 			if (next === 'film') e.film = { amount: 100, interlayer: 45 };
 			else delete e.film;
@@ -38,12 +40,35 @@ sees the light, through a filter. -->
 		oncommit();
 	}
 
-	function setMono(field: 'film' | 'filter', value: string) {
+	/** The scene's light, as `sidecar_color::spectral::light` knows it. */
+	const LIGHTS = [
+		{ id: 'daylight', label: 'Daylight' },
+		{ id: 'tungsten', label: 'Tungsten' },
+		{ id: 'white-balance', label: 'From white balance' }
+	];
+
+	/** The developers `sidecar_color::developer` knows, and what each does. */
+	const DEVELOPERS = [
+		{ id: 'standard', label: 'Standard', note: 'A general-purpose developer: the film as its datasheet shows it.' },
+		{ id: 'fine-grain', label: 'Fine grain', note: 'A solvent developer: smaller, smoother grain.' },
+		{ id: 'acutance', label: 'High acutance', note: 'A dilute sharp developer: crisp edges, grain shown off.' },
+		{ id: 'compensating', label: 'Compensating', note: 'Two-bath or stand development: highlights held back, broad halos of local contrast at edges.' },
+		{ id: 'staining', label: 'Staining', note: 'A pyro developer: highlights held and their grain hidden by the stain, edges a little sharper.' }
+	];
+
+	/** Defaults are left out of the edit, as the sidecar leaves them out. */
+	const MONO_DEFAULTS: Record<string, string> = { light: 'daylight', developer: 'standard' };
+
+	function setMono(field: 'film' | 'filter' | 'light' | 'developer', value: string) {
 		onchange((e) => {
-			if (e.monochrome) e.monochrome[field] = value;
+			if (!e.monochrome) return;
+			if (MONO_DEFAULTS[field] === value) delete e.monochrome[field as 'light' | 'developer'];
+			else e.monochrome[field] = value;
 		});
 		oncommit();
 	}
+
+	const zone = (v: number) => (v === 0 ? 'N (normal)' : `N${v > 0 ? '+' : '−'}${decimals(Math.abs(v), 1)}`);
 
 	/** Grain, kept while its size is set even at amount 0, so the size isn't lost on the way back up. */
 	function setGrain(field: 'amount' | 'size', v: number) {
@@ -83,6 +108,25 @@ sees the light, through a filter. -->
 			{/each}
 		</div>
 		<p class="text-xs text-muted">A filter on the lens lets its own colour through: yellow and orange darken skies a little and a lot, red darkens them to drama and lightens skin, green lightens foliage and darkens lips.</p>
+		<p class="pt-1 text-[11px] font-medium tracking-wide text-muted uppercase">Light</p>
+		<div class="flex flex-wrap gap-1.5 text-xs" role="radiogroup" aria-label="Light">
+			{#each LIGHTS as l (l.id)}
+				<button type="button" role="radio" aria-checked={(mono.light ?? 'daylight') === l.id} class={choice((mono.light ?? 'daylight') === l.id)} onclick={() => setMono('light', l.id)}>{l.label}</button>
+			{/each}
+		</div>
+		<p class="text-xs text-muted">Film has no white balance: under a tungsten bulb it gets plenty of red and little blue, so reds and skin print lighter and blues darker than in daylight. From white balance takes the light the white balance names.</p>
+		<p class="pt-1 text-[11px] font-medium tracking-wide text-muted uppercase">Developer</p>
+		<div class="grid gap-1 text-xs" role="radiogroup" aria-label="Developer">
+			{#each DEVELOPERS as d (d.id)}
+				{@const on = (mono.developer ?? 'standard') === d.id}
+				<button type="button" role="radio" aria-checked={on} class="rounded px-2 py-1.5 text-left {on ? 'bg-raised text-fg' : 'text-fg-2 hover:bg-raised/60'}" onclick={() => setMono('developer', d.id)}>
+					<span class="font-medium">{d.label}</span>
+					{#if on}<span class="block pt-0.5 text-muted">{d.note}</span>{/if}
+				</button>
+			{/each}
+		</div>
+		<Slider id="mono-development" label="Development" value={mono.development ?? 0} min={-2} max={2} step={0.5} defaultValue={0} bipolar format={zone} onchange={(v) => onchange((e) => { if (!e.monochrome) return; if (v === 0) delete e.monochrome.development; else e.monochrome.development = v; })} {oncommit} />
+		<p class="text-xs text-muted">Longer development (N+) gives the negative more contrast above the shadows and coarser grain; shorter (N−) less, for a scene too contrasty to hold.</p>
 		<p class="text-xs text-muted">Each colour's spectrum is estimated from the photo, then seen as the film type would. The types are the classes' sensitivities, not any one brand's measured curve.</p>
 	{:else if edit.film}
 		<Slider id="film-amount" label="Amount" value={edit.film.amount} min={0} max={100} defaultValue={100} format={(v) => `${decimals(v)} %`} onchange={(v) => onchange((e) => { if (e.film) e.film.amount = v; })} {oncommit} />

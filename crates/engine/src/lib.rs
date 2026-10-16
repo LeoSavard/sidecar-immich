@@ -13,7 +13,7 @@ pub mod focus;
 pub mod ingest;
 pub mod lens;
 pub mod warp;
-pub use develop::{DevelopPass, Masks};
+pub use develop::{DevelopPass, Masks, needs_density_map};
 pub use focus::focus_energy;
 pub use ingest::{Ingest, MosaicInput};
 
