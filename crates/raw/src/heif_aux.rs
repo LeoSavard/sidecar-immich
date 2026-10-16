@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //! A HEIC's auxiliary images — Apple's depth, mattes and HDR gain map — through the same external-decoder
 //! boundary as `decoded::decode_heif`: nothing LGPL runs in this process. One decoder run writes every
-//! auxiliary image to a temporary directory; `portrait_depth` and `gain_map` each pick theirs from the same
-//! extraction, so a photo is decoded once however many of them are wanted.
+//! auxiliary image to a temporary directory and each reader picks the one it wants from that extraction, so a
+//! photo is decoded once however many of them are wanted — `gain_map` here, and the depth/matte reader on the
+//! portrait-depth branch, which shares this module unchanged.
 
 use crate::decoded::DecodeError;
 use std::path::{Path, PathBuf};

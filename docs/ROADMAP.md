@@ -70,8 +70,11 @@ image telling an HDR screen how far past SDR white to lift each area — and Pho
 only the SDR picture (ImageMagick and `heif-convert` decode the primary image and drop the auxiliary one) and
 exports SDR, so an edit looks flat beside its original. In order:
 
-1. *Read the gain map* at decode, with its metadata — **done**, in `sidecar_raw::gain_map`, through the same
-   `heif-convert --with-aux` boundary as `portrait_depth` (docs above). Checked against a real iPhone 17 Pro
+1. *Read the gain map* at decode, with its metadata — **done**, in `sidecar_raw::gain_map`, through a shared
+   `sidecar_raw::heif_aux` module: one `heif-convert --with-aux` run per photo, every auxiliary image written
+   out, each reader picking the one it wants, so adding a second reader costs no second decode. (The
+   portrait-depth branch adds exactly such a reader and shares this module byte for byte; the two branches
+   are independent and can merge in either order, touching only adjacent `pub mod` lines.) Checked against a real iPhone 17 Pro
    HEIC rather than assumed: the aux image (`urn:com:apple:photo:2020:aux:hdrgainmap`) comes out named
    `<stem>-urn_com_apple_photo_2020_aux_hdrgainmap.png`, 8-bit grey at exactly half the main image's linear
    size — the same resolution convention `portrait_depth` already found for the Portrait Effects Matte.

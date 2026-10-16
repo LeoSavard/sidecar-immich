@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Apple's HDR gain map, read from a HEIC's auxiliary image through the same external-decoder boundary as
-//! `decoded::decode_heif` and `portrait_depth::read` — nothing LGPL runs in this process. See
-//! docs/ROADMAP.md, "HDR originals keep their gain map".
+//! `decoded::decode_heif` — nothing LGPL runs in this process. See docs/ROADMAP.md, "HDR originals keep
+//! their gain map".
 //!
 //! Checked against a real iPhone 17 Pro HEIC rather than assumed: the aux image is
 //! `urn:com:apple:photo:2020:aux:hdrgainmap`, `heif-convert --with-aux` writes it as
 //! `<stem>-urn_com_apple_photo_2020_aux_hdrgainmap.png`, and it is an 8-bit grey image at exactly half the
 //! main image's linear size (1512×2016 of 3024×4032; 1512×1512 of a 3024×3024 square crop) — the same
-//! resolution convention as the Portrait Effects Matte (`portrait_depth`), not a coincidence: both are
-//! Apple's "normal-looking derived image, half the main one's size" shape.
+//! resolution convention the Portrait Effects Matte follows (measured on the portrait-depth branch), not a
+//! coincidence: both are Apple's "normal-looking derived image, half the main one's size" shape.
 //!
 //! `exiftool` carries four numbers alongside it, and only two are clearly the same thing:
 //! `XMP-HDRGainMap:HDRGainMapVersion` (131072 = 0.2.0.0 — ExifTool's four-byte reading of it) and
@@ -106,8 +106,8 @@ mod tests {
     }
 
     /// Pins the measurements in the module docs against a real file. Skips, rather than fails, where
-    /// `heif-convert` or `exiftool` isn't installed, or the fixture isn't there (not committed — see
-    /// `portrait_depth`'s equivalent test for why).
+    /// `heif-convert` or `exiftool` isn't installed, or the fixture isn't there (it is a photo of the
+    /// owner's, so it is not committed).
     #[test]
     fn a_real_hdr_photo_has_a_half_size_gain_map_and_its_own_headroom() {
         if !crate::heif_aux::which("heif-convert") || !crate::heif_aux::which("exiftool") {
