@@ -13,18 +13,21 @@ you stop.
 from a data sheet (PROVIA 100F), the depth map upsampled against the photo (#22), the curve's pinned
 endpoints (#23) and the tone controls grading a stock (#24), with CI green on each merge.
 
-Three pull requests are open. **Every one of them waits on the owner, not on work** — each is built, tested
-and merge-clean, and each stops at a judgement that wants pictures or a measurement:
+Five pull requests are open, and **none of them changes a pixel**. The first three wait on the owner rather
+than on work — each is built, tested and merge-clean, and each stops at a judgement that wants pictures or a
+measurement. The last two are this session's own and want nothing but review:
 
 | # | Branch | What | Waiting on |
 |---|---|---|---|
 | 21 | `worktree-tone-curve` | The log-log straight segment above middle grey, built and measured. **Changes no pixels** | Which shoulder order, and what Contrast should mean above grey (see Open questions) |
 | 1 | `worktree-portrait-depth` | Apple's depth/matte aux image read from a HEIC, plus the surveyed findings. **Changes no pixels** | Nothing external — see below |
 | 2 | `worktree-hdr-gain-map` | The HDR gain map read and carried, unapplied. **Changes no pixels** | An HDR display and a colorimeter: no reconstruction formula is published and the guesses are wrong |
+| 25 | `handoff-state` | This page | Review |
+| 26 | `hilite-fringe` | Highlight reconstruction measured, three causes ruled out. **Changes no pixels** | Review; the artifact itself is still open |
 
-All three were brought up to date with `main` on 2026-10-16 and all three report `MERGEABLE`/`CLEAN`; CI's own
-checks (clippy with warnings denied, the workspace tests, the generated-TypeScript gate) were run locally on
-each before pushing. #1 and #2 are independent of each other despite sharing `crates/raw/src/heif_aux.rs`
+#21, #1 and #2 were brought up to date with `main` on 2026-10-16 and all three report `MERGEABLE`/`CLEAN`.
+CI's own checks (clippy with warnings denied, the workspace tests, the generated-TypeScript gate) were run
+locally on every one of the five before pushing, and CI is green on all of them. #1 and #2 are independent of each other despite sharing `crates/raw/src/heif_aux.rs`
 **byte for byte**: they collide only on the two adjacent `pub mod` lines in `crates/raw/src/lib.rs`, so they
 can merge in either order, and neither's docs assume the other is present any more.
 
@@ -140,7 +143,10 @@ decision from anyone:
   weighting one measure by a mask that is already there, and it answers "is the subject sharp?" rather than
   "is anything sharp?".
 - **Highlight reconstruction's bluish blotches** at the edges of reconstructed areas (ROADMAP, first section).
-  A real, visible defect with a reproducible test case, as against a feature nobody has asked for.
+  A real, visible defect, and **started in #26**: it is now measurable (`sidecar-dev hilite`), the cast has a
+  number on it, and three candidate causes are ruled out by experiment. It is not fixed. Read that pull
+  request before touching the pass — especially the trap it records, that the blobs the obvious crop lands on
+  are still there with reconstruction switched off, so they are the scene and not the artifact.
 - **Rec.2020 SDR export**, which ROADMAP calls close: the 16-bit TIFF path exists and wants the matrix and an
   ICC profile. Note this is a *gamut*, not HDR — the HDR half is #2's, and blocked.
 
