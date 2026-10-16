@@ -13,9 +13,11 @@ Where the code differs from the text below, the code and these notes win.
   measured on the server from the operator's own copies of ISO 5-3 and ISO 7589 and served as a per-stock
   profile; a deployment without those files offers no stock. Checked: the pass agrees with `Slide::render` on
   the CPU within 0.06 stop over greys and saturated colours, and at amount 0 renders bit-identically to no
-  stock; the uniform grew to 400 bytes, verified against the WGSL by naga; parity cases `slide-provia` and
-  `slide-provia-mixed`. The stock replaces the neutral tone map, so the tone controls act only on the neutral
-  rendering `Film.amount` mixes in, and `Film.interlayer` is not part of a sheet's chain.
+  stock; the uniform grew to 416 bytes, verified against the WGSL by naga; parity cases `slide-provia` and
+  `slide-provia-mixed`. The stock replaces the neutral tone map; what it renders is then graded by the tone
+  controls as a developed file is (`slide_tone`), the identity at their defaults. `Film.interlayer` is not
+  part of a sheet's chain. *The first arrangement left those controls reaching the picture only through the
+  neutral rendering, so at a full Amount they moved and did nothing — reported from the editor, and fixed.*
 - **Named stocks** (§7, "Stocks"): ILFORD HP5 Plus and SFX 200, KODAK TRI-X 400 and 320, from
   the datasheets the owner supplied — spectral sensitivity and the characteristic curve's toe and shoulder.
   EASTMAN DOUBLE-X was traced and then dropped: its sheet's spectral curve stops at 420 nm and the owner found
@@ -795,8 +797,16 @@ largest channel times the table's at its chromaticity, as light is linear; `Slid
 each layer's response on its own curve, and clamping to the table's domain is what holds every curve flat past
 its ends — so an unexposed frame comes out at full density, as a reversal stock does. The stock takes the place
 of the neutral tone map, and `Film.amount` mixes the two; `Film.interlayer` has no part in a sheet's chain and
-is ignored (the editor hides it for a stock). Because viewing puts the light table at the display's white, the
-tone controls and the user's curve reach the picture only through the neutral rendering being mixed in.
+is ignored (the editor hides it for a stock).
+
+*Grading what comes out.* A stock's output is a rendered picture — a slide on a light table — so the tone
+controls and the user's curve act on it the way they act on a developed file (`tone_display_curve_in`, with
+`DevelopParams.slide_tone` carrying them in that form): the identity where they sit at their defaults, so the
+chain's own colour is what appears, and a grade on top when they are moved. The knee is held at 1, because
+Exposure has already moved the film along its own characteristic curve and the sheet's shoulder is the one
+that counts. This replaced the first arrangement, where those controls reached the picture only through the
+neutral rendering — which meant that at a full Amount, Contrast, Blacks, Whites, Highlights, Shadows and the
+curve did nothing at all while still moving. Exposure worked throughout, since it is the film's exposure.
 
 *Which side holds what, and why.* `pack` is compiled to wasm so the browser packs the same uniforms, and the
 browser must hold no ISO table. So a stock splits in two. The **profile** — the response table and the three

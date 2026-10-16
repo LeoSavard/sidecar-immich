@@ -519,6 +519,9 @@ mod tests {
         p.tone = [-10.0, 6.5, 7.0, 0.5];
         p.slide = [1.0, sidecar_color::spectral::GRID as f32, profile.side as f32, 0.0];
         p.slide_log_h = [profile.offsets[0], profile.offsets[1], profile.offsets[2], profile.scale];
+        // The tone controls at their defaults, in a developed file's terms: the identity, so what comes out is
+        // the chain's own colour.
+        p.slide_tone = [0.0, 0.0, 1.0, 1.0];
         let lut: Vec<f32> = (0..4096).map(|i| i as f32 / 4095.0).collect();
         let tex = crate::upload_rgba16(gpu, &src);
         let masks = Masks { slide_exposure: &exposures, slide_response: &profile.response, ..Masks::none() };
@@ -535,6 +538,22 @@ mod tests {
                 assert!(off < 0.06, "{c:?} channel {k}: gpu {} chain {} ({off:+.3} stop)", got[k], want[k]);
             }
         }
+        // A stock's output is a rendered picture, so the tone controls grade it — the identity at their
+        // defaults (asserted above, against the chain), and they must actually bite when moved. Before this
+        // they reached the picture only through the neutral rendering a full Amount had already replaced, so
+        // Contrast, Blacks and the curve did nothing at all.
+        let mut harder = p;
+        harder.slide_tone = [0.0, 0.0, 1.6, 1.0]; // Contrast up
+        let contrasty = crate::read_rgba16(gpu, &pass.render(gpu, &tex, bytemuck::bytes_of(&harder), &lut, &masks).unwrap()).unwrap();
+        let grey = |img: &RgbaF32| img.data[1]; // the mid-grey patch's green
+        let dark = |img: &RgbaF32| img.data[4 + 1]; // the near-black patch's green
+        assert!(dark(&contrasty) < dark(&out) - 1e-4, "Contrast must darken the shadows: {} against {}", dark(&contrasty), dark(&out));
+        eprintln!("contrast 1.6: grey {} -> {}, shadow {} -> {}", grey(&out), grey(&contrasty), dark(&out), dark(&contrasty));
+        let mut lifted = p;
+        lifted.slide_tone = [0.6, 0.0, 1.0, 1.0]; // Blacks up
+        let raised = crate::read_rgba16(gpu, &pass.render(gpu, &tex, bytemuck::bytes_of(&lifted), &lut, &masks).unwrap()).unwrap();
+        assert!(dark(&raised) > dark(&out) + 1e-4, "Blacks must lift the shadows: {} against {}", dark(&raised), dark(&out));
+
         // Amount 0 is the neutral rendering, untouched.
         let mut off_params = p;
         off_params.slide = [0.0; 4];
