@@ -763,6 +763,14 @@ pub struct DevelopParams {
     /// Where a layer response of 1 lands in the response table, per layer, and a decade of log H, as fractions
     /// of its domain (`slide::SlideProfile`).
     pub slide_log_h: [f32; 4],
+    /// The tone controls as a *developed file's* (`display_tone`): what comes out of a stock's chain is a
+    /// rendered picture, as a scanned slide is, so Blacks, Whites, Contrast and the curve grade it rather than
+    /// reaching it through the neutral rendering it replaced. All zero without a stock.
+    ///
+    /// The knee is held at 1 — no shoulder. It exists to recover headroom when a developed file's exposure is
+    /// raised; here Exposure has already moved the film along its own characteristic curve, whose shoulder is
+    /// the sheet's, and a second one would be counted twice.
+    pub slide_tone: [f32; 4],
 }
 
 /// Contrast slider value → logistic steepness.
@@ -940,6 +948,14 @@ fn pack_inner(edit: &EditParams, camera: &CameraColor, source: SourceKind, displ
             Some((_, p)) => [p.offsets[0], p.offsets[1], p.offsets[2], p.scale],
             None => [0.0; 4],
         },
+        slide_tone: match &slide {
+            Some(_) => {
+                let mut t = display_tone(edit);
+                t[3] = 1.0;
+                t
+            }
+            None => [0.0; 4],
+        },
         shoulder: match stock_curve(edit, developed) {
             Some(c) => [c.shoulder_at as f32, c.shoulder_width as f32, 0.0, 0.0],
             None => [0.0, 1.0, 0.0, 0.0],
@@ -1022,7 +1038,7 @@ mod tests {
         let (handle, ty) = module.types.iter().find(|(_, t)| t.name.as_deref() == Some("DevelopParams")).unwrap();
         let naga::TypeInner::Struct { members, span } = &ty.inner else { panic!("not a struct") };
         assert_eq!(*span as usize, std::mem::size_of::<DevelopParams>());
-        assert_eq!(layouter[handle].size as usize, 400);
+        assert_eq!(layouter[handle].size as usize, 416);
         let rust = [
             ("wb_mul", std::mem::offset_of!(DevelopParams, wb_mul)),
             ("exposure", std::mem::offset_of!(DevelopParams, exposure)),
@@ -1041,13 +1057,14 @@ mod tests {
             ("shoulder", std::mem::offset_of!(DevelopParams, shoulder)),
             ("slide", std::mem::offset_of!(DevelopParams, slide)),
             ("slide_log_h", std::mem::offset_of!(DevelopParams, slide_log_h)),
+            ("slide_tone", std::mem::offset_of!(DevelopParams, slide_tone)),
         ];
         for (name, off) in rust {
             let m = members.iter().find(|m| m.name.as_deref() == Some(name)).unwrap();
             assert_eq!(m.offset as usize, off, "{name}");
         }
         let p = pack(&EditParams::default(), &crate::camera::nikon_d850(), SourceKind::Raw, DisplaySpace::Srgb);
-        assert_eq!(p.uniform.len(), 400);
+        assert_eq!(p.uniform.len(), 416);
         assert_eq!(p.lut.len(), LUT_SIZE);
         // exposure sits at byte 12
         assert_eq!(f32::from_le_bytes(p.uniform[12..16].try_into().unwrap()), 1.0);

@@ -220,7 +220,7 @@ sees the light, through a filter. -->
 					<button type="button" role="radio" aria-checked={on} class={choice(on)} onclick={() => setFilmLight(l.id)}>{l.label}</button>
 				{/each}
 			</div>
-			<p class="text-xs text-muted">Colour film is not white balanced either: it sees the surface's own colour times the light. The stock's own curves set the tones, so Contrast, Blacks and the curve reach the picture only through the neutral rendering Amount mixes in.</p>
+			<p class="text-xs text-muted">Colour film is not white balanced either: it sees the surface's own colour times the light. The stock's own curves set the tones; Light and Curve then grade what comes out, as you would a scanned slide.</p>
 		{:else}
 			<Slider id="film-interlayer" label="Interlayer effects" value={edit.film.interlayer} min={0} max={100} defaultValue={45} format={(v) => decimals(v)} onchange={(v) => onchange((e) => { if (e.film) e.film.interlayer = v; })} {oncommit} />
 			<p class="text-xs text-muted">Each colour gets its own tone curve, so highlights fade to white and midtones gain colour. Interlayer effects spread colours apart as film's layers hold each other back; greys stay grey.</p>

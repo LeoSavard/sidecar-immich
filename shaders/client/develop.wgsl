@@ -117,10 +117,14 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     c = mix(c, vec3f(srgb_decode1(user.r), srgb_decode1(user.g), srgb_decode1(user.b)), P.film.x);
   }
   // Colour film, spectrally: the stock's own chain in place of the neutral rendering, mixed in by its amount.
-  // Its density is the data sheet's — the light table sits at the display's white — so the tone controls and
-  // the user's curve reach it only through the neutral rendering it is mixed with.
+  // What comes out is a rendered picture — a slide on a light table — so the tone controls and the user's
+  // curve grade it the way they grade a developed file, which is the identity where they sit at their
+  // defaults. Reaching it through the neutral rendering instead would have left half of them doing nothing
+  // at all once Amount was full. `P.slide_tone` carries them in a developed file's terms.
   if (P.slide.x > 0.0) {
-    c = mix(c, slide_colour(scene, slide_exposures, slide_responses, P.slide, P.slide_log_h), P.slide.x);
+    var s = slide_colour(scene, slide_exposures, slide_responses, P.slide, P.slide_log_h);
+    let graded = layer_curves(lut_sample(tone_lut, tone_display_curve_in(s, P.slide_tone)), layer_curves_tex, local.curves, M.count);
+    c = mix(c, tone_apply(s, graded, true), P.slide.x);
   }
   c = mask_saturation(mask_contrast(c, local.contrast), local.saturation);
   c = color_mixer(c, local.mixer);                             // 5
