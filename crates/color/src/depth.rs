@@ -28,6 +28,61 @@ pub struct DepthParams {
     pub scale: [f32; 4],
 }
 
+/// The model's output, one edge: what the depth map's own resolution is, whatever size it is stretched to
+/// (`sidecar_worker::masks::DEPTH_EDGE`).
+pub const DEPTH_MODEL_EDGE: f64 = 518.0;
+
+/// The longest edge a refined depth map is rendered at. The map's detail comes from the guide, so a larger one
+/// would keep finding edges — but it is kept for as long as the photo is open and sampled bilinearly like the
+/// map it replaces, and 2,048 is already four times the model's own resolution, which is where the halo around
+/// hair and thin branches comes from. Beyond it the photo is read by point samples anyway, which would start
+/// to alias on fine texture.
+pub const REFINE_MAX_EDGE: u32 = 2048;
+
+/// The size to refine a depth map to, for a photo of `frame` pixels: the frame, with its long edge capped at
+/// `REFINE_MAX_EDGE` and its proportions kept.
+pub fn refined_size(frame: [u32; 2]) -> [u32; 2] {
+    let long = frame[0].max(frame[1]);
+    if long <= REFINE_MAX_EDGE || long == 0 {
+        return frame;
+    }
+    let scale = REFINE_MAX_EDGE as f64 / long as f64;
+    [((frame[0] as f64 * scale).round() as u32).max(1), ((frame[1] as f64 * scale).round() as u32).max(1)]
+}
+
+/// How different two luminances must be, in the photo's linear light, before the refinement stops letting one
+/// pixel's depth speak for the other. Small enough that an edge is an edge; large enough that film grain,
+/// sensor noise and a texture's own variation do not chop a smooth surface into pieces.
+pub const REFINE_SIGMA: f64 = 0.08;
+
+/// Byte-for-byte mirror of `struct DepthRefineParams` in shaders/client/depth_refine.wgsl (16 bytes); checked
+/// by naga.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct DepthRefineParams {
+    /// The distance between taps, in the texture being refined: one texel of the model's own map.
+    pub spacing: f32,
+    /// `REFINE_SIGMA`.
+    pub sigma_range: f32,
+    pub _pad: [f32; 2],
+}
+
+impl DepthRefineParams {
+    /// For a texture whose frame is `frame` pixels: the depth map has `DEPTH_MODEL_EDGE` texels along the
+    /// frame's long edge however far it has been stretched, so that is how far apart the taps go. Below one
+    /// pixel there is nothing left to repair and the pass copies.
+    pub fn for_frame(frame: [u32; 2]) -> Self {
+        let long = frame[0].max(frame[1]) as f64;
+        Self { spacing: (long / DEPTH_MODEL_EDGE) as f32, sigma_range: REFINE_SIGMA as f32, _pad: [0.0; 2] }
+    }
+
+    /// Whether refining this frame would do anything: a frame at or below the model's own resolution is
+    /// already as sharp as the map gets.
+    pub fn worth_it(&self) -> bool {
+        self.spacing >= 1.0
+    }
+}
+
 impl DepthParams {
     pub fn blurs(&self) -> bool {
         self.blur[3] > 0.5
@@ -96,6 +151,41 @@ mod tests {
         ] {
             assert_eq!(members.iter().find(|m| m.name.as_deref() == Some(name)).unwrap().offset as usize, off, "{name}");
         }
+    }
+
+    #[test]
+    fn refine_layout_matches_wgsl() {
+        let src = sidecar_shaders::compose("client/depth_refine.wgsl").unwrap();
+        let module = naga::front::wgsl::parse_str(&src).unwrap();
+        let (_, ty) = module.types.iter().find(|(_, t)| t.name.as_deref() == Some("DepthRefineParams")).unwrap();
+        let naga::TypeInner::Struct { members, span } = &ty.inner else { panic!("not a struct") };
+        assert_eq!(*span as usize, std::mem::size_of::<DepthRefineParams>());
+        for (name, off) in [
+            ("spacing", std::mem::offset_of!(DepthRefineParams, spacing)),
+            ("sigma_range", std::mem::offset_of!(DepthRefineParams, sigma_range)),
+        ] {
+            assert_eq!(members.iter().find(|m| m.name.as_deref() == Some(name)).unwrap().offset as usize, off, "{name}");
+        }
+    }
+
+    /// The taps are a texel of the model's own map apart, whatever the frame is stretched to, and a frame no
+    /// bigger than the model's output has nothing to repair.
+    #[test]
+    fn refinement_is_spaced_by_the_models_own_texel() {
+        let p = DepthRefineParams::for_frame([6000, 4000]);
+        assert!((p.spacing - 6000.0 / 518.0).abs() < 1e-4, "{}", p.spacing);
+        assert!(p.worth_it());
+        assert!((DepthRefineParams::for_frame([400, 518]).spacing - 1.0).abs() < 1e-6, "the long edge decides");
+        assert!(!DepthRefineParams::for_frame([400, 300]).worth_it(), "already at the map's own resolution");
+    }
+
+    /// A refined map is the frame, capped on its long edge and keeping its proportions.
+    #[test]
+    fn refined_size_caps_the_long_edge() {
+        assert_eq!(refined_size([1600, 1000]), [1600, 1000], "under the cap, as it is");
+        assert_eq!(refined_size([6000, 4000]), [2048, 1365]);
+        assert_eq!(refined_size([4000, 6000]), [1365, 2048], "portrait too");
+        assert!(DepthRefineParams::for_frame(refined_size([6000, 4000])).worth_it(), "and still worth refining");
     }
 
     /// Nothing to do is no pass; the blur is sized by the frame's long edge and gathered at a scale that keeps

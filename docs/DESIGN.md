@@ -13,9 +13,11 @@ Where the code differs from the text below, the code and these notes win.
   measured on the server from the operator's own copies of ISO 5-3 and ISO 7589 and served as a per-stock
   profile; a deployment without those files offers no stock. Checked: the pass agrees with `Slide::render` on
   the CPU within 0.06 stop over greys and saturated colours, and at amount 0 renders bit-identically to no
-  stock; the uniform grew to 400 bytes, verified against the WGSL by naga; parity cases `slide-provia` and
-  `slide-provia-mixed`. The stock replaces the neutral tone map, so the tone controls act only on the neutral
-  rendering `Film.amount` mixes in, and `Film.interlayer` is not part of a sheet's chain.
+  stock; the uniform grew to 416 bytes, verified against the WGSL by naga; parity cases `slide-provia` and
+  `slide-provia-mixed`. The stock replaces the neutral tone map; what it renders is then graded by the tone
+  controls as a developed file is (`slide_tone`), the identity at their defaults. `Film.interlayer` is not
+  part of a sheet's chain. *The first arrangement left those controls reaching the picture only through the
+  neutral rendering, so at a full Amount they moved and did nothing — reported from the editor, and fixed.*
 - **Named stocks** (§7, "Stocks"): ILFORD HP5 Plus and SFX 200, KODAK TRI-X 400 and 320, from
   the datasheets the owner supplied — spectral sensitivity and the characteristic curve's toe and shoulder.
   EASTMAN DOUBLE-X was traced and then dropped: its sheet's spectral curve stops at 420 nm and the owner found
@@ -150,6 +152,16 @@ Where the code differs from the text below, the code and these notes win.
   reads the depth mask under the tap. `EditParams.lensBlur` (amount, focus, range) and `haze` are left out when
   off. Measured on the tractor photo's server previews (edge energy, higher is sharper): focus near → fence,
   cab and trees 2.3, 2.5, 2.6; focus on the cab → 3.4, 10.8, 3.8; unblurred 5.3, 11.1, 13.8.
+- **The depth map's edges are the photo's** (§7, "Depth"): the model's map is 518², so stretching it to the
+  frame leaves a step smeared over a couple of its texels and a blur's edge drifts off the subject into a halo
+  — visible around hair and thin branches. `client/depth_refine.wgsl` upsamples it against the photo instead
+  (joint bilateral upsampling, Kopf et al. 2007, from the paper): 25 taps a texel apart, each weighted by
+  distance and by how closely the photo's luminance there matches the photo's here, so depth steps where the
+  photo steps and stays smooth where it does not. It depends on the photo and the map alone, not on any
+  slider, so both engines render it once and keep it; it is capped at 2,048 on the long edge, four times the
+  model's own. One pass takes most of an edge's error out rather than all of it — the texel being repaired is
+  itself a tap — which is what the engine test holds it to, along with leaving flat regions and fine texture
+  alone. Checked in the browser with `web/scripts/depth-edges.mjs`.
 - **Depth masks (§15):** Depth Anything V2 *Small* (Apache-2.0; Base and Large are CC-BY-NC and excluded),
   simplified at 518² like BiRefNet and imported by burn-onnx, gives relative inverse depth: no unit, no fixed
   origin. `Ml::depth` stretches it between the photo's own 1st and 99th percentiles to 0–255, near white, and
@@ -785,8 +797,16 @@ largest channel times the table's at its chromaticity, as light is linear; `Slid
 each layer's response on its own curve, and clamping to the table's domain is what holds every curve flat past
 its ends — so an unexposed frame comes out at full density, as a reversal stock does. The stock takes the place
 of the neutral tone map, and `Film.amount` mixes the two; `Film.interlayer` has no part in a sheet's chain and
-is ignored (the editor hides it for a stock). Because viewing puts the light table at the display's white, the
-tone controls and the user's curve reach the picture only through the neutral rendering being mixed in.
+is ignored (the editor hides it for a stock).
+
+*Grading what comes out.* A stock's output is a rendered picture — a slide on a light table — so the tone
+controls and the user's curve act on it the way they act on a developed file (`tone_display_curve_in`, with
+`DevelopParams.slide_tone` carrying them in that form): the identity where they sit at their defaults, so the
+chain's own colour is what appears, and a grade on top when they are moved. The knee is held at 1, because
+Exposure has already moved the film along its own characteristic curve and the sheet's shoulder is the one
+that counts. This replaced the first arrangement, where those controls reached the picture only through the
+neutral rendering — which meant that at a full Amount, Contrast, Blacks, Whites, Highlights, Shadows and the
+curve did nothing at all while still moving. Exposure worked throughout, since it is the film's exposure.
 
 *Which side holds what, and why.* `pack` is compiled to wasm so the browser packs the same uniforms, and the
 browser must hold no ISO table. So a stock splits in two. The **profile** — the response table and the three

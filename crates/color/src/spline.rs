@@ -88,6 +88,32 @@ fn highlight_weight(x: f64) -> f64 {
     0.5 - 0.5 * (std::f64::consts::PI * t).cos()
 }
 
+/// Where Highlights and Shadows have their full effect: the points their curve points used to sit at.
+const SHADOW_ANCHOR: f64 = 0.25;
+const HIGHLIGHT_ANCHOR: f64 = 0.75;
+
+/// How much of the bump survives at `x`: all of it between the two anchors, easing to **nothing** at pure
+/// black and pure white.
+///
+/// Without this the bump is a pedestal rather than a bump. `highlight_weight` splits the range *between* the
+/// two sliders and so sums to 1 everywhere, including at the ends — Shadows applied whole at x = 0, Highlights
+/// whole at x = 1. Lifting Shadows then lifted black off zero, and pulling Highlights down pulled white off
+/// one; the other signs clamped instead, crushing a band at each end into solid black or white. Either way the
+/// histogram's ends moved or clipped when the sliders were meant to move the tones between them.
+///
+/// The taper leaves everything between the anchors exactly as it was — the sliders keep their strength where
+/// they are aimed, and their midpoint blend is untouched — and only brings the tails home.
+fn ends_taper(x: f64) -> f64 {
+    let t = if x < SHADOW_ANCHOR {
+        x / SHADOW_ANCHOR
+    } else if x > HIGHLIGHT_ANCHOR {
+        (1.0 - x) / (1.0 - HIGHLIGHT_ANCHOR)
+    } else {
+        return 1.0;
+    };
+    0.5 - 0.5 * (std::f64::consts::PI * t.clamp(0.0, 1.0)).cos()
+}
+
 /// The tone curve's LUT, with Highlights and Shadows as a smooth additive bump instead of literal points in
 /// `points` — one LUT either way, so the develop pass samples exactly what this returns. Calling this with
 /// `points: &[]` is the curve Highlights/Shadows alone would produce, which is what a "ghost" preview of the
@@ -104,7 +130,7 @@ pub fn tone_curve_lut(points: &[[f64; 2]], highlights: f64, shadows: f64, size: 
         .map(|(i, &y)| {
             let x = i as f64 / (size - 1) as f64;
             let w = highlight_weight(x);
-            (y as f64 + h * w + s * (1.0 - w)).clamp(0.0, 1.0) as f32
+            (y as f64 + ends_taper(x) * (h * w + s * (1.0 - w))).clamp(0.0, 1.0) as f32
         })
         .collect()
 }
@@ -120,6 +146,28 @@ mod tests {
         let s = monotone_lut(&[[0.0, 0.0], [0.25, 0.15], [0.75, 0.9], [1.0, 1.0]], LUT_SIZE);
         assert!(s.windows(2).all(|w| w[1] >= w[0]));
         assert!((s[LUT_SIZE / 4] - 0.15).abs() < 0.01);
+    }
+
+    /// Black stays black and white stays white, whatever Highlights and Shadows are set to. They move the
+    /// tones *between* the ends; they are not a black- or white-point control, and nothing should clip or walk
+    /// off the end of the histogram because one of them moved.
+    #[test]
+    fn the_ends_are_pinned_whatever_the_sliders_do() {
+        let n = 4096;
+        for h in [-100.0, -60.0, 0.0, 60.0, 100.0] {
+            for s in [-100.0, -60.0, 0.0, 60.0, 100.0] {
+                let lut = tone_curve_lut(&[], h, s, n);
+                assert!(lut[0].abs() < 1e-6, "highlights {h}, shadows {s}: black became {}", lut[0]);
+                assert!((lut[n - 1] - 1.0).abs() < 1e-6, "highlights {h}, shadows {s}: white became {}", lut[n - 1]);
+                // Nor may they clip a band at either end flat, which is the same fault wearing a clamp.
+                assert!(lut[1] > lut[0] && lut[n - 1] > lut[n - 2], "highlights {h}, shadows {s}: an end is flat");
+                assert!(lut.windows(2).all(|w| w[1] >= w[0]), "highlights {h}, shadows {s}: not monotone");
+            }
+        }
+        // The ends are pinned for a drawn curve too, not just the identity.
+        let drawn = [[0.0, 0.0], [0.5, 0.42], [1.0, 1.0]];
+        let lut = tone_curve_lut(&drawn, 100.0, -100.0, n);
+        assert!(lut[0].abs() < 1e-6 && (lut[n - 1] - 1.0).abs() < 1e-6, "a drawn curve's ends moved: {} {}", lut[0], lut[n - 1]);
     }
 
     #[test]

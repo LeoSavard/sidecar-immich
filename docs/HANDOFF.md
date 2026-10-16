@@ -7,50 +7,25 @@ you stop.
 
 *Last updated 2026-10-15.*
 
-## Open pull requests and the order to merge them
+## Open pull requests
 
-On GitHub (`LeoSavard/sidecar-immich`). From #8 up they are *stacked*: each branch is built on the one before,
-and its PR's base is that branch, not `main`. **#3–#20 are out of draft and ready to merge**; #21 and #22 are
-still drafts, and #1 and #2 are held. CI is green on every branch.
-
-**Merging a stacked PR needs its base retargeted first.** GitHub only retargets a PR automatically when the
-branch it was based on is *deleted* on merge, and these branches are kept (worktrees use them). So after each
-one lands, point the next at `main` before merging it, or it will merge into its old base instead:
-
-```bash
-gh pr edit <next> --base main
-gh pr merge <next> --merge        # a merge commit: the history of how it was built is the point
-```
-
-Merge in this order:
-
-| # | Branch | What |
-|---|---|---|
-| 14 | `worktree-xmp-defaults` | Sidecar and history: a field left out at its default is removed, not kept. **First.** |
-| 6 | `worktree-dev-loop` | Fast dev profile, per-worktree builds, `dev/serve`, `dev/bootstrap`, ARCHITECTURE, Dockerfile fix |
-| 4 | `worktree-global-saturation` | Global Saturation slider |
-| 3 | `worktree-curve-highlights-shadows` | Highlights/Shadows as curve bumps (ProcessVersion 2) |
-| 5 | `worktree-look-clipboard` | Copy and paste a look |
-| 7 | `worktree-source-sha1` | Notice when a sidecar was saved for a different file |
-| 8 | `worktree-edit-types` | TypeScript edit types generated from Rust (merges 6, 4, 3, 5, 7, 14) |
-| 9 | `worktree-editor-split` | Editor page split into section components and a session module |
-| 10 | `worktree-film-rendering` | Film rendering (colour): per-channel curves, interlayer effects |
-| 11 | `worktree-wb-eyedropper` | White balance eyedropper |
-| 12 | `worktree-hide-tools` | Hide the editing tools; sRGB/P3 in the editor |
-| 13 | `worktree-depth-masks` | Depth Anything V2 Small, depth masks, mask range layers |
-| 15 | `worktree-depth-effects` | Lens blur and haze by distance; mask lock fix (slow proxies); Saturation labels; tool groups; mask edges; camera rendering beside the edit |
-| 16 | `worktree-bw-film` | Black and white from estimated spectra: film types and filters |
-| 17 | `worktree-film-grain` | Film grain: procedural, in exposure, sized on 35 mm; browser = server |
-| 18 | `worktree-film-developer` | Black and white: the scene's light, developers and development (adjacency map) |
-| 19 | `worktree-film-hp5` | Named stocks from datasheets: HP5 Plus, Tri-X 400 and 320, SFX 200 (spectral sensitivity, toe and shoulder) |
-| 20 | `worktree-film-provia` | Colour film, spectrally: FUJICHROME PROVIA 100F from its data sheet, end to end |
-
-Two branches sit on #20, independently of each other — either can merge first, and each needs #20 under it:
+**The stack has landed.** #3-#20 are merged: `main` now holds everything up to and including colour film from
+a data sheet (PROVIA 100F), and CI is green on each merge. What is left open:
 
 | # | Branch | What |
 |---|---|---|
 | 21 | `worktree-tone-curve` | The log-log straight segment above middle grey, built and measured. **Changes no pixels**: it waits on two decisions (see Open questions) |
 | 22 | `worktree-depth-edges` | The depth map upsampled against the photo, so a blur's edge follows the subject; and the roadmap corrected where focus peaking and AF points were already done |
+
+Both were branched off #20 and have had `main` merged back into them, so either can go first; neither depends
+on the other. Build the next image from #22 - it is the one with pixels in it.
+
+*What the merge taught, for the next stack.* GitHub judges a pull request by **ancestry, not content**. When
+`main` moved under the stack, #8 reported `CONFLICTING` although `git merge-tree` and a real local merge both
+said clean, and it stayed that way across repeated polls - not a cache clearing itself. The cure is to record
+the merge: merging `main` into the branch produced a **byte-identical tree** and flipped it to mergeable at
+once. So when a stack's base moves, merge it back down through every branch before merging the pull requests,
+and check that each merge leaves the tree unchanged - if one does not, that is a real conflict worth reading.
 
 Held: #1 `worktree-portrait-depth` (Apple Portrait matte) and #2 `worktree-hdr-gain-map` (HDR, paused until
 the owner's Spyder X display measurements).
