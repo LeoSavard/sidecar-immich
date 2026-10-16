@@ -148,17 +148,22 @@ rotation libheif already applies to the main image — close enough to the proxy
 beside the existing model masks (DESIGN.md §15) once resized. The raw disparity image, being fixed-resolution
 rather than scaled to the photo, needs more work: upsampling naively would blur edges (hair, fingers) well
 past what the effects matte already does at half-res, so anything using the raw map for a *sharp* mask (as
-opposed to a coarse depth ordering) wants edge-aware upsampling (joint bilateral or a guided filter, guided by
-the RGB proxy) rather than a plain resize. Either way it arrives in the *original's* frame, not the proxy's
-downsampled one, so it needs its own resize rather than reusing `mask_images`' assumption that every mask
-already matches the proxy.
+opposed to a coarse depth ordering) wants edge-aware upsampling. **That upsampling now exists** —
+`client/depth_refine.wgsl` (joint bilateral, DESIGN.md §7 "Depth") was built for the model's own 518² map and
+takes an arbitrary low-resolution depth map against the photo's luminance, which is exactly this problem; the
+disparity map's 576×768 is the same order as 518². Either map still arrives in the *original's* frame, not the
+proxy's downsampled one, so it needs its own resize rather than reusing `mask_images`' assumption that every
+mask already matches the proxy.
 
-*What it's good for, roughly most to least ready:*
+*What it's good for, roughly most to least ready.* **Most of this list has been overtaken by the depth work
+that shipped since** (#13, #15, #22): a `depth` mask from Depth Anything V2 Small, range layers, lens blur and
+haze by distance, and the joint-bilateral refinement all exist now, for *every* photo rather than the ~16%
+that carry Apple's map. What is left for Apple's own depth is therefore not a feature of its own but a
+**second source** for a pipeline that already works — see the dated note at the end of this section.
 
-- **Depth-aware grading, almost for free.** Nothing stops this mask from being just another named mask in the
-  existing layer system (§15) today: a "depth" mask that darkens, cools or desaturates the background relative
-  to the subject reuses `MaskParams` and the weighted exposure/white-balance/contrast/curve blending that
-  already ships, with no new shader work. The cheapest real feature here, and the obvious next step.
+- **Depth-aware grading — shipped**, off the model's map: a `depth` mask with a `range` band is a layer like
+  any other, carrying the same exposure, white-balance, contrast and curve blending. Apple's map would change
+  where the mask's values come from, not what can be done with them.
 - **A cheaper, possibly better subject mask for the ~16% of photos that have one.** The raw disparity (or the
   effects matte, where present) is real multi-view geometry, not a single-image model's guess — for exactly
   the photos that carry it, it could stand in for `sidecar-ml`'s BiRefNet `subject` mask entirely, skipping a
@@ -170,19 +175,21 @@ already matches the proxy.
   mattes (sky, skin, hair, teeth, glasses) already sitting in this library are also free, human-unlabelled
   ground truth if `sidecar-ml`'s own models are ever fine-tuned — Apple's segmentation running for free on
   photos this library already has.
-- **Background blur ("portrait mode" after the fact),** even on a photo a lensed camera didn't shoot with one.
-  A mask alone gives a soft subject/background split good enough to simulate depth of field — but simulating a
-  lens means a spatially-varying blur *radius*, and nothing in the develop pipeline does that yet: today's mask
-  layers blend parameter values per pixel, not a convolution. A real bokeh renderer (progressively larger blur
-  discs with distance, or a two-layer sharp/blurred composite) is new rendering work, not a slot into the
-  existing mask weights.
+- **Background blur ("portrait mode" after the fact) — shipped**, and it was indeed new rendering work rather
+  than a slot into the mask weights, as this section predicted: `EditParams.lensBlur` (amount, focus, range)
+  gathers with a spatially-varying radius from the depth map, weighting each tap by the inverse of its disc's
+  area so a bright point becomes a bright disc (DESIGN.md §7). It runs off the model's map, so it is not
+  limited to Portrait captures.
 - **Background replacement.** A mask is already most of a green-screen-free cutout; combined with `sidecar-ml`'s
   `subject` mask (on the `-ml` image), the two could cross-check each other — but replacement itself
   (compositing a new background, relighting the cut edge) is also new work.
-- **Haze or relighting by actual distance** needs metric depth, which nothing found here has: `relative`
-  disparity gives ordering (nearer/farther), not metres.
-- **Depth-aware noise reduction or sharpening** (lighter on the subject, heavier on a soft background) fits
-  the same mask-weighted model as grading, once a depth mask exists.
+- **Haze by distance — shipped**, and it did not need metric depth after all: `EditParams.haze` grades by the
+  map's relative ordering, which is enough for an aerial-perspective look even though it is not metres.
+  *Relighting* by true distance would still need the metric case Apple's format allows but these captures
+  don't use.
+- **Depth-aware noise reduction or sharpening** is still open, and for a reason unrelated to depth: per-layer
+  detail (roadmap, "Detail per layer") needs a layer's value to reach the detail passes on the worker, which
+  run at full resolution outside the develop pass.
 - **AF point corroboration.** ExifTool's `Apple:AFMeasuredDepth` (a single scalar, present on nearly every
   file regardless of Portrait mode, units unconfirmed — not the same thing as `Apple:FocusDistanceRange`,
   which is the lens's focus-position bracket, not a scene reading) is a second, independent depth-ish signal
@@ -202,8 +209,9 @@ whichever readers want one (this, and the gain map), so a photo isn't decoded on
 *Status.* `sidecar_raw::portrait_depth::read` extracts and classifies the aux image and decodes it to a plain
 0–1 buffer, pinned against both the repo's committed fixture and the real-library numbers above in tests.
 Still open: undoing the per-shot `IntMinValue`/`FloatMinValue` quantization described above, a DNG reader,
-calling any of this from the worker or exposing it over HTTP, the edge-aware resize into the proxy's frame,
-and picking a first real use (depth as a mask layer is the obvious one).
+calling any of this from the worker or exposing it over HTTP, and the resize into the proxy's frame. The first
+real use is no longer an open question — it is to stand in for the model's `depth` mask where the file carries
+a map, which is what the dated note below spells out.
 
 *Decision (2026-10-13): parked behind the HDR gain map work below.* The depth signal only ever appears on
 ~16% of photos and its best-understood use (a depth mask for grading) is a small, well-scoped follow-up
@@ -213,6 +221,21 @@ mask, for all photos, once it exists. The gain map is universal (91% of HEICs) a
 (an edited photo looking duller than its original) rather than adding a new capability, so it's the correct
 next step. This section stays as the record of what was verified, for whenever the depth mask or the blur
 renderer comes back up.
+
+*Where that leaves it (2026-10-16).* The blur renderer came back up and shipped, off a model's map, for every
+photo — so the prediction above held, and this branch's remaining value is no longer a feature. It is a
+**second source for a pipeline that is now complete**: `Ml::depth` runs Depth Anything V2 Small at 518² and
+stretches its relative inverse depth between the photo's 1st and 99th percentiles into the cached `depth`
+mask, and Apple's disparity is the same kind of quantity — relative inverse depth, no unit, no origin, at a
+comparable 576×768 — measured by stereo rather than guessed from one image. Substituting it where the file
+carries one is a contained job with a real payoff (no GPU inference pass, and genuine geometry instead of a
+single-image estimate, which should be better exactly where the model is weakest: a mirror's reflection, a
+photograph of a photograph, a flat textured wall). What it needs: the `IntMinValue`/`FloatMinValue` rescale
+above so the values mean what the model's do, the same percentile stretch so a `range` band set on one source
+means the same on the other, the resize into the proxy's frame, and a decision about whether swapping a cached
+mask's source needs a `MASK_REVISION` bump (it does, if a photo's existing layers are to keep their meaning).
+Worth doing with pictures: the honest test is whether an Apple-sourced `depth` mask blurs a Portrait capture's
+background better than the model's does, on the same photo.
 
 **Editing non-RAW images — done, in `sidecar_raw::decoded`.** JPEG, PNG and TIFF decode in-process; HEIC runs
 an external decoder. They skip the RAW-only ingest stages (hot pixels, demosaic, highlight reconstruction all
@@ -282,7 +305,9 @@ hasn't been built:
   into a halo. What is left here: **depth-weighted focus peaking**, and haze's strength curve, which may want
   tuning with pictures. The refinement itself could go further — it is one pass, so it takes most of the error
   out of an edge rather than all of it (the texel being repaired votes for itself); a second pass, or He, Sun
-  and Tang's guided filter with its box means, would finish the job if pictures ask for it.
+  and Tang's guided filter with its box means, would finish the job if pictures ask for it. A **second source
+  for the map itself** — Apple's own stereo disparity, where a Portrait-mode HEIC carries one — is surveyed
+  under "Portrait depth maps" above.
 - **Detail per layer.** Sharpening and noise reduction through a mask: they run on the worker at full
   resolution, so a layer's value has to reach the detail passes, not just the develop pass.
 - **Upright.** Keystone found automatically from the photo's lines; today Vertical and Horizontal are set by eye.
