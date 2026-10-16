@@ -193,6 +193,30 @@ fn newer_process_version_is_read_only() {
     assert!(doc.set_edit(&EditParams::default(), "x").is_err());
 }
 
+/// A sidecar a `PROCESS_VERSION` 1 Sidecar wrote, with Highlights at +20 stored the old way (a curve point at
+/// x=0.75), must read back with `tone.highlights == 20` and no such point in `tone.curve` — the point that
+/// would otherwise collide with a hand-drawn one near the same x.
+#[test]
+fn an_old_sidecars_highlight_anchor_migrates_on_read() {
+    let tmp = tempfile::tempdir().unwrap();
+    let roots = [tmp.path().canonicalize().unwrap()];
+    let original = fixture(tmp.path(), "e.NEF");
+    let mut edit = EditParams::default();
+    edit.tone.curve = vec![[0.0, 0.0], [0.75, 0.75 + 20.0 / 100.0 * 0.15], [1.0, 1.0]];
+    update(&original, &roots, |d| {
+        d.set_edit(&edit, "x")?;
+        d.sidecar["processVersion"] = serde_json::json!(1);
+        Ok(())
+    })
+    .unwrap();
+
+    let doc = SidecarDoc::load(&original).unwrap();
+    let migrated = doc.edit();
+    assert!((migrated.tone.highlights - 20.0).abs() < 1e-6);
+    assert_eq!(migrated.tone.shadows, 0.0);
+    assert!(migrated.tone.curve.iter().all(|p| (p[0] - 0.75).abs() >= 1e-6), "the anchor point is gone: {:?}", migrated.tone.curve);
+}
+
 #[test]
 fn refuses_to_write_outside_roots() {
     let tmp = tempfile::tempdir().unwrap();
@@ -521,6 +545,31 @@ mod history {
         let mut h = History::begin(&EditParams::default());
         let err = h.commit(&Commit { edit: &ev(1.0), base: "nope", checkpoint: false, session: None, user: None }, &[]).unwrap_err();
         assert!(matches!(err.downcast_ref::<SidecarError>(), Some(SidecarError::UnknownVersion { .. })));
+    }
+
+    /// A history written under `PROCESS_VERSION` 1: its versions read back migrated, and a save made from one
+    /// after the upgrade keeps its Highlights. That second part is why `edit_of` stays raw: a delta taken
+    /// against the migrated parent, replayed onto the stored one, would drop Highlights (unchanged, so not in
+    /// the delta) while the anchor point it came from is replaced along with the rest of the curve.
+    #[test]
+    fn versions_saved_before_highlights_left_the_curve_migrate_and_saves_on_top_keep_them() {
+        let mut h = History::begin(&EditParams::default());
+        h.nodes[0].delta["processVersion"] = serde_json::json!(1);
+        let mut old = EditParams { process_version: 1, ..Default::default() };
+        old.tone.curve = vec![[0.0, 0.0], [0.75, 0.75 + 0.2 * 0.15], [1.0, 1.0]];
+        let a = save(&mut h, &old, ORIGINAL).head;
+
+        let shown = h.version_of(&a).unwrap();
+        assert!((shown.tone.highlights - 20.0).abs() < 1e-9, "{shown:?}");
+        assert_eq!(shown.tone.curve, vec![[0.0, 0.0], [1.0, 1.0]]);
+        assert_eq!(shown.process_version, sidecar_color::params::PROCESS_VERSION);
+        assert_eq!(h.edit_of(&a).unwrap(), old, "what's stored is untouched");
+
+        let mut next = shown.clone();
+        next.tone.curve = vec![[0.0, 0.0], [0.4, 0.45], [1.0, 1.0]];
+        let b = save(&mut h, &next, &a).head;
+        assert_eq!(h.version_of(&b).unwrap(), next);
+        assert_eq!(h.checkout(&a).unwrap(), shown, "a checkout makes the migrated version current");
     }
 }
 

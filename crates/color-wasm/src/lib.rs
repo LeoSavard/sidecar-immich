@@ -154,6 +154,35 @@ pub unsafe extern "C" fn sc_pack_lens(ptr: *const u8, len: usize) -> *const u8 {
     }))
 }
 
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct ToneCurveRequest {
+    #[serde(default)]
+    curve: Vec<[f64; 2]>,
+    #[serde(default)]
+    highlights: f64,
+    #[serde(default)]
+    shadows: f64,
+}
+
+/// `{ curve, highlights, shadows }` → `4,096 × f32` LUT bytes (`sidecar_color::spline::tone_curve_lut`), the
+/// same one `sc_pack` bakes into its own result. `curve: []` with the current Highlights/Shadows is the
+/// "ghost" line the curve editor draws for what the sliders alone would do — see
+/// `web/src/lib/ui/CurveEditor.svelte` and docs/ROADMAP.md.
+///
+/// # Safety
+/// `ptr` must point to `len` readable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sc_tone_curve_lut(ptr: *const u8, len: usize) -> *const u8 {
+    let input = unsafe { std::slice::from_raw_parts(ptr, len) };
+    respond(serde_json::from_slice::<ToneCurveRequest>(input).map_err(|e| e.to_string()).map(|req| {
+        let lut = sidecar_color::spline::tone_curve_lut(&req.curve, req.highlights, req.shadows, sidecar_color::spline::LUT_SIZE);
+        let mut out = Vec::with_capacity(lut.len() * 4);
+        lut.iter().for_each(|v| out.extend_from_slice(&v.to_le_bytes()));
+        out
+    }))
+}
+
 /// Default edit parameters as length-prefixed JSON, so the web app never duplicates them.
 #[unsafe(no_mangle)]
 pub extern "C" fn sc_default_edit() -> *const u8 {

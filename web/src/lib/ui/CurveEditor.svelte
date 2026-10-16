@@ -1,25 +1,31 @@
 <!-- SPDX-License-Identifier: Apache-2.0
 Tone curve over display-encoded values. The drawn curve is the LUT the shader uses (monotone cubic, computed in
-Rust), so what you see is exactly what renders. Tap empty space to add a point; double-tap a point to remove it. -->
+Rust), so what you see is exactly what renders. Tap empty space to add a point; double-tap a point to remove it.
+`ghostLut` — what Highlights/Shadows alone would do to an identity curve — draws behind it, dashed: a manual
+curve starts drawn right on top of its ghost (nothing to tell apart until a point moves), and the two visibly
+part once it does, since the sliders no longer move points in `points` at all. -->
 <script lang="ts">
-	type Props = { points: [number, number][]; lut: Float32Array | null; onchange: (p: [number, number][]) => void; oncommit: () => void };
-	let { points, lut, onchange, oncommit }: Props = $props();
+	type Props = { points: [number, number][]; lut: Float32Array | null; ghostLut?: Float32Array | null; onchange: (p: [number, number][]) => void; oncommit: () => void };
+	let { points, lut, ghostLut = null, onchange, oncommit }: Props = $props();
 
 	let svg: SVGSVGElement;
 	let dragging = -1;
 	let lastTap = { index: -1, at: 0 };
 	const S = 240;
 
-	const path = $derived.by(() => {
-		if (!lut) return '';
+	function pathFor(l: Float32Array | null): string {
+		if (!l) return '';
 		let d = '';
 		for (let i = 0; i <= 64; i++) {
 			const x = i / 64;
-			const y = lut[Math.min(lut.length - 1, Math.round(x * (lut.length - 1)))];
+			const y = l[Math.min(l.length - 1, Math.round(x * (l.length - 1)))];
 			d += `${i ? 'L' : 'M'}${(x * S).toFixed(1)},${((1 - y) * S).toFixed(1)}`;
 		}
 		return d;
-	});
+	}
+
+	const path = $derived(pathFor(lut));
+	const ghostPath = $derived(pathFor(ghostLut));
 
 	function toCurve(e: PointerEvent): [number, number] {
 		const r = svg.getBoundingClientRect();
@@ -81,6 +87,9 @@ Rust), so what you see is exactly what renders. Tap empty space to add a point; 
 		<line y1={g * S} y2={g * S} x1="0" x2={S} stroke="#393939" stroke-width="1" />
 	{/each}
 	<line x1="0" y1={S} x2={S} y2="0" stroke="#393939" stroke-width="1" stroke-dasharray="4 4" />
+	{#if ghostPath}
+		<path d={ghostPath} fill="none" stroke="#6f6f6f" stroke-width="2" stroke-dasharray="3 3" />
+	{/if}
 	<path d={path} fill="none" stroke="#f4f4f4" stroke-width="2" />
 	{#each points as [x, y], i (i)}
 		<circle cx={x * S} cy={(1 - y) * S} r="7" fill="#161616" stroke="#f4f4f4" stroke-width="2" />
