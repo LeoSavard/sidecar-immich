@@ -12,6 +12,7 @@ use crate::Gpu;
 use crate::compute::{B, Kernel, Res, texture, view};
 
 pub struct DepthPass {
+    refine: Kernel,
     down: Kernel,
     gather: Kernel,
     compose: Kernel,
@@ -22,6 +23,7 @@ impl DepthPass {
     pub fn new(gpu: &Gpu) -> Result<Self> {
         let store = B::Store(F::Rgba16Float);
         Ok(Self {
+            refine: Kernel::new(gpu, "client/depth_refine.wgsl", &[B::Uniform, B::TexF, B::TexF, B::Samp, store])?,
             down: Kernel::new(gpu, "client/depth_down.wgsl", &[B::Uniform, B::Tex, B::TexF, B::Samp, store])?,
             gather: Kernel::new(gpu, "client/depth_gather.wgsl", &[B::Uniform, B::TexF, B::TexF, B::Samp, store])?,
             compose: Kernel::new(gpu, "client/depth_compose.wgsl", &[B::Uniform, B::Tex, B::TexF, B::TexF, B::Samp, store])?,
@@ -31,6 +33,28 @@ impl DepthPass {
                 ..Default::default()
             }),
         })
+    }
+
+    /// The depth map with the photo's own edges, as a new RGBA16F texture `out` pixels big
+    /// (`client/depth_refine.wgsl`). Both `depth` and `photo` are sampled across their whole frame, so neither
+    /// has to be that size — the model's map is 518², and this is what upsamples it. `None` when `out` is no
+    /// larger than the model's own output, where there is nothing to repair and the caller keeps the map it
+    /// has. `sidecar_color::depth::refined_size` is the size to ask for.
+    ///
+    /// This depends only on the photo and the map, not on any slider, so a caller renders it once and keeps
+    /// it — it costs 25 taps a texel.
+    pub fn refined(&self, gpu: &Gpu, photo: &wgpu::Texture, depth: &wgpu::Texture, out: [u32; 2]) -> Option<wgpu::Texture> {
+        let params = sidecar_color::depth::DepthRefineParams::for_frame(out);
+        if !params.worth_it() {
+            return None;
+        }
+        let (w, h) = (out[0].max(1), out[1].max(1));
+        let out = texture(gpu, w, h, F::Rgba16Float);
+        let (pv, dv, ov) = (view(photo), view(depth), view(&out));
+        let mut enc = gpu.device.create_command_encoder(&Default::default());
+        self.refine.run(gpu, &mut enc, &params, [w, h], &[Res::View(&pv), Res::View(&dv), Res::Sampler(&self.sampler), Res::View(&ov)]);
+        gpu.queue.submit([enc.finish()]);
+        Some(out)
     }
 
     /// `src` with the haze and lens blur `params` describe, as a new RGBA16F texture of its size. `depth` is the
@@ -127,6 +151,77 @@ mod tests {
         let light: f32 = (560..640).flat_map(|x| (160..240).map(move |y| (x, y))).map(|(x, y)| at(&out, x, y)[0]).sum();
         assert!((light - 400.0).abs() < 400.0 * 0.25, "about the light it had: {light}");
         assert!(at(&out, 412, 300)[0] < 0.05, "the sharp bright half doesn't bleed into the blurred far side: {:?}", at(&out, 412, 300));
+    }
+
+    /// A depth edge that has been smeared by stretching the model's map snaps back to where the photo's own
+    /// edge is, and a flat region keeps its depth rather than being chopped up by the photo's texture.
+    #[test]
+    fn refinement_puts_the_depth_edge_where_the_photo_has_one() {
+        let Ok(gpu) = crate::test_gpu() else { return eprintln!("skipping: no GPU") };
+        let pass = DepthPass::new(gpu).unwrap();
+        // A frame ten times the model's own edge, so one of its texels is ten pixels here — the scale at which
+        // the stretched map is wrong, and the scale the taps are spaced at.
+        let (w, h) = (5180u32, 200u32);
+        let texel = w as f32 / 518.0;
+        let edge = (w / 2) as f32;
+        // The photo: a hard edge at the middle, dark on the near side. Plus fine texture on the far side, which
+        // the refinement must not mistake for depth.
+        let photo = RgbaF32 {
+            width: w,
+            height: h,
+            data: (0..h)
+                .flat_map(|y| {
+                    (0..w).flat_map(move |x| {
+                        let far = x as f32 >= edge;
+                        let v = if far { 0.8 + if (x + y) % 2 == 0 { 0.02 } else { -0.02 } } else { 0.1 };
+                        [v, v, v, 1.0]
+                    })
+                })
+                .collect(),
+        };
+        // The depth map as stretching the model's output leaves it: the step smeared over two of its texels,
+        // so it disagrees with the photo for a texel either side.
+        let smear = 2.0 * texel;
+        let coarse = RgbaF32 {
+            width: w,
+            height: h,
+            data: (0..h)
+                .flat_map(|y| {
+                    (0..w).flat_map(move |x| {
+                        let _ = y;
+                        let t = (((x as f32 - edge) / smear) + 0.5).clamp(0.0, 1.0);
+                        let n = 1.0 - t; // near (1) on the left, far (0) on the right
+                        [n, n, n, 1.0]
+                    })
+                })
+                .collect(),
+        };
+        let refined = pass
+            .refined(gpu, &upload_rgba16(gpu, &photo), &upload_rgba16(gpu, &coarse), [w, h])
+            .expect("a frame this much larger than the model's map is worth refining");
+        let out = read_rgba16(gpu, &refined).unwrap();
+        let n = |x: u32| at(&out, x, 100)[0];
+        let before = |x: u32| at(&coarse, x, 100)[0];
+        let (inside, outside) = (edge as u32 - texel as u32 / 2, edge as u32 + texel as u32 / 2);
+        // Half a texel inside the photo's near side, the smeared map had already given away a quarter of the
+        // step; the refinement takes it back, and the same on the far side.
+        // The centre tap is itself a texel of the stretched map, so it carries its own error into the mean: a
+        // single pass cannot snap the step completely, and it is not supposed to. What it must do is take most
+        // of the error out — here, more than half of it — and put the step where the photo's is.
+        assert!(before(inside) < 0.8, "the map as it stands is smeared here: {}", before(inside));
+        let (was, now) = (1.0 - before(inside), 1.0 - n(inside));
+        assert!(now < was / 2.0, "near, at the photo's edge: {} (was {}), error {now} against {was}", n(inside), before(inside));
+        assert!(n(outside) < before(outside) / 2.0, "far, right after it: {} (was {})", n(outside), before(outside));
+        // The step is now the photo's: most of it happens across the two pixels the photo's edge falls between,
+        // where the stretched map spread it over two of its texels.
+        let (step_was, step_now) = (before(edge as u32 - 1) - before(edge as u32 + 1), n(edge as u32 - 1) - n(edge as u32 + 1));
+        assert!(step_now > 4.0 * step_was, "the step moved to the photo's edge: {step_now} across two pixels, against {step_was}");
+        assert!(step_now > 0.5, "and it is most of the whole step: {step_now}");
+        // Deep in each region the value is unchanged, and the far side's texture has not broken it up.
+        assert!(n(500) > 0.95 && n(w - 500) < 0.05, "interiors keep their depth: {} {}", n(500), n(w - 500));
+        let far: Vec<f32> = (w - 600..w - 500).map(n).collect();
+        let far_spread = far.iter().cloned().fold(0.0f32, f32::max) - far.iter().cloned().fold(1.0f32, f32::min);
+        assert!(far_spread < 0.02, "fine texture is not depth: spread {far_spread}");
     }
 
     /// A tile with its margin, placed in the frame, comes out as the same part of the whole picture does.

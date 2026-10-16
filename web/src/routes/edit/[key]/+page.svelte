@@ -129,6 +129,8 @@
 	let depthPass: DepthPass;
 	/** What the depth pass last ran on and with, so it only runs again when one of them changes. */
 	let depthMadeFrom: { key: string; base: GPUTexture; depth: GPUTexture } | undefined;
+	/** The refined depth map and what it was made from: the photo and the model's map, neither of them a slider. */
+	let refinedFrom: { base: GPUTexture; depth: GPUTexture; out: GPUTexture } | undefined;
 	let correctedMask: GPUTexture | undefined;
 	let lensMadeFrom = '';
 	/** The masks the models made for this photo, fetched when a mask is first needed (`$lib/masks`). */
@@ -479,7 +481,16 @@
 		const wanted = (shown.haze ?? 0) !== 0 || (shown.lensBlur?.amount ?? 0) > 0;
 		if (wanted && !maskSet) loadMaskSet();
 		const airlight = maskSet?.airlight;
-		const depth = wanted && airlight ? maskTexture(DEPTH) : undefined;
+		const coarse = wanted && airlight ? maskTexture(DEPTH) : undefined;
+		// The map with the photo's own edges, so a blur's edge follows hair rather than the model's 518².
+		// It depends on the photo and the map alone, so it is kept until one of them changes.
+		let depth = coarse;
+		if (coarse && base) {
+			if (refinedFrom?.base !== base || refinedFrom?.depth !== coarse) {
+				refinedFrom = { base, depth: coarse, out: depthPass.refine(base, coarse, [base.width, base.height]) };
+			}
+			depth = refinedFrom.out;
+		}
 		const uniform = depth && base ? packer.packDepth($state.snapshot(shown), airlight!, [base.width, base.height]) : undefined;
 		if (!uniform || !depth || !base) {
 			depthMadeFrom = undefined;

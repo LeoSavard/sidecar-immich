@@ -13,28 +13,28 @@ encoded space was built and measured: it raises +2 EV to 0.63 but pushes shadow 
 −2 EV, which is worse. A straight segment in *log-log* space holds ~0.98 at +1 EV with neutral shadows and
 costs highlights above +2 EV. Either is a `ProcessVersion` bump. Decide with pictures, not slopes.
 
-**Focus peaking measures the wrong thing.** It runs in the view pass over the proxy, where downsampling has
-already averaged the high frequencies away, so it reports edge *contrast* rather than sharpness: a soft
-high-contrast edge keeps a large gradient across two texels while crisp fine texture has no signal left.
-Peaking has to be measured at full resolution.
+**Focus peaking at full resolution — done**, in `sidecar_engine::focus`. It used to run in the view pass over
+the proxy, where downsampling had already averaged the high frequencies away, so it reported edge *contrast*
+rather than sharpness. The worker now measures it on the full-resolution demosaiced luminance: the Laplacian
+of a lightly blurred luminance over the local standard deviation of the unblurred one, so a crisp edge
+outscores a blurred edge of the same amplitude, and uncorrelated per-pixel noise — whose Laplacian and
+deviation scale together — does not light up. Because it reads the demosaiced image rather than the developed
+one it does not move when a slider does, so it is cached beside the proxy under the same generation marker and
+dropped with it. It reduces to each proxy's size by **max**-pooling, never averaging, so a single sharp pixel
+survives its cell; it ships as an 8-bit PNG, uploads as `r8unorm`, and is sampled as a third binding in the
+view pass with the threshold applied client-side, so the slider stays live. `GET /api/assets/{key}/focus?edge=…`
+relays the worker. Five tests cover it, including the two that matter: sharp beating blurred at equal contrast,
+and max-pooling keeping a pixel that averaging would lose.
 
-The plan: the worker computes a focus measure on the full-resolution demosaiced luminance — high-frequency
-energy (a Laplacian or difference-of-Gaussians at one to two pixels) normalized by the local standard
-deviation over roughly sixteen, so crisp detail beats a blurred edge of the same contrast. Because it reads
-the demosaiced image and not the developed one, it does not change when a slider moves: cache it per
-`assetKey + ProcessVersion`, like the proxy. Reduce to proxy resolution by **max**-pooling, never averaging —
-a single sharp pixel in a cell has to survive. Ship it as an 8-bit single-channel layer (mostly flat, so PNG
-carries it cheaply), upload as `r8unorm`, and sample it as a third binding in the view pass, with the
-threshold applied client-side so it stays live. `GET /api/assets/{key}/focus?edge=…` relaying a worker
-`/v1/focus`.
+**AF points from the RAW — done**, in `sidecar_raw::af`: a complementary overlay, not a driver for that mask.
+ExifTool reads them from MakerNotes where LibRaw does not (Sony `FocusLocation`, Canon and Nikon `AFInfo2`,
+Fujifilm `FocusPixel`), the coordinates are brought out of sensor space through the orientation, and the
+editor draws a marker the loupe can jump to for a critical check. The caveats stand and are why it stays a
+marker: the tag says where the camera *aimed*, not whether it succeeded, and manual focus, focus-and-recompose
+or an adapted lens leave nothing useful.
 
-**AF points from the RAW** are a separate, complementary overlay, not a driver for that mask. Most makers
-record them in MakerNotes and ExifTool reads them where LibRaw does not: Sony `FocusLocation` (width, height,
-x, y — a ZV-1 file here reads `5472 3648 4420 2409`), Canon `AFInfo2` with `AFPointsInFocus`, Nikon
-`AFInfo2`, Fujifilm `FocusPixel`. Caveats worth respecting: the coordinates are in sensor space and need the
-orientation and any future crop applied; the tag says where the camera *aimed*, not whether it succeeded; and
-manual focus, focus-and-recompose, or an adapted lens leave nothing useful. So draw it as a marker, and make
-it a place the loupe can jump to for a critical check — but let the peaking mask keep measuring actual pixels.
+What is left of peaking is in "Subject-aware tools" below: weighting the measure by the subject mask, and
+ranking eyes and faces first. Noise is already handled.
 
 **Highlight reconstruction** leaves faint bluish blotches at the edges of reconstructed areas.
 
@@ -144,10 +144,13 @@ hasn't been built:
 - **Gradients.** Linear and radial masks, analytic in the shader: a third kind of layer beside model masks and
   brushes, with handles drawn over the photo like the crop's.
 - **Sky.** A sky model, to join the subject, skin and hair ones.
-- **Depth, beyond what shipped.** Range layers, lens blur and haze by distance have shipped. The map is relative
-  and 518² at source: fine for soft bands and a smooth blur, but a blur's edge around hair or a thin branch
-  follows the map, not the photo. Next: edge-aware upsampling of the depth guided by the photo (a guided
-  filter), then depth-weighted focus peaking. Haze's strength curve may want tuning with pictures.
+- **Depth, beyond what shipped.** Range layers, lens blur and haze by distance have shipped, and the map's
+  edges are now the photo's: `client/depth_refine.wgsl` upsamples the model's 518² map against the photo
+  (joint bilateral upsampling, §7 "Depth"), so a blur's edge follows hair or a thin branch instead of drifting
+  into a halo. What is left here: **depth-weighted focus peaking**, and haze's strength curve, which may want
+  tuning with pictures. The refinement itself could go further — it is one pass, so it takes most of the error
+  out of an edge rather than all of it (the texel being repaired votes for itself); a second pass, or He, Sun
+  and Tang's guided filter with its box means, would finish the job if pictures ask for it.
 - **Detail per layer.** Sharpening and noise reduction through a mask: they run on the worker at full
   resolution, so a layer's value has to reach the detail passes, not just the develop pass.
 - **Upright.** Keystone found automatically from the photo's lines; today Vertical and Horizontal are set by eye.
@@ -197,9 +200,10 @@ sky, the subject.
   whole-image context segmentation needs: a guided filter or a matting model, driven by the coarse mask and
   the photo, tile by tile.
 - *Focus peaking, refined*: weight the focus measure by the subject mask so peaking answers "is the subject
-  sharp?" rather than "where is anything sharp?"; make it noise-aware (normalise by the estimated noise σ the
-  detail module already computes, so high-ISO grain stops lighting up); and rank eyes and faces first, next to
-  the AF point overlay.
+  sharp?" rather than "where is anything sharp?", and rank eyes and faces first, next to the AF point overlay.
+  Peaking itself is done (above) and is already noise-aware — it divides by the local standard deviation, which
+  for uncorrelated per-pixel noise scales with the noise's own amplitude, so high-ISO grain does not light up
+  without needing the detail module's estimated σ.
 
 ## Interface
 

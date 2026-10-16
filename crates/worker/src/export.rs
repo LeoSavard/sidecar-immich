@@ -198,6 +198,15 @@ impl Rendering {
         self.correct(kit, &geometry, base)
     }
 
+    /// `depth`, the model's map, with the photo's own edges (`DepthPass::refined`). `photo` is the whole frame
+    /// in linear light, as the map describes it — never a tile, since the two are sampled across the same
+    /// frame. Falls back to the map it was given when the frame is small enough that there is nothing to
+    /// repair. Done once per photo, before any tiling: it depends on no slider.
+    pub fn refine_depth(&self, kit: &Kit, photo: &wgpu::Texture, depth: wgpu::Texture, frame: [u32; 2]) -> wgpu::Texture {
+        let out = sidecar_color::depth::refined_size(frame);
+        kit.depth.refined(&kit.gpu, photo, &depth, out).unwrap_or(depth)
+    }
+
     /// `source` — the whole frame, `frame` pixels, or a tile of it at `offset` — through the edit's haze and lens
     /// blur, when it has either and `depth` is here. A tile needs `DepthParams::reach` of margin around what is
     /// kept of it to come out as the whole picture would.
@@ -399,6 +408,7 @@ pub fn render(kit: &Kit, req: &RenderRequest, masks: &[Option<RgbaF32>], depth: 
         stage(tx, "depth", 0.44);
         let frame = [source.width(), source.height()];
         let texture = rendering.depth_texture(kit, &req.edit, &map.image, flip);
+        let texture = rendering.refine_depth(kit, &source, texture, frame);
         source = rendering.depth_effects(kit, &req.edit, Some((map, &texture)), source, frame, [0, 0]);
     }
 
