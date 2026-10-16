@@ -112,6 +112,11 @@ export function describeChanges(from: EditParams, to: EditParams): string[] {
 		const [a, b] = [c.get(from), c.get(to)];
 		if (Math.abs(a - b) > 1e-9) out.push(`${c.label} ${c.show(b)}`);
 	}
+	if (!!from.film !== !!to.film) out.push(to.film ? 'Film rendering' : 'Neutral rendering');
+	else if (from.film && to.film) {
+		if (from.film.amount !== to.film.amount) out.push(`Film amount ${decimals(to.film.amount)} %`);
+		if (from.film.interlayer !== to.film.interlayer) out.push(`Interlayer effects ${decimals(to.film.interlayer)}`);
+	}
 	if (ownCurve(from) !== ownCurve(to)) out.push('Curve edited');
 	out.push(...describeGeometry(from.geometry ?? NO_GEOMETRY, to.geometry ?? NO_GEOMETRY));
 	if (!!from.lens !== !!to.lens) out.push(to.lens ? 'Lens correction on' : 'Lens correction off');
@@ -195,6 +200,14 @@ export const PICKS: { id: string; label: string; take: (into: EditParams, from: 
 			e.tone.blackEv = f.tone.blackEv;
 			e.tone.highlights = f.tone.highlights ?? 0;
 			e.tone.shadows = f.tone.shadows ?? 0;
+		}
+	},
+	{
+		id: 'film',
+		label: 'Film',
+		take: (e, f) => {
+			if (f.film) e.film = structuredClone(f.film);
+			else delete e.film;
 		}
 	},
 	{ id: 'curve', label: 'Curve', take: (e, f) => (e.tone.curve = structuredClone(f.tone.curve)) },

@@ -271,6 +271,14 @@ impl Gpu {
     }
 }
 
+/// One device for every GPU test in the crate. Tests run on parallel threads, and NVIDIA's Vulkan driver
+/// deadlocks when several of them create an instance and device at the same moment.
+#[cfg(test)]
+pub(crate) fn test_gpu() -> Result<&'static Gpu, String> {
+    static GPU: std::sync::OnceLock<Result<Gpu, String>> = std::sync::OnceLock::new();
+    GPU.get_or_init(|| Gpu::new_headless().map_err(|e| format!("{e:#}"))).as_ref().map_err(Clone::clone)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

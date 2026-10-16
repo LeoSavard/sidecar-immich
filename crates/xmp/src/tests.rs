@@ -628,3 +628,25 @@ fn settings_left_out_at_zero_are_turned_off_in_the_file_and_the_history() {
     assert_eq!(h.edit_of(&heads[0]).unwrap(), set);
     assert_eq!(h.edit_of(&heads[1]).unwrap(), EditParams::default());
 }
+
+/// Switching film rendering off (no `film` field) reaches the file and the history.
+#[test]
+fn film_switched_off_is_off_in_the_file_and_the_history() {
+    let tmp = tempfile::tempdir().unwrap();
+    let roots = [tmp.path().canonicalize().unwrap()];
+    let original = fixture(tmp.path(), "DSC_11.NEF");
+    let film = EditParams { film: Some(sidecar_color::params::Film::default()), ..Default::default() };
+    let mut heads = Vec::new();
+    for e in [&film, &EditParams::default()] {
+        let base = SidecarDoc::load(&original).unwrap().history().head;
+        update(&original, &roots, |d| {
+            heads.push(d.commit(&Commit { edit: e, base: &base, checkpoint: false, session: None, user: None }, "sha")?.head);
+            Ok(())
+        })
+        .unwrap();
+    }
+    let doc = SidecarDoc::load(&original).unwrap();
+    assert_eq!(doc.edit().film, None, "{}", doc.sidecar["edit"]);
+    assert_eq!(doc.history().edit_of(&heads[0]).unwrap(), film);
+    assert_eq!(doc.history().edit_of(&heads[1]).unwrap().film, None);
+}

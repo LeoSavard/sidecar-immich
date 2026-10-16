@@ -235,8 +235,8 @@ mod tests {
     /// away; a base mask shows through where nothing painted.
     #[test]
     fn strokes_paint_and_erase() {
-        let Ok(gpu) = Gpu::new_headless() else { return eprintln!("skipping: no GPU") };
-        let brush = Brush::new(&gpu).unwrap();
+        let Ok(gpu) = crate::test_gpu() else { return eprintln!("skipping: no GPU") };
+        let brush = Brush::new(gpu).unwrap();
         let size = [100u32, 50u32];
         let paint = Stroke { radius: 0.05, feather: 0.0, flow: 1.0, points: vec![[0.2, 0.5], [0.8, 0.5]], ..Default::default() };
         let erase = Stroke { erase: true, radius: 0.1, feather: 0.0, flow: 1.0, points: vec![[0.75, 0.5]] };
@@ -244,8 +244,8 @@ mod tests {
         assert_eq!(strokes[0].radius, 5.0);
         let mut base = crate::RgbaF32 { width: 10, height: 10, data: vec![0.0; 400] };
         base.data[0] = 1.0;
-        let base_tex = crate::upload_rgba16(&gpu, &base);
-        let mask = read_mask(&gpu, &brush.paint(&gpu, Some(&base_tex), size, &strokes)).unwrap();
+        let base_tex = crate::upload_rgba16(gpu, &base);
+        let mask = read_mask(gpu, &brush.paint(gpu, Some(&base_tex), size, &strokes)).unwrap();
         let at = |x: u32, y: u32| mask[(y * size[0] + x) as usize];
         assert!(at(50, 25) > 0.99, "on the stroke");
         assert!(at(50, 31) < 0.01, "past its radius");
@@ -257,9 +257,9 @@ mod tests {
     /// The mask lens pass moves a mask as the picture's lens pass moves the picture's green channel.
     #[test]
     fn a_mask_moves_with_the_lens_correction() {
-        let Ok(gpu) = Gpu::new_headless() else { return eprintln!("skipping: no GPU") };
-        let brush = Brush::new(&gpu).unwrap();
-        let lens = crate::lens::LensPass::new(&gpu).unwrap();
+        let Ok(gpu) = crate::test_gpu() else { return eprintln!("skipping: no GPU") };
+        let brush = Brush::new(gpu).unwrap();
+        let lens = crate::lens::LensPass::new(gpu).unwrap();
         let profile = sidecar_color::lens::LensProfile {
             id: "t".into(),
             label: "t".into(),
@@ -274,8 +274,8 @@ mod tests {
         let e = sidecar_color::lens::effective(&profile, &Default::default(), 1.5);
         let params = sidecar_color::lens::pack(&e, [0.5, 0.5], [w, h], 0, [0.0; 2], [0.0; 2]);
         let img = crate::RgbaF32 { width: w, height: h, data: (0..w * h).flat_map(|i| { let v = if (i % w) / 10 % 2 == 0 { 1.0 } else { 0.0 }; [v, v, v, 0.0] }).collect() };
-        let picture = crate::read_rgba16(&gpu, &lens.apply(&gpu, &crate::upload_rgba16(&gpu, &img), &params, [w, h])).unwrap();
-        let mask = read_mask(&gpu, &brush.correct(&gpu, &crate::upload_rgba16(&gpu, &img), &params)).unwrap();
+        let picture = crate::read_rgba16(gpu, &lens.apply(gpu, &crate::upload_rgba16(gpu, &img), &params, [w, h])).unwrap();
+        let mask = read_mask(gpu, &brush.correct(gpu, &crate::upload_rgba16(gpu, &img), &params)).unwrap();
         let worst = (0..(w * h) as usize).map(|i| (picture.data[i * 4 + 1] - mask[i]).abs()).fold(0.0, f32::max);
         let mean = (0..(w * h) as usize).map(|i| (picture.data[i * 4 + 1] - mask[i]).abs()).sum::<f32>() / (w * h) as f32;
         // Bilinear against bicubic on hard stripes: the edges differ by a fraction, the rest not at all.

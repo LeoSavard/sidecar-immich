@@ -22,13 +22,14 @@
 	import CropSection from '$lib/ui/sections/CropSection.svelte';
 	import WhiteBalanceSection from '$lib/ui/sections/WhiteBalanceSection.svelte';
 	import LightSection from '$lib/ui/sections/LightSection.svelte';
+	import FilmSection from '$lib/ui/sections/FilmSection.svelte';
 	import CurveSection from '$lib/ui/sections/CurveSection.svelte';
 	import ColorSection from '$lib/ui/sections/ColorSection.svelte';
 	import DetailSection from '$lib/ui/sections/DetailSection.svelte';
 	import { NO_GEOMETRY, isNoGeometry, project, twist, untwist } from '$lib/state/edit-view';
 	import type { Crop, DisplaySpace, EditParams, Frame, Geometry, MaskAdjustment, Meta } from '$lib/types';
 
-	type Section = 'lens' | 'crop' | 'wb' | 'light' | 'curve' | 'color' | 'masks' | 'detail' | 'history';
+	type Section = 'lens' | 'crop' | 'wb' | 'light' | 'film' | 'curve' | 'color' | 'masks' | 'detail' | 'history';
 
 	const key = page.params.key!;
 	let canvas: HTMLCanvasElement;
@@ -1013,6 +1014,7 @@
 		{ id: 'crop', label: 'Crop and straighten', short: 'Crop' },
 		{ id: 'wb', label: 'White balance', short: 'WB' },
 		{ id: 'light', label: 'Light', short: 'Light' },
+		{ id: 'film', label: 'Film', short: 'Film' },
 		{ id: 'curve', label: 'Curve', short: 'Curve' },
 		{ id: 'color', label: 'Color', short: 'Color' },
 		{ id: 'masks', label: 'Masks', short: 'Masks' },
@@ -1038,6 +1040,10 @@
 
 {#snippet lightSection()}
 	{#if edit}<LightSection {edit} onchange={update} oncommit={committed} {developed} />{/if}
+{/snippet}
+
+{#snippet filmSection()}
+	{#if edit}<FilmSection {edit} onchange={update} oncommit={committed} {developed} />{/if}
 {/snippet}
 
 {#snippet curveSection()}
@@ -1240,7 +1246,7 @@
 			</nav>
 
 			<div class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-6 pt-1">
-				{#if section === 'lens'}{@render lensSection()}{:else if section === 'crop'}{@render cropSection()}{:else if section === 'wb'}{@render wbSection()}{:else if section === 'light'}{@render lightSection()}{:else if section === 'curve'}{@render curveSection()}{:else if section === 'color'}{@render colorSection()}{:else if section === 'masks'}{@render masksSection()}{:else if section === 'history'}{@render historySection()}{:else}{@render detailSection()}{/if}
+				{#if section === 'lens'}{@render lensSection()}{:else if section === 'crop'}{@render cropSection()}{:else if section === 'wb'}{@render wbSection()}{:else if section === 'light'}{@render lightSection()}{:else if section === 'film'}{@render filmSection()}{:else if section === 'curve'}{@render curveSection()}{:else if section === 'color'}{@render colorSection()}{:else if section === 'masks'}{@render masksSection()}{:else if section === 'history'}{@render historySection()}{:else}{@render detailSection()}{/if}
 			</div>
 
 			{/if}
@@ -1258,7 +1264,7 @@
 					>
 						<summary class="cursor-pointer py-1 text-xs font-medium">{s.label}</summary>
 						<div class="pt-2">
-							{#if s.id === 'lens'}{@render lensSection()}{:else if s.id === 'crop'}{@render cropSection()}{:else if s.id === 'wb'}{@render wbSection()}{:else if s.id === 'light'}{@render lightSection()}{:else if s.id === 'curve'}{@render curveSection()}{:else if s.id === 'color'}{@render colorSection()}{:else if s.id === 'masks'}{@render masksSection()}{:else if s.id === 'history'}{@render historySection()}{:else if detailOpen}{@render detailSection()}{/if}
+							{#if s.id === 'lens'}{@render lensSection()}{:else if s.id === 'crop'}{@render cropSection()}{:else if s.id === 'wb'}{@render wbSection()}{:else if s.id === 'light'}{@render lightSection()}{:else if s.id === 'film'}{@render filmSection()}{:else if s.id === 'curve'}{@render curveSection()}{:else if s.id === 'color'}{@render colorSection()}{:else if s.id === 'masks'}{@render masksSection()}{:else if s.id === 'history'}{@render historySection()}{:else if detailOpen}{@render detailSection()}{/if}
 						</div>
 					</details>
 				{/each}

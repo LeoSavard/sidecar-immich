@@ -168,6 +168,10 @@ fn cases() -> Vec<Fixture> {
     let layered = EditParams { masks: layers.clone(), ..graded.clone() };
     let phone_layered = EditParams { masks: layers, ..phone.clone() };
 
+    // Film rendering: the per-channel curves blended with the neutral path, with and without layers on top.
+    let film = |e: &EditParams| EditParams { film: Some(sidecar_color::params::Film { amount: 80.0, interlayer: 60.0 }), ..e.clone() };
+    let (graded_film, layered_film) = (film(&graded), film(&layered));
+
     let mut lens = EditParams { lens: Some(sidecar_color::params::Lens { profile: "sony".into(), ..Default::default() }), ..graded.clone() };
     lens.lens.as_mut().unwrap().lateral_ca = 150.0;
 
@@ -181,6 +185,8 @@ fn cases() -> Vec<Fixture> {
         ("masks".into(), nikon_d850(), SourceKind::Raw, masked, DisplaySpace::Srgb, None),
         ("layers".into(), nikon_d850(), SourceKind::Raw, layered, DisplaySpace::Srgb, None),
         ("heic-layers".into(), heic(), SourceKind::Developed, phone_layered, DisplaySpace::DisplayP3, None),
+        ("film".into(), nikon_d850(), SourceKind::Raw, graded_film, DisplaySpace::Srgb, None),
+        ("film-layers".into(), nikon_d850(), SourceKind::Raw, layered_film, DisplaySpace::DisplayP3, None),
     ]
 }
 

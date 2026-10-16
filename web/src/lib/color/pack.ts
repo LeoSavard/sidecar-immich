@@ -14,6 +14,7 @@ type Exports = {
 	sc_geometry_fit(ptr: number, len: number): number;
 	sc_default_edit(): number;
 	sc_last_error(): number;
+	sc_develop_uniform_bytes(): number;
 };
 
 /**
@@ -22,6 +23,9 @@ type Exports = {
  */
 export type Packed = { uniform: Uint8Array; lut: Float32Array; temperatureK: number; tint: number; masks: Uint8Array; maskCurves: Float32Array };
 
+/** `DevelopParams` (shaders/develop/params.wgsl), mirrored in crates/color. Checked against the wasm on load, so a
+ *  struct that grew on one side fails here, by name, rather than as a garbled render. */
+export const DEVELOP_UNIFORM_BYTES = 288;
 const MASK_UNIFORM_BYTES = 1568;
 const LUT = 4096;
 const MAX_MASKS = 8;
@@ -31,7 +35,10 @@ export class ColorPacker {
 
 	static async load(): Promise<ColorPacker> {
 		const { instance } = await WebAssembly.instantiateStreaming(fetch(wasmUrl), {});
-		return new ColorPacker(instance.exports as unknown as Exports);
+		const x = instance.exports as unknown as Exports;
+		const bytes = x.sc_develop_uniform_bytes();
+		if (bytes !== DEVELOP_UNIFORM_BYTES) throw new Error(`The develop uniform is ${bytes} bytes in the colour maths but ${DEVELOP_UNIFORM_BYTES} here: rebuild the wasm (npm run generate).`);
+		return new ColorPacker(x);
 	}
 
 	private framed(ptr: number): Uint8Array {
@@ -95,14 +102,15 @@ export class ColorPacker {
 		this.x.sc_free(ptr, input.length);
 		if (out.length === 0) throw new Error(new TextDecoder().decode(this.framed(this.x.sc_last_error())));
 		const lutBytes = 4096 * 4;
+		const U = DEVELOP_UNIFORM_BYTES;
 		const view = new DataView(out.buffer, out.byteOffset);
 		return {
-			uniform: out.slice(0, 272),
-			lut: new Float32Array(out.slice(272, 272 + lutBytes).buffer),
-			temperatureK: view.getFloat64(272 + lutBytes, true),
-			tint: view.getFloat64(280 + lutBytes, true),
-			masks: out.slice(288 + lutBytes, 288 + lutBytes + MASK_UNIFORM_BYTES),
-			maskCurves: new Float32Array(out.slice(288 + lutBytes + MASK_UNIFORM_BYTES, 288 + lutBytes + MASK_UNIFORM_BYTES + MAX_MASKS * LUT * 4).buffer)
+			uniform: out.slice(0, U),
+			lut: new Float32Array(out.slice(U, U + lutBytes).buffer),
+			temperatureK: view.getFloat64(U + lutBytes, true),
+			tint: view.getFloat64(U + 8 + lutBytes, true),
+			masks: out.slice(U + 16 + lutBytes, U + 16 + lutBytes + MASK_UNIFORM_BYTES),
+			maskCurves: new Float32Array(out.slice(U + 16 + lutBytes + MASK_UNIFORM_BYTES, U + 16 + lutBytes + MASK_UNIFORM_BYTES + MAX_MASKS * LUT * 4).buffer)
 		};
 	}
 }

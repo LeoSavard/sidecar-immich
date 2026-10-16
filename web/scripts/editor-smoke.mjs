@@ -91,6 +91,12 @@ try {
 		await set('blacks', -5);
 		await set('hl-blend', 70);
 	});
+	await step('film', async () => {
+		await section('Film');
+		await (await visible(page.getByRole('radio', { name: 'Film' }))).click();
+		await set('film-amount', 80);
+		await set('film-interlayer', 45);
+	});
 	await step('curve', async () => {
 		await section('Curve');
 		const s = await visible(page.locator('svg[aria-label^="Tone curve"]'));

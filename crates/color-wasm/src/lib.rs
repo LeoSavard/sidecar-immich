@@ -2,7 +2,7 @@
 //! Browser entry point for the colour maths. No bindings generator: the page allocates a buffer, writes
 //! JSON `{ edit, camera, source, display }`, and reads back a packed result. See web/src/lib/color/pack.ts.
 //!
-//! Result layout: `[u32 len][272 uniform bytes][4096 × f32 tone LUT][f64 temperature][f64 tint][1,568 mask
+//! Result layout: `[u32 len][`sc_develop_uniform_bytes` uniform bytes][4096 × f32 tone LUT][f64 temperature][f64 tint][1,568 mask
 //! uniform bytes][8 × 4096 × f32 layer curves]`, or len 0 with the error message available from `sc_last_error`.
 //! Geometry calls take and return JSON.
 
@@ -24,6 +24,12 @@ struct Request {
 thread_local! {
     static RESULT: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     static ERROR: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The develop uniform's size (`DevelopParams`): the browser checks its own copy of it against this on load.
+#[unsafe(no_mangle)]
+pub extern "C" fn sc_develop_uniform_bytes() -> u32 {
+    std::mem::size_of::<sidecar_color::params::DevelopParams>() as u32
 }
 
 #[unsafe(no_mangle)]

@@ -170,8 +170,9 @@ impl DevelopPass {
 
     /// Develop a source texture into a new RGBA16F texture (display-linear).
     pub fn render(&self, gpu: &Gpu, src_tex: &wgpu::Texture, uniform: &[u8], lut: &[f32], masks: &Masks) -> Result<wgpu::Texture> {
-        if uniform.len() != 272 {
-            bail!("develop uniform must be 272 bytes, got {}", uniform.len());
+        let expected = std::mem::size_of::<sidecar_color::params::DevelopParams>();
+        if uniform.len() != expected {
+            bail!("develop uniform must be {expected} bytes, got {}", uniform.len());
         }
         let (w, h) = (src_tex.width(), src_tex.height());
         let size = wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 };
@@ -266,7 +267,7 @@ mod tests {
 
     #[test]
     fn develops_on_the_gpu() {
-        let gpu = match Gpu::new_headless() {
+        let gpu = match crate::test_gpu() {
             Ok(g) => g,
             Err(e) => {
                 eprintln!("skipping: {e}");
@@ -274,9 +275,9 @@ mod tests {
             }
         };
         eprintln!("adapter: {} ({:?})", gpu.adapter_info.name, gpu.adapter_info.backend);
-        let pass = DevelopPass::new(&gpu).unwrap();
+        let pass = DevelopPass::new(gpu).unwrap();
         // Identity-ish uniforms: unit WB, unit matrices, default tone.
-        let mut u = vec![0u8; 272];
+        let mut u = vec![0u8; std::mem::size_of::<sidecar_color::params::DevelopParams>()];
         let put = |u: &mut Vec<u8>, off: usize, v: &[f32]| u[off..off + v.len() * 4].copy_from_slice(bytemuck::cast_slice(v));
         put(&mut u, 0, &[1.0, 1.0, 1.0, 1.0]);
         put(&mut u, 16, &[1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
@@ -284,7 +285,7 @@ mod tests {
         put(&mut u, 112, &[-10.0, 6.5, 7.0, 0.5]);
         let lut: Vec<f32> = (0..4096).map(|i| i as f32 / 4095.0).collect();
         let src = RgbaF32 { width: 4, height: 2, data: [0.18f32, 0.18, 0.18, 0.0].repeat(8) };
-        let out = pass.run(&gpu, &src, &u, &lut).unwrap();
+        let out = pass.run(gpu, &src, &u, &lut).unwrap();
         assert_eq!(out.data.len(), 32);
         assert!(out.data[0] > 0.01 && out.data[0] < 1.0, "{:?}", &out.data[..4]);
     }
