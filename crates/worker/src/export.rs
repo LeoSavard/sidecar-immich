@@ -69,6 +69,7 @@ pub struct Kit {
     pub lens: sidecar_engine::lens::LensPass,
     pub warp: sidecar_engine::warp::WarpPass,
     pub brush: sidecar_engine::brush::Brush,
+    pub depth: sidecar_engine::depth::DepthPass,
     pub lensfun: std::sync::Arc<crate::lensfun::Lensfun>,
 }
 
@@ -116,8 +117,13 @@ impl Rendering {
         Self { color, kind: SourceKind::Developed, lens: None, sensor_aspect: 1.5, lens_flip: 0 }
     }
 
+    /// A spectral colour stock's profile comes from `crate::stocks`, which measures it from the operator's own
+    /// copies of the standards and caches it: it depends on the stock and those files, nothing about the photo
+    /// or the edit, so it is looked up here rather than threaded through every caller. Without it a named
+    /// stock falls back to the per-channel film approximation.
     pub fn pack(&self, edit: &EditParams, display: DisplaySpace) -> Packed {
-        sidecar_color::pack(edit, &self.color, self.kind, display)
+        let profile = crate::stocks::for_edit(edit);
+        sidecar_color::params::pack_with(edit, &self.color, self.kind, display, profile.as_deref())
     }
 
     /// The lens pass's uniforms for this edit over a texture holding the whole frame at `frame` pixels, with
@@ -158,21 +164,59 @@ impl Rendering {
                     return None;
                 }
                 let base = masks.get(i).cloned().flatten().map(|m| sidecar_engine::upload_rgba16(&kit.gpu, &m.oriented(sidecar_engine::inverse_flip(flip))));
-                if layer.strokes.is_empty() {
+                if layer.strokes.is_empty() && layer.range.is_none() && layer.edge.is_none() {
                     return Some(self.correct(kit, &geometry, base?));
                 }
-                // Strokes are drawn at the source's resolution up to 4,096 px on the long edge: a mask is
-                // sampled through a linear filter, and nothing a brush draws needs more.
+                // A range, strokes or an edge: painted, the range windowing the base first, the edge last. At the source's resolution
+                // up to 4,096 px on the long edge: a mask is sampled through a linear filter, and nothing a
+                // brush draws needs more.
                 let scale = (MASK_EDGE as f64 / frame[0].max(frame[1]) as f64).min(1.0);
                 let size = frame.map(|v| ((v as f64 * scale).round() as u32).max(1));
                 let strokes: Vec<_> = layer.strokes.iter().map(|s| sidecar_engine::brush::stroke_px(s, size, |p| sidecar_color::geometry::map(&to_source, p))).collect();
-                let painted = kit.brush.paint(&kit.gpu, base.as_ref(), size, &strokes);
+                let painted = kit.brush.paint(&kit.gpu, base.as_ref(), size, sidecar_color::params::MaskRange::uniform(layer.range.as_ref()), &strokes);
+                let painted = match &layer.edge {
+                    Some(edge) => kit.brush.edge(&kit.gpu, painted, edge),
+                    None => painted,
+                };
                 Some(match self.lens_params(&geometry, size, [0.0; 2], [0.0; 2]) {
                     Some(p) => kit.brush.correct(&kit.gpu, &painted, &p),
                     None => painted,
                 })
             })
             .collect()
+    }
+
+    /// The depth map in the frame a source of `frame` pixels this rendering corrects: taken back through the
+    /// orientation `flip` still has to apply and lens-corrected as the source is (without vignetting), as a
+    /// mask is.
+    pub fn depth_texture(&self, kit: &Kit, edit: &EditParams, depth: &RgbaF32, flip: i32) -> wgpu::Texture {
+        let mut geometry = edit.clone();
+        if let Some(lens) = &mut geometry.lens {
+            lens.vignetting = 0.0;
+        }
+        let base = sidecar_engine::upload_rgba16(&kit.gpu, &depth.clone().oriented(sidecar_engine::inverse_flip(flip)));
+        self.correct(kit, &geometry, base)
+    }
+
+    /// `depth`, the model's map, with the photo's own edges (`DepthPass::refined`). `photo` is the whole frame
+    /// in linear light, as the map describes it — never a tile, since the two are sampled across the same
+    /// frame. Falls back to the map it was given when the frame is small enough that there is nothing to
+    /// repair. Done once per photo, before any tiling: it depends on no slider.
+    pub fn refine_depth(&self, kit: &Kit, photo: &wgpu::Texture, depth: wgpu::Texture, frame: [u32; 2]) -> wgpu::Texture {
+        let out = sidecar_color::depth::refined_size(frame);
+        kit.depth.refined(&kit.gpu, photo, &depth, out).unwrap_or(depth)
+    }
+
+    /// `source` — the whole frame, `frame` pixels, or a tile of it at `offset` — through the edit's haze and lens
+    /// blur, when it has either and `depth` is here. A tile needs `DepthParams::reach` of margin around what is
+    /// kept of it to come out as the whole picture would.
+    #[allow(clippy::too_many_arguments)]
+    pub fn depth_effects(&self, kit: &Kit, edit: &EditParams, depth: Option<(&crate::masks::DepthMap, &wgpu::Texture)>, source: wgpu::Texture, frame: [u32; 2], offset: [u32; 2]) -> wgpu::Texture {
+        let Some((map, texture)) = depth else { return source };
+        match sidecar_color::depth::pack(edit, map.airlight, frame, [offset[0] as f32, offset[1] as f32]) {
+            Some(params) => kit.depth.apply(&kit.gpu, &source, texture, &params),
+            None => source,
+        }
     }
 
     /// Crop, straighten, keystone and turn a developed texture holding the whole picture in the orientation
@@ -194,11 +238,21 @@ pub fn oriented_size(size: [u32; 2], flip: i32) -> [u32; 2] {
     if flip & 4 != 0 { [size[1], size[0]] } else { size }
 }
 
-/// `pack`'s mask uniforms, curves, and the textures for them, ready for `DevelopPass::render`.
-pub fn masks_for<'a>(packed: &'a Packed, textures: &'a [Option<wgpu::Texture>], frame: [f32; 4]) -> sidecar_engine::Masks<'a> {
+/// `pack`'s mask uniforms, curves, and the textures for them, ready for `DevelopPass::render`. A spectral
+/// colour stock's response table comes from its profile (`Worker::slide_profile`), not from `pack`, which is
+/// also compiled to wasm and must stay clear of the standards it is measured through; `&[]` is no stock.
+pub fn masks_for<'a>(packed: &'a Packed, textures: &'a [Option<wgpu::Texture>], frame: [f32; 4], slide_response: &'a [f32]) -> sidecar_engine::Masks<'a> {
     let mut params = packed.masks;
     params.frame = frame;
-    sidecar_engine::Masks { params, textures: textures.iter().map(Option::as_ref).collect(), curves: &packed.mask_curves }
+    sidecar_engine::Masks {
+        params,
+        textures: textures.iter().map(Option::as_ref).collect(),
+        curves: &packed.mask_curves,
+        mono: &packed.mono_lut,
+        density: None,
+        slide_exposure: &packed.slide_exposure,
+        slide_response,
+    }
 }
 
 /// Full-resolution linear RGB on the GPU, the orientation still to apply, and how to develop it. RAW comes
@@ -335,7 +389,7 @@ fn copy_metadata(raw: &Path, out: &Path, width: u32, height: u32) -> Result<()> 
 }
 
 /// `masks` are the edit's masks from the cache, in the order it names them (`Worker::mask_images`).
-pub fn render(kit: &Kit, req: &RenderRequest, masks: &[Option<RgbaF32>], outbox: &Path, tx: &Sender<Progress>) -> Result<Progress> {
+pub fn render(kit: &Kit, req: &RenderRequest, masks: &[Option<RgbaF32>], depth: Option<&crate::masks::DepthMap>, outbox: &Path, tx: &Sender<Progress>) -> Result<Progress> {
     stage(tx, "decode", 0.02);
     stage(tx, "demosaic", 0.15);
     let (mut source, flip, rendering) = full_source_for(kit, &req.path)?;
@@ -350,11 +404,20 @@ pub fn render(kit: &Kit, req: &RenderRequest, masks: &[Option<RgbaF32>], outbox:
         stage(tx, "lens", 0.42);
         source = rendering.correct(kit, &req.edit, source);
     }
+    if let Some(map) = depth {
+        stage(tx, "depth", 0.44);
+        let frame = [source.width(), source.height()];
+        let texture = rendering.depth_texture(kit, &req.edit, &map.image, flip);
+        let texture = rendering.refine_depth(kit, &source, texture, frame);
+        source = rendering.depth_effects(kit, &req.edit, Some((map, &texture)), source, frame, [0, 0]);
+    }
 
     stage(tx, "develop", 0.45);
     let packed = rendering.pack(&req.edit, req.color_space);
+    let profile = crate::stocks::for_edit(&req.edit);
+    let slide_response = crate::stocks::response(&profile);
     let mask_textures = rendering.mask_textures(kit, &req.edit, masks, flip, [source.width(), source.height()]);
-    let developed = kit.develop.render(&kit.gpu, &source, &packed.uniform, &packed.lut, &masks_for(&packed, &mask_textures, [0.0; 4]))?;
+    let developed = kit.develop.render(&kit.gpu, &source, &packed.uniform, &packed.lut, &masks_for(&packed, &mask_textures, [0.0; 4], slide_response))?;
     drop(source);
     drop(mask_textures);
     let mut img = match rendering.warp(kit, &req.edit, &developed, flip) {

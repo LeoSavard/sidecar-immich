@@ -7,6 +7,48 @@ Source: the architecture plan (PWA entry, XMP sidecars, server-side demosaic, We
 
 Where the code differs from the text below, the code and these notes win.
 
+- **Colour film, spectrally** (§7, "Colour film, spectrally"): FUJICHROME PROVIA 100F renders through its own
+  data sheet — layer sensitivities, characteristic curves, dyes, light table — in the browser and on the
+  server, from two tables the develop pass reads (`develop/slide.wgsl`). The licensed half of the chain is
+  measured on the server from the operator's own copies of ISO 5-3 and ISO 7589 and served as a per-stock
+  profile; a deployment without those files offers no stock. Checked: the pass agrees with `Slide::render` on
+  the CPU within 0.06 stop over greys and saturated colours, and at amount 0 renders bit-identically to no
+  stock; the uniform grew to 416 bytes, verified against the WGSL by naga; parity cases `slide-provia` and
+  `slide-provia-mixed`. The stock replaces the neutral tone map; what it renders is then graded by the tone
+  controls as a developed file is (`slide_tone`), the identity at their defaults. `Film.interlayer` is not
+  part of a sheet's chain. *The first arrangement left those controls reaching the picture only through the
+  neutral rendering, so at a full Amount they moved and did nothing — reported from the editor, and fixed.*
+- **Named stocks** (§7, "Stocks"): ILFORD HP5 Plus and SFX 200, KODAK TRI-X 400 and 320, from
+  the datasheets the owner supplied — spectral sensitivity and the characteristic curve's toe and shoulder.
+  EASTMAN DOUBLE-X was traced and then dropped: its sheet's spectral curve stops at 420 nm and the owner found
+  sources describing a strong response below that, so the held-flat trace would misreport the film. A named
+  stock stands on its own sheet; where the sheet runs out, the stock is not offered.
+  HP5's spectrogram was first read divided by its tungsten light; SFX 200's filter factors showed that wrong
+  (×9 against the sheet's ×2.8 behind red) and it is now read as drawn. Checked: every fit within 0.015 density
+  of its trace; Tri-X 400's speed point on ISO 400's (−2.701 against −2.699 log lux·s); each stock's red filter
+  factor within 0.3 stop of its sheet; packing tests; parity `stock-hp5` and `stock-sfx-red` (21/21 pass);
+  the six renderings of the tractor and the portrait, and SFX 200 against generic panchromatic behind red. In
+  the editor a stock is a choice under its film type; the edit still names the stock.
+
+- **Developers** (§7, "Developers"): adjacency through a low-resolution map of the whole frame, development N±2,
+  compensation, grain per developer and a staining developer's grain masking. Checked: packing tests; an engine
+  test of an edge (bright side 0.588 → 0.634, dark side 0.138 → 0.107, display-linear) and of a loupe tile given
+  the whole frame's map (within 0.001); parity `dev-acutance`, `dev-staining-layers` and `dev-compensating`
+  (19/19 pass); the tractor in each developer and at N±1, whole and in 100 % crops; the three editor smoke runs
+  choose a developer, tungsten and N+1 and save them. Choosing the rendering already chosen no longer resets its
+  settings.
+
+- **Black and white under other light** (§7, "The scene's light"): daylight, tungsten, or the white balance's
+  temperature. Checked: illuminants against colour-science's A and D50; tungsten's effect on a red and a sky;
+  old edits without `light` read as daylight; the tractor in both film types under each light.
+
+- **Grain** (§7, "Grain"): procedural, in exposure before the tone map, sized on a 35 mm frame and averaged by
+  Selwyn's law where finer than a pixel. Checked: packing tests; parity `grain-mono`, `grain-film`, `grain-heic`
+  identical browser to server (16/16 pass); a portrait developed at 1600 px and 5584 px with grain 0/40/80
+  (midtones grainy, deep shadows and the bright fleece less so; the proxy softer, as expected); the three editor
+  smoke runs set Amount 30 and Size 40 and save them. `sidecar-dev develop` now passes black and white's table and
+  demosaics at full size when asked for more than half the sensor.
+
 - **Immich checksums:** Immich hashes file contents only for its internal library. External-library assets get `sha1("path:" + originalPath)` as their checksum, so checksum search can't find them. Resolution therefore relies on the date layout and filename search for external RAWs, confirms candidates by hashing the local files, and finds the Immich asset by `originalPath`.
 - **Immich is 3.2.0** on the server (floating `v3` tag). The API behaviour relied on is unchanged from 3.1.0. `GET /api/users/me` needs `user.read`, so the sign-in key needs `user.read, asset.read, asset.view, asset.upload, asset.update, stack.create`.
 - **Uniform layouts** are mirrored by hand in `#[repr(C)]` Rust structs and checked against the WGSL by parsing it with naga in tests. `encase` 0.12 dropped glam support and `webgpu-utils` isn't needed: the browser packs uniforms with the same Rust code compiled to WebAssembly (`crates/color-wasm`).
@@ -20,7 +62,7 @@ Where the code differs from the text below, the code and these notes win.
 - **Detail (milestone 7):** denoise and sharpening are implemented from the published methods (à-trous wavelets with square-root variance stabilization and a per-image noise estimate; Richardson–Lucy on luminance), not ported — vkdt's denoise depends on per-camera noise profiles. The worker keeps the last two full-resolution buffers for loupe tiles.
 - **Internal library** roots can set `per_user = true`: Immich keeps a folder per user (storage label or id) before the template.
 - **Entry points (milestone 8):** Android share target hashes in the service worker and opens `/open?sha1=…`; desktop pastes an Immich link, resolved through `GET /api/assets/{id}`.
-- **Development:** `./dev/serve` runs api + worker on `127.0.0.1:8090`, the real library read-only, and a writable test copy under `testdata/cache/library`.
+- **Development:** `./dev/serve` runs api + worker on the first free port from `127.0.0.1:8091`, the real library read-only, and a writable test copy under `testdata/cache/library`. It builds the `dev-serve` cargo profile (dependencies optimized, Sidecar's crates at `opt-level = 1`, incremental): touching `sidecar-color` rebuilds in 2 s instead of 22 s. Each git worktree has its own target directory, server state and container; sccache shares compiled dependencies between them. `--web` adds Vite's dev server for live reload. See `docs/ARCHITECTURE.md`.
 - **First live run (2026-09-15):** share → resolve → develop → sidecar → export → upload → stack, against the real external library. The Immich *admin* key is scoped without `asset.read`, so stacks can't be checked from the CLI — only in the Immich app.
 - **Output space is a user setting** (§11), not a guess from `matchMedia`. It drives the develop uniform, the canvas, the loupe request and the export default together; the export sheet still overrides it for one export. The editor previewing in P3 while exports defaulted to sRGB was a real trap: saturated reds fit on screen and clipped in the file.
 - **Tint direction:** the slider names what happens to the *image*, as every editor does. Positive tint moves the assumed illuminant toward green so the photo goes magenta. It shipped inverted and is fixed; `positive_tint_moves_the_illuminant_toward_green` pins it.
@@ -80,6 +122,57 @@ Where the code differs from the text below, the code and these notes win.
   `ProcessVersion` bump was needed: an older Sidecar keeps masks it can't render, and entries a newer one adds
   (a `kind`) are carried and skipped here. The first masks on a new install take minutes while burn tunes
   itself to the GPU; after that a photo's masks take seconds, once.
+- **The camera's rendering beside the edit:** the worker extracts the largest JPEG the camera embedded in a RAW
+  (`JpgFromRaw`, `PreviewImage` or `OtherImage`, by ExifTool), copies the RAW's orientation tag onto it and
+  caches it (`GET /api/assets/{key}/camera`). The editor's Camera toggle splits the view — the canvas keeps the
+  left half (top on a phone) so everything drawn over it keeps its place — and is off while cropping or
+  painting. Developed files have none: they are their own rendering.
+- **Mask edges (§15):** a layer's optional `edge` (width, feather, shift) blurs its finished mask — after the
+  range and the strokes — over up to 5 % of the long edge and thresholds it again: the threshold moves the edge
+  out or in (0.5 ± 0.45), the ramp around it sets how soft it is (feather 0 keeps it crisp, only moved and
+  smoothed). Averaged down so the Gaussian's radius is at most 16 texels, in 16-bit textures so a moved
+  threshold doesn't band; render passes (`client/mask_edge.wgsl`), since r8unorm can't be a storage texture.
+  The browser's painter and the worker run the same passes from one plan (`MaskEdge::plan`, through wasm).
+- **Depth effects (§15): lens blur and haze by distance.** A pass between the lens pass and develop, on
+  camera-native linear light, so a blurred highlight spreads as the light it is and haze is light in the scene
+  before white balance sees it (`shaders/depth/effects.wgsl` and three `client/depth_*.wgsl` entries, the same
+  WGSL in the browser and the worker; uniform packed by `sidecar_color::depth::pack`, 64 bytes). *Haze*:
+  transmittance `t = exp(−τ·(1 − nearness))`, τ up to 3 at ±100; adding mixes toward the airlight, removing
+  inverts that with t floored at 0.2. The airlight is the mean camera RGB of the farthest 3 % of the photo,
+  estimated by the worker with the depth mask (`depth.json`, listed with the masks; `MASK_REVISION` 3).
+  *Lens blur*: the circle of confusion is linear in the difference in nearness from the focus (Depth Anything
+  gives inverse depth, which a thin lens's blur follows), minus half the depth of field, up to 2.5 % of the long
+  edge. It is gathered at a scale where the largest disc is ≤ 16 texels (downsample with the haze, a
+  160-sample golden-angle gather, then compose at full resolution), so a wide blur costs the same at any size.
+  A sample counts if its own disc reaches the texel; a farther one only as far as the texel's own disc, so a
+  sharp subject doesn't take in the blurred background behind it, while a nearer blurred one spreads over what
+  is behind it (its share is kept in alpha and lets compose blur a sharp pixel it covers). Samples weigh by the
+  inverse of their disc's area, so a bright point becomes a bright disc. A loupe tile is developed with the
+  blur's reach of margin, its corner on the gather grid, and matches the whole (engine test). Tap to focus
+  reads the depth mask under the tap. `EditParams.lensBlur` (amount, focus, range) and `haze` are left out when
+  off. Measured on the tractor photo's server previews (edge energy, higher is sharper): focus near → fence,
+  cab and trees 2.3, 2.5, 2.6; focus on the cab → 3.4, 10.8, 3.8; unblurred 5.3, 11.1, 13.8.
+- **The depth map's edges are the photo's** (§7, "Depth"): the model's map is 518², so stretching it to the
+  frame leaves a step smeared over a couple of its texels and a blur's edge drifts off the subject into a halo
+  — visible around hair and thin branches. `client/depth_refine.wgsl` upsamples it against the photo instead
+  (joint bilateral upsampling, Kopf et al. 2007, from the paper): 25 taps a texel apart, each weighted by
+  distance and by how closely the photo's luminance there matches the photo's here, so depth steps where the
+  photo steps and stays smooth where it does not. It depends on the photo and the map alone, not on any
+  slider, so both engines render it once and keep it; it is capped at 2,048 on the long edge, four times the
+  model's own. One pass takes most of an edge's error out rather than all of it — the texel being repaired is
+  itself a tap — which is what the engine test holds it to, along with leaving flat regions and fine texture
+  alone. Checked in the browser with `web/scripts/depth-edges.mjs`.
+- **Depth masks (§15):** Depth Anything V2 *Small* (Apache-2.0; Base and Large are CC-BY-NC and excluded),
+  simplified at 518² like BiRefNet and imported by burn-onnx, gives relative inverse depth: no unit, no fixed
+  origin. `Ml::depth` stretches it between the photo's own 1st and 99th percentiles to 0–255, near white, and
+  the worker caches it as `depth` with the other masks (`MASK_REVISION` 2, so cached sets are made again once
+  with it). f16 stays within 2.4 % of f32's span at worst, 0.2 % on average, and runs in about 100 ms on the
+  A4000. On its own the mask is a far-to-near gradient; a layer on it usually carries a `range`
+  (`MaskAdjustment.range`: from, to, feather, 0–100 of the mask's value), which the brush composite applies
+  when it seeds the layer from the model's mask (`in_range` in `client/brush_composite.wgsl`, the same pass
+  in the browser and on export), so strokes still add to or take from the band it selects, and the develop
+  pass is unchanged. A new depth layer starts as the nearer half (50–100, feather 15). A mirror's reflection
+  sits at the mirror's distance, where Apple's Portrait matte counts it as subject.
 - **Crop and straighten (§15):** `sidecar_color::geometry` turns `EditParams.geometry` — quarter turns, a
   mirror, straighten, Vertical and Horizontal keystone (a virtual camera tilt of up to 30° with a focal length of
   0.8 picture diagonals, Aspect for the stretch that leaves), and a crop — into one projective map from the
@@ -516,6 +609,11 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
 Module functions take their values as arguments and never read the uniform buffer themselves, so local masks (§15) can call them with per-pixel blended values. Module bypasses compile as pipeline `override` constants, so disabled modules cost nothing.
 
 1. **White balance.** The `color` crate (compiled to WASM) turns (Temperature K, Tint) into CIE xy on the Planckian locus offset along the isotemperature line → XYZ white → camera neutral through the XYZ→camera matrix interpolated for that temperature → multipliers = 1/neutral, normalized so G = 1. For *As shot* it runs the inverse, iterating on `cam_mul` to place the sliders.
+   **Eyedropper.** The same inverse with a picked patch as the neutral (`CameraColor::neutral_xy`, wasm
+   `sc_white_from_neutral`): a tap on the photo maps back through crop, straighten and lens correction to the
+   source texture, which is still camera RGB before white balance; the editor reads back a square about 9 CSS
+   pixels across there, leaves out pixels the ingest flagged as clipped, and sets the temperature and tint under
+   which that average is grey. Needs WebGPU (the source lives on the GPU); without it the button is hidden.
 2. **Exposure.** `2^EV`, computed on the CPU. Values above 1.0 pass through untouched.
    **Highlight blend.** Where alpha > 0, blend toward the pixel's luminance-preserving neutral by `alpha × strength`, suppressing the magenta cast WB multipliers put on reconstructed highlights.
 3. **Color space.** Camera → XYZ (inverse of the interpolated XYZ → camera matrix, normalized so camera white lands on D65) then XYZ → Rec.2020, recomputed whenever WB changes. Gamut compression (distance-based, in the style of the ACES reference gamut compression) keeps saturated lights from producing negative channels.
@@ -535,6 +633,219 @@ are the RAW ones (`whiteEv`, `blackEv`, `contrast`), read through the slider map
 sidecar format need no second meaning; the editor limits Exposure to ±2 EV and hides Highlight recovery.
 Measured on an iPhone HEIC at default settings: mean difference from the file 0.03/255, none above 0.12/255.
 
+**Film.** A RAW can be rendered the way colour negative film renders light, as an alternative to step 4's
+neutral rendering — the process, not a look imitating any stock. Film has three emulsion layers, each with its
+own characteristic curve, so red, green and blue each pass through the curve separately: a bright saturated
+light reaches the shoulder in one channel before the others and fades toward white, and midtones gain
+saturation from the toe and shoulder pulling channels apart. The neutral path's `rgb × Y′ / Y` holds hue
+instead; that is its point, and film's is not to. `EditParams.film` (absent = neutral, so old edits are
+unchanged and need no process version) holds:
+
+- **Amount** 0–100 (default 100): a mix between the neutral and the film result, after the user's curve.
+- **Interlayer effects** 0–100 (default 45): in film, developer by-products from one layer hold back
+  development in its neighbours, which separates colours. Modelled as a spread in log exposure away from the
+  pixel's mean over the channels, `x + s·(x − mean)`, with `s = interlayer/100 × 0.6`, before the curves. A
+  neutral has no spread, so greys stay grey and white balance keeps its meaning.
+
+`film_curve_in` (shaders/develop/tone.wgsl) applies the same logistic, black and white points as the neutral
+path to each channel; the user's curve LUT and mask curves then apply per channel. A channel at zero is held
+four stops under the black point, where the curve is flat. Developed files ignore it (`pack` writes 0): their
+curve was already applied. Judged on ten RAWs from the library: 30 reads as natural, 70 is strong (skin goes
+orange-red); the user chose 45 as the default. Halation, grain and monochrome film are later steps.
+
+**Black and white.** `EditParams.monochrome { film, filter }` renders the light as a black-and-white film type
+would see it, instead of taking a weighted sum of RGB. Three numbers can't say which spectrum a colour came
+from; Sidecar picks the one of Jakob and Hanika's family (2019: a sigmoid of a quadratic in wavelength) whose
+colour under D65 is the pixel's — always a valid reflectance, smooth as surfaces are, and exactly the colour
+it came from — implemented from the paper in `sidecar_color::spectral` (Newton's method on the CIELAB
+difference, from grey out in steps), with CIE 1931 colour matching functions and D65 at 10 nm taken from
+colour-science (BSD-3). colour-science's own implementation was too slow for this (minutes for a coarse table);
+ours fits a 17³ table in about 0.16 s, once per process, and matches its spectra within 0.01.
+
+Each colour is fitted at a surface's brightness (luminance at middle grey's, no channel above 0.95), not
+scaled until a channel reaches 1: the family's spectrum depends on brightness, and an implausibly bright,
+saturated colour comes back as a red that rises again in the violet — unseen by the eye, seen by blue-sensitive
+film, which then rendered red paint lighter than panchromatic did. Light is linear, so the scale divides back
+out. The film's exposure is the spectrum lit by D65 (the picture is white-balanced), through the filter's
+transmission and the film type's sensitivity, white at 1; tabulated over the colour cube for the chosen
+film and filter (`mono_lut`, rebuilt per pack in well under a millisecond), read by the develop pass right
+after the camera matrix (`develop/mono.wgsl`, eight corners, since r32float isn't filterable), and passed on as a
+neutral to the tone map. Film rendering gives way when both are set; developed files can be black and white too.
+
+Film types are the classes' sensitivities — panchromatic (classic), extended-red panchromatic
+(modern flat-grain), orthochromatic, blue-sensitive (collodion; the ultraviolet real plates saw is not in any RAW) — not
+measured curves of named stocks, which need their datasheets digitised. Filters are generic yellow, orange,
+red (long-pass edges at 500, 555, 600 nm) and green (a band). Measured on everyday colours: blue-sensitive film
+darkens skin 0.7 stop against panchromatic and lifts the sky; orthochromatic takes a saturated red to near
+black; a red filter darkens a blue sky 1.6 stops. Not yet: the stock's own characteristic curve.
+
+**The scene's light.** `Monochrome.light` names what lit the scene: `daylight` (D65, the default, left out of
+the serialized edit), `tungsten` (CIE illuminant A: Planck's law at 2,848 K with CIE's older constant 1.435e-2),
+or `white-balance` — the temperature the edit's white balance resolves to, as a black body below 5,000 K and CIE
+daylight above (the split CIE's colour-rendering index uses; daylight from CIE 15's chromaticity formula and
+basis functions S0, S1, S2, taken from colour-science). The white-balanced pixel says what the surface is; film
+has no white balance, so it sees that reflectance times the light, and the meter (white at 1) evens out the
+total. Under tungsten, panchromatic film renders a saturated red 0.86 stop lighter and a blue sky 0.55 stop
+darker than in daylight, against the same grey. Checked against colour-science: A within 0.1 %, D50 within 0.1
+of 100.
+
+**Developers.** `Monochrome.developer` (`standard`, `fine-grain`, `acutance`, `compensating`, `staining`; the
+default left out of the edit) and `Monochrome.development` (−2 … 2, the zone system's N−2 … N+2) act on the film's
+exposure right after `mono_exposure`, before grain and the tone map (`develop/developer.wgsl`,
+`sidecar_color::developer`). In log exposure `x`, stops from middle grey:
+
+- *Adjacency:* `x + a·(x − local)`, where `local` is the exposure around the pixel, blurred over the developer's
+  reach on a 35 mm negative — developer exhausts in dense areas and stays fresh in thin ones, and diffusion
+  carries both across an edge (the Eberhard effect, Mackie lines).
+- *Development:* contrast × `5 / (5 − N)` above a speed point 2.5 stops under grey, rounded into the shadows
+  with a softplus hinge: N+1 fits four zones of subject into five of negative; shadows barely move.
+- *Compensation:* density grows by `1 − c` as much above a knee 1.5 stops over grey.
+
+| developer | adjacency | reach | compensation | grain |
+|---|---|---|---|---|
+| standard (general purpose) | 0 | — | 0 | × 1 |
+| fine grain (solvent) | 0 | — | 0 | × 0.75 |
+| high acutance (dilute) | 0.35 | 0.08 mm | 0.1 | × 1.2 |
+| compensating (two-bath, stand) | 0.25 | 0.3 mm | 0.45 | × 1 |
+| staining (pyro) | 0.2 | 0.15 mm | 0.3 | × 1, stain hides up to half at the white point |
+
+Development scales grain by `1 + 0.15 N`. These are the developers' kinds as the literature describes them, not
+fits to one formula's measurements. The standard developer at N returns its input exactly.
+
+`local` comes from an *adjacency map*: the frame averaged down by a whole number to at most 1,024 texels on its
+long edge (`client/density_down.wgsl`), developed by the develop pass itself with `mono.z` set — which returns
+the film's log exposure right after `mono_exposure`, through the whole frame's masks — then blurred twice
+(`client/density_blur.wgsl`, separable Gaussian, σ the reach in map texels). The develop pass samples it
+bilinearly at the pixel's place in the frame. A develop of the whole frame builds its own map (browser:
+`DevelopPass` in `develop.ts`; server: `DevelopPass::render`), so preview, export and parity need nothing new;
+the loupe builds one from the whole session source, lens-corrected at the map's size, and hands it to every
+tile, so a tile's edges are the whole picture's (engine test: within 0.001). Depth effects and the detail
+filters are not in the loupe's map; at a fraction of a millimetre's reach this doesn't show.
+
+**Stocks.** A named stock is a film type with its maker's measured curves, offered under its type in the
+editor (the edit names the stock). Four so far, read from the datasheets the owner supplied by the scripts in
+`crates/color/film-data/` (its README lists the sheets and how to rerun them); the data is in
+`crates/color/src/film_data.rs`:
+
+| stock | type | spectral sensitivity | characteristic curve |
+|---|---|---|---|
+| ILFORD HP5 Plus | panchromatic | spectrogram, traced | ILFOTEC HC 1+31, 6½ min |
+| KODAK TRI-X 400 | panchromatic | log sensitivity, vector | D-76, 8 min |
+| KODAK TRI-X 320 | panchromatic | Tri-X's one curve (the sheet gives no other) | D-76, 8 min, sheets |
+| ILFORD SFX 200 | extended red | spectrogram to 740 nm, traced | ID-11, 10 min |
+
+- *Spectral sensitivity.* Kodak plots log₁₀ of the reciprocal of the energy giving density 1.0 over fog — the
+  film's own sensitivity, used as it is. ILFORD plots a "wedge spectrogram to tungsten light (2,850 K)", 0 to
+  1; it is read as drawn, the film's relative sensitivity. *That corrects the first reading of HP5*, which
+  divided the light out: SFX 200's filter-factor table decides it — read as drawn, SFX needs ×2.9 behind a red
+  filter where the sheet says ×2.8; divided by tungsten it would need ×9. (The first reading had leaned on the
+  sheet's warning that cameras' meters underexpose by up to 1½ stops behind deep red: that is about meters'
+  red response, not the film's spectrum.) Every stock's red (Wratten 25) factor through Sidecar's generic red
+  filter lands within 0.3 stop of its sheet: SFX 2.9 / 2.8, Tri-X 9.0 / 8 in daylight and 4.1 / 5 in tungsten.
+  Our yellow is a long-pass at 500 nm, deeper than a Wratten 8 (Tri-X 2.4 / 2, SFX 1.6 / 2). HP5 read as drawn renders yellow 0.6 stop darker and a blue sky 0.4 stop lighter than
+  the eye — the classic panchromatic its sheet describes; its red factor, 6.3, sits with Tri-X's.
+- *Characteristic curve.* Each is fitted (`sheets/fit.py`, Nelder–Mead) as
+  `fog + G·(w·sp((log E − e₀)/w) − c·v·sp((log E − e₁)/v))`, `sp(u) = ln(1 + eᵘ)`: a toe that becomes the
+  straight line, and a shoulder taking `c` of the gradient away — within 0.015 density of every trace. Middle
+  grey sits 1.2 log E (Zone V four stops over Zone I) above the speed point at fog + 0.1; Kodak's curves are in
+  lux·s, and Tri-X 400's speed point falls at log −2.701, where ISO 400 (0.8 / 400 lux·s) puts it: −2.699. In
+  stops from grey the toes sit near −3.7 to −4 (HP5, Tri-X 400, SFX), Tri-X 320's at −1.4 and twice
+  as wide — the long toe it is known for; shoulders: SFX 200 rolls fully over around the white point, Tri-X 400
+  takes 30 % off above +4.4, HP5 is nearly straight.
+- *Rendering.* `stock = [1, toe at, toe width, shoulder strength]` and `shoulder = [at, width]` reach the develop
+  pass, which bends exposure after grain (`develop/stock.wgsl`): the curve's shape, scaled to slope 1 at grey,
+  so the deepest shadows flatten into fog, grain with them, and the highlights go over the shoulder, while
+  grey and Contrast's midtone slope are kept. The print puts the fog half a stop over the tone map's black
+  point (`tone_params`): the black point moves to the curve's floor, Blacks still moves it from there, and the
+  steepness follows the narrower range. The gradient itself is the print's: a darkroom printer picks the
+  paper grade. From a RAW only; a developed file keeps its own tones and takes just the sensitivity.
+
+*Named products use their own data.* The owner's rule: generic items (the film classes, the developer kinds, Film's
+interlayer model) may rest on assumptions, but anything carrying a product name must rest on that product's own
+data or a published standard — never another product's curves. The generic items name no products. One known gap:
+Double-X's sheet plots its sensitivity from 420 nm and the trace is held flat below, which carries 15 % of a
+daylight exposure (Tri-X, measured to 300 nm, carries 18 % there): it needs the owner's decision.
+
+**Colour film, spectrally (stage 3).** `crate::slide` renders a colour reversal stock from its data
+sheet alone — FUJICHROME PROVIA 100F first, whose sheet (AF3-036E) gives each layer's spectral sensitivity, the
+three characteristic curves and each dye's spectral density, all traced (`crates/color/film-data/provia-100f/`):
+
+1. The scene's spectrum: each colour's reflectance (Jakob and Hanika) under the scene's light, at the exposure a
+   reflected-light meter gives ISO 100 for Sidecar's middle grey (ISO 2720: q·K/S = 0.65 × 12.5 / 100 lux·s).
+2. Each layer's exposure through its sensitivity. FUJIFILM's sensitivities are relative (read as absolute, density
+   1.0 would take ~0.1 J/cm², 10⁸ times what an ISO 100 film needs), so each layer is placed on its curve through the
+   light the curves were exposed with — the sheet's "Daylight", **ISO 7589's sensitometric daylight**.
+3. The characteristic curves give Status A densities, as the sheet measured them (a Fuji FAD-30S densitometer).
+4. The dye amounts that read those densities through **ISO 5-3's Status A spectral products**, by Newton's method.
+5. The slide on the sheet's ISO 3664 light table (CIE D50), the eye adapted to it (Bradford), on the display.
+
+Both ISO tables are licensed and stay **out of the public repository and image**. The owner found them: Status A
+in ANSI/ISO 5-3-1995 (ANSI/NAPM IT2.18-1996, table 3: log₁₀ spectral products at 10 nm, with slopes beyond each
+listed range; ISO 5-3:2009 keeps the same 10 nm values), and ISO sensitometric daylight in ISO 7589-1984, table 1
+(D55 × the ISO standard lens, 350–690 nm; 0 beyond, where Provia's layers see nothing and the eye under 0.1 % of
+a lux) — the current edition is ISO 7589:2002; its daylight table is still to be compared. With both: a metered
+middle grey in ISO daylight renders [0.074, 0.080, 0.089] — equal Status A densities of about 1.1, slightly cool
+on the D50 light table. They are
+read at run time from the operator's own files, named by `SIDECAR_STATUS_A` and `SIDECAR_ISO_DAYLIGHT`
+(`Densitometer::parse`, `parse_spectrum`). Tests run the mechanics through a stand-in densitometer and D55
+(`slide::stand_in_standards`), which render no real slide.
+
+*What the develop pass reads.* Two tables (`develop/slide.wgsl`, eight corners each, since rgba32float does not
+filter): each colour's three layer responses over the colour cube (`exposure_lut`), and the slide's colour over
+layer log H, 65³, in log₂ (`response_lut`; within 2 % between lattice points). A pixel's responses are its
+largest channel times the table's at its chromaticity, as light is linear; `SlideProfile`'s three offsets put
+each layer's response on its own curve, and clamping to the table's domain is what holds every curve flat past
+its ends — so an unexposed frame comes out at full density, as a reversal stock does. The stock takes the place
+of the neutral tone map, and `Film.amount` mixes the two; `Film.interlayer` has no part in a sheet's chain and
+is ignored (the editor hides it for a stock).
+
+*Grading what comes out.* A stock's output is a rendered picture — a slide on a light table — so the tone
+controls and the user's curve act on it the way they act on a developed file (`tone_display_curve_in`, with
+`DevelopParams.slide_tone` carrying them in that form): the identity where they sit at their defaults, so the
+chain's own colour is what appears, and a grade on top when they are moved. The knee is held at 1, because
+Exposure has already moved the film along its own characteristic curve and the sheet's shoulder is the one
+that counts. This replaced the first arrangement, where those controls reached the picture only through the
+neutral rendering — which meant that at a full Amount, Contrast, Blacks, Whites, Highlights, Shadows and the
+curve did nothing at all while still moving. Exposure worked throughout, since it is the film's exposure.
+
+*Which side holds what, and why.* `pack` is compiled to wasm so the browser packs the same uniforms, and the
+browser must hold no ISO table. So a stock splits in two. The **profile** — the response table and the three
+offsets, all a standard touches — is measured on the server from the operator's files, cached per stock
+(`sidecar_worker::stocks`, in memory and under `cache/stocks`; about four seconds, a quarter of a million dye
+solves) and served by `GET /api/film/stocks/{id}`; the browser fetches it once and uploads the table straight to
+the GPU. Neither standard can be recovered from it: it is a table of colours and three numbers. Everything else
+— the sheet's sensitivities and the scene's light — is public, so `exposure_lut` is built per edit on whichever
+side is rendering. A deployment without the two files renders no stock and offers none: `GET /api/film/stocks`
+reports what it has, and the editor shows the choice only for those.
+
+Edges, stated: sensitivities beyond the sheet's plotted floor (about 1/30 of each peak) are 0;
+dyes beyond 388–719 nm hold their end values, where the eye sees under 0.1 % of the light. Viewing places the light
+table at the display's white, so the slide keeps its density: a slide's middle grey is darker than Sidecar's
+neutral rendering of the same exposure, as it is on a light table.
+
+**Grain.** `EditParams.grain { amount, size }` makes each spot's exposure flicker as a negative's grains make
+it, before the tone map, in colour or black and white, on a RAW or a developed file (`develop/grain.wgsl`). The
+noise is procedural, not a stored map: two octaves of value noise — clumps at the grain's size, grains at half
+of it — whose lattice values come from an integer hash of the pixel's place in the whole frame (pcg2d, from
+Jarzynski and Olano's 2020 JCGT paper), four 16-bit uniforms summed to a near-Gaussian value. Integer maths and
+an exact multiply make it the same on every GPU: parity's grain cases are identical between browser and server.
+Interpolated value noise is divided by its own spread at that position, so the lattice leaves no pattern of
+stronger and weaker grain. Position is the frame's: the develop pass adds `MaskParams.frame`'s offset, so a
+loupe tile's grain is the export's at the same pixels.
+
+Size is a grain on a 35 mm negative, 5–40 µm (`Grain::microns`, doubling every third of the slider), turned into
+pixels from the frame's long edge at each rendering, so grain keeps its share of the picture at every size.
+Where an octave is finer than a pixel, its lattice is the pixels and its strength falls with grain size over
+pixel size — Selwyn's law, granularity × √(area seen) constant — so the proxy shows what a scaled-down export
+would, and the full-size export shows the grain itself.
+
+The flicker is in exposure, `exp2(σ·n)`, with its mean kept (`− σ² ln 2 / 2`). Grain is denser where the
+negative is, so σ grows with the pixel's place between the black and white points (`√((0.2 + t)/1.2)`); the
+tone curve then flattens it in the deep shadows and the clipped highlights, and more contrast shows more of it,
+as a harder paper grade does. A developed file is already a print: its σ is shaped `4e(1 − e)` on the encoded
+value instead. Amount 100 is a σ of 0.6 stop. Colour grain is one value for all three channels (luminance
+grain); separate grain per dye layer belongs to stage 3's spectral colour film.
+
 Uniform buffer:
 
 ```wgsl
@@ -547,12 +858,20 @@ struct DevelopParams {            // offset  size
                                   //                developed: blacks, whites, contrast, knee
   hlStrength : f32,               //  128      4
   displayReferred : f32,          //  132      4   0 RAW, 1 developed
-  _pad1      : vec2f,             //  136      8
+  saturation : f32,               //  136      4   global chroma gain − 1
+  _pad1      : f32,               //  140      4
   mixer      : array<vec4f, 8>,   //  144    128   per band: hue, sat, lum, unused
-}                                 //  total 272 bytes
+  film       : vec4f,             //  272     16   amount 0–1 (0 neutral), interlayer spread, unused ×2
+  mono       : vec4f,             //  288     16   black and white: 1 on, the table's side, 1 = output the
+                                  //                adjacency map's log exposure, unused
+  grain      : vec4f,             //  304     16   σ in stops (0 none), size ÷ long edge, stain masking, unused
+  developer  : vec4f,             //  320     16   adjacency, reach ÷ long edge, development contrast, compensation
+  stock      : vec4f,             //  336     16   a named stock's curve: 1 on, toe at, toe width, shoulder strength
+  shoulder   : vec4f,             //  352     16   the stock's shoulder: at, width (stops from grey), unused ×2
+}                                 //  total 368 bytes
 ```
 
-**Struct layouts.** The 272-byte table above documents the layout; code never hard-codes it. `encase` (MIT-0) derives it on the Rust side and `webgpu-utils` (MIT) reads it from the WGSL source in the browser, so a field added to the struct can't silently shift the offsets.
+**Struct layouts.** The 368-byte table above documents the layout; code never hard-codes it. `encase` (MIT-0) derives it on the Rust side and `webgpu-utils` (MIT) reads it from the WGSL source in the browser, so a field added to the struct can't silently shift the offsets.
 
 **Parameter flow.** Slider input → params store (Svelte 5 `$state`) → derived CPU values (WASM: WB → multipliers and matrix; curve → LUT) → `queue.writeBuffer` → dirty flag → next `requestAnimationFrame` runs develop → view → histogram. Undo snapshots on `pointerup`, not per input event.
 
@@ -993,7 +1312,7 @@ After V1: lens correction, then crop and straighten, then local masks (§15).
 **Masks.**
 
 - Weights: gradients (still to come) are analytic in the shader. Brush strokes — normalized points, radius, feather, flow — are rasterized by shared WGSL render passes into `r8unorm` masks, at proxy size on the phone and up to 4,096 px on the server (see the build log).
-- Model masks (subject, skin, hair, clothes; sky is still to come) run on the worker's GPU through `sidecar-ml`. The sidecar stores only the mask's name; the raster lives in `/cache` and is recomputed if the cache is gone, so nothing binary lands beside the RAW. See the build log.
+- Model masks (subject, skin, hair, clothes, depth; sky is still to come) run on the worker's GPU through `sidecar-ml`. A layer's `range` keeps a band of its mask's values — on depth, a band of distance. The sidecar stores only the mask's name; the raster lives in `/cache` and is recomputed if the cache is gone, so nothing binary lands beside the RAW. See the build log.
 - Blending: `ev = global.ev + Σ wₖ · maskₖ.ev`, and likewise for WB multipliers, contrast, saturation and mixer values; the tone map's parameters blend toward the layer's, and each layer's curve applies after the global one by its weight. Up to 8 layers per photo, in a fixed-size uniform array.
 - Display: the selected mask shows as desaturation outside it, which keeps red and blue reserved for clipping.
 

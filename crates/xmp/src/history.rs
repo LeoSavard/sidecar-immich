@@ -117,14 +117,19 @@ fn canonical(edit: &EditParams) -> Value {
 }
 
 /// Fields of `child` that differ from `parent`, recursing into objects; arrays and scalars are replaced whole.
+/// A field `child` doesn't have — left out at its default, as saturation 0 or no geometry is — is removed.
 fn diff(parent: &Value, child: &Value, path: &str, delta: &mut Map<String, Value>, removed: &mut Vec<String>) {
     let Value::Object(c) = child else { return };
+    let dotted = |k: &str| if path.is_empty() { k.to_string() } else { format!("{path}.{k}") };
+    if let Value::Object(p) = parent {
+        removed.extend(p.keys().filter(|k| !c.contains_key(*k)).map(|k| dotted(k)));
+    }
     for (k, v) in c {
         let p = parent.get(k).unwrap_or(&Value::Null);
         if p == v {
             continue;
         }
-        let here = if path.is_empty() { k.clone() } else { format!("{path}.{k}") };
+        let here = dotted(k);
         match (p, v) {
             (_, Value::Null) => removed.push(here),
             (Value::Object(_), Value::Object(_)) => {
@@ -146,8 +151,10 @@ fn clear(v: &mut Value, dotted: &str) {
     let mut parts = dotted.split('.').peekable();
     while let Some(part) = parts.next() {
         let Some(obj) = at.as_object_mut() else { return };
+        // Removed, not set to null: a field left out at its default reads back as that default, and null
+        // isn't a number. (Histories written before this held only fields that read null as none.)
         if parts.peek().is_none() {
-            obj.insert(part.to_string(), Value::Null);
+            obj.remove(part);
             return;
         }
         let Some(next) = obj.get_mut(part) else { return };
@@ -228,7 +235,19 @@ impl History {
         self.nodes.iter().any(|n| n.parent.as_deref() == Some(id))
     }
 
-    /// The full edit a node stands for, rebuilt from the root down its ancestry.
+    /// A version as the editor should see it: `edit_of`, brought to the current `PROCESS_VERSION`. Each node
+    /// records the version it was saved under (the root holds all of `EditParams`, a later node's delta any
+    /// change to it), so a version saved before an upgrade migrates and one saved after is left alone. This
+    /// is what `GET …/history` lists and what a checkout makes current.
+    pub fn version_of(&self, id: &str) -> Result<EditParams> {
+        let mut edit = self.edit_of(id)?;
+        edit.migrate();
+        Ok(edit)
+    }
+
+    /// The full edit a node stands for, rebuilt from the root down its ancestry, exactly as stored. Deltas are
+    /// taken against this, so it must not migrate: a delta computed against a migrated parent would be
+    /// replayed onto the unmigrated one. Anything handed out goes through `version_of`.
     pub fn edit_of(&self, id: &str) -> Result<EditParams> {
         let mut chain = Vec::new();
         let mut at = Some(id.to_string());
@@ -344,7 +363,7 @@ impl History {
 
     /// Move the head to `id`, and return the edit it holds.
     pub fn checkout(&mut self, id: &str) -> Result<EditParams> {
-        let edit = self.edit_of(id)?;
+        let edit = self.version_of(id)?;
         self.head = id.to_string();
         Ok(edit)
     }

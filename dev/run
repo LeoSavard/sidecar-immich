@@ -2,13 +2,29 @@
 # Run a command inside the Sidecar dev container with the GPU, repo and build caches mounted.
 # The container runs as root (toolchains and caches live there); files it creates in the repo are handed
 # back to the invoking user afterwards.
+#
+# Each git worktree builds into its own target directory. They all mount at /src, so in a shared one cargo
+# could take another worktree's build of a crate as up to date (it compares modification times, and the
+# other checkout's files can be older than the last build). sccache keeps a new worktree's first build cheap,
+# on two conditions measured here: the target directory reaches cargo through a config file rather than
+# CARGO_TARGET_DIR (sccache hashes every CARGO_* variable, so a per-worktree value meant 0 % Rust hits), and
+# SCCACHE_BASEDIRS strips it from the paths in rustc's arguments. With both, a fresh worktree builds the server in
+# 91 s instead of 170 s (90 % of Rust compiles from cache). Scripts that need the
+# directory read SIDECAR_TARGET_DIR.
 set -euo pipefail
 here="$(cd "$(dirname "$0")/.." && pwd)"
 uid="$(id -u)"; gid="$(id -g)"
 tty=""; [ -t 0 ] && tty="-t"
+. "$here/dev/worktree.sh"
 exec docker run --rm -i $tty \
   --device nvidia.com/gpu=all -e NVIDIA_DRIVER_CAPABILITIES=all \
   --security-opt label=disable \
   -v "$here":/src -v sidecar-dev-cache:/cache \
+  -e SIDECAR_TARGET_DIR="$SIDECAR_TARGET_DIR" -e SCCACHE_BASEDIRS="$SIDECAR_TARGET_DIR" \
   ${SIDECAR_DEV_EXTRA:-} \
-  -w /src sidecar-dev bash -c '"$@"; rc=$?; find /src -xdev -user 0 -not -path "/src/.git/*" -exec chown '"$uid:$gid"' {} + 2>/dev/null; exit $rc' _ "$@"
+  -w /src sidecar-dev bash -c '
+    unset CARGO_TARGET_DIR
+    mkdir -p /.cargo && printf "[build]\ntarget-dir = \"%s\"\n" "$SIDECAR_TARGET_DIR" > /.cargo/config.toml
+    "$@"; rc=$?
+    find /src -xdev -user 0 -not -path "/src/.git/*" -exec chown '"$uid:$gid"' {} + 2>/dev/null
+    exit $rc' _ "$@"

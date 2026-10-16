@@ -6,13 +6,14 @@ use anyhow::{Context, Result};
 
 pub mod brush;
 pub mod compute;
+pub mod depth;
 pub mod detail;
 pub mod develop;
 pub mod focus;
 pub mod ingest;
 pub mod lens;
 pub mod warp;
-pub use develop::{DevelopPass, Masks};
+pub use develop::{DevelopPass, Masks, needs_density_map};
 pub use focus::focus_energy;
 pub use ingest::{Ingest, MosaicInput};
 
@@ -269,6 +270,14 @@ impl Gpu {
             Ok(Self { adapter_info, device, queue })
         })
     }
+}
+
+/// One device for every GPU test in the crate. Tests run on parallel threads, and NVIDIA's Vulkan driver
+/// deadlocks when several of them create an instance and device at the same moment.
+#[cfg(test)]
+pub(crate) fn test_gpu() -> Result<&'static Gpu, String> {
+    static GPU: std::sync::OnceLock<Result<Gpu, String>> = std::sync::OnceLock::new();
+    GPU.get_or_init(|| Gpu::new_headless().map_err(|e| format!("{e:#}"))).as_ref().map_err(Clone::clone)
 }
 
 #[cfg(test)]

@@ -3,8 +3,8 @@ on: [push, pull_request]
 jobs:
   rust:
     runs-on: ubuntu-latest
-    # Clippy's and the tests' debug builds of burn and wgpu filled the runner's disk: the linker died with a bus
-    # error writing sidecar-ml's test binary. Line tables keep backtraces readable at a fraction of the size.
+    # Line tables keep backtraces readable at a fraction of full debug info's size: full debug builds of wgpu
+    # filled the runner's disk.
     env:
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
@@ -18,11 +18,36 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: EmbarkStudios/cargo-deny-action@v2
         with: { command: check licenses }
+      # Dependencies (LibRaw included) come from the cache; only Sidecar's own crates rebuild per push.
+      - uses: Swatinem/rust-cache@v2
       # LibRaw builds against zlib and libjpeg; exiftool is shelled out to when copying export metadata.
       - run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers libvulkan1 libjpeg-dev zlib1g-dev pkg-config libimage-exiftool-perl
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --workspace --exclude sidecar-ml --all-targets -- -D warnings
       # GPU tests fall back to lavapipe (software Vulkan) on CI runners.
-      - run: cargo test --workspace
+      - run: cargo test --workspace --exclude sidecar-ml
+      # The web app's edit types are generated from sidecar-color and committed; fail if they've drifted.
+      - name: Generated TypeScript is current
+        run: |
+          TS_RS_EXPORT_DIR="$PWD/web/src/lib/generated" cargo test -q -p sidecar-color --features ts export_bindings
+          git status --porcelain -- web/src/lib/generated | tee /dev/stderr | (! grep -q .)
+  # sidecar-ml on its own runner: burn's debug build is what filled the disk (the linker died with a bus error
+  # writing its test binary), and nothing else depends on it.
+  ml:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+    steps:
+      - uses: actions/checkout@v7
+      - name: Make room for burn's debug build
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers libvulkan1
+      - run: cargo clippy -p sidecar-ml --all-targets -- -D warnings
+      - run: cargo test -p sidecar-ml
   parity:
     runs-on: ubuntu-latest
     steps:
@@ -32,10 +57,11 @@ jobs:
       - uses: actions/setup-node@v7
         with: { node-version: 24 }
       - run: rustup target add wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
       # LibRaw builds against zlib and libjpeg; exiftool is shelled out to when copying export metadata.
       - run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers libvulkan1 libjpeg-dev zlib1g-dev pkg-config libimage-exiftool-perl
       # The web app imports generated files that are not in git: the composed WGSL and the colour maths as wasm.
-      - run: cargo run -p sidecar-devtools -- shaders web/src/lib/gpu/wgsl
+      - run: cargo run -p sidecar-shaders -- web/src/lib/gpu/wgsl
       - run: cargo build --release -p sidecar-color-wasm --target wasm32-unknown-unknown
       - run: cp target/wasm32-unknown-unknown/release/sidecar_color_wasm.wasm web/src/lib/color/sidecar_color.wasm
       - run: cargo run -p sidecar-devtools -- parity fixtures web/static/parity

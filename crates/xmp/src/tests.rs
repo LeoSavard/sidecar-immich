@@ -193,6 +193,30 @@ fn newer_process_version_is_read_only() {
     assert!(doc.set_edit(&EditParams::default(), "x").is_err());
 }
 
+/// A sidecar a `PROCESS_VERSION` 1 Sidecar wrote, with Highlights at +20 stored the old way (a curve point at
+/// x=0.75), must read back with `tone.highlights == 20` and no such point in `tone.curve` — the point that
+/// would otherwise collide with a hand-drawn one near the same x.
+#[test]
+fn an_old_sidecars_highlight_anchor_migrates_on_read() {
+    let tmp = tempfile::tempdir().unwrap();
+    let roots = [tmp.path().canonicalize().unwrap()];
+    let original = fixture(tmp.path(), "e.NEF");
+    let mut edit = EditParams::default();
+    edit.tone.curve = vec![[0.0, 0.0], [0.75, 0.75 + 20.0 / 100.0 * 0.15], [1.0, 1.0]];
+    update(&original, &roots, |d| {
+        d.set_edit(&edit, "x")?;
+        d.sidecar["processVersion"] = serde_json::json!(1);
+        Ok(())
+    })
+    .unwrap();
+
+    let doc = SidecarDoc::load(&original).unwrap();
+    let migrated = doc.edit();
+    assert!((migrated.tone.highlights - 20.0).abs() < 1e-6);
+    assert_eq!(migrated.tone.shadows, 0.0);
+    assert!(migrated.tone.curve.iter().all(|p| (p[0] - 0.75).abs() >= 1e-6), "the anchor point is gone: {:?}", migrated.tone.curve);
+}
+
 #[test]
 fn refuses_to_write_outside_roots() {
     let tmp = tempfile::tempdir().unwrap();
@@ -309,6 +333,24 @@ mod history {
         assert_eq!(h.node(&heads[1]).unwrap().label.as_deref(), Some("1234e5"), "a label that looks like a number stays text");
         assert_eq!(h.edit_of(&heads[2]).unwrap().lens, None, "turning lens correction off survives the file");
         assert_eq!(doc.edit(), edits[2], "sc:Edit is still the current edit on its own");
+    }
+
+    /// A version that drops something an earlier one had — the geometry reset, the last mask removed — comes
+    /// back without it: a field left out at its default is a change too.
+    #[test]
+    fn a_field_left_out_is_removed_in_the_version_that_left_it_out() {
+        let mut h = History::begin(&EditParams::default());
+        let shaped = EditParams {
+            geometry: Some(sidecar_color::geometry::Geometry { angle: 3.0, ..Default::default() }),
+            masks: vec![sidecar_color::params::MaskAdjustment { mask: "subject".into(), exposure: 1.0, ..Default::default() }],
+            ..ev(0.5)
+        };
+        let a = save(&mut h, &shaped, ORIGINAL).head;
+        let b = save(&mut h, &ev(0.5), &a).head;
+        assert_eq!(h.edit_of(&a).unwrap(), shaped);
+        assert_eq!(h.edit_of(&b).unwrap(), ev(0.5));
+        let removed = &h.node(&b).unwrap().removed;
+        assert!(removed.contains(&"geometry".to_string()) && removed.contains(&"masks".to_string()), "{removed:?}");
     }
 
     #[test]
@@ -504,4 +546,129 @@ mod history {
         let err = h.commit(&Commit { edit: &ev(1.0), base: "nope", checkpoint: false, session: None, user: None }, &[]).unwrap_err();
         assert!(matches!(err.downcast_ref::<SidecarError>(), Some(SidecarError::UnknownVersion { .. })));
     }
+
+    /// A history written under `PROCESS_VERSION` 1: its versions read back migrated, and a save made from one
+    /// after the upgrade keeps its Highlights. That second part is why `edit_of` stays raw: a delta taken
+    /// against the migrated parent, replayed onto the stored one, would drop Highlights (unchanged, so not in
+    /// the delta) while the anchor point it came from is replaced along with the rest of the curve.
+    #[test]
+    fn versions_saved_before_highlights_left_the_curve_migrate_and_saves_on_top_keep_them() {
+        let mut h = History::begin(&EditParams::default());
+        h.nodes[0].delta["processVersion"] = serde_json::json!(1);
+        let mut old = EditParams { process_version: 1, ..Default::default() };
+        old.tone.curve = vec![[0.0, 0.0], [0.75, 0.75 + 0.2 * 0.15], [1.0, 1.0]];
+        let a = save(&mut h, &old, ORIGINAL).head;
+
+        let shown = h.version_of(&a).unwrap();
+        assert!((shown.tone.highlights - 20.0).abs() < 1e-9, "{shown:?}");
+        assert_eq!(shown.tone.curve, vec![[0.0, 0.0], [1.0, 1.0]]);
+        assert_eq!(shown.process_version, sidecar_color::params::PROCESS_VERSION);
+        assert_eq!(h.edit_of(&a).unwrap(), old, "what's stored is untouched");
+
+        let mut next = shown.clone();
+        next.tone.curve = vec![[0.0, 0.0], [0.4, 0.45], [1.0, 1.0]];
+        let b = save(&mut h, &next, &a).head;
+        assert_eq!(h.version_of(&b).unwrap(), next);
+        assert_eq!(h.checkout(&a).unwrap(), shown, "a checkout makes the migrated version current");
+    }
+}
+
+/// Saving writes the edit as it is now: a field this version knows and leaves out (at its default) is gone
+/// from the file, however the last save had it, while what a newer Sidecar wrote — a field this version doesn't
+/// know, at the top or inside one it does — is carried along.
+#[test]
+fn saving_drops_known_fields_left_out_and_keeps_unknown_ones() {
+    let tmp = tempfile::tempdir().unwrap();
+    let roots = [tmp.path().canonicalize().unwrap()];
+    let original = fixture(tmp.path(), "DSC_9.NEF");
+    let shaped = EditParams {
+        geometry: Some(sidecar_color::geometry::Geometry { angle: 3.0, ..Default::default() }),
+        masks: vec![sidecar_color::params::MaskAdjustment { mask: "subject".into(), exposure: 1.0, ..Default::default() }],
+        ..Default::default()
+    };
+    update(&original, &roots, |d| {
+        d.set_edit(&shaped, "x")?;
+        let stored = d.sidecar["edit"].as_object_mut().unwrap();
+        stored.insert("fromTheFuture".into(), serde_json::json!({ "strength": 7 }));
+        stored["tone"].as_object_mut().unwrap().insert("knee".into(), serde_json::json!(0.25));
+        Ok(())
+    })
+    .unwrap();
+    update(&original, &roots, |d| d.set_edit(&EditParams::default(), "x")).unwrap();
+    let doc = SidecarDoc::load(&original).unwrap();
+    let stored = &doc.sidecar["edit"];
+    assert!(stored.get("geometry").is_none() && stored.get("masks").is_none(), "{stored}");
+    assert_eq!(stored["fromTheFuture"]["strength"], 7);
+    assert_eq!(stored["tone"]["knee"], 0.25);
+    assert_eq!(doc.edit(), EditParams::default());
+}
+
+/// Saturation and Highlights/Shadows are written only when set: setting them back to 0 must reach the file and
+/// the history, not leave the last value standing.
+#[test]
+fn settings_left_out_at_zero_are_turned_off_in_the_file_and_the_history() {
+    let tmp = tempfile::tempdir().unwrap();
+    let roots = [tmp.path().canonicalize().unwrap()];
+    let original = fixture(tmp.path(), "DSC_10.NEF");
+    let mut set = EditParams { saturation: 15.0, ..Default::default() };
+    set.tone.highlights = -30.0;
+    set.tone.shadows = 20.0;
+    let mut heads = Vec::new();
+    for e in [&set, &EditParams::default()] {
+        let base = SidecarDoc::load(&original).unwrap().history().head;
+        update(&original, &roots, |d| {
+            heads.push(d.commit(&Commit { edit: e, base: &base, checkpoint: false, session: None, user: None }, "sha")?.head);
+            Ok(())
+        })
+        .unwrap();
+    }
+    let doc = SidecarDoc::load(&original).unwrap();
+    assert_eq!(doc.edit(), EditParams::default(), "{}", doc.sidecar["edit"]);
+    let h = doc.history();
+    assert_eq!(h.edit_of(&heads[0]).unwrap(), set);
+    assert_eq!(h.edit_of(&heads[1]).unwrap(), EditParams::default());
+}
+
+/// Switching film rendering off (no `film` field) reaches the file and the history.
+#[test]
+fn film_switched_off_is_off_in_the_file_and_the_history() {
+    let tmp = tempfile::tempdir().unwrap();
+    let roots = [tmp.path().canonicalize().unwrap()];
+    let original = fixture(tmp.path(), "DSC_11.NEF");
+    let film = EditParams { film: Some(sidecar_color::params::Film::default()), ..Default::default() };
+    let mut heads = Vec::new();
+    for e in [&film, &EditParams::default()] {
+        let base = SidecarDoc::load(&original).unwrap().history().head;
+        update(&original, &roots, |d| {
+            heads.push(d.commit(&Commit { edit: e, base: &base, checkpoint: false, session: None, user: None }, "sha")?.head);
+            Ok(())
+        })
+        .unwrap();
+    }
+    let doc = SidecarDoc::load(&original).unwrap();
+    assert_eq!(doc.edit().film, None, "{}", doc.sidecar["edit"]);
+    assert_eq!(doc.history().edit_of(&heads[0]).unwrap(), film);
+    assert_eq!(doc.history().edit_of(&heads[1]).unwrap().film, None);
+}
+
+/// Haze and lens blur turned off (no fields) reach the file and the history.
+#[test]
+fn depth_effects_turned_off_are_off_in_the_file_and_the_history() {
+    let tmp = tempfile::tempdir().unwrap();
+    let roots = [tmp.path().canonicalize().unwrap()];
+    let original = fixture(tmp.path(), "DSC_12.NEF");
+    let on = EditParams { haze: 30.0, lens_blur: Some(sidecar_color::params::LensBlur::default()), ..Default::default() };
+    let mut heads = Vec::new();
+    for e in [&on, &EditParams::default()] {
+        let base = SidecarDoc::load(&original).unwrap().history().head;
+        update(&original, &roots, |d| {
+            heads.push(d.commit(&Commit { edit: e, base: &base, checkpoint: false, session: None, user: None }, "sha")?.head);
+            Ok(())
+        })
+        .unwrap();
+    }
+    let doc = SidecarDoc::load(&original).unwrap();
+    assert_eq!(doc.edit(), EditParams::default(), "{}", doc.sidecar["edit"]);
+    assert_eq!(doc.history().edit_of(&heads[0]).unwrap(), on);
+    assert_eq!(doc.history().edit_of(&heads[1]).unwrap(), EditParams::default());
 }

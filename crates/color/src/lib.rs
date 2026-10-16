@@ -3,11 +3,18 @@
 //! is cheaper to compute once per edit than once per pixel lives here.
 
 pub mod cct;
+pub mod depth;
+mod film_data;
+pub mod developer;
 pub mod geometry;
 pub mod lens;
 pub mod mat;
 pub mod camera;
 pub mod params;
+pub mod slide;
+pub mod spectral;
+pub mod stock;
+mod spectral_data;
 pub mod spline;
 pub mod tone;
 

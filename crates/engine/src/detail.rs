@@ -198,8 +198,8 @@ mod tests {
 
     #[test]
     fn denoise_reduces_noise_and_keeps_the_mean() {
-        let Ok(gpu) = Gpu::new_headless() else { return };
-        let detail = Detail::new(&gpu).unwrap();
+        let Ok(gpu) = crate::test_gpu() else { return };
+        let detail = Detail::new(gpu).unwrap();
         let (w, h) = (256u32, 256u32);
         let mut state = 12345u64;
         let mut rnd = || {
@@ -213,10 +213,10 @@ mod tests {
             [0.2 + n, 0.2 + 0.02 * rnd(), 0.2 + 0.02 * rnd(), 0.0]
         }).collect();
         let img = crate::RgbaF32 { width: w, height: h, data };
-        let tex = crate::upload_rgba16(&gpu, &img);
-        let sigma = detail.noise_sigma(&gpu, &tex).unwrap();
+        let tex = crate::upload_rgba16(gpu, &img);
+        let sigma = detail.noise_sigma(gpu, &tex).unwrap();
         assert!(sigma > 0.0);
-        let out = read_rgba16(&gpu, &detail.denoise(&gpu, &tex, sigma, 100.0, 100.0)).unwrap();
+        let out = read_rgba16(gpu, &detail.denoise(gpu, &tex, sigma, 100.0, 100.0)).unwrap();
         let stats = |d: &[f32]| {
             let g: Vec<f32> = d.as_chunks::<4>().0.iter().map(|p| p[1]).collect();
             let mean = g.iter().sum::<f32>() / g.len() as f32;

@@ -42,7 +42,12 @@ impl CameraColor {
     /// White point chromaticity implied by the as-shot multipliers.
     pub fn as_shot_xy(&self) -> [f64; 2] {
         let m = self.as_shot_mul;
-        let neutral = [m[1] / m[0], 1.0, m[1] / m[2]];
+        self.neutral_xy([m[1] / m[0], 1.0, m[1] / m[2]])
+    }
+
+    /// The white point under which `neutral`, a camera RGB, is grey: what the white balance eyedropper sets
+    /// from the patch it samples. Iterates because the colour matrix depends on the temperature it finds.
+    pub fn neutral_xy(&self, neutral: V3) -> [f64; 2] {
         let mut xy = mat::D65;
         for _ in 0..30 {
             let (t, _) = xy_to_temp_tint(xy);
@@ -103,5 +108,18 @@ mod tests {
         let w = mat::apply(&wb.cam_to_rec2020, &[1.0, 1.0, 1.0]);
         assert!(w.iter().all(|v| (v - 1.0).abs() < 1e-9));
         assert!((3000.0..8000.0).contains(&wb.temperature_k), "{}", wb.temperature_k);
+    }
+
+    /// A patch picked as neutral comes out grey once its white point is resolved, through the same temperature
+    /// and tint the sliders store.
+    #[test]
+    fn a_picked_patch_resolves_to_grey() {
+        let cam = nikon_d850();
+        let patch = [0.21, 0.40, 0.33];
+        let (t, tint) = crate::cct::xy_to_temp_tint(cam.neutral_xy(patch));
+        let wb = resolve(&cam, crate::cct::temp_tint_to_xy(t, tint));
+        let balanced = [patch[0] * wb.mul[0], patch[1], patch[2] * wb.mul[2]];
+        let out = mat::apply(&wb.cam_to_rec2020, &balanced);
+        assert!(out.iter().all(|v| (v / out[1] - 1.0).abs() < 1e-3), "{out:?} at {t:.0} K {tint:+.1}");
     }
 }

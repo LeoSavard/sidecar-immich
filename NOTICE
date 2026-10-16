@@ -10,6 +10,13 @@ THIRD_PARTY_NOTICES.md, which ships in the Docker image at /usr/share/doc/sideca
 - vkdt — Johannes Hanika (BSD-2-Clause): demosaic, highlight, denoise and deconvolution shaders ported to WGSL.
 - ACES Reference Gamut Compression — Academy Software Foundation (Apache-2.0).
 - OKLab — Björn Ottosson.
+- colour-science — Colour Developers (BSD-3-Clause): the CIE 1931 colour-matching functions, D65 and CIE
+  daylight tables used for black and white, taken from its data; the CIE standard data itself is the CIE's.
+- Film stocks' spectral sensitivities and characteristic curves — read from their makers' published datasheets:
+  HARMAN technology (ILFORD HP5 Plus, SFX 200; Nov 2018) and Kodak Alaris (KODAK PROFESSIONAL TRI-X 320 and
+  400, F-4017, 2016). ILFORD, HP5 and SFX are HARMAN technology's trademarks; Kodak, Kodak Professional and
+  Tri-X are Eastman Kodak Company's.
+- Jakob and Hanika's spectral upsampling (2019) — implemented from the paper.
 - Adobe XMP Toolkit — Adobe (BSD-3-Clause), via xmp_toolkit (MIT OR Apache-2.0).
 - ExifTool — Phil Harvey (Perl licence: Artistic or GPL), run as a separate program.
 - lensfun database — the lensfun contributors (CC BY-SA 3.0): lens calibrations downloaded at run time for
@@ -20,8 +27,10 @@ THIRD_PARTY_NOTICES.md, which ships in the Docker image at /usr/share/doc/sideca
 - Compact-ICC-Profiles — Clinton Ingram (CC0-1.0).
 - Free blue-noise textures — Christoph Peters (CC0-1.0).
 - wgpu and naga — the wgpu contributors (MIT OR Apache-2.0).
+- ts-rs — Aleph Alpha GmbH and contributors (MIT): generates the web app's TypeScript for the edit types.
 - burn and CubeCL — Tracel AI and the burn contributors (MIT OR Apache-2.0): the machine-learning runtime in
   sidecar-ml.
 - YuNet face detector — Shiqi Yu, via OpenCV Zoo (MIT).
 - BiRefNet — Peng Zheng and contributors (MIT), as exported to ONNX by onnx-community.
 - MediaPipe multi-class selfie segmentation — Google (Apache-2.0).
+- Depth Anything V2 Small — the Depth Anything V2 authors (Apache-2.0), as exported to ONNX by onnx-community.

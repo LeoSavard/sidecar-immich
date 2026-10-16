@@ -56,3 +56,16 @@ sidecar-template = { path = "crates/template" }
 sidecar-xmp = { path = "crates/xmp" }
 sidecar-worker = { path = "crates/worker" }
 sidecar-api = { path = "crates/api" }
+
+# What `./dev/serve` builds: dependencies fully optimized (they change rarely and hold the hot loops — wgpu,
+# image codecs, jxl-oxide; LibRaw is C and always -O3), Sidecar's own crates lightly optimized and incremental,
+# so touching one rebuilds in seconds rather than the ~20 s a release build takes. Not for anything shipped.
+[profile.dev-serve]
+inherits = "release"
+opt-level = 1
+incremental = true
+codegen-units = 256
+
+[profile.dev-serve.package."*"]
+opt-level = 3
+codegen-units = 16
