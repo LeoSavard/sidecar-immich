@@ -69,6 +69,7 @@ edged by the brush passes before develop samples them.
 | Depth: the model, the mask, airlight | `crates/ml` (Depth Anything V2 Small), `crates/worker/src/masks.rs` |
 | Lens blur and haze by distance | `shaders/depth/`, `shaders/client/depth_*.wgsl`, `crates/color/src/depth.rs`, `crates/engine/src/depth.rs`, `web/src/lib/gpu/depth.ts` |
 | Film rendering (colour) | `film_curve_in` in `shaders/develop/tone.wgsl`, `Film` in `crates/color/src/params.rs` |
+| Colour film from a data sheet (PROVIA 100F) | `crates/color/src/slide.rs` (the chain and `SlideProfile`), `shaders/develop/slide.wgsl`, `crates/worker/src/stocks.rs` (the operator's standards, the profile cache, `/v1/film/stocks`), `web/src/lib/film.ts`, the Film section |
 | Black and white: spectra, film types, filters | `crates/color/src/spectral.rs` (+ `spectral_data.rs`), `shaders/develop/mono.wgsl` |
 | Named stocks (HP5 Plus, Tri-X, SFX 200) | `crates/color/src/stock.rs` (curves), `film_sensitivity` in `spectral.rs`, `crates/color/src/film_data.rs` (the sheets' data), `shaders/develop/stock.wgsl`, `crates/color/film-data/` (tracing scripts), `STOCKS` in the Film section |
 | Grain | `Grain` in `crates/color/src/params.rs`, `shaders/develop/grain.wgsl`, the Film section |
@@ -121,10 +122,40 @@ The global Saturation slider (PR #4: one commit for the core, one for the UI) is
   (`sidecar-serve-<worktree>`). sccache shares compiled dependencies between them.
 - **Fast checks**: `./dev/run cargo check -p <crate>`, `./dev/run cargo test -p <crate>`,
   `./dev/run bash -c 'cd web && npm run check'`.
+- **Before pushing, run what CI runs** (`.github/workflows/ci.yml`), or the branch goes red and so does every
+  branch above it. `check` and `test` passing is *not* the gate; clippy is, with warnings denied:
+
+  ```bash
+  ./dev/run cargo clippy --workspace --exclude sidecar-ml --all-targets -- -D warnings
+  ./dev/run cargo test --workspace --exclude sidecar-ml
+  ./dev/run bash -c 'cd /src && TS_RS_EXPORT_DIR=/src/web/src/lib/generated cargo test -q -p sidecar-color --features ts export_bindings'
+  git status --porcelain -- web/src/lib/generated   # must be empty: CI fails on drift
+  ```
+
+  CI's other two jobs are `sidecar-ml` on its own runner (it is slow and nothing depends on it) and parity,
+  which builds the fixtures, renders them natively and in Chromium's WebGPU under SwiftShader, and compares.
 - **Editor smoke test**: `web/scripts/editor-smoke.mjs <url> <photo path>` (`--narrow`, `--fallback`) drives
   every section, saves, opens versions, and prints the saved edit. Run it before and after an editor refactor
   and diff the output: the same edit means the same behaviour. From `web/` with
   `SIDECAR_DEV_EXTRA="--network host" ./dev/run …` against `./dev/serve`.
+
+### Traps that cost a session
+
+- **A new `shaders/client/*.wgsl` must be added to `WEB_ENTRIES`** (`crates/shaders/src/lib.rs`). Nothing else
+  points at it: the browser's copy is generated from that list, so without the entry `npm run generate` writes
+  no file, the Vite build fails on an unresolved import — and naga never validates the shader either, because
+  that test walks the same list.
+- **A wasm request struct needs `#[serde(rename_all = "camelCase")]`.** The browser sends camelCase; a field
+  named `slide_profile` with `#[serde(default)]` and no rename silently reads as absent, so the feature just
+  does nothing, everywhere, with no error. They now also carry `deny_unknown_fields`, which turns the next
+  such mistake into a parse error instead of a quiet default. This was invisible to every test: parity feeds
+  the browser fixture uniforms and never calls the packer.
+- **Changing `sidecar-color` or any shader means `npm run generate`** before the browser sees it. The wasm and
+  the composed WGSL are build products; `npm run check` passes against stale ones, and the editor then runs
+  old code against new TypeScript. `./dev/serve` regenerates on start, `npm run build` does not.
+- **In the editor, `developDirty = true` schedules nothing.** Work that lands in a promise — a fetch's
+  `then`, a mask loading — must call `schedule(true)`, or the change only appears on the next unrelated
+  interaction, which looks exactly like a broken feature.
 
 ### Testing pitfalls
 

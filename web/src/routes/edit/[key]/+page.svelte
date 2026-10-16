@@ -9,7 +9,8 @@
 	import { MaskPainter, simplify } from '$lib/gpu/brush';
 	import { HistogramPass, type HistogramData } from '$lib/gpu/histogram';
 	import { LensPass, correctedPoint, sourcePoint } from '$lib/gpu/lens';
-	import { ColorPacker } from '$lib/color/pack';
+	import { ColorPacker, type SlideProfile } from '$lib/color/pack';
+	import { cachedProfile, loadProfile } from '$lib/film';
 	import { api } from '$lib/api';
 	import { saveSettings, settings, SPACE_LABELS } from '$lib/settings';
 	import { EditSession, type EditState } from '$lib/state/edit-session.svelte';
@@ -53,6 +54,9 @@
 	let asShotWb = $state({ temperatureK: 5000, tint: 0 });
 	let lookClipboard = $state<LookClipboard | null>(readLookClipboard());
 	let lut = $state<Float32Array | null>(null);
+	/** The profile of the spectral colour stock this edit names, once the server has sent it. */
+	let slideProfile: SlideProfile | undefined;
+	const NO_TABLE = new Float32Array(0);
 	/** The layers' curves as they render, a 4,096-entry row each: what the selected layer's curve editor draws. */
 	let maskCurves = $state<Float32Array | null>(null);
 	let histogram = $state<HistogramData | null>(null);
@@ -221,7 +225,13 @@
 	/** Resolve the edit through the colour packer — wasm, so it works with or without a GPU. */
 	function repack() {
 		const source = before ? compareEdit() : $state.snapshot(edit!);
-		const packed = packer.pack(source, meta!.info.color, meta!.info.sourceKind ?? 'raw', display);
+		// A spectral colour stock needs its profile, which only the server can measure; until it arrives the
+		// edit renders as the per-channel film approximation, and the fetch marks the develop dirty again.
+		const stock = source.film?.stock;
+		// `schedule`, not the flag alone: the profile lands in a promise, with no frame on the way.
+		if (stock) loadProfile(stock, () => schedule(true));
+		slideProfile = stock ? cachedProfile(stock) : undefined;
+		const packed = packer.pack(source, meta!.info.color, meta!.info.sourceKind ?? 'raw', display, slideProfile);
 		if (!before) {
 			lut = packed.lut;
 			maskCurves = packed.maskCurves;
@@ -250,6 +260,7 @@
 			develop.setUniforms(packed.uniform);
 			develop.setToneLut(packed.lut);
 			develop.setMono(packed.monoLut);
+			develop.setSlide(packed.slideExposure, slideProfile?.response ?? NO_TABLE);
 			develop.setMasks(packed.masks, ((before ? compareEdit() : edit).masks ?? []).map((m, i) => layerTexture(i, m)), packed.maskCurves);
 			develop.render();
 			developDirty = false;

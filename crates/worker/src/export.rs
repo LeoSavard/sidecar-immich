@@ -117,8 +117,13 @@ impl Rendering {
         Self { color, kind: SourceKind::Developed, lens: None, sensor_aspect: 1.5, lens_flip: 0 }
     }
 
+    /// A spectral colour stock's profile comes from `crate::stocks`, which measures it from the operator's own
+    /// copies of the standards and caches it: it depends on the stock and those files, nothing about the photo
+    /// or the edit, so it is looked up here rather than threaded through every caller. Without it a named
+    /// stock falls back to the per-channel film approximation.
     pub fn pack(&self, edit: &EditParams, display: DisplaySpace) -> Packed {
-        sidecar_color::pack(edit, &self.color, self.kind, display)
+        let profile = crate::stocks::for_edit(edit);
+        sidecar_color::params::pack_with(edit, &self.color, self.kind, display, profile.as_deref())
     }
 
     /// The lens pass's uniforms for this edit over a texture holding the whole frame at `frame` pixels, with
@@ -224,11 +229,21 @@ pub fn oriented_size(size: [u32; 2], flip: i32) -> [u32; 2] {
     if flip & 4 != 0 { [size[1], size[0]] } else { size }
 }
 
-/// `pack`'s mask uniforms, curves, and the textures for them, ready for `DevelopPass::render`.
-pub fn masks_for<'a>(packed: &'a Packed, textures: &'a [Option<wgpu::Texture>], frame: [f32; 4]) -> sidecar_engine::Masks<'a> {
+/// `pack`'s mask uniforms, curves, and the textures for them, ready for `DevelopPass::render`. A spectral
+/// colour stock's response table comes from its profile (`Worker::slide_profile`), not from `pack`, which is
+/// also compiled to wasm and must stay clear of the standards it is measured through; `&[]` is no stock.
+pub fn masks_for<'a>(packed: &'a Packed, textures: &'a [Option<wgpu::Texture>], frame: [f32; 4], slide_response: &'a [f32]) -> sidecar_engine::Masks<'a> {
     let mut params = packed.masks;
     params.frame = frame;
-    sidecar_engine::Masks { params, textures: textures.iter().map(Option::as_ref).collect(), curves: &packed.mask_curves, mono: &packed.mono_lut, density: None }
+    sidecar_engine::Masks {
+        params,
+        textures: textures.iter().map(Option::as_ref).collect(),
+        curves: &packed.mask_curves,
+        mono: &packed.mono_lut,
+        density: None,
+        slide_exposure: &packed.slide_exposure,
+        slide_response,
+    }
 }
 
 /// Full-resolution linear RGB on the GPU, the orientation still to apply, and how to develop it. RAW comes
@@ -389,8 +404,10 @@ pub fn render(kit: &Kit, req: &RenderRequest, masks: &[Option<RgbaF32>], depth: 
 
     stage(tx, "develop", 0.45);
     let packed = rendering.pack(&req.edit, req.color_space);
+    let profile = crate::stocks::for_edit(&req.edit);
+    let slide_response = crate::stocks::response(&profile);
     let mask_textures = rendering.mask_textures(kit, &req.edit, masks, flip, [source.width(), source.height()]);
-    let developed = kit.develop.render(&kit.gpu, &source, &packed.uniform, &packed.lut, &masks_for(&packed, &mask_textures, [0.0; 4]))?;
+    let developed = kit.develop.render(&kit.gpu, &source, &packed.uniform, &packed.lut, &masks_for(&packed, &mask_textures, [0.0; 4], slide_response))?;
     drop(source);
     drop(mask_textures);
     let mut img = match rendering.warp(kit, &req.edit, &developed, flip) {

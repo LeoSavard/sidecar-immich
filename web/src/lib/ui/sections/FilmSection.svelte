@@ -6,6 +6,7 @@ sees the light, through a filter. -->
 	import Slider from '$lib/ui/Slider.svelte';
 	import { decimals } from '$lib/ui/format';
 	import { grainMicrons } from '$lib/state/edit-view';
+	import { stocks as offeredStocks } from '$lib/film';
 	import type { SectionProps } from './section';
 
 	let { edit, onchange, oncommit, developed }: SectionProps & { developed: boolean } = $props();
@@ -71,6 +72,42 @@ sees the light, through a filter. -->
 		{ id: 'compensating', label: 'Compensating', note: 'Two-bath or stand development: highlights held back, broad halos of local contrast at edges.' },
 		{ id: 'staining', label: 'Staining', note: 'A pyro developer: highlights held and their grain hidden by the stain, edges a little sharper.' }
 	];
+
+	/**
+	 * Colour reversal stocks rendered from their data sheets (`sidecar_color::slide`), offered only where the
+	 * server has the two ISO standards they are measured through — without those there is nothing to render
+	 * them with, so the choice is not shown at all.
+	 */
+	const SLIDES = [
+		{
+			id: 'provia-100f',
+			label: 'FUJICHROME PROVIA 100F',
+			note: "FUJIFILM's data sheet end to end: each layer's spectral sensitivity and characteristic curve, the dyes those densities call for, and the slide seen on a light table. It keeps a slide's density, so it reads darker than the neutral rendering — as a slide does."
+		}
+	];
+	let available = $state<string[]>([]);
+	offeredStocks().then((s) => (available = s));
+	const slides = $derived(SLIDES.filter((s) => available.includes(s.id)));
+
+	/** The stock an edit names, or nothing for the per-channel approximation. */
+	function setStock(id: string) {
+		onchange((e) => {
+			if (!e.film) return;
+			if (id) e.film.stock = id;
+			else delete e.film.stock;
+		});
+		oncommit();
+	}
+
+	/** The scene's light for a spectral stock; daylight, the default, is left out of the edit. */
+	function setFilmLight(id: string) {
+		onchange((e) => {
+			if (!e.film) return;
+			if (id === 'daylight') delete e.film.light;
+			else e.film.light = id;
+		});
+		oncommit();
+	}
 
 	/** Defaults are left out of the edit, as the sidecar leaves them out. */
 	const MONO_DEFAULTS: Record<string, string> = { light: 'daylight', developer: 'standard' };
@@ -157,9 +194,37 @@ sees the light, through a filter. -->
 		<p class="text-xs text-muted">Longer development (N+) gives the negative more contrast above the shadows and coarser grain; shorter (N−) less, for a scene too contrasty to hold.</p>
 		<p class="text-xs text-muted">Each colour's spectrum is estimated from the photo, then seen as the film type would. The types are the classes' sensitivities; a named stock is its maker's measured curve.</p>
 	{:else if edit.film}
+		{@const stock = slides.find((s) => s.id === edit.film?.stock)}
+		{#if slides.length}
+			<p class="pt-1 text-[11px] font-medium tracking-wide text-muted uppercase">Colour stock</p>
+			<div class="grid gap-1 text-xs" role="radiogroup" aria-label="Colour stock">
+				<button type="button" role="radio" aria-checked={!stock} class="rounded px-2 py-1.5 text-left {!stock ? 'bg-raised text-fg' : 'text-fg-2 hover:bg-raised/60'}" onclick={() => setStock('')}>
+					<span class="font-medium">Generic</span>
+					{#if !stock}<span class="block pt-0.5 text-muted">Film's way with light, not any one stock: each channel through its own curve.</span>{/if}
+				</button>
+				{#each slides as s (s.id)}
+					{@const on = edit.film?.stock === s.id}
+					<button type="button" role="radio" aria-checked={on} class="rounded px-2 py-1.5 text-left {on ? 'bg-raised text-fg' : 'text-fg-2 hover:bg-raised/60'}" onclick={() => setStock(s.id)}>
+						<span class="font-medium">{s.label}</span>
+						{#if on}<span class="block pt-0.5 text-muted">{s.note}</span>{/if}
+					</button>
+				{/each}
+			</div>
+		{/if}
 		<Slider id="film-amount" label="Amount" value={edit.film.amount} min={0} max={100} defaultValue={100} format={(v) => `${decimals(v)} %`} onchange={(v) => onchange((e) => { if (e.film) e.film.amount = v; })} {oncommit} />
-		<Slider id="film-interlayer" label="Interlayer effects" value={edit.film.interlayer} min={0} max={100} defaultValue={45} format={(v) => decimals(v)} onchange={(v) => onchange((e) => { if (e.film) e.film.interlayer = v; })} {oncommit} />
-		<p class="text-xs text-muted">Each colour gets its own tone curve, so highlights fade to white and midtones gain colour. Interlayer effects spread colours apart as film's layers hold each other back; greys stay grey.</p>
+		{#if stock}
+			<p class="pt-1 text-[11px] font-medium tracking-wide text-muted uppercase">The scene's light</p>
+			<div class="flex flex-wrap items-center gap-1.5 text-xs" role="radiogroup" aria-label="The scene's light">
+				{#each LIGHTS as l (l.id)}
+					{@const on = (edit.film?.light ?? 'daylight') === l.id}
+					<button type="button" role="radio" aria-checked={on} class={choice(on)} onclick={() => setFilmLight(l.id)}>{l.label}</button>
+				{/each}
+			</div>
+			<p class="text-xs text-muted">Colour film is not white balanced either: it sees the surface's own colour times the light. The stock's own curves set the tones, so Contrast, Blacks and the curve reach the picture only through the neutral rendering Amount mixes in.</p>
+		{:else}
+			<Slider id="film-interlayer" label="Interlayer effects" value={edit.film.interlayer} min={0} max={100} defaultValue={45} format={(v) => decimals(v)} onchange={(v) => onchange((e) => { if (e.film) e.film.interlayer = v; })} {oncommit} />
+			<p class="text-xs text-muted">Each colour gets its own tone curve, so highlights fade to white and midtones gain colour. Interlayer effects spread colours apart as film's layers hold each other back; greys stay grey.</p>
+		{/if}
 	{:else if developed}
 		<p class="text-xs text-muted">This picture was already rendered by whatever wrote it, so film rendering, which works on a RAW's light, isn't offered. Black and white is.</p>
 	{:else}

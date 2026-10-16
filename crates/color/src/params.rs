@@ -278,11 +278,24 @@ pub struct Film {
     pub amount: f64,
     /// 0–100: interlayer effects, at 100 a spread of `FILM_INTERLAYER` in log exposure.
     pub interlayer: f64,
+    /// A named colour reversal stock (`crate::slide::slide`) to render spectrally — its own sensitivities,
+    /// characteristic curves and dyes, from its data sheet — instead of the per-channel curves above. Empty
+    /// (the default, left out of the serialized edit) is the approximation; `interlayer` has no part in a
+    /// stock's chain, which is the sheet's, and is ignored.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<String>", optional))]
+    pub stock: String,
+    /// What lit the scene, as `Monochrome.light` names it: a colour film is not white-balanced either, so it
+    /// sees the surface's reflectance times the light. Only read with a `stock`; daylight, the default, is
+    /// left out of the serialized edit, so film rendering made before this hashes as it did.
+    #[serde(skip_serializing_if = "is_daylight")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<String>", optional))]
+    pub light: String,
 }
 
 impl Default for Film {
     fn default() -> Self {
-        Self { amount: 100.0, interlayer: 45.0 }
+        Self { amount: 100.0, interlayer: 45.0, stock: String::new(), light: "daylight".into() }
     }
 }
 
@@ -744,6 +757,12 @@ pub struct DevelopParams {
     pub stock: [f32; 4],
     /// The stock's shoulder in stops from grey, its width, unused ×2.
     pub shoulder: [f32; 4],
+    /// Colour film, spectrally (`crate::slide`): the amount 0…1 (0 off), the side of `Packed::slide_exposure`'s
+    /// cube, the side of the profile's response table, unused.
+    pub slide: [f32; 4],
+    /// Where a layer response of 1 lands in the response table, per layer, and a decade of log H, as fractions
+    /// of its domain (`slide::SlideProfile`).
+    pub slide_log_h: [f32; 4],
 }
 
 /// Contrast slider value → logistic steepness.
@@ -772,6 +791,10 @@ pub struct Packed {
     pub mask_curves: Vec<f32>,
     /// Black and white's exposures over the colour cube (`crate::spectral::mono_lut`); empty in colour.
     pub mono_lut: Vec<f32>,
+    /// A spectral stock's layer responses over the colour cube (`crate::slide::Slide::exposure_lut`), four
+    /// floats an entry; empty unless a stock is named *and* its profile was given to `pack_with`. The response
+    /// table it goes with is the profile's.
+    pub slide_exposure: Vec<f32>,
 }
 
 /// Row-major 3×3 → WGSL `mat3x3f` columns.
@@ -836,7 +859,22 @@ fn layer_edit(edit: &EditParams, m: &MaskAdjustment) -> EditParams {
     e
 }
 
+/// As `pack`, with the profile of the stock `edit.film.stock` names if the caller has it — the server builds it
+/// from the owner's standards (`slide::SlideProfile`) and hands it to the browser, which has no standard of its
+/// own. Without the profile a named stock cannot be rendered at all, so the edit falls back to the per-channel
+/// film approximation and the develop pass needs no second code path.
+///
+/// Only the profile's offsets, scale and side are read — never its response table, which goes to the GPU
+/// directly — so a caller that already holds the table can pass a `SlideProfile::header`.
+pub fn pack_with(edit: &EditParams, camera: &CameraColor, source: SourceKind, display: DisplaySpace, profile: Option<&crate::slide::SlideProfile>) -> Packed {
+    pack_inner(edit, camera, source, display, profile)
+}
+
 pub fn pack(edit: &EditParams, camera: &CameraColor, source: SourceKind, display: DisplaySpace) -> Packed {
+    pack_inner(edit, camera, source, display, None)
+}
+
+fn pack_inner(edit: &EditParams, camera: &CameraColor, source: SourceKind, display: DisplaySpace, profile: Option<&crate::slide::SlideProfile>) -> Packed {
     let white_xy = match edit.white_balance.mode {
         WhiteBalanceMode::AsShot => camera.as_shot_xy(),
         WhiteBalanceMode::Custom => crate::cct::temp_tint_to_xy(edit.white_balance.temperature_k, edit.white_balance.tint),
@@ -849,6 +887,18 @@ pub fn pack(edit: &EditParams, camera: &CameraColor, source: SourceKind, display
         .and_then(|m| crate::spectral::mono_lut(&m.film, &m.filter, &crate::spectral::light(&m.light, wb.temperature_k)?))
         .unwrap_or_default();
     let mono = !mono_lut.is_empty();
+    // Colour film, spectrally: the stock's own chain, which needs both the public half (its sheet's
+    // sensitivities under the scene's light, tabulated here per edit) and the profile only the server can
+    // build. Black and white and a developed file both take precedence, as they do over film rendering.
+    let slide = (!developed && !mono)
+        .then(|| {
+            let film = edit.film.as_ref()?;
+            let profile = profile?;
+            let stock = crate::slide::slide(&film.stock)?;
+            let light = crate::spectral::light(&film.light, wb.temperature_k)?;
+            Some((stock.exposure_lut(&light), profile))
+        })
+        .flatten();
     let tone = tone_params(edit, developed);
     let mut params = DevelopParams {
         wb_mul: wb.mul.map(|v| v as f32),
@@ -866,7 +916,7 @@ pub fn pack(edit: &EditParams, camera: &CameraColor, source: SourceKind, display
         saturation: (edit.saturation.clamp(-100.0, 100.0) / 100.0) as f32,
         _pad1: 0.0,
         mixer: mixer_params(&edit.mixer),
-        film: match (&edit.film, developed || mono) {
+        film: match (&edit.film, developed || mono || slide.is_some()) {
             (Some(f), false) => [(f.amount.clamp(0.0, 100.0) / 100.0) as f32, (f.interlayer.clamp(0.0, 100.0) / 100.0 * FILM_INTERLAYER) as f32, 0.0, 0.0],
             _ => [0.0; 4],
         },
@@ -875,6 +925,19 @@ pub fn pack(edit: &EditParams, camera: &CameraColor, source: SourceKind, display
         developer: [0.0; 4],
         stock: match stock_curve(edit, developed) {
             Some(c) => [1.0, c.toe_at as f32, c.toe_width as f32, c.shoulder as f32],
+            None => [0.0; 4],
+        },
+        slide: match &slide {
+            Some((_, p)) => [
+                (edit.film.as_ref().map_or(0.0, |f| f.amount.clamp(0.0, 100.0)) / 100.0) as f32,
+                crate::spectral::GRID as f32,
+                p.side as f32,
+                0.0,
+            ],
+            None => [0.0; 4],
+        },
+        slide_log_h: match &slide {
+            Some((_, p)) => [p.offsets[0], p.offsets[1], p.offsets[2], p.scale],
             None => [0.0; 4],
         },
         shoulder: match stock_curve(edit, developed) {
@@ -916,7 +979,16 @@ pub fn pack(edit: &EditParams, camera: &CameraColor, source: SourceKind, display
         };
     }
     let lut = tone_curve_lut(&edit.tone.curve, edit.tone.highlights, edit.tone.shadows, LUT_SIZE);
-    Packed { uniform: bytemuck::bytes_of(&params).to_vec(), lut, temperature_k: wb.temperature_k, tint: wb.tint, masks, mask_curves, mono_lut }
+    Packed {
+        uniform: bytemuck::bytes_of(&params).to_vec(),
+        lut,
+        temperature_k: wb.temperature_k,
+        tint: wb.tint,
+        masks,
+        mask_curves,
+        mono_lut,
+        slide_exposure: slide.map(|(lut, _)| lut).unwrap_or_default(),
+    }
 }
 
 #[cfg(test)]
@@ -950,7 +1022,7 @@ mod tests {
         let (handle, ty) = module.types.iter().find(|(_, t)| t.name.as_deref() == Some("DevelopParams")).unwrap();
         let naga::TypeInner::Struct { members, span } = &ty.inner else { panic!("not a struct") };
         assert_eq!(*span as usize, std::mem::size_of::<DevelopParams>());
-        assert_eq!(layouter[handle].size as usize, 368);
+        assert_eq!(layouter[handle].size as usize, 400);
         let rust = [
             ("wb_mul", std::mem::offset_of!(DevelopParams, wb_mul)),
             ("exposure", std::mem::offset_of!(DevelopParams, exposure)),
@@ -967,13 +1039,15 @@ mod tests {
             ("developer", std::mem::offset_of!(DevelopParams, developer)),
             ("stock", std::mem::offset_of!(DevelopParams, stock)),
             ("shoulder", std::mem::offset_of!(DevelopParams, shoulder)),
+            ("slide", std::mem::offset_of!(DevelopParams, slide)),
+            ("slide_log_h", std::mem::offset_of!(DevelopParams, slide_log_h)),
         ];
         for (name, off) in rust {
             let m = members.iter().find(|m| m.name.as_deref() == Some(name)).unwrap();
             assert_eq!(m.offset as usize, off, "{name}");
         }
         let p = pack(&EditParams::default(), &crate::camera::nikon_d850(), SourceKind::Raw, DisplaySpace::Srgb);
-        assert_eq!(p.uniform.len(), 368);
+        assert_eq!(p.uniform.len(), 400);
         assert_eq!(p.lut.len(), LUT_SIZE);
         // exposure sits at byte 12
         assert_eq!(f32::from_le_bytes(p.uniform[12..16].try_into().unwrap()), 1.0);
@@ -997,7 +1071,7 @@ mod tests {
         let cam = crate::camera::nikon_d850();
         let at = |edit: &EditParams, source| *bytemuck::from_bytes::<DevelopParams>(&pack(edit, &cam, source, DisplaySpace::Srgb).uniform);
         assert_eq!(at(&EditParams::default(), SourceKind::Raw).film, [0.0; 4], "absent is the neutral rendering");
-        let edit = EditParams { film: Some(Film { amount: 50.0, interlayer: 100.0 }), ..Default::default() };
+        let edit = EditParams { film: Some(Film { amount: 50.0, interlayer: 100.0, ..Default::default() }), ..Default::default() };
         assert_eq!(at(&edit, SourceKind::Raw).film, [0.5, FILM_INTERLAYER as f32, 0.0, 0.0]);
         assert_eq!(at(&edit, SourceKind::Developed).film, [0.0; 4]);
     }

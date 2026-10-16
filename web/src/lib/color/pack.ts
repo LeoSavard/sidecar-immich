@@ -27,12 +27,26 @@ type Exports = {
  * `masks` are the develop pass's mask uniforms (`DevelopPass.setMasks`), texture `i` being `edit.masks[i]`'s;
  * `maskCurves` the layers' curves, a 4,096-entry row each.
  */
-export type Packed = { uniform: Uint8Array; lut: Float32Array; temperatureK: number; tint: number; masks: Uint8Array; maskCurves: Float32Array; monoLut: Float32Array };
+export type Packed = {
+	uniform: Uint8Array;
+	lut: Float32Array;
+	temperatureK: number;
+	tint: number;
+	masks: Uint8Array;
+	maskCurves: Float32Array;
+	monoLut: Float32Array;
+	/** A spectral colour stock's layer responses over the colour cube; empty unless one is being rendered. */
+	slideExposure: Float32Array;
+};
+
+/** A spectral colour stock's profile, as `GET /api/film/stocks/{id}` sends it (`slide::SlideProfile`). */
+export type SlideProfile = { offsets: [number, number, number]; scale: number; side: number; response: Float32Array };
 
 /** `DevelopParams` (shaders/develop/params.wgsl), mirrored in crates/color. Checked against the wasm on load, so a
  *  struct that grew on one side fails here, by name, rather than as a garbled render. */
-export const DEVELOP_UNIFORM_BYTES = 368;
+export const DEVELOP_UNIFORM_BYTES = 400;
 const MASK_UNIFORM_BYTES = 1568;
+const EMPTY = new Float32Array(0);
 const LUT = 4096;
 const MAX_MASKS = 8;
 
@@ -120,8 +134,10 @@ export class ColorPacker {
 	}
 
 	/** `source` picks the develop pass's tone path: sensor light, or a picture a camera or app already rendered. */
-	pack(edit: EditParams, camera: CameraColor, source: SourceKind, display: DisplaySpace): Packed {
-		const input = new TextEncoder().encode(JSON.stringify({ edit, camera, source, display }));
+	pack(edit: EditParams, camera: CameraColor, source: SourceKind, display: DisplaySpace, slide?: SlideProfile): Packed {
+		// The profile's header is all `pack` reads; its response table goes straight to the GPU.
+		const slideProfile = slide ? { offsets: slide.offsets, scale: slide.scale, side: slide.side } : null;
+		const input = new TextEncoder().encode(JSON.stringify({ edit, camera, source, display, slideProfile }));
 		const ptr = this.x.sc_alloc(input.length);
 		new Uint8Array(this.x.memory.buffer, ptr, input.length).set(input);
 		const out = this.framed(this.x.sc_pack(ptr, input.length));
@@ -130,6 +146,17 @@ export class ColorPacker {
 		const lutBytes = 4096 * 4;
 		const U = DEVELOP_UNIFORM_BYTES;
 		const view = new DataView(out.buffer, out.byteOffset);
+		// Two length-prefixed tables over the colour cube close the stream: black and white's exposures, then a
+		// spectral stock's layer responses. At most one is ever non-empty.
+		let at = U + 16 + lutBytes + MASK_UNIFORM_BYTES + MAX_MASKS * LUT * 4;
+		const table = () => {
+			const floats = view.getUint32(at, true);
+			const start = at + 4;
+			at = start + floats * 4;
+			return floats ? new Float32Array(out.slice(start, at).buffer) : EMPTY;
+		};
+		const monoLut = table();
+		const slideExposure = table();
 		return {
 			uniform: out.slice(0, U),
 			lut: new Float32Array(out.slice(U, U + lutBytes).buffer),
@@ -137,8 +164,8 @@ export class ColorPacker {
 			tint: view.getFloat64(U + 8 + lutBytes, true),
 			masks: out.slice(U + 16 + lutBytes, U + 16 + lutBytes + MASK_UNIFORM_BYTES),
 			maskCurves: new Float32Array(out.slice(U + 16 + lutBytes + MASK_UNIFORM_BYTES, U + 16 + lutBytes + MASK_UNIFORM_BYTES + MAX_MASKS * LUT * 4).buffer),
-			// Whatever follows is black and white's table over the colour cube; nothing in colour.
-			monoLut: new Float32Array(out.slice(U + 16 + lutBytes + MASK_UNIFORM_BYTES + MAX_MASKS * LUT * 4).buffer)
+			monoLut,
+			slideExposure
 		};
 	}
 }

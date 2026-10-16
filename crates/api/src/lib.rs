@@ -505,6 +505,21 @@ async fn focus(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Path(key): P
     pixels(&app, &user, &key, format!("/v1/assets/{key}/focus?edge={edge}")).await
 }
 
+/// Which spectral colour stocks this deployment renders. Not cached by the browser: "none" must not outlive
+/// the operator adding their copies of the standards.
+async fn film_stocks(State(app): State<Arc<App>>, ApiUser(_user): ApiUser) -> Response {
+    relay(app.http.get(app.worker("/v1/film/stocks")).send().await).await
+}
+
+/// One stock's profile, relayed from the worker: the slide's colours over its layers' log H, which is what the
+/// browser needs to render the stock itself. The ISO tables it was measured through stay on the server.
+async fn film_stock(State(app): State<Arc<App>>, ApiUser(_user): ApiUser, Path(id): Path<String>) -> Response {
+    if !id.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    relay(app.http.get(app.worker(&format!("/v1/film/stocks/{id}"))).send().await).await
+}
+
 /// Which masks this photo has, and its faces: `{ available, names, faces }`, computed on first use. Not cached
 /// by the browser: "unavailable" must not outlive a switch to the `-ml` image.
 async fn masks(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Path(key): Path<String>) -> Response {
@@ -778,6 +793,8 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/picks/{token}", get(get_pick).post(choose_pick))
         .route("/api/intake", axum::routing::post(intake).layer(axum::extract::DefaultBodyLimit::max(INTAKE_LIMIT)))
         .route("/api/immich/assets/{id}/thumbnail", get(thumbnail))
+        .route("/api/film/stocks", get(film_stocks))
+        .route("/api/film/stocks/{id}", get(film_stock))
         .route("/api/assets/{key}/meta", get(meta))
         .route("/api/assets/{key}/proxy", get(proxy))
         .route("/api/assets/{key}/focus", get(focus))

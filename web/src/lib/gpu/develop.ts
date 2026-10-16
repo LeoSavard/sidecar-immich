@@ -18,6 +18,17 @@ const MAP_LONG = 1024;
 const MONO = 72;
 const DEVELOPER = 80;
 
+/** One of a spectral stock's tables: `side`³ of four floats, read corner by corner (rgba32float can't filter). */
+function slideTexture(device: GPUDevice, label: string, side: number): GPUTexture {
+	return device.createTexture({
+		label,
+		size: [side, side, side],
+		dimension: '3d',
+		format: 'rgba32float',
+		usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
+	});
+}
+
 export class DevelopPass {
 	readonly device: GPUDevice;
 	private pipeline: GPURenderPipeline;
@@ -40,6 +51,10 @@ export class DevelopPass {
 	private layerCurves: GPUTexture;
 	/** Black and white's table over the colour cube; 1×1×1 in colour. */
 	private mono: GPUTexture;
+	private slideExposures: GPUTexture;
+	private slideResponses: GPUTexture;
+	/** The response table already on the GPU, so a slider move doesn't rewrite four megabytes. */
+	private boundResponses: Float32Array = new Float32Array(0);
 	/** The uniforms last set, which say whether the developer needs its adjacency map. */
 	private uniform = new Float32Array(DEVELOP_UNIFORM_BYTES / 4);
 	/** Black and white's adjacency map and the textures it is made in (`sidecar_color::developer`). */
@@ -65,6 +80,8 @@ export class DevelopPass {
 		const identity = new Float32Array(LUT * MAX_MASKS).map((_, i) => (i % LUT) / (LUT - 1));
 		device.queue.writeTexture({ texture: this.layerCurves }, identity, { bytesPerRow: LUT * 4 }, [LUT, MAX_MASKS]);
 		this.mono = device.createTexture({ label: 'mono table', size: [1, 1, 1], dimension: '3d', format: 'r32float', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+		this.slideExposures = slideTexture(device, 'slide exposures', 1);
+		this.slideResponses = slideTexture(device, 'slide responses', 1);
 	}
 
 	static async create(device: GPUDevice): Promise<DevelopPass> {
@@ -79,7 +96,9 @@ export class DevelopPass {
 				{ binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '2d' } },
 				{ binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '1d' } },
 				{ binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '3d' } },
-				{ binding: 4, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '2d' } }
+				{ binding: 4, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '2d' } },
+				{ binding: 5, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '3d' } },
+				{ binding: 6, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '3d' } }
 			]
 		});
 		// Mirrors crates/engine/src/develop.rs: the mask uniforms, a linear sampler, a texture per slot.
@@ -234,6 +253,33 @@ export class DevelopPass {
 	}
 
 	/**
+	 * A spectral colour stock's two tables: `exposures` from the packer (`Packed.slideExposure`, rebuilt per
+	 * edit because it depends on the scene's light) and `responses` from the stock's profile, downloaded once.
+	 * Either empty keeps a 1×1×1 table, which the uniform's amount of 0 then never reads. The response table is
+	 * four megabytes and changes only with the stock, so it is written only when it actually changes.
+	 */
+	setSlide(exposures: Float32Array, responses: Float32Array) {
+		this.slideExposures = this.writeSlide(this.slideExposures, 'slide exposures', exposures, true);
+		this.slideResponses = this.writeSlide(this.slideResponses, 'slide responses', responses, this.boundResponses !== responses);
+		this.boundResponses = responses;
+	}
+
+	private writeSlide(texture: GPUTexture, label: string, table: Float32Array, changed: boolean): GPUTexture {
+		const side = Math.round(Math.cbrt(table.length / 4));
+		const want = side > 0 && side ** 3 * 4 === table.length ? side : 1;
+		if (texture.width !== want) {
+			texture.destroy();
+			texture = slideTexture(this.device, label, want);
+			this.bindGroup = undefined;
+			changed = true;
+		}
+		if (want > 1 && changed) {
+			this.device.queue.writeTexture({ texture }, table, { bytesPerRow: want * 16, rowsPerImage: want }, [want, want, want]);
+		}
+		return texture;
+	}
+
+	/**
 	 * The edit's masks: `params` and `curves` from the packer (`Packed.masks`, `Packed.maskCurves`), and a
 	 * texture per mask in the frame being developed — `undefined` for one not loaded yet, which then weighs
 	 * nothing.
@@ -268,7 +314,9 @@ export class DevelopPass {
 				{ binding: 1, resource: input.createView() },
 				{ binding: 2, resource: this.lut!.createView() },
 				{ binding: 3, resource: this.mono.createView() },
-				{ binding: 4, resource: density.createView() }
+				{ binding: 4, resource: density.createView() },
+				{ binding: 5, resource: this.slideExposures.createView() },
+				{ binding: 6, resource: this.slideResponses.createView() }
 			]
 		});
 	}

@@ -16,4 +16,17 @@ amount: number,
 /**
  * 0–100: interlayer effects, at 100 a spread of `FILM_INTERLAYER` in log exposure.
  */
-interlayer: number, };
+interlayer: number, 
+/**
+ * A named colour reversal stock (`crate::slide::slide`) to render spectrally — its own sensitivities,
+ * characteristic curves and dyes, from its data sheet — instead of the per-channel curves above. Empty
+ * (the default, left out of the serialized edit) is the approximation; `interlayer` has no part in a
+ * stock's chain, which is the sheet's, and is ignored.
+ */
+stock?: string, 
+/**
+ * What lit the scene, as `Monochrome.light` names it: a colour film is not white-balanced either, so it
+ * sees the surface's reflectance times the light. Only read with a `stock`; daylight, the default, is
+ * left out of the serialized edit, so film rendering made before this hashes as it did.
+ */
+light?: string, };
