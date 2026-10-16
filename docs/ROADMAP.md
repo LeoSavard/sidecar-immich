@@ -31,7 +31,10 @@ choice**, and the slope through it is exactly `(1 − t)ⁿ⁻¹`:
 | +4 EV | 0.24 | 0.12 | 0.03 | 0.01 |
 
 Order 3 is the shape this roadmap used to describe: a stop of scene light for a stop of picture out to
-+1.5 EV, paid for above +2. Shadows are the logistic's throughout. **What is left is the owner's call, with
++1.5 EV, paid for above +2. Shadows are the logistic's throughout. The "logistic (now)" column is measured by
+the same test rather than quoted, and it still reads as above after the curve's endpoints were pinned
+(`Curve: pin the ends`, #23) — that change moved what Highlights and Shadows do to black and white, not the
+base curve's slope through the midtones, so the comparison below is current. **What is left is the owner's call, with
 pictures and the Camera toggle, not slopes:** which order, and what Contrast should mean above grey — today
 it is the logistic's own steepness, and a fixed segment has none, so either Contrast becomes a power S-curve
 through grey there (as it already is for a developed file, `tone_display`) or the segment's slope follows it.
