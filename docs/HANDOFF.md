@@ -5,20 +5,46 @@ For whoever picks this up next, person or agent. [`ARCHITECTURE.md`](ARCHITECTUR
 checked), [`ROADMAP.md`](ROADMAP.md) what's known to be missing. This page is the state of play; update it when
 you stop.
 
-*Last updated 2026-10-15.*
+*Last updated 2026-10-16.*
 
 ## Open pull requests
 
-**The stack has landed.** #3-#20 are merged: `main` now holds everything up to and including colour film from
-a data sheet (PROVIA 100F), and CI is green on each merge. What is left open:
+**#1–#24 are merged.** `main` holds colour film from a data sheet (PROVIA 100F), the depth map upsampled
+against the photo (#22), the curve's pinned endpoints (#23), the tone controls grading a stock (#24), and —
+merged on 2026-10-16 — Apple's depth/matte aux image (#1) and the HDR gain map read and carried, unapplied
+(#2). The two long-held branches turned out not to be blocked at all; see "What changed under #1" below.
 
-| # | Branch | What |
-|---|---|---|
-| 21 | `worktree-tone-curve` | The log-log straight segment above middle grey, built and measured. **Changes no pixels**: it waits on two decisions (see Open questions) |
-| 22 | `worktree-depth-edges` | The depth map upsampled against the photo, so a blur's edge follows the subject; and the roadmap corrected where focus peaking and AF points were already done |
+**New features are paused** from 2026-10-16 (owner's call). The work is maintainability, standardization and
+widening the project past a single Immich deployment: [`V2.md`](V2.md) is the programme.
 
-Both were branched off #20 and have had `main` merged back into them, so either can go first; neither depends
-on the other. Build the next image from #22 - it is the one with pixels in it.
+Five pull requests are open. All are green on CI, all were brought up to date with `main` that night, and
+**none of them changes a pixel**:
+
+| # | Branch | What | State |
+|---|---|---|---|
+| 21 | `worktree-tone-curve` | The log-log straight segment above middle grey, built and measured, rendering nothing | Needs the owner: which shoulder order, and what Contrast should mean above grey (see Open questions) |
+| 26 | `hilite-fringe` | Highlight reconstruction measured, three causes ruled out, the entry rewritten | Ready |
+| 27 | `v2-plan` | `V2.md`, and the roadmap reordered under it | Ready |
+| 28 | `library-name-search` | `find_by_name`: a folder library can be searched without Immich | Ready |
+| 29 | `format-rust` | rustfmt at 100 columns, and the reflow | Ready — **merge it last**, see below |
+
+**Merge order matters now, for once.** #29 reformats every Rust source, so it conflicts with any open branch
+that touches Rust. Merge #21, #26, #27 and #28 first, then #29. If a branch is still open afterwards,
+resolving needs no judgement: `git merge main`, take the branch's own side on any Rust conflict,
+`cargo fmt --all`, commit.
+
+**What changed under #1 while it sat.** It was parked in favour of the gain map because a depth map's best use
+needed a blur renderer nobody had written. That renderer shipped — lens blur, haze by distance, range layers
+and the joint-bilateral refinement all run off Depth Anything V2's map, for every photo rather than the ~16%
+carrying Apple's. So #1's value was never a feature but a **second source** for a finished pipeline: Apple's
+disparity is the same quantity the model produces (relative inverse depth, comparable resolution) measured by
+stereo instead of guessed from one image. Its roadmap section says so, with the remaining work and the open
+`MASK_REVISION` question written down. Nothing blocks picking it up; it needs deciding whether it is worth a
+pass, ideally with a Portrait capture blurred both ways side by side.
+
+Held, and genuinely blocked: **#2's stage 2** — carrying the gain map through an edit — cannot be guessed at.
+No reconstruction formula is published, the reverse-engineered ones call themselves wrong, and the answer
+needs an HDR display and a colorimeter. `dev/hdr-gainmap-probe` is ready for whenever that can be done.
 
 *What the merge taught, for the next stack.* GitHub judges a pull request by **ancestry, not content**. When
 `main` moved under the stack, #8 reported `CONFLICTING` although `git merge-tree` and a real local merge both
@@ -26,9 +52,6 @@ said clean, and it stayed that way across repeated polls - not a cache clearing 
 the merge: merging `main` into the branch produced a **byte-identical tree** and flipped it to mergeable at
 once. So when a stack's base moves, merge it back down through every branch before merging the pull requests,
 and check that each merge leaves the tree unchanged - if one does not, that is a real conflict worth reading.
-
-Held: #1 `worktree-portrait-depth` (Apple Portrait matte) and #2 `worktree-hdr-gain-map` (HDR, paused until
-the owner's Spyder X display measurements).
 
 **A fix to a lower branch** goes on that branch, then is merged upward through every branch above it, in
 order, and each is pushed (`git merge --no-edit <base>`; new commits only, never rebase or force-push, never
@@ -50,10 +73,10 @@ docker tag sidecar:local sidecar:previous && docker tag sidecar:latest-test side
 cd ~/Claude/sidecar/deploy/local && docker compose up -d
 ```
 
-`sidecar:latest-test` holds everything through #19, so it predates #20, #22 and the withdrawal of Double-X.
-**Rebuild it before the next hand-over**, from whichever branch holds everything you mean to ship —
-`worktree-depth-edges` is the furthest along (it contains #20 and the depth work; `worktree-tone-curve` is its
-sibling and changes no pixels yet). Once the stack has landed, build from `main` instead.
+`sidecar:latest-test` holds everything through #19, so it predates #20 and everything after it — the depth
+edges, the pinned curve endpoints, a stock that the tone controls can grade, and the withdrawal of Double-X.
+**Rebuild it before the next hand-over, from `main`:** the stack has landed, and none of the open pull
+requests changes a pixel, so `main` is the whole of what there is to ship.
 
 **To get the colour stocks in a real deployment**, the image needs the owner's two ISO tables mounted and
 named, since Sidecar carries neither and will not render a stock without them. In `deploy/local/compose.yaml`,
@@ -75,9 +98,11 @@ missing. The worker measures each stock's profile once (about three seconds) and
 
 - **How dark a slide should be.** PROVIA renders with a slide's own density, because viewing puts the light
   table at the display's white — the chain is faithful and the pictures look like slides, but on a screen it is
-  a strong look, and Amount is the only way down from it. Worth deciding with pictures: keep it as it is, or
-  let the stock's white point meet the display's. See `testdata/cache/slide/` for the tractor NEF rendered
-  neutral, generic film, PROVIA, and PROVIA under tungsten.
+  a strong look. **Less pressing since #24:** Amount is no longer the only way down from it, because Contrast,
+  Blacks, Whites, Highlights, Shadows and the curve now grade the stock (identity at their defaults, so the
+  chain's own colour is still what appears untouched). The question that remains is only whether the *default*
+  should be this dark, or the stock's white point should meet the display's. See `testdata/cache/slide/` for
+  the tractor NEF rendered neutral, generic film, PROVIA, and PROVIA under tungsten.
 - **Sidecar's default rendering is darker than the camera's JPEG.** Visible with the Camera toggle. This is
   ROADMAP's "Tone curve above middle grey", and the candidate curve is now built and measured on #21 — but it
   renders nothing until two things are settled, both with pictures rather than slopes: **which shoulder order**
@@ -108,6 +133,32 @@ Film, in three stages:
 
 The spectral method is Jakob and Hanika's (`crates/color/src/spectral.rs`); a new stock or filter is data, not
 code.
+
+### If you are picking this up and the owner is away
+
+**Features are paused**, so don't start one. [`V2.md`](V2.md) is the agreed direction and says what order to
+work in; the queue below it in ROADMAP keeps its places but is not what is being worked through.
+
+The live piece is **workstream B, the library seam** — making Immich one adapter among several rather than
+the substrate, which is what "broader use cases" means in code. #28 is its first commit:
+`sidecar_template::find_by_name`, so a folder library can be searched by name, which was the one step in
+`resolve.rs`'s chain with no answer but Immich's. What is left of B:
+
+1. A `Library` abstraction over what `resolve.rs` actually needs, implemented twice — the Immich one (move
+   today's behaviour wholesale) and a folder one — because a seam with one implementation is a guess.
+2. Wire `find_by_name` into the picker's `search_by_name`, which returns nothing without Immich today.
+3. Let a `Root` be configured with no `immich_prefix` and no Immich section at all.
+
+A design note worth keeping from the survey: the Immich coupling is **three** concerns, not one, and they
+want separating rather than merging — library lookup (`resolve.rs`), identity and auth (`session.rs` takes
+the user from Immich's `/users/me`), and the export destination (`export.rs` uploads and stacks).
+`Destination::Device` already exists, so the third seam is half-built too. Replacing `immich.enabled()` —
+a stringly-typed "is the URL non-empty" check — with the presence of an adapter is the standardization half
+of the same change.
+
+If something smaller and self-contained is wanted instead, ROADMAP's **Rec.2020 SDR export** needs no
+decision from anyone: the 16-bit TIFF path exists and wants the matrix and an ICC profile. It is a *gamut*,
+not HDR — the HDR half is #2's, and blocked.
 
 ## Working conventions that aren't obvious from the code
 
