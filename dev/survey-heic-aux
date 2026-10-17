@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# Survey a photo library for the HEIF auxiliary images Apple writes (HDR gain map, Portrait depth/disparity,
+# Portrait Effects Matte, semantic mattes, …) — the methodology behind docs/ROADMAP.md's "Portrait depth
+# maps" numbers, kept here so it's reproducible instead of a one-off shell session.
+#   ./dev/survey-heic-aux <library-dir> [sample-size]      default sample-size: 200
+#
+# Stratified-samples every Nth HEIC under <library-dir> (read-only; never writes there), classifies each by
+# which `AuxiliaryImageType` values it carries, and for one example of each distinct combination: dumps the
+# depth/disparity/portrait/matte-related EXIF, and runs `heif-convert --with-aux` to check whether a literal
+# aux *image* exists (a tag alone isn't one — see the module docs in crates/raw/src/portrait_depth.rs) along
+# with its measured size and value range.
+#
+# Needs Docker and a sidecar-dev image (./dev/run builds it). Installs libheif-examples and imagemagick into a
+# throwaway container each run — the published image ships neither (docs/ROADMAP.md, the HEIC licensing trap).
+set -euo pipefail
+library="${1:?usage: dev/survey-heic-aux <library-dir> [sample-size]}"
+n="${2:-200}"
+uid="$(id -u)"; gid="$(id -g)"
+scratch="$(mktemp -d)"
+trap 'rm -rf "$scratch"' EXIT
+
+cat > "$scratch/entrypoint.sh" <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+apt-get update -qq >/dev/null 2>&1
+apt-get install -y -qq libheif-examples imagemagick >/dev/null 2>&1
+
+find /library -iname '*.heic' > /scratch/heic_all.txt
+total=$(wc -l < /scratch/heic_all.txt)
+n="${1:-200}"
+step=$(( total / n )); [ "$step" -lt 1 ] && step=1
+echo "total heic files: $total, sampling every ${step}th"
+awk -v step="$step" 'NR % step == 0' /scratch/heic_all.txt > /scratch/heic_sample.txt
+
+: > /scratch/sig_paths.txt
+while IFS= read -r f; do
+  sig=$(exiftool -a -G1 -s3 -AuxiliaryImageType "$f" 2>/dev/null | sort -u | tr '\n' '|')
+  printf '%s\t%s\n' "${sig:-(none)}" "$f" >> /scratch/sig_paths.txt
+done < /scratch/heic_sample.txt
+
+echo "--- signature counts ---"
+cut -f1 /scratch/sig_paths.txt | sort | uniq -c | sort -rn
+
+echo "--- one example per signature, with its depth/matte tags and any extractable aux image ---"
+sort -t$'\t' -k1,1 -u /scratch/sig_paths.txt | while IFS=$'\t' read -r sig path; do
+  echo ""
+  echo "=== $sig ==="
+  echo "file: $path"
+  exiftool -a -G1 "$path" 2>/dev/null | grep -iE "depth|disparity|aux|portrait|matte|customrendered|model name|software"
+  d="/scratch/work/$RANDOM"; mkdir -p "$d"
+  if heif-convert --with-aux "$path" "$d/out.png" > "$d/log.txt" 2>&1; then
+    for f in "$d"/*depth*.png "$d"/*disparity*.png "$d"/*portraiteffectsmatte*.png; do
+      [ -f "$f" ] || continue
+      echo "-- $(basename "$f"): $(identify -format '%wx%h %z-bit' "$f" 2>/dev/null) --"
+      identify -verbose "$f" 2>/dev/null | grep -A4 'Channel statistics' | head -5
+    done
+  fi
+done
+
+# The container runs as root, so everything it wrote under /scratch is root-owned on the host too; hand it
+# back to the invoking user or the outer script's cleanup trap can't remove it (dev/run's own problem, same
+# fix).
+chown -R "${2:-0}:${3:-0}" /scratch
+SCRIPT
+chmod +x "$scratch/entrypoint.sh"
+
+docker run --rm --security-opt label=disable \
+  -v "$library":/library:ro \
+  -v "$scratch":/scratch \
+  sidecar-dev bash /scratch/entrypoint.sh "$n" "$uid" "$gid"
