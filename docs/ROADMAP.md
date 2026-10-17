@@ -10,8 +10,35 @@ raising exposure flattens upper-midtone texture — measured log-log slope 0.80 
 at +2.5 EV. The real constraint is headroom (sRGB holds 2.47 stops above grey; the default `whiteEv` asks for
 4.5), so the shape can only decide *where* the compression is spent, not avoid it. A straight segment in
 encoded space was built and measured: it raises +2 EV to 0.63 but pushes shadow contrast from 1.29 to 2.37 at
-−2 EV, which is worse. A straight segment in *log-log* space holds ~0.98 at +1 EV with neutral shadows and
-costs highlights above +2 EV. Either is a `ProcessVersion` bump. Decide with pictures, not slopes.
+−2 EV, which is worse.
+
+The log-log straight segment is now built — `tone::straight_stops`, with
+`tone::tests::the_straight_segment_keeps_the_upper_midtones` printing the table below — and it leaves the
+shadows exactly as they are, because it only replaces the curve above grey. A straight segment through grey
+with slope 1, then a shoulder `1 − (1 − t)ⁿ` reaching white at `whiteEv` with no slope left over; requiring
+the two to meet without a kink fixes the knee at `(nH − W)/(n − 1)`, so the shoulder's **order is the whole
+choice**, and the slope through it is exactly `(1 − t)ⁿ⁻¹`:
+
+| stops over grey | logistic (now) | order 2 | order 3 | order 4 |
+|---|---|---|---|---|
+| knee at | — | +0.45 | +1.46 | +1.80 |
+| +0.5 EV | 0.92 | 0.99 | 1.00 | 1.00 |
+| +1 EV | 0.80 | 0.86 | 1.00 | 1.00 |
+| +1.5 EV | 0.68 | 0.74 | 0.97 | 1.00 |
+| +2 EV | 0.57 | 0.62 | 0.68 | 0.79 |
+| +2.5 EV | 0.47 | 0.49 | 0.43 | 0.41 |
+| +3 EV | 0.38 | 0.37 | 0.24 | 0.17 |
+| +4 EV | 0.24 | 0.12 | 0.03 | 0.01 |
+
+Order 3 is the shape this roadmap used to describe: a stop of scene light for a stop of picture out to
++1.5 EV, paid for above +2. Shadows are the logistic's throughout. The "logistic (now)" column is measured by
+the same test rather than quoted, and it still reads as above after the curve's endpoints were pinned
+(`Curve: pin the ends`, #23) — that change moved what Highlights and Shadows do to black and white, not the
+base curve's slope through the midtones, so the comparison below is current. **What is left is the owner's call, with
+pictures and the Camera toggle, not slopes:** which order, and what Contrast should mean above grey — today
+it is the logistic's own steepness, and a fixed segment has none, so either Contrast becomes a power S-curve
+through grey there (as it already is for a developed file, `tone_display`) or the segment's slope follows it.
+Then it is a `ProcessVersion` bump, a WGSL mirror and a parity case.
 
 **Focus peaking at full resolution — done**, in `sidecar_engine::focus`. It used to run in the view pass over
 the proxy, where downsampling had already averaged the high frequencies away, so it reported edge *contrast*
