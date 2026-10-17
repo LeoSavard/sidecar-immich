@@ -1,0 +1,9 @@
+# Rust's own default width, stated explicitly so it cannot drift with a future toolchain default.
+#
+# Narrow, for a codebase whose sources were hand-wrapped much wider, and the reason is mechanical rather
+# than aesthetic: git is line-granular. Two branches that touch different arguments of one wide call collide
+# in the same hunk, where at 100 those arguments sit on their own lines and merge cleanly. With a stack of
+# branches that each merge `main` back down, that is the difference between a conflict and no conflict.
+# `git blame` gains the same precision, and 100 is what every other Rust project uses, which matters if
+# anyone else is ever to send a patch. See docs/V2.md.
+max_width = 100
