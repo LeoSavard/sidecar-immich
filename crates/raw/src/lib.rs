@@ -9,9 +9,11 @@ use std::path::Path;
 
 pub mod af;
 pub mod decoded;
+pub mod heif_aux;
 pub mod lens;
 pub mod lensfun;
 pub mod linear_dng;
+pub mod portrait_depth;
 pub use af::AfPoint;
 pub use decoded::SourceSpace;
 pub use sidecar_color::SourceKind;
