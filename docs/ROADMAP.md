@@ -36,10 +36,31 @@ or an adapted lens leave nothing useful.
 What is left of peaking is in "Subject-aware tools" below: weighting the measure by the subject mask, and
 ranking eyes and faces first. Noise is already handled.
 
-**Highlight reconstruction** leaves faint bluish blotches at the edges of reconstructed areas. Now measured
-rather than squinted at, with `sidecar-dev hilite <raw> <dir> [--crop]`: it buckets the proxy by its alpha —
-the fraction of source samples that clipped under each output pixel, so 0 is untouched picture and 1 the heart
-of a blown area — and prints the mean chromaticity `r/(r+g+b)`, `b/(r+g+b)` of each bucket in white-balanced
+**Highlight reconstruction — low priority, and it is not what this entry used to claim.** The item said
+"leaves faint bluish blotches at the edges of reconstructed areas", and no such artifact could be reproduced:
+the blotches in the obvious test photo are the sky and the trees beyond a window, confirmed by the owner and
+by switching reconstruction off. What the pass *is* for is narrower and worth stating correctly, because it
+is not detail recovery.
+
+A raw file clips per channel, and not at the same scene luminance: a neutral white puts its largest raw
+response in green, which is exactly why green's white-balance multiplier is 1 and red's is above it, so green
+pins first and red keeps recording for roughly log₂(red multiplier) — about a stop — afterwards. Measured on
+this repository's own fixtures: on `_D5N3075.NEF` green clips on 12.5 % of samples, blue on 10.0 % and **red
+on only 2.3 %**, so about a tenth of that frame has green pinned while red is still a live measurement; on
+`DSC01899.ARW` green clips on 0.14 % of samples and **red and blue on none at all**. In that band
+reconstruction is solving for the pinned channel from two measured ones, not inventing. Above it — every
+channel pinned, which is the core of a blown window — there is nothing left and anything drawn is inpainting
+from the neighbours.
+
+**So the value is avoiding false colour, not recovering texture**, and it matters most to exactly the
+workflow that pulls highlights down with the curve: in the transition band green is frozen while red and blue
+climb, the white-balance gains turn that into a magenta drift, and a tone curve lifts the tinted near-white
+into visible range where it reads as a pink patch. Left clipped to white it would never be seen. The develop
+pass's `highlight_blend` is a second net for the hopeless case.
+
+The measurements below stand, and `sidecar-dev hilite <raw> <dir> [--crop]` is how to repeat them: it buckets
+the proxy by its alpha — the fraction of source samples that clipped under each output pixel, so 0 is
+untouched picture and 1 the heart of a blown area — and prints the mean chromaticity `r/(r+g+b)`, `b/(r+g+b)` of each bucket in white-balanced
 camera RGB, where a neutral reads 0.333. It also counts, on the mosaic itself, how often each colour actually
 reaches saturation, which is what decides whether a blown area still holds an honest measurement.
 
@@ -71,11 +92,14 @@ green comes back and red and blue fall proportionally.
   glass), not the pass. Anyone chasing this should run that A/B before trusting their eyes, as should have
   happened here first.
 
-*Where to look next.* The hue of a reconstructed pixel is the pyramid estimate's hue, so that is the only
-place a cast can come from. In a fully-blown core there are no unclipped taps nearby, so the estimate is
-carried in from coarse levels — the surroundings — and a window's surroundings are the room, which is far from
-the window's own colour. That is consistent with the measured red deficit, and the honest next experiment is
-to dump each pyramid level as an image and find the level where the hue departs, rather than to guess again.
+*Where to look next, if anyone returns to this.* The hue of a reconstructed pixel is the pyramid estimate's
+hue, so that is the only place a shift can come from. In a fully-blown core there are no unclipped taps
+nearby, so the estimate is carried in from coarse levels — the surroundings — and a window's surroundings are
+the room, which is far from the window's own colour. That fits the measured red deficit; the next experiment
+is to dump each pyramid level as an image and find the level where the hue departs, rather than guess again.
+But note what the per-channel census above implies: the fully-blown core is the case with no data in it, and
+the band that *does* carry data is the one where the pass already measures correctly. So this is a small
+refinement to a stage that is working, which is why the entry now sits low rather than at the top.
 
 **X-Trans at full resolution** still runs LibRaw's Markesteijn on the CPU; only Bayer has a GPU demosaic for
 loupe and export. Porting LibRaw's algorithm to WGSL (CDDL-1.0, so the port keeps that header) is the
