@@ -54,6 +54,21 @@ never been in the loop. It needs a way to run the browser side on a phone and po
 
 ## Reach
 
+**Someone else's folder structure.** The storage template is tuned to one library — this one. `render_dir`
+understands date tokens only (`{{yyyy}}`, `{{yy}}`, `{{y}}`, `{{MMMM}}`, `{{MMM}}`, `{{MM}}`, `{{M}}`,
+`{{dd}}`, `{{d}}`) with month names in English or French, and a `Root` carries an `immich_prefix` and a
+`per_user` flag shaped by Immich's own internal layout. Note what this does *not* affect: the sidecar is
+written beside the original, so **writing is already layout-independent**. What the template constrains is
+*finding* the original from a share — hash, name and capture date — which is the step that fails on a
+library laid out any other way, leaving only Immich's own search and the picker.
+
+Worth doing, in order of value: fall back to the name walk (`sidecar_template::find_by_name`) when the date
+path misses, which makes an unrecognised layout degrade instead of failing; more tokens and more month
+locales; a configured layout that need not be Immich's, including the plain case of "everything in one
+folder" and the common `{{yyyy}}/{{event}}/` shape where a folder name is not a date at all. The measure of
+success is that someone whose photos sit in `2019/Holidays/` rather than `2019/05.May/2019-05-02/` can point
+Sidecar at them and have sidecars land correctly. See [`V2.md`](V2.md), Workstream B.
+
 **Browsers without WebGPU (Firefox, older Safari) — done.** `POST /api/assets/{key}/preview` develops the
 cached proxy with the same shaders and parameters the browser would have used and returns a JPEG, so the
 picture is the same; it just arrives when a slider is released rather than while it moves. One request is in
@@ -453,7 +468,12 @@ order:
   inside one entry, for A/B while editing). The XMP already carries history and versions, so this is mostly
   UI plus a side-by-side compare.
 - **Soft proofing with a gamut check** — see the desktop section of [`V2.md`](V2.md); it is nearly pure
-  rendering-path work and sits next to the Rec.2020 export already listed above.
+  rendering-path work and sits next to the Rec.2020 export already listed above. Note it needs no knowledge
+  of the viewer's own display: the image is transformed to the proof profile and back, and the result is
+  shown in whatever space the editor already renders. Compose the whole chain into one 3D LUT and compute
+  the gamut warning from that same chain, since a parallel path is how gamut warnings end up disagreeing
+  with the preview. *Display calibration is not part of this and is not Sidecar's job* — editors consume a
+  profile, they do not measure one.
 - **3D LUT loading**, **defringe** as a post-demosaic tool distinct from raw CA correction, and
   **film-negative inversion** for scans.
 - **HDR merge and focus stacking.** These sit with panorama below: not table stakes for a RAW *developer*

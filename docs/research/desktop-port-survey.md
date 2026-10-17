@@ -5,6 +5,21 @@
 > weights. It is a snapshot with sources, not a specification: ROADMAP.md and V2.md carry the decisions it
 > led to, and where the two disagree the roadmap wins. Claims here are cited; the ones that could not be
 > sourced say so, and the open questions are collected in V2.md's measurement table rather than guessed at.*
+>
+> **Two of its conclusions were overruled on the day it was written, and are left in place rather than
+> edited so the reasoning stays legible:**
+>
+> 1. *"The catalogue is the largest single risk."* The port is **not trying to be a library** — it is an
+>    editor over the filesystem, and the Immich-backed flavour keeps library management. So the catalogue,
+>    import, ratings, keywords, collections and the culling workflow are out of scope rather than at risk.
+>    What survives is reading the embedded JPEG for a fast first frame, and the warning never to write a
+>    sidecar as a side effect of browsing.
+> 2. *"A browser-only build cannot be colour-accurate by construction."* Overstated. A browser does take
+>    part in colour management — it tags its output and the compositor converts to the display profile — so
+>    on a profiled display the result matches what an application would compute itself. The real point is
+>    narrower: that chain has been unreliable **on Linux**, which is why `color-management-v1` only arrived
+>    in 2025, so it is something to verify rather than a reason to reject the browser. No editor measures a
+>    display, and Sidecar will not either.*
 
 The research turns up one gap that no amount of shader work closes — **Sidecar has no heal, clone or spot-removal tool, and all six established desktop RAW editors do** ([darktable module list](https://docs.darktable.org/usermanual/stable/en/module-reference/processing-modules/); [RawPedia Local Adjustments](https://rawpedia.pixls.us/local_adjustments/); [ON1 features](https://www.on1.com/products/photo-raw/features/?t=2); [PetaPixel on LrC 13.3](https://petapixel.com/2024/05/21/huge-adobe-lightroom-update-adds-ai-generative-remove-and-lens-blurring/)) — and four findings that invalidate routes currently assumed open. The webview route to a desktop shell does not deliver WebGPU on Linux: Tauri closed WebGPU support as "not planned", the flag mechanism it does offer works only on Windows WebView2, and WebKitGTK had its GPU process *disabled by default* in February 2026 ([tauri#12846](https://github.com/tauri-apps/tauri/issues/12846); [tauri#6381](https://github.com/tauri-apps/tauri/issues/6381); [WebKit bug 307065](https://bugs.webkit.org/show_bug.cgi?id=307065)). `docs/ROADMAP.md:354` states that Real-ESRGAN is "BSD-3-Clause for both code and pretrained weights"; the code licence is verified BSD-3-Clause, but the model-zoo page **states no licence for the weights at all**, which grants nothing ([Real-ESRGAN LICENSE](https://raw.githubusercontent.com/xinntao/Real-ESRGAN/master/LICENSE); [model_zoo.md](https://raw.githubusercontent.com/xinntao/Real-ESRGAN/master/docs/model_zoo.md)). ArgyllCMS, the obvious display-profiling dependency, is **AGPL-3.0, not GPL** — harder to work around, and its command-line-tool shape is exactly what AGPL is written to cover ([argyllcms.com/doc/License.txt](https://www.argyllcms.com/doc/License.txt)). SegFormer, the default sky-segmentation answer, ships Apache-2.0 code with weights restricted to "research or evaluation purposes only" ([NVlabs/SegFormer LICENSE](https://raw.githubusercontent.com/NVlabs/SegFormer/master/LICENSE)). Against that, the cheapest high-leverage item in the whole survey is the **guided filter**, which is four box filters plus per-pixel algebra and simultaneously unlocks clarity, dehaze transmission refinement, mask feathering and better depth upsampling ([He, Sun, Tang, TPAMI](https://people.csail.mit.edu/kaiming/publications/pami12guidedfilter.pdf)).
 
