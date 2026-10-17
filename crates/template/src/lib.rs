@@ -161,6 +161,67 @@ pub fn find_by_date_and_name(root: &Path, template: &str, month_locale: &str, da
     out
 }
 
+/// Look for `query` anywhere under `root`, by stem, case-insensitively and as a substring — which is what a
+/// person typing into a picker means, and what Immich's own filename search does.
+///
+/// A library is a photo collection, so the walk is bounded rather than exhaustive: it stops once `limit`
+/// matches are in hand or `MAX_DIRS` directories have been opened, and it never follows a symlink, so a link
+/// pointing back up its own tree cannot spin. Directories are visited newest first, because a picker's answer
+/// is far more often a recent photo than an old one, and that ordering makes the bound land in the right
+/// place when it does bite. Hidden directories are skipped.
+///
+/// Ranking: an exact stem before a substring, RAW before anything else, then the shorter stem — a query that
+/// is the whole of one name and part of another should offer the whole one first.
+pub fn find_by_name(root: &Path, query: &str, limit: usize) -> Vec<Candidate> {
+    const MAX_DIRS: usize = 20_000;
+    let want = stem_of(query).to_ascii_lowercase();
+    let mut out = Vec::new();
+    if want.is_empty() {
+        return out;
+    }
+    let (mut queue, mut opened) = (vec![root.to_path_buf()], 0usize);
+    while let Some(dir) = queue.pop() {
+        if out.len() >= limit || opened >= MAX_DIRS {
+            break;
+        }
+        opened += 1;
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        let mut subdirs = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(fname) = path.file_name().and_then(|f| f.to_str()) else { continue };
+            if fname.starts_with('.') {
+                continue;
+            }
+            // `file_type` does not follow a symlink, so a linked directory is simply not descended into.
+            let Ok(ft) = entry.file_type() else { continue };
+            if ft.is_dir() {
+                subdirs.push(path);
+                continue;
+            }
+            if !ft.is_file() || !is_editable(&path) {
+                continue;
+            }
+            let stem = stem_of(fname).to_ascii_lowercase();
+            if !stem.contains(&want) {
+                continue;
+            }
+            let Ok(md) = entry.metadata() else { continue };
+            let mut rank = if stem == want { 0 } else { 8 };
+            if !is_raw(&path) {
+                rank += 4;
+            }
+            rank += (stem.len() - want.len()).min(3) as u32;
+            out.push(Candidate { path, size: md.len(), rank });
+        }
+        subdirs.sort();
+        queue.extend(subdirs);
+    }
+    out.sort_by(|a, b| a.rank.cmp(&b.rank).then_with(|| a.path.cmp(&b.path)));
+    out.truncate(limit);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -209,5 +270,52 @@ mod tests {
         // Near midnight: captured on the 26th by the phone's clock, filed on the 27th, with a collision suffix.
         let c = find_by_date_and_name(tmp.path(), T, "en", Date { year: 2026, month: 8, day: 26 }, "_D5N9000.NEF", None);
         assert!(c[0].path.ends_with("_D5N9000+1.NEF"));
+    }
+
+    #[test]
+    fn searches_a_folder_library_by_name_without_a_date() {
+        let tmp = tempfile::tempdir().unwrap();
+        let day = tmp.path().join("2026/08.August/2026-08-26");
+        let other = tmp.path().join("2019/05.May/2019-05-02");
+        std::fs::create_dir_all(&day).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::create_dir_all(tmp.path().join(".hidden")).unwrap();
+        std::fs::write(day.join("_D5N5068.JPG"), b"jpeg").unwrap();
+        std::fs::write(day.join("_D5N5068.NEF"), b"raw!").unwrap();
+        std::fs::write(day.join("_D5N5068.NEF.xmp"), b"<x/>").unwrap();
+        std::fs::write(other.join("holiday_D5N5068_edit.NEF"), b"raw").unwrap();
+        std::fs::write(tmp.path().join(".hidden/_D5N5068.NEF"), b"raw").unwrap();
+        std::fs::write(day.join("notes.txt"), b"text").unwrap();
+
+        // The whole point of this one: a picker can find a photo with no capture date to go on.
+        let c = find_by_name(tmp.path(), "_D5N5068", 10);
+        let names: Vec<_> = c.iter().map(|c| c.path.file_name().unwrap().to_str().unwrap()).collect();
+        // Exact stem and RAW first, then the exact-stem JPEG, then the substring match. No sidecar, no
+        // text file, nothing from a hidden directory.
+        assert_eq!(names, vec!["_D5N5068.NEF", "_D5N5068.JPG", "holiday_D5N5068_edit.NEF"]);
+
+        // An extension on the query is a stem too, so pasting a file name works.
+        assert_eq!(find_by_name(tmp.path(), "_D5N5068.NEF", 10).len(), 3);
+        // Case-insensitive, like Immich's own filename search.
+        assert_eq!(find_by_name(tmp.path(), "_d5n5068", 10).len(), 3);
+        // The limit is honoured, and the best match survives it.
+        let one = find_by_name(tmp.path(), "_D5N5068", 1);
+        assert_eq!(one.len(), 1);
+        assert!(one[0].path.ends_with("_D5N5068.NEF"));
+        // An empty query matches nothing rather than the whole library.
+        assert!(find_by_name(tmp.path(), "", 10).is_empty());
+        assert!(find_by_name(tmp.path(), "nothing-like-this", 10).is_empty());
+    }
+
+    #[test]
+    fn a_symlink_loop_does_not_hang_the_walk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let deep = tmp.path().join("a/b");
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(deep.join("IMG_0001.NEF"), b"raw").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(tmp.path(), deep.join("loop")).unwrap();
+        let c = find_by_name(tmp.path(), "IMG_0001", 10);
+        assert_eq!(c.len(), 1);
     }
 }
