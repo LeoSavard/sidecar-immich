@@ -23,7 +23,11 @@ pub(crate) fn wavelength(i: usize) -> f64 {
 }
 
 /// Linear Rec.2020 → XYZ (D65), as colour-science gives it.
-const REC2020_TO_XYZ: [[f64; 3]; 3] = [[0.6369580483, 0.1446169036, 0.1688809752], [0.262700212, 0.6779980715, 0.0593017165], [0.0, 0.028072693, 1.0609850577]];
+const REC2020_TO_XYZ: [[f64; 3]; 3] = [
+    [0.6369580483, 0.1446169036, 0.1688809752],
+    [0.262700212, 0.6779980715, 0.0593017165],
+    [0.0, 0.028072693, 1.0609850577],
+];
 
 /// The reflectance of coefficients `c` at sample `i`.
 pub fn reflectance(c: [f64; 3], i: usize) -> f64 {
@@ -60,8 +64,18 @@ fn white() -> [f64; 3] {
 }
 
 fn lab(xyz: [f64; 3], white: [f64; 3]) -> [f64; 3] {
-    let f = |t: f64| if t > 216.0 / 24389.0 { t.cbrt() } else { (24389.0 / 27.0 * t + 16.0) / 116.0 };
-    let (fx, fy, fz) = (f(xyz[0] / white[0]), f(xyz[1] / white[1]), f(xyz[2] / white[2]));
+    let f = |t: f64| {
+        if t > 216.0 / 24389.0 {
+            t.cbrt()
+        } else {
+            (24389.0 / 27.0 * t + 16.0) / 116.0
+        }
+    };
+    let (fx, fy, fz) = (
+        f(xyz[0] / white[0]),
+        f(xyz[1] / white[1]),
+        f(xyz[2] / white[2]),
+    );
     [116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz)]
 }
 
@@ -91,8 +105,20 @@ fn lab_and_jacobian(c: [f64; 3], white: [f64; 3]) -> ([f64; 3], [[f64; 3]; 3]) {
         norm += D65[i] * CMF[i][1];
     }
     let xyz = xyz.map(|v| v / norm);
-    let f = |t: f64| if t > 216.0 / 24389.0 { t.cbrt() } else { (24389.0 / 27.0 * t + 16.0) / 116.0 };
-    let df = |t: f64| if t > 216.0 / 24389.0 { 1.0 / (3.0 * t.cbrt().powi(2)) } else { 24389.0 / 27.0 / 116.0 };
+    let f = |t: f64| {
+        if t > 216.0 / 24389.0 {
+            t.cbrt()
+        } else {
+            (24389.0 / 27.0 * t + 16.0) / 116.0
+        }
+    };
+    let df = |t: f64| {
+        if t > 216.0 / 24389.0 {
+            1.0 / (3.0 * t.cbrt().powi(2))
+        } else {
+            24389.0 / 27.0 / 116.0
+        }
+    };
     let r: [f64; 3] = std::array::from_fn(|k| xyz[k] / white[k]);
     let (fx, fy, fz) = (f(r[0]), f(r[1]), f(r[2]));
     // d f(xyz_k / white_k) / dc_j
@@ -102,25 +128,36 @@ fn lab_and_jacobian(c: [f64; 3], white: [f64; 3]) -> ([f64; 3], [[f64; 3]; 3]) {
         std::array::from_fn(|j| 500.0 * (dfk(0, j) - dfk(1, j))),
         std::array::from_fn(|j| 200.0 * (dfk(1, j) - dfk(2, j))),
     ];
-    ([116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz)], jac)
+    (
+        [116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz)],
+        jac,
+    )
 }
 
 /// Newton's method from `c` toward the coefficients whose colour is `target` (CIELAB), a step that would make
 /// it worse halved. A colour no reflectance has (more saturated than any surface) ends at the nearest it
 /// reaches in the iterations it gets.
 fn refine(mut c: [f64; 3], target: [f64; 3], white: [f64; 3]) -> [f64; 3] {
-    let err = |l: [f64; 3]| (l[0] - target[0]).powi(2) + (l[1] - target[1]).powi(2) + (l[2] - target[2]).powi(2);
+    let err = |l: [f64; 3]| {
+        (l[0] - target[0]).powi(2) + (l[1] - target[1]).powi(2) + (l[2] - target[2]).powi(2)
+    };
     for _ in 0..15 {
         let (l, j) = lab_and_jacobian(c, white);
         let before = err(l);
         if before < 1e-8 {
             break;
         }
-        let Some(delta) = solve(j, [target[0] - l[0], target[1] - l[1], target[2] - l[2]]) else { break };
+        let Some(delta) = solve(j, [target[0] - l[0], target[1] - l[1], target[2] - l[2]]) else {
+            break;
+        };
         let mut step = 1.0;
         let mut moved = false;
         for _ in 0..6 {
-            let trial = [c[0] + step * delta[0], c[1] + step * delta[1], c[2] + step * delta[2]];
+            let trial = [
+                c[0] + step * delta[0],
+                c[1] + step * delta[1],
+                c[2] + step * delta[2],
+            ];
             if err(lab(xyz(trial), white)) < before {
                 c = trial;
                 moved = true;
@@ -137,7 +174,11 @@ fn refine(mut c: [f64; 3], target: [f64; 3], white: [f64; 3]) -> [f64; 3] {
 
 /// `a·x = b` for 3×3, by Cramer's rule; `None` when singular.
 fn solve(a: [[f64; 3]; 3], b: [f64; 3]) -> Option<[f64; 3]> {
-    let det = |m: [[f64; 3]; 3]| m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+    let det = |m: [[f64; 3]; 3]| {
+        m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+            - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+            + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
+    };
     let d = det(a);
     if d.abs() < 1e-14 {
         return None;
@@ -155,7 +196,10 @@ fn solve(a: [[f64; 3]; 3], b: [f64; 3]) -> Option<[f64; 3]> {
 pub fn coefficients(rgb: [f64; 3]) -> [f64; 3] {
     let white = white();
     let rgb = rgb.map(|v| v.clamp(0.0, 1.0));
-    let y = (REC2020_TO_XYZ[1][0] * rgb[0] + REC2020_TO_XYZ[1][1] * rgb[1] + REC2020_TO_XYZ[1][2] * rgb[2]).clamp(1e-3, 0.999);
+    let y = (REC2020_TO_XYZ[1][0] * rgb[0]
+        + REC2020_TO_XYZ[1][1] * rgb[1]
+        + REC2020_TO_XYZ[1][2] * rgb[2])
+        .clamp(1e-3, 0.999);
     // The flat spectrum at that grey: s = y everywhere.
     let mut c = [0.0, 0.0, (2.0 * y - 1.0) / (2.0 * (y * (1.0 - y)).sqrt())];
     const STEPS: usize = 4;
@@ -186,20 +230,73 @@ pub fn film_sensitivity(id: &str) -> Option<[f64; SAMPLES]> {
     match id {
         "hp5-plus" => return Some(normalised(data::HP5_PLUS_SPECTROGRAM)),
         "sfx-200" => return Some(normalised(data::SFX_200_SPECTROGRAM)),
-        "tri-x-400" | "tri-x-320" => return Some(normalised(data::TRI_X_LOG_SENSITIVITY.map(|l| 10f64.powf(l)))),
+        "tri-x-400" | "tri-x-320" => {
+            return Some(normalised(
+                data::TRI_X_LOG_SENSITIVITY.map(|l| 10f64.powf(l)),
+            ));
+        }
         _ => {}
     }
     Some(sampled(match id {
         // Classic panchromatic, as the class's datasheets draw it: blue-heavy, a dip in the green, sensitising out to
         // the orange-red and gone by about 680 nm, which is why reds print darker than the eye sees them.
-        "panchromatic" => &[(380.0, 0.55), (400.0, 0.8), (430.0, 0.95), (460.0, 1.0), (490.0, 0.85), (510.0, 0.7), (530.0, 0.75), (560.0, 0.85), (590.0, 0.9), (620.0, 0.9), (640.0, 0.7), (660.0, 0.3), (680.0, 0.05), (700.0, 0.0)],
+        "panchromatic" => &[
+            (380.0, 0.55),
+            (400.0, 0.8),
+            (430.0, 0.95),
+            (460.0, 1.0),
+            (490.0, 0.85),
+            (510.0, 0.7),
+            (530.0, 0.75),
+            (560.0, 0.85),
+            (590.0, 0.9),
+            (620.0, 0.9),
+            (640.0, 0.7),
+            (660.0, 0.3),
+            (680.0, 0.05),
+            (700.0, 0.0),
+        ],
         // Modern panchromatic with an extended red: flatter, seeing further into the red.
-        "panchromatic-extended" => &[(380.0, 0.5), (400.0, 0.75), (440.0, 0.9), (480.0, 0.9), (510.0, 0.8), (540.0, 0.85), (580.0, 0.95), (620.0, 1.0), (650.0, 0.9), (670.0, 0.65), (690.0, 0.3), (710.0, 0.05), (720.0, 0.0)],
+        "panchromatic-extended" => &[
+            (380.0, 0.5),
+            (400.0, 0.75),
+            (440.0, 0.9),
+            (480.0, 0.9),
+            (510.0, 0.8),
+            (540.0, 0.85),
+            (580.0, 0.95),
+            (620.0, 1.0),
+            (650.0, 0.9),
+            (670.0, 0.65),
+            (690.0, 0.3),
+            (710.0, 0.05),
+            (720.0, 0.0),
+        ],
         // Orthochromatic: blind to red past about 600 nm — reds go black, skies stay bright.
-        "orthochromatic" => &[(380.0, 0.6), (400.0, 0.85), (440.0, 1.0), (480.0, 0.95), (520.0, 0.85), (550.0, 0.8), (570.0, 0.6), (590.0, 0.2), (600.0, 0.05), (610.0, 0.0)],
+        "orthochromatic" => &[
+            (380.0, 0.6),
+            (400.0, 0.85),
+            (440.0, 1.0),
+            (480.0, 0.95),
+            (520.0, 0.85),
+            (550.0, 0.8),
+            (570.0, 0.6),
+            (590.0, 0.2),
+            (600.0, 0.05),
+            (610.0, 0.0),
+        ],
         // Blue-sensitive, as wet collodion and the earliest plates: ultraviolet to blue only (the ultraviolet
         // itself no camera records).
-        "blue-sensitive" => &[(380.0, 1.0), (400.0, 1.0), (430.0, 0.9), (460.0, 0.6), (480.0, 0.35), (500.0, 0.12), (520.0, 0.02), (530.0, 0.0)],
+        "blue-sensitive" => &[
+            (380.0, 1.0),
+            (400.0, 1.0),
+            (430.0, 0.9),
+            (460.0, 0.6),
+            (480.0, 0.35),
+            (500.0, 0.12),
+            (520.0, 0.02),
+            (530.0, 0.0),
+        ],
         _ => return None,
     }))
 }
@@ -216,7 +313,9 @@ fn normalised(s: [f64; SAMPLES]) -> [f64; SAMPLES] {
 /// A filter on the lens: its transmission per wavelength. Generic shapes after the classic yellow, orange, red
 /// and green filters (a long-pass edge, or a band for green).
 pub fn filter_transmission(id: &str) -> Option<[f64; SAMPLES]> {
-    let edge = |at: f64, width: f64| -> [f64; SAMPLES] { std::array::from_fn(|i| 1.0 / (1.0 + (-(wavelength(i) - at) / width).exp())) };
+    let edge = |at: f64, width: f64| -> [f64; SAMPLES] {
+        std::array::from_fn(|i| 1.0 / (1.0 + (-(wavelength(i) - at) / width).exp()))
+    };
     Some(match id {
         "none" => [1.0; SAMPLES],
         "yellow" => edge(500.0, 12.0),
@@ -252,8 +351,12 @@ pub fn daylight(t: f64) -> [f64; SAMPLES] {
     };
     let y = -3.0 * x * x + 2.870 * x - 0.275;
     let m = 0.0241 + 0.2562 * x - 0.7341 * y;
-    let (m1, m2) = ((-1.3515 - 1.7703 * x + 5.9114 * y) / m, (0.0300 - 31.4424 * x + 30.0717 * y) / m);
-    let raw: [f64; SAMPLES] = std::array::from_fn(|i| DAYLIGHT_S0[i] + m1 * DAYLIGHT_S1[i] + m2 * DAYLIGHT_S2[i]);
+    let (m1, m2) = (
+        (-1.3515 - 1.7703 * x + 5.9114 * y) / m,
+        (0.0300 - 31.4424 * x + 30.0717 * y) / m,
+    );
+    let raw: [f64; SAMPLES] =
+        std::array::from_fn(|i| DAYLIGHT_S0[i] + m1 * DAYLIGHT_S1[i] + m2 * DAYLIGHT_S2[i]);
     // 560 nm is sample 18.
     std::array::from_fn(|i| 100.0 * raw[i] / raw[18])
 }
@@ -266,7 +369,9 @@ pub fn light(id: &str, temperature_k: f64) -> Option<[f64; SAMPLES]> {
     match id {
         "daylight" => Some(D65),
         "tungsten" => Some(planck(2848.0, 1.435e-2)),
-        "white-balance" if temperature_k < 5000.0 => Some(planck(temperature_k.max(1000.0), 1.4388e-2)),
+        "white-balance" if temperature_k < 5000.0 => {
+            Some(planck(temperature_k.max(1000.0), 1.4388e-2))
+        }
         "white-balance" => Some(daylight(temperature_k)),
         _ => None,
     }
@@ -285,7 +390,9 @@ const SURFACE_Y: f64 = 0.18;
 /// with odd shapes — a red that rises again in the violet, unseen by the eye and seen by blue-sensitive film.
 /// At a surface's brightness, a red is a red: low in the blue and violet.
 pub(crate) fn fit_scale(rgb: [f64; 3]) -> f64 {
-    let y = REC2020_TO_XYZ[1][0] * rgb[0] + REC2020_TO_XYZ[1][1] * rgb[1] + REC2020_TO_XYZ[1][2] * rgb[2];
+    let y = REC2020_TO_XYZ[1][0] * rgb[0]
+        + REC2020_TO_XYZ[1][1] * rgb[1]
+        + REC2020_TO_XYZ[1][2] * rgb[2];
     let max = rgb.iter().cloned().fold(0.0, f64::max);
     if y <= 1e-6 || max <= 1e-6 {
         return 1.0;
@@ -295,7 +402,8 @@ pub(crate) fn fit_scale(rgb: [f64; 3]) -> f64 {
 
 /// For each colour of the cube: its coefficients, fitted at `fit_scale`, and that scale.
 pub(crate) fn grid() -> &'static [([f64; 3], f64)] {
-    static GRID_COEFFICIENTS: std::sync::OnceLock<Vec<([f64; 3], f64)>> = std::sync::OnceLock::new();
+    static GRID_COEFFICIENTS: std::sync::OnceLock<Vec<([f64; 3], f64)>> =
+        std::sync::OnceLock::new();
     GRID_COEFFICIENTS.get_or_init(|| {
         let at = |i: usize| i as f64 / (GRID - 1) as f64;
         (0..GRID * GRID * GRID)
@@ -318,7 +426,13 @@ pub fn mono_lut(film: &str, filter: &str, light: &[f64; SAMPLES]) -> Option<Vec<
     let (s, f) = (film_sensitivity(film)?, filter_transmission(filter)?);
     let weight: [f64; SAMPLES] = std::array::from_fn(|i| light[i] * s[i] * f[i]);
     let total: f64 = weight.iter().sum();
-    let exposure = |(c, k): ([f64; 3], f64)| (0..SAMPLES).map(|i| reflectance(c, i) * weight[i]).sum::<f64>() / total / k;
+    let exposure = |(c, k): ([f64; 3], f64)| {
+        (0..SAMPLES)
+            .map(|i| reflectance(c, i) * weight[i])
+            .sum::<f64>()
+            / total
+            / k
+    };
     let grid = grid();
     // White is a flat spectrum, so it is its own exposure whatever the film; dividing by it only takes out the
     // fit's last thousandth.
@@ -336,7 +450,9 @@ mod tests {
     fn matches_colour_science() {
         for (rgb, reference) in REFERENCE {
             let c = coefficients(rgb);
-            let worst = (0..SAMPLES).map(|i| (reflectance(c, i) - reference[i]).abs()).fold(0.0, f64::max);
+            let worst = (0..SAMPLES)
+                .map(|i| (reflectance(c, i) - reference[i]).abs())
+                .fold(0.0, f64::max);
             assert!(worst < 0.01, "{rgb:?}: worst {worst}");
         }
     }
@@ -347,11 +463,22 @@ mod tests {
         let white = white();
         // Colours real surfaces have (the cube's corners are beyond any reflectance: more saturated than a surface
         // can be, they end at the nearest the family reaches).
-        for &rgb in &[[0.5, 0.08, 0.06], [0.1, 0.4, 0.1], [0.08, 0.12, 0.5], [0.6, 0.55, 0.1], [0.3, 0.3, 0.3], [0.02, 0.02, 0.02], [0.95, 0.95, 0.95]] {
+        for &rgb in &[
+            [0.5, 0.08, 0.06],
+            [0.1, 0.4, 0.1],
+            [0.08, 0.12, 0.5],
+            [0.6, 0.55, 0.1],
+            [0.3, 0.3, 0.3],
+            [0.02, 0.02, 0.02],
+            [0.95, 0.95, 0.95],
+        ] {
             let c = coefficients(rgb);
             assert!((0..SAMPLES).all(|i| (0.0..=1.0).contains(&reflectance(c, i))));
             let (got, want) = (lab(xyz(c), white), lab(rec2020_to_xyz(rgb), white));
-            let de = ((got[0] - want[0]).powi(2) + (got[1] - want[1]).powi(2) + (got[2] - want[2]).powi(2)).sqrt();
+            let de = ((got[0] - want[0]).powi(2)
+                + (got[1] - want[1]).powi(2)
+                + (got[2] - want[2]).powi(2))
+            .sqrt();
             assert!(de < 1.0, "{rgb:?}: ΔE {de}");
         }
     }
@@ -370,13 +497,25 @@ mod tests {
         let g = GRID - 1;
         assert!((at(&pan, [g, g, g]) - 1.0).abs() < 1e-6);
         let mid = g / 2;
-        assert!((at(&pan, [mid, mid, mid]) - 0.5).abs() < 0.02, "mid grey {}", at(&pan, [mid, mid, mid]));
+        assert!(
+            (at(&pan, [mid, mid, mid]) - 0.5).abs() < 0.02,
+            "mid grey {}",
+            at(&pan, [mid, mid, mid])
+        );
         // A red and a blue at the table's points nearest surface colours (about 0.5, 0.06, 0.06 and the like).
         let (red, blue) = ([mid, 1, 1], [1, 2, mid]);
-        assert!(at(&ortho, red) < 0.5 * at(&pan, red), "ortho red {} pan red {}", at(&ortho, red), at(&pan, red));
+        assert!(
+            at(&ortho, red) < 0.5 * at(&pan, red),
+            "ortho red {} pan red {}",
+            at(&ortho, red),
+            at(&pan, red)
+        );
         assert!(at(&ortho, blue) > at(&pan, blue));
         assert!(at(&red_filter, red) > at(&pan, red) && at(&red_filter, blue) < at(&pan, blue));
-        assert!(mono_lut("panchromatic", "purple", &D65).is_none() && mono_lut("velvia", "none", &D65).is_none());
+        assert!(
+            mono_lut("panchromatic", "purple", &D65).is_none()
+                && mono_lut("velvia", "none", &D65).is_none()
+        );
     }
 
     /// Everyday colours as each kind renders them, measured: blue-sensitive film darkens skin by more than half
@@ -387,14 +526,32 @@ mod tests {
         let e = |film: &str, filter: &str, rgb: [f64; 3]| {
             let lut = mono_lut(film, filter, &D65).unwrap();
             let m = rgb.iter().cloned().fold(0.0, f64::max);
-            m * at(&lut, rgb.map(|v| (v / m * (GRID - 1) as f64).round() as usize)) as f64
+            m * at(
+                &lut,
+                rgb.map(|v| (v / m * (GRID - 1) as f64).round() as usize),
+            ) as f64
         };
         let (skin, sky, red) = ([0.45, 0.30, 0.20], [0.25, 0.42, 0.75], [0.55, 0.06, 0.05]);
         let pan = |c| e("panchromatic", "none", c);
-        assert!(e("blue-sensitive", "none", skin) < 0.7 * pan(skin), "{} vs {}", e("blue-sensitive", "none", skin), pan(skin));
+        assert!(
+            e("blue-sensitive", "none", skin) < 0.7 * pan(skin),
+            "{} vs {}",
+            e("blue-sensitive", "none", skin),
+            pan(skin)
+        );
         assert!(e("blue-sensitive", "none", sky) > pan(sky));
-        assert!(e("orthochromatic", "none", red) < 0.4 * pan(red), "{} vs {}", e("orthochromatic", "none", red), pan(red));
-        assert!(e("panchromatic", "red", sky) < 0.5 * pan(sky), "{} vs {}", e("panchromatic", "red", sky), pan(sky));
+        assert!(
+            e("orthochromatic", "none", red) < 0.4 * pan(red),
+            "{} vs {}",
+            e("orthochromatic", "none", red),
+            pan(red)
+        );
+        assert!(
+            e("panchromatic", "red", sky) < 0.5 * pan(sky),
+            "{} vs {}",
+            e("panchromatic", "red", sky),
+            pan(sky)
+        );
     }
 
     /// Planck's law at CIE A's defining temperature and constant is CIE A; CIE's daylight formula at D50's temperature
@@ -403,12 +560,18 @@ mod tests {
     fn illuminants_match_cie() {
         use crate::spectral_data::{D50, ILLUMINANT_A};
         let a = planck(2848.0, 1.435e-2);
-        let worst = (0..SAMPLES).map(|i| (a[i] - ILLUMINANT_A[i]).abs() / ILLUMINANT_A[i]).fold(0.0, f64::max);
+        let worst = (0..SAMPLES)
+            .map(|i| (a[i] - ILLUMINANT_A[i]).abs() / ILLUMINANT_A[i])
+            .fold(0.0, f64::max);
         assert!(worst < 1e-3, "A: worst relative {worst}");
         let d50 = daylight(5003.0 * 1.4388 / 1.4380);
-        let worst = (0..SAMPLES).map(|i| (d50[i] - D50[i]).abs()).fold(0.0, f64::max);
+        let worst = (0..SAMPLES)
+            .map(|i| (d50[i] - D50[i]).abs())
+            .fold(0.0, f64::max);
         assert!(worst < 0.1, "D50: worst {worst}");
-        assert!(light("white-balance", 3000.0).unwrap()[0] < light("white-balance", 6500.0).unwrap()[0]);
+        assert!(
+            light("white-balance", 3000.0).unwrap()[0] < light("white-balance", 6500.0).unwrap()[0]
+        );
         assert!(light("candle", 6500.0).is_none());
     }
 
@@ -420,14 +583,38 @@ mod tests {
         let e = |light: &[f64; SAMPLES], rgb: [f64; 3]| {
             let lut = mono_lut("panchromatic", "none", light).unwrap();
             let m = rgb.iter().cloned().fold(0.0, f64::max);
-            m * at(&lut, rgb.map(|v| (v / m * (GRID - 1) as f64).round() as usize)) as f64
+            m * at(
+                &lut,
+                rgb.map(|v| (v / m * (GRID - 1) as f64).round() as usize),
+            ) as f64
         };
         let tungsten = planck(2848.0, 1.435e-2);
-        eprintln!("tungsten against daylight: red {:+.2} stop, sky {:+.2} stop", (e(&tungsten, red) / e(&D65, red)).log2(), (e(&tungsten, sky) / e(&D65, sky)).log2());
-        assert!(e(&tungsten, red) > 1.2 * e(&D65, red), "{} vs {}", e(&tungsten, red), e(&D65, red));
-        assert!(e(&tungsten, sky) < 0.9 * e(&D65, sky), "{} vs {}", e(&tungsten, sky), e(&D65, sky));
+        eprintln!(
+            "tungsten against daylight: red {:+.2} stop, sky {:+.2} stop",
+            (e(&tungsten, red) / e(&D65, red)).log2(),
+            (e(&tungsten, sky) / e(&D65, sky)).log2()
+        );
+        assert!(
+            e(&tungsten, red) > 1.2 * e(&D65, red),
+            "{} vs {}",
+            e(&tungsten, red),
+            e(&D65, red)
+        );
+        assert!(
+            e(&tungsten, sky) < 0.9 * e(&D65, sky),
+            "{} vs {}",
+            e(&tungsten, sky),
+            e(&D65, sky)
+        );
         let mid = (GRID - 1) / 2;
-        assert!((at(&mono_lut("panchromatic", "none", &tungsten).unwrap(), [mid, mid, mid]) - 0.5).abs() < 0.02);
+        assert!(
+            (at(
+                &mono_lut("panchromatic", "none", &tungsten).unwrap(),
+                [mid, mid, mid]
+            ) - 0.5)
+                .abs()
+                < 0.02
+        );
     }
 
     /// A film's filter factor behind one of our filters, in light `light`.
@@ -460,7 +647,10 @@ mod tests {
             eprintln!("{film} behind {filter}: {ours:.1} (sheet {sheet}), {off:+.2} stop");
             // Our yellow is a long-pass at 500 nm, between a Wratten 8 and a 15: compared with the 8, loosely.
             let within = if filter == "yellow" { 0.65 } else { 0.45 };
-            assert!(off.abs() < within, "{film} {filter}: {ours} against {sheet}");
+            assert!(
+                off.abs() < within,
+                "{film} {filter}: {ours} against {sheet}"
+            );
         }
     }
 
@@ -470,11 +660,25 @@ mod tests {
         let lut = mono_lut("hp5-plus", "none", &D65).unwrap();
         let e = |rgb: [f64; 3]| {
             let m = rgb.iter().cloned().fold(0.0, f64::max);
-            m * at(&lut, rgb.map(|v| (v / m * (GRID - 1) as f64).round() as usize)) as f64
+            m * at(
+                &lut,
+                rgb.map(|v| (v / m * (GRID - 1) as f64).round() as usize),
+            ) as f64
         };
-        let lum = |rgb: [f64; 3]| REC2020_TO_XYZ[1][0] * rgb[0] + REC2020_TO_XYZ[1][1] * rgb[1] + REC2020_TO_XYZ[1][2] * rgb[2];
+        let lum = |rgb: [f64; 3]| {
+            REC2020_TO_XYZ[1][0] * rgb[0]
+                + REC2020_TO_XYZ[1][1] * rgb[1]
+                + REC2020_TO_XYZ[1][2] * rgb[2]
+        };
         let (yellow, sky) = ([0.6, 0.5, 0.05], [0.25, 0.42, 0.75]);
-        assert!(e(yellow) < 0.8 * lum(yellow) && e(sky) > 1.15 * lum(sky), "yellow {} / {}, sky {} / {}", e(yellow), lum(yellow), e(sky), lum(sky));
+        assert!(
+            e(yellow) < 0.8 * lum(yellow) && e(sky) > 1.15 * lum(sky),
+            "yellow {} / {}, sky {} / {}",
+            e(yellow),
+            lum(yellow),
+            e(sky),
+            lum(sky)
+        );
     }
 
     #[test]

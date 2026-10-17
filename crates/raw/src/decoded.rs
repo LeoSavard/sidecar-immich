@@ -32,9 +32,11 @@ pub const HEIF_DECODER_ENV: &str = "SIDECAR_HEIF_DECODER";
 pub enum DecodeError {
     #[error("{0} is not an image Sidecar can open")]
     Unsupported(String),
-    #[error("HEIC needs an external decoder, and none is installed. Set {HEIF_DECODER_ENV}, or install one \
+    #[error(
+        "HEIC needs an external decoder, and none is installed. Set {HEIF_DECODER_ENV}, or install one \
              (for example libheif-examples or ImageMagick) — the published image ships none, because the \
-             HEIF decoders available are LGPL and HEVC is patent-encumbered.")]
+             HEIF decoders available are LGPL and HEVC is patent-encumbered."
+    )]
     NoHeifDecoder,
     #[error("the HEIC decoder failed: {0}")]
     HeifDecoder(String),
@@ -56,7 +58,11 @@ impl SourceSpace {
     /// Guess from an ICC profile description. Anything unrecognised is treated as sRGB, which is what an
     /// untagged JPEG almost always is.
     pub fn from_profile(description: &str) -> Self {
-        if description.contains("P3") { Self::DisplayP3 } else { Self::Srgb }
+        if description.contains("P3") {
+            Self::DisplayP3
+        } else {
+            Self::Srgb
+        }
     }
 
     /// XYZ → this space, derived from the working-space constants rather than written out again, so there is
@@ -73,7 +79,10 @@ impl SourceSpace {
     pub fn camera_color(self) -> CameraColor {
         CameraColor {
             as_shot_mul: [1.0, 1.0, 1.0],
-            calibrations: vec![Calibration { temperature_k: 6504.0, xyz_to_camera: self.xyz_to_rgb() }],
+            calibrations: vec![Calibration {
+                temperature_k: 6504.0,
+                xyz_to_camera: self.xyz_to_rgb(),
+            }],
         }
     }
 }
@@ -98,7 +107,10 @@ pub fn is_supported(path: &Path) -> bool {
 }
 
 fn extension(path: &Path) -> String {
-    path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase()
+    path.extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
 }
 
 /// sRGB EOTF over a lookup table — exact for integer input, and much faster than a `powf` per sample on a
@@ -107,7 +119,11 @@ fn linear_lut(levels: usize) -> Vec<f32> {
     (0..levels)
         .map(|i| {
             let v = i as f32 / (levels - 1) as f32;
-            if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+            if v <= 0.04045 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
         })
         .collect()
 }
@@ -126,11 +142,20 @@ enum Samples {
 /// fraction of the pixel clipped at the sensor, which only a RAW has. (The develop pass also turns highlight
 /// blending off for developed files, so this is the honest value rather than a load-bearing one.)
 fn to_linear_rgba(samples: &Samples, channels: usize) -> Vec<f32> {
-    fn convert<T: Copy>(samples: &[T], channels: usize, levels: usize, index: impl Fn(T) -> usize) -> Vec<f32> {
+    fn convert<T: Copy>(
+        samples: &[T],
+        channels: usize,
+        levels: usize,
+        index: impl Fn(T) -> usize,
+    ) -> Vec<f32> {
         let lut = linear_lut(levels);
         let mut out = Vec::with_capacity(samples.len() / channels * 4);
         for p in samples.chunks_exact(channels) {
-            let (r, g, b) = if channels < 3 { (p[0], p[0], p[0]) } else { (p[0], p[1], p[2]) };
+            let (r, g, b) = if channels < 3 {
+                (p[0], p[0], p[0])
+            } else {
+                (p[0], p[1], p[2])
+            };
             out.push(lut[index(r)]);
             out.push(lut[index(g)]);
             out.push(lut[index(b)]);
@@ -154,19 +179,24 @@ fn decode_pnm(bytes: &[u8]) -> Result<(u32, u32, Vec<f32>), DecodeError> {
     // Header tokens are whitespace-separated, and `#` comments may appear wherever whitespace may.
     while at < bytes.len() && fields.len() < 3 {
         match bytes[at] {
-            b'#' => while at < bytes.len() && bytes[at] != b'\n' {
-                at += 1;
-            },
+            b'#' => {
+                while at < bytes.len() && bytes[at] != b'\n' {
+                    at += 1;
+                }
+            }
             c if c.is_ascii_whitespace() => at += 1,
             _ => {
                 let start = at;
                 while at < bytes.len() && !bytes[at].is_ascii_whitespace() {
                     at += 1;
                 }
-                let token = std::str::from_utf8(&bytes[start..at]).map_err(|_| bad("unreadable header"))?;
+                let token =
+                    std::str::from_utf8(&bytes[start..at]).map_err(|_| bad("unreadable header"))?;
                 match magic {
                     None => magic = Some(token.to_string()),
-                    Some(_) => fields.push(token.parse().map_err(|_| bad("non-numeric header field"))?),
+                    Some(_) => {
+                        fields.push(token.parse().map_err(|_| bad("non-numeric header field"))?)
+                    }
                 }
             }
         }
@@ -174,9 +204,15 @@ fn decode_pnm(bytes: &[u8]) -> Result<(u32, u32, Vec<f32>), DecodeError> {
     let channels = match magic.as_deref() {
         Some("P6") => 3,
         Some("P5") => 1,
-        other => return Err(bad(&format!("unsupported magic {other:?}; only binary P5 and P6 are read"))),
+        other => {
+            return Err(bad(&format!(
+                "unsupported magic {other:?}; only binary P5 and P6 are read"
+            )));
+        }
     };
-    let [width, height, maxval] = fields[..] else { return Err(bad("truncated header")) };
+    let [width, height, maxval] = fields[..] else {
+        return Err(bad("truncated header"));
+    };
     // Exactly one whitespace byte separates the header from the samples.
     let data = bytes.get(at + 1..).ok_or_else(|| bad("no sample data"))?;
     let count = (width as usize) * (height as usize) * channels;
@@ -185,22 +221,44 @@ fn decode_pnm(bytes: &[u8]) -> Result<(u32, u32, Vec<f32>), DecodeError> {
         if data.len() < wanted {
             return Err(bad("sample data is short"));
         }
-        Samples::Sixteen(data[..wanted].as_chunks::<2>().0.iter().map(|b| u16::from_be_bytes(*b)).collect())
+        Samples::Sixteen(
+            data[..wanted]
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|b| u16::from_be_bytes(*b))
+                .collect(),
+        )
     } else {
         if data.len() < count {
             return Err(bad("sample data is short"));
         }
         Samples::Eight(data[..count].to_vec())
     };
-    Ok((width as u32, height as u32, to_linear_rgba(&samples, channels)))
+    Ok((
+        width as u32,
+        height as u32,
+        to_linear_rgba(&samples, channels),
+    ))
 }
 
 fn decode_jpeg(bytes: &[u8]) -> Result<(u32, u32, Vec<f32>), DecodeError> {
     let mut decoder = zune_jpeg::JpegDecoder::new(std::io::Cursor::new(bytes));
-    let pixels = decoder.decode().map_err(|e| DecodeError::Decode(format!("JPEG: {e}")))?;
-    let info = decoder.info().ok_or_else(|| DecodeError::Decode("JPEG has no frame header".into()))?;
-    let channels = decoder.output_colorspace().map(|c| c.num_components()).unwrap_or(3);
-    Ok((info.width as u32, info.height as u32, to_linear_rgba(&Samples::Eight(pixels), channels)))
+    let pixels = decoder
+        .decode()
+        .map_err(|e| DecodeError::Decode(format!("JPEG: {e}")))?;
+    let info = decoder
+        .info()
+        .ok_or_else(|| DecodeError::Decode("JPEG has no frame header".into()))?;
+    let channels = decoder
+        .output_colorspace()
+        .map(|c| c.num_components())
+        .unwrap_or(3);
+    Ok((
+        info.width as u32,
+        info.height as u32,
+        to_linear_rgba(&Samples::Eight(pixels), channels),
+    ))
 }
 
 fn decode_png(bytes: &[u8]) -> Result<(u32, u32, Vec<f32>), DecodeError> {
@@ -208,14 +266,29 @@ fn decode_png(bytes: &[u8]) -> Result<(u32, u32, Vec<f32>), DecodeError> {
     // Palette and 1/2/4-bit files arrive as indices or packed bits otherwise: a palette PNG read as grey
     // indices, and grey + alpha as two channels the converter indexed three deep and panicked on.
     decoder.set_transformations(png::Transformations::EXPAND);
-    let mut reader = decoder.read_info().map_err(|e| DecodeError::Decode(format!("PNG: {e}")))?;
-    let mut buf = vec![0u8; reader.output_buffer_size().ok_or_else(|| DecodeError::Decode("PNG too large".into()))?];
-    let frame = reader.next_frame(&mut buf).map_err(|e| DecodeError::Decode(format!("PNG: {e}")))?;
+    let mut reader = decoder
+        .read_info()
+        .map_err(|e| DecodeError::Decode(format!("PNG: {e}")))?;
+    let mut buf = vec![
+        0u8;
+        reader
+            .output_buffer_size()
+            .ok_or_else(|| DecodeError::Decode("PNG too large".into()))?
+    ];
+    let frame = reader
+        .next_frame(&mut buf)
+        .map_err(|e| DecodeError::Decode(format!("PNG: {e}")))?;
     let info = reader.info();
     let channels = frame.color_type.samples();
     let used = &buf[..frame.buffer_size()];
     let samples = match frame.bit_depth {
-        png::BitDepth::Sixteen => Samples::Sixteen(used.as_chunks::<2>().0.iter().map(|b| u16::from_be_bytes(*b)).collect()),
+        png::BitDepth::Sixteen => Samples::Sixteen(
+            used.as_chunks::<2>()
+                .0
+                .iter()
+                .map(|b| u16::from_be_bytes(*b))
+                .collect(),
+        ),
         _ => Samples::Eight(used.to_vec()),
     };
     Ok((info.width, info.height, to_linear_rgba(&samples, channels)))
@@ -223,19 +296,35 @@ fn decode_png(bytes: &[u8]) -> Result<(u32, u32, Vec<f32>), DecodeError> {
 
 fn decode_tiff(bytes: &[u8]) -> Result<(u32, u32, Vec<f32>), DecodeError> {
     use tiff::decoder::DecodingResult;
-    let mut decoder = tiff::decoder::Decoder::new(std::io::Cursor::new(bytes)).map_err(|e| DecodeError::Decode(format!("TIFF: {e}")))?;
-    let (width, height) = decoder.dimensions().map_err(|e| DecodeError::Decode(format!("TIFF: {e}")))?;
-    let colour = decoder.colortype().map_err(|e| DecodeError::Decode(format!("TIFF: {e}")))?;
+    let mut decoder = tiff::decoder::Decoder::new(std::io::Cursor::new(bytes))
+        .map_err(|e| DecodeError::Decode(format!("TIFF: {e}")))?;
+    let (width, height) = decoder
+        .dimensions()
+        .map_err(|e| DecodeError::Decode(format!("TIFF: {e}")))?;
+    let colour = decoder
+        .colortype()
+        .map_err(|e| DecodeError::Decode(format!("TIFF: {e}")))?;
     let channels = match colour {
         tiff::ColorType::Gray(_) => 1,
         tiff::ColorType::RGB(_) => 3,
         tiff::ColorType::RGBA(_) => 4,
-        other => return Err(DecodeError::Decode(format!("TIFF colour type {other:?} isn't supported"))),
+        other => {
+            return Err(DecodeError::Decode(format!(
+                "TIFF colour type {other:?} isn't supported"
+            )));
+        }
     };
-    let samples = match decoder.read_image().map_err(|e| DecodeError::Decode(format!("TIFF: {e}")))? {
+    let samples = match decoder
+        .read_image()
+        .map_err(|e| DecodeError::Decode(format!("TIFF: {e}")))?
+    {
         DecodingResult::U8(v) => Samples::Eight(v),
         DecodingResult::U16(v) => Samples::Sixteen(v),
-        _ => return Err(DecodeError::Decode("TIFF sample format isn't supported".into())),
+        _ => {
+            return Err(DecodeError::Decode(
+                "TIFF sample format isn't supported".into(),
+            ));
+        }
     };
     Ok((width, height, to_linear_rgba(&samples, channels)))
 }
@@ -254,7 +343,11 @@ fn decode_tiff(bytes: &[u8]) -> Result<(u32, u32, Vec<f32>), DecodeError> {
 /// for) measured 340 ms — an order of magnitude faster than what was actually shipping, because `decode()`'s
 /// extension detection matched the *template string* for "tif" and found none in `heif-convert %i %o`, so it
 /// silently fell through to PNG.
-const HEIF_COMMANDS: &[&str] = &["magick %i -depth 16 ppm:%o", "convert %i -depth 16 ppm:%o", "heif-convert %i %o"];
+const HEIF_COMMANDS: &[&str] = &[
+    "magick %i -depth 16 ppm:%o",
+    "convert %i -depth 16 ppm:%o",
+    "heif-convert %i %o",
+];
 
 fn heif_command() -> Option<String> {
     if let Ok(configured) = std::env::var(HEIF_DECODER_ENV)
@@ -262,7 +355,10 @@ fn heif_command() -> Option<String> {
     {
         return Some(configured);
     }
-    HEIF_COMMANDS.iter().find(|c| which(c.split_whitespace().next().unwrap_or_default())).map(|c| c.to_string())
+    HEIF_COMMANDS
+        .iter()
+        .find(|c| which(c.split_whitespace().next().unwrap_or_default()))
+        .map(|c| c.to_string())
 }
 
 /// What the command will write, read back off the template so a custom `SIDECAR_HEIF_DECODER` naming `ppm:`
@@ -291,21 +387,31 @@ fn which(program: &str) -> bool {
 fn decode_heif(path: &Path) -> Result<(u32, u32, Vec<f32>), DecodeError> {
     let template = heif_command().ok_or(DecodeError::NoHeifDecoder)?;
     let dir = tempfile::tempdir().map_err(|e| DecodeError::HeifDecoder(e.to_string()))?;
-    let out = dir.path().join(format!("decoded.{}", heif_output_extension(&template)));
+    let out = dir
+        .path()
+        .join(format!("decoded.{}", heif_output_extension(&template)));
 
     let mut parts = template.split_whitespace().map(|part| {
-        part.replace("%i", &path.to_string_lossy()).replace("%o", &out.to_string_lossy())
+        part.replace("%i", &path.to_string_lossy())
+            .replace("%o", &out.to_string_lossy())
     });
-    let program = parts.next().ok_or_else(|| DecodeError::HeifDecoder("empty decoder command".into()))?;
+    let program = parts
+        .next()
+        .ok_or_else(|| DecodeError::HeifDecoder("empty decoder command".into()))?;
     let result = std::process::Command::new(&program)
         .args(parts)
         .output()
         .map_err(|e| DecodeError::HeifDecoder(format!("running {program}: {e}")))?;
     if !result.status.success() {
         let stderr = String::from_utf8_lossy(&result.stderr);
-        return Err(DecodeError::HeifDecoder(format!("{program} exited {}: {}", result.status, stderr.trim())));
+        return Err(DecodeError::HeifDecoder(format!(
+            "{program} exited {}: {}",
+            result.status,
+            stderr.trim()
+        )));
     }
-    let bytes = std::fs::read(&out).map_err(|e| DecodeError::HeifDecoder(format!("reading {}: {e}", out.display())))?;
+    let bytes = std::fs::read(&out)
+        .map_err(|e| DecodeError::HeifDecoder(format!("reading {}: {e}", out.display())))?;
     match heif_output_extension(&template) {
         "ppm" => decode_pnm(&bytes),
         "tif" => decode_tiff(&bytes),
@@ -336,12 +442,17 @@ fn pending_flip_for(extension: &str, orientation_flip: i32) -> i32 {
 /// Decode a non-RAW image, given what its EXIF says — the orientation (in `RgbaF32::oriented`'s numbering)
 /// and the colour space its ICC profile claims; `RawInfo` carries both once ingest has read them. When the decoder has already applied the
 /// rotation, the returned `flip` is zero so the worker doesn't rotate twice.
-pub fn decode(path: &Path, orientation_flip: i32, space: SourceSpace) -> Result<Decoded, DecodeError> {
+pub fn decode(
+    path: &Path,
+    orientation_flip: i32,
+    space: SourceSpace,
+) -> Result<Decoded, DecodeError> {
     let ext = extension(path);
     let (width, height, rgba) = match ext.as_str() {
         "heic" | "heif" => decode_heif(path)?,
         _ => {
-            let bytes = std::fs::read(path).map_err(|e| DecodeError::Decode(format!("reading {}: {e}", path.display())))?;
+            let bytes = std::fs::read(path)
+                .map_err(|e| DecodeError::Decode(format!("reading {}: {e}", path.display())))?;
             match ext.as_str() {
                 "jpg" | "jpeg" => decode_jpeg(&bytes)?,
                 "png" => decode_png(&bytes)?,
@@ -351,7 +462,13 @@ pub fn decode(path: &Path, orientation_flip: i32, space: SourceSpace) -> Result<
         }
     };
 
-    Ok(Decoded { width, height, rgba, pending_flip: pending_flip_for(&ext, orientation_flip), space })
+    Ok(Decoded {
+        width,
+        height,
+        rgba,
+        pending_flip: pending_flip_for(&ext, orientation_flip),
+        space,
+    })
 }
 
 /// Metadata for a non-RAW source, shaped like the RAW path's so the api and the editor need no special case.
@@ -421,8 +538,20 @@ pub(crate) fn flip_from_orientation(orientation: i64) -> i32 {
 pub fn exif(path: &Path) -> Exif {
     let Ok(output) = std::process::Command::new("exiftool")
         .args([
-            "-j", "-n", "-Make", "-Model", "-LensModel", "-ImageWidth", "-ImageHeight", "-ISO",
-            "-ExposureTime", "-FNumber", "-FocalLength", "-DateTimeOriginal", "-Orientation", "-ProfileDescription",
+            "-j",
+            "-n",
+            "-Make",
+            "-Model",
+            "-LensModel",
+            "-ImageWidth",
+            "-ImageHeight",
+            "-ISO",
+            "-ExposureTime",
+            "-FNumber",
+            "-FocalLength",
+            "-DateTimeOriginal",
+            "-Orientation",
+            "-ProfileDescription",
         ])
         // The AF point's tags too: one ExifTool run per photo rather than two, each paying Perl's startup.
         .args(crate::af::TAGS)
@@ -431,9 +560,18 @@ pub fn exif(path: &Path) -> Exif {
     else {
         return Exif::default();
     };
-    let Ok(json) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else { return Exif::default() };
-    let Some(tags) = json.as_array().and_then(|a| a.first()) else { return Exif::default() };
-    let text = |key: &str| tags.get(key).and_then(|v| v.as_str()).unwrap_or_default().to_string();
+    let Ok(json) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else {
+        return Exif::default();
+    };
+    let Some(tags) = json.as_array().and_then(|a| a.first()) else {
+        return Exif::default();
+    };
+    let text = |key: &str| {
+        tags.get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
     let number = |key: &str| tags.get(key).and_then(|v| v.as_f64()).unwrap_or(0.0);
 
     let orientation_flip = flip_from_orientation(number("Orientation") as i64);
@@ -457,8 +595,14 @@ pub fn exif(path: &Path) -> Exif {
 /// `YYYY:MM:DD HH:MM:SS` in the camera's own local time, which is all EXIF records — read as if it were UTC,
 /// matching what LibRaw hands back for a RAW so the two paths sort together.
 fn captured_unix(stamp: &str) -> i64 {
-    let n: Vec<i64> = stamp.split(|c: char| !c.is_ascii_digit()).filter(|s| !s.is_empty()).filter_map(|s| s.parse().ok()).collect();
-    let Some([year, month, day, hour, minute, second]) = n.get(..6).and_then(|s| <[i64; 6]>::try_from(s).ok()) else {
+    let n: Vec<i64> = stamp
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| s.parse().ok())
+        .collect();
+    let Some([year, month, day, hour, minute, second]) =
+        n.get(..6).and_then(|s| <[i64; 6]>::try_from(s).ok())
+    else {
         return 0;
     };
     // Days from civil (H. Hinnant), the inverse of the formatting in sidecar_xmp::utc_now.
@@ -485,10 +629,21 @@ mod tests {
             let camera = space.camera_color();
             let xy = camera.as_shot_xy();
             let wb = sidecar_color::camera::resolve(&camera, xy);
-            assert!(wb.mul.iter().all(|m| (m - 1.0).abs() < 1e-3), "{space:?} multipliers {:?}", wb.mul);
+            assert!(
+                wb.mul.iter().all(|m| (m - 1.0).abs() < 1e-3),
+                "{space:?} multipliers {:?}",
+                wb.mul
+            );
             let white = mat::apply(&wb.cam_to_rec2020, &[1.0, 1.0, 1.0]);
-            assert!(white.iter().all(|v| (v - 1.0).abs() < 1e-9), "{space:?} white {white:?}");
-            assert!((wb.temperature_k - 6504.0).abs() < 200.0, "{space:?} temperature {}", wb.temperature_k);
+            assert!(
+                white.iter().all(|v| (v - 1.0).abs() < 1e-9),
+                "{space:?} white {white:?}"
+            );
+            assert!(
+                (wb.temperature_k - 6504.0).abs() < 200.0,
+                "{space:?} temperature {}",
+                wb.temperature_k
+            );
         }
     }
 
@@ -536,7 +691,10 @@ mod tests {
     #[test]
     fn a_grey_ramp_round_trips_through_the_transfer_function() {
         // Encoded mid grey stays mid grey in linear light, and white stays white.
-        let rgba = to_linear_rgba(&Samples::Eight(vec![0, 0, 0, 128, 128, 128, 255, 255, 255]), 3);
+        let rgba = to_linear_rgba(
+            &Samples::Eight(vec![0, 0, 0, 128, 128, 128, 255, 255, 255]),
+            3,
+        );
         assert_eq!(rgba[0], 0.0);
         assert!((rgba[4] - 0.2158).abs() < 1e-3);
         assert!((rgba[8] - 1.0).abs() < 1e-6);
@@ -567,7 +725,11 @@ mod tests {
             assert_eq!(pending_flip_for("heif", flip), 0, "heif, exif flip {flip}");
             assert_eq!(pending_flip_for("jpg", flip), flip, "jpg, exif flip {flip}");
             assert_eq!(pending_flip_for("png", flip), flip, "png, exif flip {flip}");
-            assert_eq!(pending_flip_for("tiff", flip), flip, "tiff, exif flip {flip}");
+            assert_eq!(
+                pending_flip_for("tiff", flip),
+                flip,
+                "tiff, exif flip {flip}"
+            );
         }
     }
 
@@ -581,7 +743,14 @@ mod tests {
         assert_eq!(captured_unix("nonsense"), 0);
     }
 
-    fn png_bytes(w: u32, h: u32, color: png::ColorType, depth: png::BitDepth, palette: Option<Vec<u8>>, data: &[u8]) -> Vec<u8> {
+    fn png_bytes(
+        w: u32,
+        h: u32,
+        color: png::ColorType,
+        depth: png::BitDepth,
+        palette: Option<Vec<u8>>,
+        data: &[u8],
+    ) -> Vec<u8> {
         let mut out = Vec::new();
         let mut enc = png::Encoder::new(&mut out, w, h);
         enc.set_color(color);
@@ -596,22 +765,50 @@ mod tests {
     /// A palette PNG used to come back as its grey indices, and grey + alpha panicked the decode outright.
     #[test]
     fn palette_and_grey_alpha_pngs_decode_to_their_colours() {
-        let red_blue = png_bytes(2, 1, png::ColorType::Indexed, png::BitDepth::Eight, Some(vec![255, 0, 0, 0, 0, 255]), &[0, 1]);
+        let red_blue = png_bytes(
+            2,
+            1,
+            png::ColorType::Indexed,
+            png::BitDepth::Eight,
+            Some(vec![255, 0, 0, 0, 0, 255]),
+            &[0, 1],
+        );
         let (w, h, rgba) = decode_png(&red_blue).unwrap();
         assert_eq!((w, h), (2, 1));
         assert_eq!(&rgba[..3], &[1.0, 0.0, 0.0]);
         assert_eq!(&rgba[4..7], &[0.0, 0.0, 1.0]);
 
-        let grey_alpha = png_bytes(1, 1, png::ColorType::GrayscaleAlpha, png::BitDepth::Eight, None, &[255, 7]);
+        let grey_alpha = png_bytes(
+            1,
+            1,
+            png::ColorType::GrayscaleAlpha,
+            png::BitDepth::Eight,
+            None,
+            &[255, 7],
+        );
         let (_, _, rgba) = decode_png(&grey_alpha).unwrap();
         assert_eq!(rgba.len(), 4);
-        assert!(rgba[..3].iter().all(|&v| (v - 1.0).abs() < 1e-6), "{rgba:?}");
+        assert!(
+            rgba[..3].iter().all(|&v| (v - 1.0).abs() < 1e-6),
+            "{rgba:?}"
+        );
         assert_eq!(rgba[3], 0.0);
 
-        let one_bit = png_bytes(8, 1, png::ColorType::Grayscale, png::BitDepth::One, None, &[0b1000_0000]);
+        let one_bit = png_bytes(
+            8,
+            1,
+            png::ColorType::Grayscale,
+            png::BitDepth::One,
+            None,
+            &[0b1000_0000],
+        );
         let (_, _, rgba) = decode_png(&one_bit).unwrap();
         assert_eq!(rgba.len(), 32);
-        assert!((rgba[0] - 1.0).abs() < 1e-6 && rgba[4] == 0.0, "{:?}", &rgba[..8]);
+        assert!(
+            (rgba[0] - 1.0).abs() < 1e-6 && rgba[4] == 0.0,
+            "{:?}",
+            &rgba[..8]
+        );
     }
 
     #[test]

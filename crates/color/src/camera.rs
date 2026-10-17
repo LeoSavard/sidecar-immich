@@ -30,9 +30,15 @@ impl CameraColor {
         match self.calibrations.as_slice() {
             [only] => only.xyz_to_camera,
             [a, b, ..] => {
-                let (lo, hi) = if a.temperature_k <= b.temperature_k { (a, b) } else { (b, a) };
+                let (lo, hi) = if a.temperature_k <= b.temperature_k {
+                    (a, b)
+                } else {
+                    (b, a)
+                };
                 let inv = |t: f64| 1.0 / t;
-                let w = ((inv(temperature_k) - inv(hi.temperature_k)) / (inv(lo.temperature_k) - inv(hi.temperature_k))).clamp(0.0, 1.0);
+                let w = ((inv(temperature_k) - inv(hi.temperature_k))
+                    / (inv(lo.temperature_k) - inv(hi.temperature_k)))
+                .clamp(0.0, 1.0);
                 mat::lerp(&lo.xyz_to_camera, &hi.xyz_to_camera, w)
             }
             [] => panic!("camera has no colour calibration"),
@@ -73,25 +79,41 @@ pub fn resolve(camera: &CameraColor, white_xy: [f64; 2]) -> ResolvedWhiteBalance
     let cm = camera.xyz_to_camera_at(t);
     let neutral = mat::apply(&cm, &mat::xy_to_xyz(white_xy));
     let mul = [neutral[1] / neutral[0], 1.0, neutral[1] / neutral[2]];
-    let cam_wb_to_xyz = mat::mul(&mat::inverse(&cm), &mat::diag([1.0 / mul[0], 1.0, 1.0 / mul[2]]));
-    let mut m = mat::mul(&mat::XYZ_TO_REC2020, &mat::mul(&mat::bradford(white_xy, mat::D65), &cam_wb_to_xyz));
+    let cam_wb_to_xyz = mat::mul(
+        &mat::inverse(&cm),
+        &mat::diag([1.0 / mul[0], 1.0, 1.0 / mul[2]]),
+    );
+    let mut m = mat::mul(
+        &mat::XYZ_TO_REC2020,
+        &mat::mul(&mat::bradford(white_xy, mat::D65), &cam_wb_to_xyz),
+    );
     let white = mat::apply(&m, &[1.0, 1.0, 1.0]);
     for (row, w) in m.iter_mut().zip(white) {
         for v in row.iter_mut() {
             *v /= w;
         }
     }
-    ResolvedWhiteBalance { temperature_k: t, tint, mul, cam_to_rec2020: m }
+    ResolvedWhiteBalance {
+        temperature_k: t,
+        tint,
+        mul,
+        cam_to_rec2020: m,
+    }
 }
-
 
 #[cfg(test)]
 pub(crate) fn nikon_d850() -> CameraColor {
     // Adobe coefficients as distributed in LibRaw's colordata table (XYZ → camera, ×10000).
-    let m = [10405.0, -3755.0, -1270.0, -5461.0, 13787.0, 1793.0, -1040.0, 2015.0, 6785.0].map(|v| v / 10000.0);
+    let m = [
+        10405.0, -3755.0, -1270.0, -5461.0, 13787.0, 1793.0, -1040.0, 2015.0, 6785.0,
+    ]
+    .map(|v| v / 10000.0);
     CameraColor {
         as_shot_mul: [2.0996, 1.0, 1.4453],
-        calibrations: vec![Calibration { temperature_k: 6504.0, xyz_to_camera: [[m[0], m[1], m[2]], [m[3], m[4], m[5]], [m[6], m[7], m[8]]] }],
+        calibrations: vec![Calibration {
+            temperature_k: 6504.0,
+            xyz_to_camera: [[m[0], m[1], m[2]], [m[3], m[4], m[5]], [m[6], m[7], m[8]]],
+        }],
     }
 }
 
@@ -104,10 +126,18 @@ mod tests {
         let cam = nikon_d850();
         let xy = cam.as_shot_xy();
         let wb = resolve(&cam, xy);
-        assert!((wb.mul[0] - 2.0996).abs() < 1e-3 && (wb.mul[2] - 1.4453).abs() < 1e-3, "{:?}", wb.mul);
+        assert!(
+            (wb.mul[0] - 2.0996).abs() < 1e-3 && (wb.mul[2] - 1.4453).abs() < 1e-3,
+            "{:?}",
+            wb.mul
+        );
         let w = mat::apply(&wb.cam_to_rec2020, &[1.0, 1.0, 1.0]);
         assert!(w.iter().all(|v| (v - 1.0).abs() < 1e-9));
-        assert!((3000.0..8000.0).contains(&wb.temperature_k), "{}", wb.temperature_k);
+        assert!(
+            (3000.0..8000.0).contains(&wb.temperature_k),
+            "{}",
+            wb.temperature_k
+        );
     }
 
     /// A patch picked as neutral comes out grey once its white point is resolved, through the same temperature
@@ -120,6 +150,9 @@ mod tests {
         let wb = resolve(&cam, crate::cct::temp_tint_to_xy(t, tint));
         let balanced = [patch[0] * wb.mul[0], patch[1], patch[2] * wb.mul[2]];
         let out = mat::apply(&wb.cam_to_rec2020, &balanced);
-        assert!(out.iter().all(|v| (v / out[1] - 1.0).abs() < 1e-3), "{out:?} at {t:.0} K {tint:+.1}");
+        assert!(
+            out.iter().all(|v| (v / out[1] - 1.0).abs() < 1e-3),
+            "{out:?} at {t:.0} K {tint:+.1}"
+        );
     }
 }

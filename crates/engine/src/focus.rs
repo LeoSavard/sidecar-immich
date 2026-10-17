@@ -23,7 +23,13 @@ const BLUR_RADIUS: i64 = 2;
 /// surround, so it scores high.
 pub fn focus_energy(img: &RgbaF32) -> Mono {
     let (w, h) = (img.width as usize, img.height as usize);
-    let luma: Vec<f64> = img.data.as_chunks::<4>().0.iter().map(|p| LUMA[0] * p[0] as f64 + LUMA[1] * p[1] as f64 + LUMA[2] * p[2] as f64).collect();
+    let luma: Vec<f64> = img
+        .data
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|p| LUMA[0] * p[0] as f64 + LUMA[1] * p[1] as f64 + LUMA[2] * p[2] as f64)
+        .collect();
     let (sum, sumsq) = summed_area_tables(&luma, w, h);
     let stride = w + 1;
 
@@ -39,14 +45,23 @@ pub fn focus_energy(img: &RgbaF32) -> Mono {
     let mut data = vec![0f32; w * h];
     for y in 0..h as i64 {
         for x in 0..w as i64 {
-            let laplacian = (4.0 * blurred(x, y) - blurred(x - 1, y) - blurred(x + 1, y) - blurred(x, y - 1) - blurred(x, y + 1)).abs();
+            let laplacian = (4.0 * blurred(x, y)
+                - blurred(x - 1, y)
+                - blurred(x + 1, y)
+                - blurred(x, y - 1)
+                - blurred(x, y + 1))
+            .abs();
             let variance = window_variance(&sum, &sumsq, w, h, x, y);
             let std = variance.max(0.0).sqrt();
             let raw = laplacian / (std + 1e-3);
             data[y as usize * w + x as usize] = (raw / (raw + 1.0)) as f32; // compress (0, inf) to (0, 1)
         }
     }
-    Mono { width: img.width, height: img.height, data }
+    Mono {
+        width: img.width,
+        height: img.height,
+        data,
+    }
 }
 
 /// Padded (w+1)×(h+1) prefix sums of the values and their squares, for O(1) windowed mean/variance.
@@ -57,15 +72,19 @@ fn summed_area_tables(values: &[f64], w: usize, h: usize) -> (Vec<f64>, Vec<f64>
     for y in 0..h {
         for x in 0..w {
             let v = values[y * w + x];
-            sum[(y + 1) * stride + x + 1] = v + sum[y * stride + x + 1] + sum[(y + 1) * stride + x] - sum[y * stride + x];
-            sumsq[(y + 1) * stride + x + 1] = v * v + sumsq[y * stride + x + 1] + sumsq[(y + 1) * stride + x] - sumsq[y * stride + x];
+            sum[(y + 1) * stride + x + 1] =
+                v + sum[y * stride + x + 1] + sum[(y + 1) * stride + x] - sum[y * stride + x];
+            sumsq[(y + 1) * stride + x + 1] =
+                v * v + sumsq[y * stride + x + 1] + sumsq[(y + 1) * stride + x]
+                    - sumsq[y * stride + x];
         }
     }
     (sum, sumsq)
 }
 
 fn rect_sum(table: &[f64], stride: usize, x0: usize, y0: usize, x1: usize, y1: usize) -> f64 {
-    table[y1 * stride + x1] - table[y0 * stride + x1] - table[y1 * stride + x0] + table[y0 * stride + x0]
+    table[y1 * stride + x1] - table[y0 * stride + x1] - table[y1 * stride + x0]
+        + table[y0 * stride + x0]
 }
 
 fn window_variance(sum: &[f64], sumsq: &[f64], w: usize, h: usize, x: i64, y: i64) -> f64 {
@@ -87,7 +106,11 @@ mod tests {
     use super::*;
 
     fn flat(w: u32, h: u32, v: f32) -> RgbaF32 {
-        RgbaF32 { width: w, height: h, data: (0..(w * h) as usize).flat_map(|_| [v, v, v, 1.0]).collect() }
+        RgbaF32 {
+            width: w,
+            height: h,
+            data: (0..(w * h) as usize).flat_map(|_| [v, v, v, 1.0]).collect(),
+        }
     }
 
     /// A hard step edge (contrast in one pixel) against a soft ramp of the same total contrast spread over
@@ -111,10 +134,24 @@ mod tests {
                 }
             }
         }
-        let sharp_peak = focus_energy(&sharp).data.iter().cloned().fold(0f32, f32::max);
-        let blurred_peak = focus_energy(&blurred).data.iter().cloned().fold(0f32, f32::max);
-        assert!(sharp_peak > blurred_peak, "sharp {sharp_peak} should beat blurred {blurred_peak}");
-        assert!(sharp_peak > 0.5, "a hard step should score high: {sharp_peak}");
+        let sharp_peak = focus_energy(&sharp)
+            .data
+            .iter()
+            .cloned()
+            .fold(0f32, f32::max);
+        let blurred_peak = focus_energy(&blurred)
+            .data
+            .iter()
+            .cloned()
+            .fold(0f32, f32::max);
+        assert!(
+            sharp_peak > blurred_peak,
+            "sharp {sharp_peak} should beat blurred {blurred_peak}"
+        );
+        assert!(
+            sharp_peak > 0.5,
+            "a hard step should score high: {sharp_peak}"
+        );
     }
 
     #[test]
@@ -141,12 +178,19 @@ mod tests {
         }
         let energy = focus_energy(&img);
         let mean = energy.data.iter().sum::<f32>() / energy.data.len() as f32;
-        assert!(mean < 0.3, "pure per-pixel noise should score well below the peaking threshold: mean={mean}");
+        assert!(
+            mean < 0.3,
+            "pure per-pixel noise should score well below the peaking threshold: mean={mean}"
+        );
     }
 
     #[test]
     fn max_pooling_keeps_a_single_sharp_pixel_a_uniform_downsample_would_average_away() {
-        let mut mono = Mono { width: 8, height: 8, data: vec![0.0; 64] };
+        let mut mono = Mono {
+            width: 8,
+            height: 8,
+            data: vec![0.0; 64],
+        };
         mono.data[3 * 8 + 3] = 1.0; // one bright pixel in an otherwise black 8x8
         let pooled = mono.max_pooled(2);
         assert!(pooled.data.contains(&1.0), "{:?}", pooled.data);
@@ -154,7 +198,11 @@ mod tests {
 
     #[test]
     fn max_pooled_never_upscales() {
-        let mono = Mono { width: 4, height: 4, data: vec![0.0; 16] };
+        let mono = Mono {
+            width: 4,
+            height: 4,
+            data: vec![0.0; 16],
+        };
         let pooled = mono.max_pooled(64);
         assert_eq!((pooled.width, pooled.height), (4, 4));
     }

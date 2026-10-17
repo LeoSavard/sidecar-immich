@@ -25,31 +25,73 @@ struct Entry {
 }
 
 fn now() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 async fn sync(app: &App) -> Result<Option<usize>> {
     let cfg = &app.config.lensfun;
-    let status: Status = app.http.get(app.worker("/v1/lensfun")).send().await?.error_for_status()?.json().await?;
-    let fresh = status.updated.is_some_and(|t| now().saturating_sub(t) < cfg.refresh_days * 86400);
+    let status: Status = app
+        .http
+        .get(app.worker("/v1/lensfun"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let fresh = status
+        .updated
+        .is_some_and(|t| now().saturating_sub(t) < cfg.refresh_days * 86400);
     if status.files > 0 && fresh {
         return Ok(None);
     }
     let ua = concat!("sidecar/", env!("CARGO_PKG_VERSION"));
-    let entries: Vec<Entry> = app.http.get(&cfg.index).header("user-agent", ua).send().await?.error_for_status()?.json().await.context("reading the lensfun index")?;
+    let entries: Vec<Entry> = app
+        .http
+        .get(&cfg.index)
+        .header("user-agent", ua)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await
+        .context("reading the lensfun index")?;
     let mut sent = 0;
     for e in entries.iter().filter(|e| e.name.ends_with(".xml")) {
         let Some(url) = &e.download_url else { continue };
-        let xml = app.http.get(url).header("user-agent", ua).send().await?.error_for_status()?.text().await?;
-        let r = app.http.put(app.worker(&format!("/v1/lensfun/{}", e.name))).body(xml).send().await?;
+        let xml = app
+            .http
+            .get(url)
+            .header("user-agent", ua)
+            .send()
+            .await?
+            .error_for_status()?
+            .text()
+            .await?;
+        let r = app
+            .http
+            .put(app.worker(&format!("/v1/lensfun/{}", e.name)))
+            .body(xml)
+            .send()
+            .await?;
         if r.status().is_success() {
             sent += 1;
         } else {
-            tracing::warn!("lensfun: the worker refused {}: {}", e.name, r.text().await.unwrap_or_default());
+            tracing::warn!(
+                "lensfun: the worker refused {}: {}",
+                e.name,
+                r.text().await.unwrap_or_default()
+            );
         }
     }
     anyhow::ensure!(sent > 0, "the lensfun index listed no database files");
-    app.http.post(app.worker("/v1/lensfun/done")).send().await?.error_for_status()?;
+    app.http
+        .post(app.worker("/v1/lensfun/done"))
+        .send()
+        .await?
+        .error_for_status()?;
     Ok(Some(sent))
 }
 
@@ -67,9 +109,13 @@ impl App {
             tokio::time::sleep(Duration::from_secs(5)).await;
             loop {
                 match sync(&app).await {
-                    Ok(Some(n)) => tracing::info!("lensfun: fetched {n} database files for the worker"),
+                    Ok(Some(n)) => {
+                        tracing::info!("lensfun: fetched {n} database files for the worker")
+                    }
                     Ok(None) => {}
-                    Err(e) => tracing::warn!("lensfun: couldn't update the database, lenses without a correction in the file stay uncorrected: {e:#}"),
+                    Err(e) => tracing::warn!(
+                        "lensfun: couldn't update the database, lenses without a correction in the file stay uncorrected: {e:#}"
+                    ),
                 }
                 tokio::time::sleep(Duration::from_secs(24 * 3600)).await;
             }

@@ -31,7 +31,11 @@ pub struct Lensfun {
 
 impl Default for Lensfun {
     fn default() -> Self {
-        Self { enabled: true, index: "https://api.github.com/repos/lensfun/lensfun/contents/data/db".into(), refresh_days: 30 }
+        Self {
+            enabled: true,
+            index: "https://api.github.com/repos/lensfun/lensfun/contents/data/db".into(),
+            refresh_days: 30,
+        }
     }
 }
 
@@ -91,19 +95,25 @@ fn english() -> String {
 
 impl Config {
     pub fn load(path: &Path) -> Result<Self> {
-        let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        let text =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))
     }
 
     /// Canonical mounts of every root, for the sidecar writer's guard.
     pub fn canonical_mounts(&self) -> Vec<PathBuf> {
-        self.roots.iter().filter_map(|r| r.mount.canonicalize().ok()).collect()
+        self.roots
+            .iter()
+            .filter_map(|r| r.mount.canonicalize().ok())
+            .collect()
     }
 
     /// Map an Immich `originalPath` to Sidecar's view of the same file.
     pub fn mount_path(&self, original_path: &str) -> Option<(&Root, PathBuf)> {
         self.roots.iter().find_map(|r| {
-            let rest = original_path.strip_prefix(r.immich_prefix.trim_end_matches('/'))?.strip_prefix('/')?;
+            let rest = original_path
+                .strip_prefix(r.immich_prefix.trim_end_matches('/'))?
+                .strip_prefix('/')?;
             Some((r, r.mount.join(rest)))
         })
     }
@@ -112,8 +122,17 @@ impl Config {
     /// reached through a symlink (say `/mnt/photos`, pointing at another volume) otherwise never shares a
     /// prefix with its own canonical form, and every file under it maps to nothing.
     pub fn immich_path(&self, root: &Root, mounted: &Path) -> Option<String> {
-        let rest = mounted.canonicalize().ok()?.strip_prefix(root.mount.canonicalize().ok()?).ok()?.to_path_buf();
-        Some(format!("{}/{}", root.immich_prefix.trim_end_matches('/'), rest.to_string_lossy()))
+        let rest = mounted
+            .canonicalize()
+            .ok()?
+            .strip_prefix(root.mount.canonicalize().ok()?)
+            .ok()?
+            .to_path_buf();
+        Some(format!(
+            "{}/{}",
+            root.immich_prefix.trim_end_matches('/'),
+            rest.to_string_lossy()
+        ))
     }
 
     /// The root containing `path`, after resolving symlinks and `..`.
@@ -149,8 +168,23 @@ mod tests {
             moves_files: false,
             per_user: false,
         };
-        let config = Config { server: Server::default(), immich: Immich::default(), roots: vec![root.clone()], lensfun: Lensfun::default() };
-        assert_eq!(config.immich_path(&root, &link.join("2026/a.NEF")).as_deref(), Some("/data/library/2026/a.NEF"));
-        assert_eq!(config.immich_path(&root, &real.join("2026/a.NEF")).as_deref(), Some("/data/library/2026/a.NEF"));
+        let config = Config {
+            server: Server::default(),
+            immich: Immich::default(),
+            roots: vec![root.clone()],
+            lensfun: Lensfun::default(),
+        };
+        assert_eq!(
+            config
+                .immich_path(&root, &link.join("2026/a.NEF"))
+                .as_deref(),
+            Some("/data/library/2026/a.NEF")
+        );
+        assert_eq!(
+            config
+                .immich_path(&root, &real.join("2026/a.NEF"))
+                .as_deref(),
+            Some("/data/library/2026/a.NEF")
+        );
     }
 }

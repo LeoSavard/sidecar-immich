@@ -23,9 +23,9 @@ use resolve::{Candidate, OpenQuery, Resolved};
 use serde::{Deserialize, Serialize};
 use session::{ApiUser, PageUser, User};
 use sidecar_color::EditParams;
+use sidecar_xmp::{Commit, SidecarDoc};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use sidecar_xmp::{Commit, SidecarDoc};
 use store::{Store, random_hex};
 use tower_http::compression::Predicate;
 use tower_http::{
@@ -56,22 +56,49 @@ impl App {
         let secret = session::load_secret(&config.server.state_dir)?;
         let http = reqwest::Client::new();
         let admin_key = match &config.immich.admin_api_key_file {
-            Some(p) => Some(std::fs::read_to_string(p).map(|s| s.trim().to_string()).map_err(|e| anyhow::anyhow!("reading {}: {e}", p.display()))?),
+            Some(p) => Some(
+                std::fs::read_to_string(p)
+                    .map(|s| s.trim().to_string())
+                    .map_err(|e| anyhow::anyhow!("reading {}: {e}", p.display()))?,
+            ),
             None => None,
         };
-        let immich = immich::Immich { base: config.immich.url.clone(), http: http.clone() };
-        Ok(Arc::new(Self { config, http, immich, store, secret, admin_key, jobs: export::Jobs::default(), discovery: Mutex::new(Discovery::default()) }))
+        let immich = immich::Immich {
+            base: config.immich.url.clone(),
+            http: http.clone(),
+        };
+        Ok(Arc::new(Self {
+            config,
+            http,
+            immich,
+            store,
+            secret,
+            admin_key,
+            jobs: export::Jobs::default(),
+            discovery: Mutex::new(Discovery::default()),
+        }))
     }
 
     pub(crate) fn worker(&self, path: &str) -> String {
-        format!("{}{}", self.config.server.worker_url.trim_end_matches('/'), path)
+        format!(
+            "{}{}",
+            self.config.server.worker_url.trim_end_matches('/'),
+            path
+        )
     }
 
     /// Hand the worker a photo's path; it answers with the photo's metadata. It forgets paths when it
     /// restarts, so anything that asks it about a photo may need to do this again first. Cheap after the
     /// first time: the worker only hashes a file it hasn't seen.
-    pub(crate) async fn ingest(&self, path: &std::path::Path) -> reqwest::Result<reqwest::Response> {
-        self.http.post(self.worker("/v1/ingest")).json(&serde_json::json!({ "path": path })).send().await
+    pub(crate) async fn ingest(
+        &self,
+        path: &std::path::Path,
+    ) -> reqwest::Result<reqwest::Response> {
+        self.http
+            .post(self.worker("/v1/ingest"))
+            .json(&serde_json::json!({ "path": path }))
+            .send()
+            .await
     }
 
     /// Hourly: drop finished export jobs, picker tokens nobody came back to, and sessions past their cookie's
@@ -81,10 +108,18 @@ impl App {
         tokio::spawn(async move {
             loop {
                 let jobs = app.jobs.sweep();
-                let picks = app.store.sweep("picks", Duration::from_secs(24 * 3600)).await;
-                let sessions = app.store.sweep("sessions", Duration::from_secs(366 * 24 * 3600)).await;
+                let picks = app
+                    .store
+                    .sweep("picks", Duration::from_secs(24 * 3600))
+                    .await;
+                let sessions = app
+                    .store
+                    .sweep("sessions", Duration::from_secs(366 * 24 * 3600))
+                    .await;
                 if jobs + picks + sessions > 0 {
-                    tracing::info!("housekeeping: dropped {jobs} finished jobs, {picks} picker tokens, {sessions} expired sessions");
+                    tracing::info!(
+                        "housekeeping: dropped {jobs} finished jobs, {picks} picker tokens, {sessions} expired sessions"
+                    );
                 }
                 tokio::time::sleep(Duration::from_secs(3600)).await;
             }
@@ -93,21 +128,27 @@ impl App {
 
     /// Ask Immich to discover a newly created internal-library sidecar: at most one run an hour.
     fn queue_sidecar_discovery(self: &Arc<Self>) {
-        let Some(key) = self.admin_key.clone() else { return };
+        let Some(key) = self.admin_key.clone() else {
+            return;
+        };
         let delay = {
             let mut d = self.discovery.lock().unwrap();
             if d.pending {
                 return;
             }
             d.pending = true;
-            d.last.map_or(Duration::ZERO, |l| Duration::from_secs(3600).saturating_sub(l.elapsed()))
+            d.last.map_or(Duration::ZERO, |l| {
+                Duration::from_secs(3600).saturating_sub(l.elapsed())
+            })
         };
         let app = self.clone();
         tokio::spawn(async move {
             tokio::time::sleep(delay).await;
             match app.immich.discover_missing_sidecars(&key).await {
                 Ok(()) => tracing::info!("started Immich sidecar discovery"),
-                Err(e) => tracing::warn!("Immich sidecar discovery failed — an internal-library sidecar may not move with its original: {e:#}"),
+                Err(e) => tracing::warn!(
+                    "Immich sidecar discovery failed — an internal-library sidecar may not move with its original: {e:#}"
+                ),
             }
             let mut d = app.discovery.lock().unwrap();
             d.pending = false;
@@ -145,7 +186,11 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { output_space: sidecar_color::DisplaySpace::Srgb, clip_highlights: false, clip_shadows: false }
+        Self {
+            output_space: sidecar_color::DisplaySpace::Srgb,
+            clip_highlights: false,
+            clip_shadows: false,
+        }
     }
 }
 
@@ -199,7 +244,12 @@ async fn admit(app: &Arc<App>, user: &User, c: Candidate) -> Result<String> {
     let rec: AssetRecord = app
         .store
         .update("assets", &key, |found: Option<AssetRecord>| {
-            let mut rec = found.unwrap_or(AssetRecord { path: c.path.clone(), file_name: c.file_name.clone(), immich_asset_id: None, users: Vec::new() });
+            let mut rec = found.unwrap_or(AssetRecord {
+                path: c.path.clone(),
+                file_name: c.file_name.clone(),
+                immich_asset_id: None,
+                users: Vec::new(),
+            });
             rec.path = c.path;
             rec.immich_asset_id = c.immich_asset_id.or(rec.immich_asset_id);
             if !rec.users.contains(&user.id) {
@@ -208,7 +258,12 @@ async fn admit(app: &Arc<App>, user: &User, c: Candidate) -> Result<String> {
             rec
         })
         .await?;
-    let item = RecentItem { asset_key: key.clone(), file_name: rec.file_name, immich_asset_id: rec.immich_asset_id, opened_at: sidecar_xmp::utc_now() };
+    let item = RecentItem {
+        asset_key: key.clone(),
+        file_name: rec.file_name,
+        immich_asset_id: rec.immich_asset_id,
+        opened_at: sidecar_xmp::utc_now(),
+    };
     app.store
         .update("users", &user.id, |found: Option<UserRecord>| {
             let mut u = found.unwrap_or_default();
@@ -235,7 +290,11 @@ const INTAKE_SETTLE: Duration = Duration::from_secs(20);
 /// the library. It goes into Immich first and is then opened exactly like any other asset: the edit belongs
 /// in an XMP beside an original, so the original has to become a file in a library root before there is
 /// anywhere to put it. Nothing about the editor downstream knows the photo arrived this way.
-async fn intake(State(app): State<Arc<App>>, ApiUser(user): ApiUser, mut form: axum::extract::Multipart) -> Response {
+async fn intake(
+    State(app): State<Arc<App>>,
+    ApiUser(user): ApiUser,
+    mut form: axum::extract::Multipart,
+) -> Response {
     if !app.immich.enabled() {
         return (StatusCode::NOT_IMPLEMENTED, "This Sidecar has no Immich library to put a photo into, so it can only open photos already on the server.").into_response();
     }
@@ -249,11 +308,17 @@ async fn intake(State(app): State<Arc<App>>, ApiUser(user): ApiUser, mut form: a
                 let name = field.file_name().map(str::to_string).unwrap_or_default();
                 match field.bytes().await {
                     Ok(b) => file = Some((name, b.to_vec())),
-                    Err(e) => return (StatusCode::BAD_REQUEST, format!("reading the upload: {e}")).into_response(),
+                    Err(e) => {
+                        return (StatusCode::BAD_REQUEST, format!("reading the upload: {e}"))
+                            .into_response();
+                    }
                 }
             }
             Ok(None) => break,
-            Err(e) => return (StatusCode::BAD_REQUEST, format!("reading the upload: {e}")).into_response(),
+            Err(e) => {
+                return (StatusCode::BAD_REQUEST, format!("reading the upload: {e}"))
+                    .into_response();
+            }
         }
     }
     let Some((file_name, bytes)) = file.filter(|(n, b)| !n.is_empty() && !b.is_empty()) else {
@@ -265,7 +330,11 @@ async fn intake(State(app): State<Arc<App>>, ApiUser(user): ApiUser, mut form: a
         return (StatusCode::UNPROCESSABLE_ENTITY, cant_open(&file_name)).into_response();
     }
 
-    let id = match app.immich.upload(&user.api_key, &file_name, bytes, &sidecar_xmp::utc_now()).await {
+    let id = match app
+        .immich
+        .upload(&user.api_key, &file_name, bytes, &sidecar_xmp::utc_now())
+        .await
+    {
         Ok(id) => id,
         Err(e) => return (StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response(),
     };
@@ -281,7 +350,9 @@ async fn intake(State(app): State<Arc<App>>, ApiUser(user): ApiUser, mut form: a
                 if let Some(c) = resolve::from_asset(&app, &asset) {
                     return match admit(&app, &user, c).await {
                         Ok(key) => Json(serde_json::json!({ "assetKey": key })).into_response(),
-                        Err(e) => (StatusCode::UNPROCESSABLE_ENTITY, format!("{e:#}")).into_response(),
+                        Err(e) => {
+                            (StatusCode::UNPROCESSABLE_ENTITY, format!("{e:#}")).into_response()
+                        }
                     };
                 }
             }
@@ -296,26 +367,49 @@ async fn intake(State(app): State<Arc<App>>, ApiUser(user): ApiUser, mut form: a
     let detail = if last_path.is_empty() {
         "Immich hasn't finished filing it yet.".to_string()
     } else {
-        format!("Immich put it at {last_path}, which isn't inside a library Sidecar is configured for.")
+        format!(
+            "Immich put it at {last_path}, which isn't inside a library Sidecar is configured for."
+        )
     };
     (StatusCode::BAD_GATEWAY, format!("{file_name} is in your library, but Sidecar can't open it yet. {detail} Try opening it from Immich in a moment.")).into_response()
 }
 
-async fn new_pick(app: &App, user: &User, query: String, candidates: Vec<Candidate>) -> Result<String> {
+async fn new_pick(
+    app: &App,
+    user: &User,
+    query: String,
+    candidates: Vec<Candidate>,
+) -> Result<String> {
     let token = random_hex(16);
-    app.store.put("picks", &token, &PickRecord { user_id: user.id.clone(), query, candidates }).await?;
+    app.store
+        .put(
+            "picks",
+            &token,
+            &PickRecord {
+                user_id: user.id.clone(),
+                query,
+                candidates,
+            },
+        )
+        .await?;
     Ok(token)
 }
 
 /// `GET /open?sha1=…&name=…&taken=…&size=…` (the iOS Shortcut), or `?path=…` where allowed.
-async fn open(State(app): State<Arc<App>>, PageUser(user): PageUser, Query(q): Query<OpenQuery>) -> Response {
+async fn open(
+    State(app): State<Arc<App>>,
+    PageUser(user): PageUser,
+    Query(q): Query<OpenQuery>,
+) -> Response {
     let outcome = match resolve::resolve(&app, &user, &q).await {
         Ok(r) => r,
         Err(e) => return error_page(StatusCode::BAD_GATEWAY, &format!("{e:#}")),
     };
     let query = q.name.clone().unwrap_or_default();
     match outcome {
-        Resolved::Found(c) if !sidecar_template::is_editable(&c.path) => error_page(StatusCode::UNPROCESSABLE_ENTITY, &cant_open(&c.file_name)),
+        Resolved::Found(c) if !sidecar_template::is_editable(&c.path) => {
+            error_page(StatusCode::UNPROCESSABLE_ENTITY, &cant_open(&c.file_name))
+        }
         Resolved::Found(c) => match admit(&app, &user, c).await {
             Ok(key) => Redirect::to(&format!("/edit/{key}")).into_response(),
             Err(e) => error_page(StatusCode::UNPROCESSABLE_ENTITY, &format!("{e:#}")),
@@ -336,8 +430,18 @@ struct PickQuery {
     q: Option<String>,
 }
 
-async fn get_pick(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Path(token): Path<String>, Query(pq): Query<PickQuery>) -> Response {
-    let Some(mut rec) = app.store.get::<PickRecord>("picks", &token).await.filter(|r| r.user_id == user.id) else {
+async fn get_pick(
+    State(app): State<Arc<App>>,
+    ApiUser(user): ApiUser,
+    Path(token): Path<String>,
+    Query(pq): Query<PickQuery>,
+) -> Response {
+    let Some(mut rec) = app
+        .store
+        .get::<PickRecord>("picks", &token)
+        .await
+        .filter(|r| r.user_id == user.id)
+    else {
         return StatusCode::NOT_FOUND.into_response();
     };
     if let Some(q) = pq.q.filter(|q| !q.trim().is_empty()) {
@@ -360,11 +464,23 @@ struct PickChoice {
     index: usize,
 }
 
-async fn choose_pick(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Path(token): Path<String>, Json(choice): Json<PickChoice>) -> Response {
-    let Some(rec) = app.store.get::<PickRecord>("picks", &token).await.filter(|r| r.user_id == user.id) else {
+async fn choose_pick(
+    State(app): State<Arc<App>>,
+    ApiUser(user): ApiUser,
+    Path(token): Path<String>,
+    Json(choice): Json<PickChoice>,
+) -> Response {
+    let Some(rec) = app
+        .store
+        .get::<PickRecord>("picks", &token)
+        .await
+        .filter(|r| r.user_id == user.id)
+    else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let Some(c) = rec.candidates.get(choice.index).cloned() else { return StatusCode::BAD_REQUEST.into_response() };
+    let Some(c) = rec.candidates.get(choice.index).cloned() else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
     match admit(&app, &user, c).await {
         Ok(key) => {
             app.store.delete("picks", &token).await;
@@ -379,10 +495,17 @@ async fn get_settings(State(app): State<Arc<App>>, ApiUser(user): ApiUser) -> Re
     Json(u.settings).into_response()
 }
 
-async fn put_settings(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Json(settings): Json<Settings>) -> Response {
+async fn put_settings(
+    State(app): State<Arc<App>>,
+    ApiUser(user): ApiUser,
+    Json(settings): Json<Settings>,
+) -> Response {
     let saved = app
         .store
-        .update("users", &user.id, |found: Option<UserRecord>| UserRecord { settings: settings.clone(), ..found.unwrap_or_default() })
+        .update("users", &user.id, |found: Option<UserRecord>| UserRecord {
+            settings: settings.clone(),
+            ..found.unwrap_or_default()
+        })
         .await;
     match saved {
         Ok(_) => Json(settings).into_response(),
@@ -395,14 +518,30 @@ async fn recent(State(app): State<Arc<App>>, ApiUser(user): ApiUser) -> Response
     Json(u.recent).into_response()
 }
 
-async fn thumbnail(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Path(id): Path<String>) -> Response {
+async fn thumbnail(
+    State(app): State<Arc<App>>,
+    ApiUser(user): ApiUser,
+    Path(id): Path<String>,
+) -> Response {
     if id.len() != 36 || !id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-') {
         return StatusCode::NOT_FOUND.into_response();
     }
     match app.immich.thumbnail(&user.api_key, &id).await {
         Ok(r) => {
-            let ct = r.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("image/jpeg").to_string();
-            ([(header::CONTENT_TYPE, ct), (header::CACHE_CONTROL, "private, max-age=86400".into())], Body::from_stream(r.bytes_stream())).into_response()
+            let ct = r
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("image/jpeg")
+                .to_string();
+            (
+                [
+                    (header::CONTENT_TYPE, ct),
+                    (header::CACHE_CONTROL, "private, max-age=86400".into()),
+                ],
+                Body::from_stream(r.bytes_stream()),
+            )
+                .into_response()
         }
         Err(e) => (StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response(),
     }
@@ -424,24 +563,53 @@ pub(crate) async fn asset_for(app: &App, user: &User, key: &str) -> Option<Asset
     if !valid_key(key) {
         return None;
     }
-    let rec: AssetRecord = app.store.get("assets", key).await.filter(|r: &AssetRecord| r.users.contains(&user.id))?;
+    let rec: AssetRecord = app
+        .store
+        .get("assets", key)
+        .await
+        .filter(|r: &AssetRecord| r.users.contains(&user.id))?;
     if rec.path.is_file() {
         return Some(rec);
     }
-    let asset = app.immich.asset(&user.api_key, rec.immich_asset_id.as_deref()?).await.ok()?;
+    let asset = app
+        .immich
+        .asset(&user.api_key, rec.immich_asset_id.as_deref()?)
+        .await
+        .ok()?;
     let found = resolve::from_asset(app, &asset)?;
-    tracing::info!("{} is gone; Immich has it at {}", rec.path.display(), found.path.display());
-    let fixed = AssetRecord { path: found.path, file_name: found.file_name, ..rec };
+    tracing::info!(
+        "{} is gone; Immich has it at {}",
+        rec.path.display(),
+        found.path.display()
+    );
+    let fixed = AssetRecord {
+        path: found.path,
+        file_name: found.file_name,
+        ..rec
+    };
     // Through `update`, so a user added by a concurrent `admit` isn't written back out of the record.
     let (path, file_name) = (fixed.path.clone(), fixed.file_name.clone());
-    let _ = app.store.update("assets", key, |now: Option<AssetRecord>| AssetRecord { path, file_name, ..now.unwrap_or(fixed.clone()) }).await;
+    let _ = app
+        .store
+        .update("assets", key, |now: Option<AssetRecord>| AssetRecord {
+            path,
+            file_name,
+            ..now.unwrap_or(fixed.clone())
+        })
+        .await;
     Some(fixed)
 }
 
 pub(crate) async fn relay(resp: reqwest::Result<reqwest::Response>) -> Response {
     let resp = match resp {
         Ok(r) => r,
-        Err(e) => return (StatusCode::BAD_GATEWAY, format!("The worker didn't answer: {e}")).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                format!("The worker didn't answer: {e}"),
+            )
+                .into_response();
+        }
     };
     let mut out = Response::builder().status(resp.status().as_u16());
     for name in ["content-type", "x-width", "x-height", "x-process-version"] {
@@ -452,10 +620,22 @@ pub(crate) async fn relay(resp: reqwest::Result<reqwest::Response>) -> Response 
     out.body(Body::from_stream(resp.bytes_stream())).unwrap()
 }
 
-async fn meta(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Path(key): Path<String>) -> Response {
-    let Some(rec) = asset_for(&app, &user, &key).await else { return StatusCode::NOT_FOUND.into_response() };
+async fn meta(
+    State(app): State<Arc<App>>,
+    ApiUser(user): ApiUser,
+    Path(key): Path<String>,
+) -> Response {
+    let Some(rec) = asset_for(&app, &user, &key).await else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
     let _ = app.ingest(&rec.path).await;
-    relay(app.http.get(app.worker(&format!("/v1/assets/{key}/meta"))).send().await).await
+    relay(
+        app.http
+            .get(app.worker(&format!("/v1/assets/{key}/meta")))
+            .send()
+            .await,
+    )
+    .await
 }
 
 #[derive(Deserialize)]
@@ -473,25 +653,44 @@ struct ProxyQuery {
 /// Both are keyed by content hash, so a success is cached for a day. A failure is not: the browser would
 /// go on showing a broken photo long after the worker recovered.
 async fn pixels(app: &Arc<App>, user: &User, key: &str, worker_path: String) -> Response {
-    let Some(rec) = asset_for(app, user, key).await else { return StatusCode::NOT_FOUND.into_response() };
+    let Some(rec) = asset_for(app, user, key).await else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
     let fetch = || async { relay(app.http.get(app.worker(&worker_path)).send().await).await };
     let mut resp = fetch().await;
     if !resp.status().is_success() {
         let ingested = app.ingest(&rec.path).await;
         if ingested.is_ok_and(|r| r.status().is_success()) {
-            tracing::info!("re-ingested {} after the worker forgot it", rec.path.display());
+            tracing::info!(
+                "re-ingested {} after the worker forgot it",
+                rec.path.display()
+            );
             resp = fetch().await;
         }
     }
     if resp.status().is_success() {
-        resp.headers_mut().insert(header::CACHE_CONTROL, header::HeaderValue::from_static("private, max-age=86400"));
+        resp.headers_mut().insert(
+            header::CACHE_CONTROL,
+            header::HeaderValue::from_static("private, max-age=86400"),
+        );
     }
     resp
 }
 
-async fn proxy(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Path(key): Path<String>, Query(q): Query<ProxyQuery>) -> Response {
+async fn proxy(
+    State(app): State<Arc<App>>,
+    ApiUser(user): ApiUser,
+    Path(key): Path<String>,
+    Query(q): Query<ProxyQuery>,
+) -> Response {
     let edge = q.long_edge.unwrap_or(2560);
-    pixels(&app, &user, &key, format!("/v1/assets/{key}/proxy?long_edge={edge}")).await
+    pixels(
+        &app,
+        &user,
+        &key,
+        format!("/v1/assets/{key}/proxy?long_edge={edge}"),
+    )
+    .await
 }
 
 #[derive(Deserialize)]
@@ -500,9 +699,20 @@ struct FocusQuery {
 }
 
 /// Focus-peaking mask: PNG bytes at the same edge as a proxy, so the client can pair them up.
-async fn focus(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Path(key): Path<String>, Query(q): Query<FocusQuery>) -> Response {
+async fn focus(
+    State(app): State<Arc<App>>,
+    ApiUser(user): ApiUser,
+    Path(key): Path<String>,
+    Query(q): Query<FocusQuery>,
+) -> Response {
     let edge = q.edge.unwrap_or(2560);
-    pixels(&app, &user, &key, format!("/v1/assets/{key}/focus?edge={edge}")).await
+    pixels(
+        &app,
+        &user,
+        &key,
+        format!("/v1/assets/{key}/focus?edge={edge}"),
+    )
+    .await
 }
 
 /// Which spectral colour stocks this deployment renders. Not cached by the browser: "none" must not outlive
@@ -513,28 +723,61 @@ async fn film_stocks(State(app): State<Arc<App>>, ApiUser(_user): ApiUser) -> Re
 
 /// One stock's profile, relayed from the worker: the slide's colours over its layers' log H, which is what the
 /// browser needs to render the stock itself. The ISO tables it was measured through stay on the server.
-async fn film_stock(State(app): State<Arc<App>>, ApiUser(_user): ApiUser, Path(id): Path<String>) -> Response {
-    if !id.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') {
+async fn film_stock(
+    State(app): State<Arc<App>>,
+    ApiUser(_user): ApiUser,
+    Path(id): Path<String>,
+) -> Response {
+    if !id
+        .bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    {
         return StatusCode::NOT_FOUND.into_response();
     }
-    relay(app.http.get(app.worker(&format!("/v1/film/stocks/{id}"))).send().await).await
+    relay(
+        app.http
+            .get(app.worker(&format!("/v1/film/stocks/{id}")))
+            .send()
+            .await,
+    )
+    .await
 }
 
 /// Which masks this photo has, and its faces: `{ available, names, faces }`, computed on first use. Not cached
 /// by the browser: "unavailable" must not outlive a switch to the `-ml` image.
-async fn masks(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Path(key): Path<String>) -> Response {
-    let Some(rec) = asset_for(&app, &user, &key).await else { return StatusCode::NOT_FOUND.into_response() };
+async fn masks(
+    State(app): State<Arc<App>>,
+    ApiUser(user): ApiUser,
+    Path(key): Path<String>,
+) -> Response {
+    let Some(rec) = asset_for(&app, &user, &key).await else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
     let _ = app.ingest(&rec.path).await;
-    relay(app.http.get(app.worker(&format!("/v1/assets/{key}/masks"))).send().await).await
+    relay(
+        app.http
+            .get(app.worker(&format!("/v1/assets/{key}/masks")))
+            .send()
+            .await,
+    )
+    .await
 }
 
 /// One mask as a greyscale PNG, in the proxy's frame. Keyed by content like a proxy, so cached like one.
 /// `GET /api/assets/{key}/camera` — the JPEG the camera embedded in the RAW, upright: its own rendering.
-async fn camera(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Path(key): Path<String>) -> Response {
+async fn camera(
+    State(app): State<Arc<App>>,
+    ApiUser(user): ApiUser,
+    Path(key): Path<String>,
+) -> Response {
     pixels(&app, &user, &key, format!("/v1/assets/{key}/camera")).await
 }
 
-async fn mask(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Path((key, name)): Path<(String, String)>) -> Response {
+async fn mask(
+    State(app): State<Arc<App>>,
+    ApiUser(user): ApiUser,
+    Path((key, name)): Path<(String, String)>,
+) -> Response {
     if !name.bytes().all(|b| b.is_ascii_lowercase() || b == b'-') {
         return StatusCode::NOT_FOUND.into_response();
     }
@@ -565,8 +808,20 @@ struct EditState {
 
 impl EditState {
     fn of(doc: &SidecarDoc, key: &str, writable: bool, forked: bool) -> Self {
-        let saved_for = doc.source_sha1().filter(|s| !s.eq_ignore_ascii_case(key)).map(String::from);
-        Self { edit: doc.edit(), etag: doc.etag(), head: doc.history().head, read_only: doc.is_read_only(), writable, exports: doc.exports(), forked, saved_for }
+        let saved_for = doc
+            .source_sha1()
+            .filter(|s| !s.eq_ignore_ascii_case(key))
+            .map(String::from);
+        Self {
+            edit: doc.edit(),
+            etag: doc.etag(),
+            head: doc.history().head,
+            read_only: doc.is_read_only(),
+            writable,
+            exports: doc.exports(),
+            forked,
+            saved_for,
+        }
     }
 
     fn into_response(self) -> Response {
@@ -574,8 +829,14 @@ impl EditState {
     }
 }
 
-async fn get_edit(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Path(key): Path<String>) -> Response {
-    let Some(rec) = asset_for(&app, &user, &key).await else { return StatusCode::NOT_FOUND.into_response() };
+async fn get_edit(
+    State(app): State<Arc<App>>,
+    ApiUser(user): ApiUser,
+    Path(key): Path<String>,
+) -> Response {
+    let Some(rec) = asset_for(&app, &user, &key).await else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
     let loaded = tokio::task::spawn_blocking(move || {
         let writable = sidecar_xmp::writable_beside(&rec.path);
         SidecarDoc::load(&rec.path).map(|d| EditState::of(&d, &key, writable, false))
@@ -596,9 +857,17 @@ struct Stale;
 /// Change a photo's sidecar through the guarded writer, off the async runtime, and answer with the edit state
 /// it leaves. `change` returns whether the save forked. The failures a person can act on carry their own
 /// message and status; anything else is a bug here and goes to the log as one.
-async fn write_sidecar(app: &Arc<App>, key: &str, rec: &AssetRecord, mut change: impl FnMut(&mut SidecarDoc) -> anyhow::Result<bool> + Send + 'static) -> Response {
+async fn write_sidecar(
+    app: &Arc<App>,
+    key: &str,
+    rec: &AssetRecord,
+    mut change: impl FnMut(&mut SidecarDoc) -> anyhow::Result<bool> + Send + 'static,
+) -> Response {
     let roots = app.config.canonical_mounts();
-    let moves_files = app.config.root_of(&rec.path).is_some_and(|(r, _)| r.moves_files);
+    let moves_files = app
+        .config
+        .root_of(&rec.path)
+        .is_some_and(|(r, _)| r.moves_files);
     let path = rec.path.clone();
     let key = key.to_string();
     let result = tokio::task::spawn_blocking(move || {
@@ -613,16 +882,29 @@ async fn write_sidecar(app: &Arc<App>, key: &str, rec: &AssetRecord, mut change:
         let stale = || SidecarDoc::load(&path).map(|d| EditState::of(&d, &key, writable, false));
         match saved {
             Ok(_) => Ok((state.expect("set by a successful change"), created)),
-            Err(e) if e.is::<Stale>() => Err(Box::new(stale().map_or_else(internal, |s| (StatusCode::PRECONDITION_FAILED, [(header::ETAG, format!("\"{}\"", s.etag))], Json(s)).into_response()))),
-            Err(e) => Err(Box::new(match e.downcast_ref::<sidecar_xmp::SidecarError>() {
-                Some(sidecar_xmp::SidecarError::NewerProcessVersion { .. }) => (StatusCode::CONFLICT, format!("{e}")).into_response(),
-                Some(sidecar_xmp::SidecarError::UnknownVersion { .. }) => (StatusCode::NOT_FOUND, format!("{e}")).into_response(),
-                Some(sidecar_xmp::SidecarError::NotWritable { .. }) => {
-                    tracing::error!("{e:#}");
-                    (StatusCode::FORBIDDEN, format!("{e}")).into_response()
-                }
-                _ => internal(e),
-            })),
+            Err(e) if e.is::<Stale>() => Err(Box::new(stale().map_or_else(internal, |s| {
+                (
+                    StatusCode::PRECONDITION_FAILED,
+                    [(header::ETAG, format!("\"{}\"", s.etag))],
+                    Json(s),
+                )
+                    .into_response()
+            }))),
+            Err(e) => Err(Box::new(
+                match e.downcast_ref::<sidecar_xmp::SidecarError>() {
+                    Some(sidecar_xmp::SidecarError::NewerProcessVersion { .. }) => {
+                        (StatusCode::CONFLICT, format!("{e}")).into_response()
+                    }
+                    Some(sidecar_xmp::SidecarError::UnknownVersion { .. }) => {
+                        (StatusCode::NOT_FOUND, format!("{e}")).into_response()
+                    }
+                    Some(sidecar_xmp::SidecarError::NotWritable { .. }) => {
+                        tracing::error!("{e:#}");
+                        (StatusCode::FORBIDDEN, format!("{e}")).into_response()
+                    }
+                    _ => internal(e),
+                },
+            )),
         }
     })
     .await;
@@ -659,14 +941,29 @@ struct Save {
     session: Option<String>,
 }
 
-async fn put_edit(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Path(key): Path<String>, headers: HeaderMap, Json(body): Json<SaveBody>) -> Response {
-    let Some(rec) = asset_for(&app, &user, &key).await else { return StatusCode::NOT_FOUND.into_response() };
-    let if_match = headers.get(header::IF_MATCH).and_then(|v| v.to_str().ok()).map(|v| v.trim_matches('"').to_string());
+async fn put_edit(
+    State(app): State<Arc<App>>,
+    ApiUser(user): ApiUser,
+    Path(key): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<SaveBody>,
+) -> Response {
+    let Some(rec) = asset_for(&app, &user, &key).await else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let if_match = headers
+        .get(header::IF_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.trim_matches('"').to_string());
     let save = match body {
         SaveBody::Versioned(save) => save,
         SaveBody::Bare(edit) => {
             let Some(if_match) = if_match else {
-                return (StatusCode::PRECONDITION_REQUIRED, "Send If-Match with the ETag you edited from.").into_response();
+                return (
+                    StatusCode::PRECONDITION_REQUIRED,
+                    "Send If-Match with the ETag you edited from.",
+                )
+                    .into_response();
             };
             // Without a base the save can only go on top of the head, and only if the client saw the head.
             return write_sidecar(&app, &key.clone(), &rec, move |doc| {
@@ -674,14 +971,31 @@ async fn put_edit(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Path(key)
                     anyhow::bail!(Stale);
                 }
                 let base = doc.history().head;
-                Ok(doc.commit(&Commit { edit: &edit, base: &base, checkpoint: false, session: None, user: None }, &key)?.forked)
+                Ok(doc
+                    .commit(
+                        &Commit {
+                            edit: &edit,
+                            base: &base,
+                            checkpoint: false,
+                            session: None,
+                            user: None,
+                        },
+                        &key,
+                    )?
+                    .forked)
             })
             .await;
         }
     };
     let name = user.name.clone();
     write_sidecar(&app, &key.clone(), &rec, move |doc| {
-        let c = Commit { edit: &save.edit, base: &save.base, checkpoint: save.checkpoint, session: save.session.as_deref(), user: Some(&name) };
+        let c = Commit {
+            edit: &save.edit,
+            base: &save.base,
+            checkpoint: save.checkpoint,
+            session: save.session.as_deref(),
+            user: Some(&name),
+        };
         Ok(doc.commit(&c, &key)?.forked)
     })
     .await
@@ -699,8 +1013,14 @@ struct HistoryNode {
 }
 
 /// `GET /api/assets/{key}/history` — every version of this photo's edit, oldest first.
-async fn get_history(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Path(key): Path<String>) -> Response {
-    let Some(rec) = asset_for(&app, &user, &key).await else { return StatusCode::NOT_FOUND.into_response() };
+async fn get_history(
+    State(app): State<Arc<App>>,
+    ApiUser(user): ApiUser,
+    Path(key): Path<String>,
+) -> Response {
+    let Some(rec) = asset_for(&app, &user, &key).await else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
     let built = tokio::task::spawn_blocking(move || -> anyhow::Result<serde_json::Value> {
         let doc = SidecarDoc::load(&rec.path)?;
         let (history, exports) = (doc.history(), doc.exports());
@@ -709,8 +1029,16 @@ async fn get_history(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Path(k
             .iter()
             .map(|n| {
                 let edit = history.version_of(&n.id)?;
-                let exports = exports.iter().filter(|e| e["editEtag"] == n.etag).cloned().collect();
-                Ok(HistoryNode { node: n.clone(), edit, exports })
+                let exports = exports
+                    .iter()
+                    .filter(|e| e["editEtag"] == n.etag)
+                    .cloned()
+                    .collect();
+                Ok(HistoryNode {
+                    node: n.clone(),
+                    edit,
+                    exports,
+                })
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
         Ok(serde_json::json!({ "head": history.head, "nodes": nodes }))
@@ -729,9 +1057,19 @@ struct Checkout {
 }
 
 /// `POST /api/assets/{key}/history/checkout { node }` — make that version (or `original`) the current edit.
-async fn checkout(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Path(key): Path<String>, Json(body): Json<Checkout>) -> Response {
-    let Some(rec) = asset_for(&app, &user, &key).await else { return StatusCode::NOT_FOUND.into_response() };
-    write_sidecar(&app, &key.clone(), &rec, move |doc| doc.checkout(&body.node, &key).map(|()| false)).await
+async fn checkout(
+    State(app): State<Arc<App>>,
+    ApiUser(user): ApiUser,
+    Path(key): Path<String>,
+    Json(body): Json<Checkout>,
+) -> Response {
+    let Some(rec) = asset_for(&app, &user, &key).await else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    write_sidecar(&app, &key.clone(), &rec, move |doc| {
+        doc.checkout(&body.node, &key).map(|()| false)
+    })
+    .await
 }
 
 #[derive(Deserialize)]
@@ -740,9 +1078,19 @@ struct Label {
 }
 
 /// `PUT /api/assets/{key}/history/{node}/label { label }` — name a version, or clear its name with null.
-async fn label(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Path((key, node)): Path<(String, String)>, Json(body): Json<Label>) -> Response {
-    let Some(rec) = asset_for(&app, &user, &key).await else { return StatusCode::NOT_FOUND.into_response() };
-    write_sidecar(&app, &key, &rec, move |doc| doc.label(&node, body.label.clone()).map(|()| false)).await
+async fn label(
+    State(app): State<Arc<App>>,
+    ApiUser(user): ApiUser,
+    Path((key, node)): Path<(String, String)>,
+    Json(body): Json<Label>,
+) -> Response {
+    let Some(rec) = asset_for(&app, &user, &key).await else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    write_sidecar(&app, &key, &rec, move |doc| {
+        doc.label(&node, body.label.clone()).map(|()| false)
+    })
+    .await
 }
 
 #[derive(Deserialize)]
@@ -756,10 +1104,24 @@ struct LoupeBody {
 }
 
 /// `POST /api/assets/{key}/loupe` — a 1:1 tile with denoise and sharpening applied, as PNG.
-async fn loupe(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Path(key): Path<String>, Json(body): Json<LoupeBody>) -> Response {
-    let Some(rec) = asset_for(&app, &user, &key).await else { return StatusCode::NOT_FOUND.into_response() };
+async fn loupe(
+    State(app): State<Arc<App>>,
+    ApiUser(user): ApiUser,
+    Path(key): Path<String>,
+    Json(body): Json<LoupeBody>,
+) -> Response {
+    let Some(rec) = asset_for(&app, &user, &key).await else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
     let req = serde_json::json!({ "key": key, "path": rec.path, "center": body.center, "size": body.size, "edit": body.edit, "colorSpace": body.color_space });
-    relay(app.http.post(app.worker("/v1/loupe")).json(&req).send().await).await
+    relay(
+        app.http
+            .post(app.worker("/v1/loupe"))
+            .json(&req)
+            .send()
+            .await,
+    )
+    .await
 }
 
 #[derive(Deserialize)]
@@ -773,10 +1135,24 @@ struct PreviewBody {
 
 /// `POST /api/assets/{key}/preview` — the whole photo developed on the server, as JPEG, for browsers that
 /// can't run the develop pass themselves.
-async fn preview(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Path(key): Path<String>, Json(body): Json<PreviewBody>) -> Response {
-    let Some(rec) = asset_for(&app, &user, &key).await else { return StatusCode::NOT_FOUND.into_response() };
+async fn preview(
+    State(app): State<Arc<App>>,
+    ApiUser(user): ApiUser,
+    Path(key): Path<String>,
+    Json(body): Json<PreviewBody>,
+) -> Response {
+    let Some(rec) = asset_for(&app, &user, &key).await else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
     let req = serde_json::json!({ "key": key, "path": rec.path, "edit": body.edit, "colorSpace": body.color_space, "longEdge": body.long_edge });
-    relay(app.http.post(app.worker("/v1/preview")).json(&req).send().await).await
+    relay(
+        app.http
+            .post(app.worker("/v1/preview"))
+            .json(&req)
+            .send()
+            .await,
+    )
+    .await
 }
 
 pub fn router(app: Arc<App>) -> Router {
@@ -787,11 +1163,19 @@ pub fn router(app: Arc<App>) -> Router {
     Router::new()
         .route("/open", get(open))
         .route("/api/health", get(|| async { "ok" }))
-        .route("/api/session", get(session::session).post(session::sign_in).delete(session::sign_out))
+        .route(
+            "/api/session",
+            get(session::session)
+                .post(session::sign_in)
+                .delete(session::sign_out),
+        )
         .route("/api/recent", get(recent))
         .route("/api/settings", get(get_settings).put(put_settings))
         .route("/api/picks/{token}", get(get_pick).post(choose_pick))
-        .route("/api/intake", axum::routing::post(intake).layer(axum::extract::DefaultBodyLimit::max(INTAKE_LIMIT)))
+        .route(
+            "/api/intake",
+            axum::routing::post(intake).layer(axum::extract::DefaultBodyLimit::max(INTAKE_LIMIT)),
+        )
         .route("/api/immich/assets/{id}/thumbnail", get(thumbnail))
         .route("/api/film/stocks", get(film_stocks))
         .route("/api/film/stocks/{id}", get(film_stock))
@@ -803,8 +1187,14 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/assets/{key}/camera", get(camera))
         .route("/api/assets/{key}/edit", get(get_edit).put(put_edit))
         .route("/api/assets/{key}/history", get(get_history))
-        .route("/api/assets/{key}/history/checkout", axum::routing::post(checkout))
-        .route("/api/assets/{key}/history/{node}/label", axum::routing::put(label))
+        .route(
+            "/api/assets/{key}/history/checkout",
+            axum::routing::post(checkout),
+        )
+        .route(
+            "/api/assets/{key}/history/{node}/label",
+            axum::routing::put(label),
+        )
         .route("/api/assets/{key}/loupe", axum::routing::post(loupe))
         .route("/api/assets/{key}/preview", axum::routing::post(preview))
         .route("/api/exports", axum::routing::post(export::create))
@@ -813,7 +1203,19 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/exports/{id}/file", get(export::file))
         .fallback_service(spa)
         // Proxies compress with brotli for Safari and zstd for Chromium.
-        .layer(CompressionLayer::new().br(true).zstd(true).gzip(true).compress_when(tower_http::compression::predicate::SizeAbove::new(1024).and(tower_http::compression::predicate::NotForContentType::new("text/event-stream"))))
+        .layer(
+            CompressionLayer::new()
+                .br(true)
+                .zstd(true)
+                .gzip(true)
+                .compress_when(
+                    tower_http::compression::predicate::SizeAbove::new(1024).and(
+                        tower_http::compression::predicate::NotForContentType::new(
+                            "text/event-stream",
+                        ),
+                    ),
+                ),
+        )
         .with_state(app)
 }
 
@@ -828,10 +1230,24 @@ mod tests {
         let mut edit = EditParams::default();
         edit.exposure.ev = 0.7;
         let versioned = serde_json::json!({ "edit": edit, "base": "original", "checkpoint": true, "session": "tab" });
-        let SaveBody::Versioned(s) = serde_json::from_value(versioned).unwrap() else { panic!("read as bare") };
-        assert_eq!((s.edit.exposure.ev, s.base.as_str(), s.checkpoint, s.session.as_deref()), (0.7, "original", true, Some("tab")));
+        let SaveBody::Versioned(s) = serde_json::from_value(versioned).unwrap() else {
+            panic!("read as bare")
+        };
+        assert_eq!(
+            (
+                s.edit.exposure.ev,
+                s.base.as_str(),
+                s.checkpoint,
+                s.session.as_deref()
+            ),
+            (0.7, "original", true, Some("tab"))
+        );
 
-        let SaveBody::Bare(e) = serde_json::from_value(serde_json::to_value(&edit).unwrap()).unwrap() else { panic!("read as versioned") };
+        let SaveBody::Bare(e) =
+            serde_json::from_value(serde_json::to_value(&edit).unwrap()).unwrap()
+        else {
+            panic!("read as versioned")
+        };
         assert_eq!(e, edit, "a client from before history still saves");
     }
 
@@ -843,12 +1259,23 @@ mod tests {
         let dir = tmp.path().canonicalize().unwrap();
         let original = dir.join("DSC_1.NEF");
         std::fs::write(&original, b"raw").unwrap();
-        sidecar_xmp::update(&original, std::slice::from_ref(&dir), |d| d.set_edit(&EditParams::default(), "aaaa")).unwrap();
+        sidecar_xmp::update(&original, std::slice::from_ref(&dir), |d| {
+            d.set_edit(&EditParams::default(), "aaaa")
+        })
+        .unwrap();
         let doc = SidecarDoc::load(&original).unwrap();
-        assert_eq!(EditState::of(&doc, "bbbb", true, false).saved_for.as_deref(), Some("aaaa"));
+        assert_eq!(
+            EditState::of(&doc, "bbbb", true, false)
+                .saved_for
+                .as_deref(),
+            Some("aaaa")
+        );
         assert_eq!(EditState::of(&doc, "AAAA", true, false).saved_for, None);
         let other = dir.join("DSC_2.NEF");
         std::fs::write(&other, b"raw2").unwrap();
-        assert_eq!(EditState::of(&SidecarDoc::load(&other).unwrap(), "bbbb", true, false).saved_for, None);
+        assert_eq!(
+            EditState::of(&SidecarDoc::load(&other).unwrap(), "bbbb", true, false).saved_for,
+            None
+        );
     }
 }

@@ -69,26 +69,55 @@ pub fn read(path: &Path) -> Result<Option<GainMap>, DecodeError> {
 /// `read`, from images already extracted — so a caller that also wants the depth map decodes the photo once.
 /// `path` is still needed for the scalars `exiftool` reads beside the map.
 pub fn from_aux(aux: &AuxImages, path: &Path) -> Result<Option<GainMap>, DecodeError> {
-    let Some(plane) = aux.read(is_gain_map_file)? else { return Ok(None) };
-    Ok(Some(GainMap { width: plane.width, height: plane.height, values: plane.values, meta: read_meta(path) }))
+    let Some(plane) = aux.read(is_gain_map_file)? else {
+        return Ok(None);
+    };
+    Ok(Some(GainMap {
+        width: plane.width,
+        height: plane.height,
+        values: plane.values,
+        meta: read_meta(path),
+    }))
 }
 
 /// One `exiftool` run for the four scalars the module docs name — matching `decoded::exif`'s own rule of one
 /// run per photo rather than one per tag, even though this one happens alone rather than beside the rest of
 /// `decoded::exif`'s tags: it is only ever wanted lazily, when a gain map was actually found.
 fn read_meta(path: &Path) -> GainMapMeta {
-    let Ok(output) =
-        std::process::Command::new("exiftool").args(["-j", "-n", "-HDRGainMapVersion", "-HDRGainMapHeadroom", "-HDRHeadroom", "-HDRGain"]).arg(path).output()
+    let Ok(output) = std::process::Command::new("exiftool")
+        .args([
+            "-j",
+            "-n",
+            "-HDRGainMapVersion",
+            "-HDRGainMapHeadroom",
+            "-HDRHeadroom",
+            "-HDRGain",
+        ])
+        .arg(path)
+        .output()
     else {
         return GainMapMeta::default();
     };
-    let Ok(json) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else { return GainMapMeta::default() };
-    let Some(tags) = json.as_array().and_then(|a| a.first()) else { return GainMapMeta::default() };
+    let Ok(json) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else {
+        return GainMapMeta::default();
+    };
+    let Some(tags) = json.as_array().and_then(|a| a.first()) else {
+        return GainMapMeta::default();
+    };
     GainMapMeta {
         version: tags.get("HDRGainMapVersion").and_then(|v| v.as_i64()),
-        headroom: tags.get("HDRGainMapHeadroom").and_then(|v| v.as_f64()).map(|v| v as f32),
-        apple_hdr_headroom: tags.get("HDRHeadroom").and_then(|v| v.as_f64()).map(|v| v as f32),
-        apple_hdr_gain: tags.get("HDRGain").and_then(|v| v.as_f64()).map(|v| v as f32),
+        headroom: tags
+            .get("HDRGainMapHeadroom")
+            .and_then(|v| v.as_f64())
+            .map(|v| v as f32),
+        apple_hdr_headroom: tags
+            .get("HDRHeadroom")
+            .and_then(|v| v.as_f64())
+            .map(|v| v as f32),
+        apple_hdr_gain: tags
+            .get("HDRGain")
+            .and_then(|v| v.as_f64())
+            .map(|v| v as f32),
     }
 }
 
@@ -98,9 +127,15 @@ mod tests {
 
     #[test]
     fn only_the_hdrgainmap_file_is_picked_whatever_colons_became() {
-        assert!(is_gain_map_file("out-urn_com_apple_photo_2020_aux_hdrgainmap.png"));
-        assert!(is_gain_map_file("out-urn:com:apple:photo:2020:aux:hdrgainmap.png"));
-        assert!(!is_gain_map_file("out-urn_com_apple_photo_2018_aux_portraiteffectsmatte.png"));
+        assert!(is_gain_map_file(
+            "out-urn_com_apple_photo_2020_aux_hdrgainmap.png"
+        ));
+        assert!(is_gain_map_file(
+            "out-urn:com:apple:photo:2020:aux:hdrgainmap.png"
+        ));
+        assert!(!is_gain_map_file(
+            "out-urn_com_apple_photo_2018_aux_portraiteffectsmatte.png"
+        ));
         assert!(!is_gain_map_file("out-depth.png"));
         assert!(!is_gain_map_file("out.png"));
     }
@@ -116,11 +151,20 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let fixture = root.join("testdata/cache/IMG_2367.heic");
         if !fixture.is_file() {
-            return eprintln!("skipping: no {} (not a committed fixture)", fixture.display());
+            return eprintln!(
+                "skipping: no {} (not a committed fixture)",
+                fixture.display()
+            );
         }
-        let map = read(&fixture).unwrap().expect("IMG_2367.heic carries an HDR gain map");
+        let map = read(&fixture)
+            .unwrap()
+            .expect("IMG_2367.heic carries an HDR gain map");
         assert_eq!((map.width, map.height), (1512, 1512));
-        assert!(map.meta.headroom.is_some_and(|h| h > 1.0), "expected a headroom above 1.0, got {:?}", map.meta.headroom);
+        assert!(
+            map.meta.headroom.is_some_and(|h| h > 1.0),
+            "expected a headroom above 1.0, got {:?}",
+            map.meta.headroom
+        );
         assert!(map.meta.version.is_some());
     }
 }

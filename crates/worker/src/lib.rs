@@ -6,12 +6,12 @@
 //! `GET  /v1/assets/{key}/proxy?long_edge=N`  RGBA16F proxy bytes; `X-Width`, `X-Height` headers
 //! `GET  /v1/assets/{key}/masks[/{name}]`     masks from the models (`masks.rs`)
 
+pub mod camera;
 pub mod export;
 pub mod lensfun;
-pub mod camera;
 pub mod masks;
-pub mod stocks;
 pub mod ml;
+pub mod stocks;
 
 use anyhow::{Context, Result};
 use axum::{
@@ -114,7 +114,9 @@ fn sweep_stale_cache(cache: &std::path::Path) {
     let marker = format!("-{}-", cache_generation());
     let (mut removed, mut bytes) = (0u64, 0u64);
     for dir in ["proxies", "focus", "masks"] {
-        let Ok(entries) = std::fs::read_dir(cache.join(dir)) else { continue };
+        let Ok(entries) = std::fs::read_dir(cache.join(dir)) else {
+            continue;
+        };
         for entry in entries.flatten() {
             let name = entry.file_name();
             if name.to_str().is_some_and(|n| n.contains(&marker)) {
@@ -128,7 +130,10 @@ fn sweep_stale_cache(cache: &std::path::Path) {
         }
     }
     if removed > 0 {
-        tracing::info!("dropped {removed} cached files from an earlier ingest generation ({} MB); they rebuild on demand", bytes >> 20);
+        tracing::info!(
+            "dropped {removed} cached files from an earlier ingest generation ({} MB); they rebuild on demand",
+            bytes >> 20
+        );
     }
 }
 
@@ -155,11 +160,25 @@ impl Worker {
             let warp = sidecar_engine::warp::WarpPass::new(&gpu)?;
             let brush = sidecar_engine::brush::Brush::new(&gpu)?;
             let depth = sidecar_engine::depth::DepthPass::new(&gpu)?;
-            Ok(export::Kit { gpu, ingest, develop, detail, lens, warp, brush, depth, lensfun: lensfun.clone() })
+            Ok(export::Kit {
+                gpu,
+                ingest,
+                develop,
+                detail,
+                lens,
+                warp,
+                brush,
+                depth,
+                lensfun: lensfun.clone(),
+            })
         });
         let gpu = match kit {
             Ok(k) => {
-                tracing::info!("GPU ingest on {} ({:?})", k.gpu.adapter_info.name, k.gpu.adapter_info.backend);
+                tracing::info!(
+                    "GPU ingest on {} ({:?})",
+                    k.gpu.adapter_info.name,
+                    k.gpu.adapter_info.backend
+                );
                 Some(Arc::new(k))
             }
             Err(e) => {
@@ -187,25 +206,42 @@ impl Worker {
     }
 
     fn proxy_path(&self, key: &str, edge: u32) -> PathBuf {
-        self.cache.join("proxies").join(format!("{key}-{}-{edge}.f16", cache_generation()))
+        self.cache
+            .join("proxies")
+            .join(format!("{key}-{}-{edge}.f16", cache_generation()))
     }
 
     /// Focus-peaking mask at `edge`: max-pooled from a full-resolution measure, so it caches (and expires)
     /// alongside the proxy it overlays, keyed the same way. See docs/ROADMAP.md, "Focus peaking...".
     fn focus_path(&self, key: &str, edge: u32) -> PathBuf {
-        self.cache.join("focus").join(format!("{key}-{}-{edge}.png", cache_generation()))
+        self.cache
+            .join("focus")
+            .join(format!("{key}-{}-{edge}.png", cache_generation()))
     }
 
     pub async fn ingest(self: &Arc<Self>, path: PathBuf) -> Result<Meta> {
-        let stamp = tokio::fs::metadata(&path).await.ok().and_then(|m| Some((m.len(), m.modified().ok()?)));
-        let known = stamp.and_then(|s| self.hashed.lock().unwrap().get(&path).filter(|(len, at, _)| (*len, *at) == s).map(|(_, _, key)| key.clone()));
+        let stamp = tokio::fs::metadata(&path)
+            .await
+            .ok()
+            .and_then(|m| Some((m.len(), m.modified().ok()?)));
+        let known = stamp.and_then(|s| {
+            self.hashed
+                .lock()
+                .unwrap()
+                .get(&path)
+                .filter(|(len, at, _)| (*len, *at) == s)
+                .map(|(_, _, key)| key.clone())
+        });
         let key = match known {
             Some(key) => key,
             None => {
                 let p = path.clone();
                 let key = tokio::task::spawn_blocking(move || sidecar_xmp::sha1_file(&p)).await??;
                 if let Some((len, at)) = stamp {
-                    self.hashed.lock().unwrap().insert(path.clone(), (len, at, key.clone()));
+                    self.hashed
+                        .lock()
+                        .unwrap()
+                        .insert(path.clone(), (len, at, key.clone()));
                 }
                 key
             }
@@ -219,7 +255,11 @@ impl Worker {
         {
             // A lensfun database that arrived since, for a photo whose file carries no correction: match again.
             // No ExifTool run needed — the lens's identity is already here.
-            let from_lensfun = meta.info.lens_profile.as_ref().is_none_or(|p| p.id.starts_with("lensfun:"));
+            let from_lensfun = meta
+                .info
+                .lens_profile
+                .as_ref()
+                .is_none_or(|p| p.id.starts_with("lensfun:"));
             let raw = meta.info.source_kind == sidecar_raw::SourceKind::Raw;
             if raw && from_lensfun && meta.lensfun != self.lensfun.updated() {
                 meta.info.lens_profile = None;
@@ -239,13 +279,19 @@ impl Worker {
                 sidecar_raw::decoded::info(&sidecar_raw::decoded::exif(&p))
             } else if sidecar_raw::linear_dng::is_supported(&p) {
                 // A JPEG XL linear DNG LibRaw can't open: colour from its own tags, the rest from ExifTool.
-                lf.described(&p, sidecar_raw::linear_dng::info(&p, &sidecar_raw::decoded::exif(&p))?)
+                lf.described(
+                    &p,
+                    sidecar_raw::linear_dng::info(&p, &sidecar_raw::decoded::exif(&p))?,
+                )
             } else {
                 lf.described(&p, RawFile::metadata(&p)?)
             };
             Ok(Meta {
                 asset_key: k,
-                file_name: p.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default(),
+                file_name: p
+                    .file_name()
+                    .map(|f| f.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
                 process_version: PROCESS_VERSION,
                 generation: INGEST_GENERATION,
                 revision: META_REVISION,
@@ -293,7 +339,10 @@ impl Worker {
     /// short-circuit past building the mask.
     async fn cached_proxy(&self, key: &str, edge: u32) -> Option<(u32, u32, Bytes)> {
         let found = read_proxy(&self.proxy_path(key, edge)).await?;
-        tokio::fs::try_exists(self.focus_path(key, edge)).await.unwrap_or(false).then_some(found)
+        tokio::fs::try_exists(self.focus_path(key, edge))
+            .await
+            .unwrap_or(false)
+            .then_some(found)
     }
 
     /// Build (or reuse) the proxy at `edge`, building the preview size from the same decode.
@@ -307,7 +356,13 @@ impl Worker {
             return Ok(found);
         }
         let _slot = self.decode_slots.acquire().await?;
-        let path = self.paths.lock().unwrap().get(key).cloned().context("unknown asset; ingest it first")?;
+        let path = self
+            .paths
+            .lock()
+            .unwrap()
+            .get(key)
+            .cloned()
+            .context("unknown asset; ingest it first")?;
         // Orientation and colour space for a developed file, as ingest already read them — rather than
         // running ExifTool again for every proxy.
         let info = self.cached_meta(key).await.ok().map(|m| m.info);
@@ -316,7 +371,10 @@ impl Worker {
         if edge != PREVIEW_EDGE {
             wanted.push(PREVIEW_EDGE);
         }
-        let edges: Vec<(u32, PathBuf, PathBuf)> = wanted.into_iter().map(|e| (e, self.proxy_path(key, e), self.focus_path(key, e))).collect();
+        let edges: Vec<(u32, PathBuf, PathBuf)> = wanted
+            .into_iter()
+            .map(|e| (e, self.proxy_path(key, e), self.focus_path(key, e)))
+            .collect();
         let gpu = self.gpu.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let started = std::time::Instant::now();
@@ -338,15 +396,23 @@ impl Worker {
                 let pooled = focus.max_pooled(e);
                 write_focus_png(&focus_out, &pooled)?;
             }
-            tracing::info!("proxy for {} in {:.0} ms", path.display(), started.elapsed().as_secs_f64() * 1e3);
+            tracing::info!(
+                "proxy for {} in {:.0} ms",
+                path.display(),
+                started.elapsed().as_secs_f64() * 1e3
+            );
             Ok(())
         })
         .await??;
-        read_proxy(&self.proxy_path(key, edge)).await.context("proxy was not written")
+        read_proxy(&self.proxy_path(key, edge))
+            .await
+            .context("proxy was not written")
     }
 
     async fn cached_meta(&self, key: &str) -> Result<Meta> {
-        let bytes = tokio::fs::read(self.meta_path(key)).await.context("no cached metadata; ingest it first")?;
+        let bytes = tokio::fs::read(self.meta_path(key))
+            .await
+            .context("no cached metadata; ingest it first")?;
         Ok(serde_json::from_slice(&bytes)?)
     }
 
@@ -357,7 +423,9 @@ impl Worker {
             return Ok(bytes);
         }
         self.proxy(key, edge).await?;
-        tokio::fs::read(&target).await.context("focus mask was not written")
+        tokio::fs::read(&target)
+            .await
+            .context("focus mask was not written")
     }
 }
 
@@ -371,7 +439,12 @@ impl Worker {
 /// 48-megapixel HEIC would pay full-resolution cost in `focus_energy` and the downsample loop for a proxy
 /// that only ever needs at most 2,560 pixels on the long edge — measured at several seconds on this server's
 /// CPU for a single 12-megapixel photo, against a sub-second HEIC decode itself.
-fn decode_full(path: &std::path::Path, info: Option<&RawInfo>, gpu: Option<&export::Kit>, largest: u32) -> Result<sidecar_engine::RgbaF32> {
+fn decode_full(
+    path: &std::path::Path,
+    info: Option<&RawInfo>,
+    gpu: Option<&export::Kit>,
+    largest: u32,
+) -> Result<sidecar_engine::RgbaF32> {
     if sidecar_raw::decoded::is_supported(path) {
         let (flip, space) = match info.and_then(|i| Some((i.orientation_flip, i.source_space?))) {
             Some(known) => known,
@@ -381,27 +454,55 @@ fn decode_full(path: &std::path::Path, info: Option<&RawInfo>, gpu: Option<&expo
             }
         };
         let d = sidecar_raw::decoded::decode(path, flip, space)?;
-        let full = sidecar_engine::RgbaF32 { width: d.width, height: d.height, data: d.rgba };
+        let full = sidecar_engine::RgbaF32 {
+            width: d.width,
+            height: d.height,
+            data: d.rgba,
+        };
         return Ok(full.downsampled(largest).oriented(d.pending_flip));
     }
     if sidecar_raw::linear_dng::is_supported(path) {
         let flip = match info {
             Some(i) => i.orientation_flip,
-            None => sidecar_raw::linear_dng::info(path, &sidecar_raw::decoded::exif(path))?.orientation_flip,
+            None => {
+                sidecar_raw::linear_dng::info(path, &sidecar_raw::decoded::exif(path))?
+                    .orientation_flip
+            }
         };
         let d = sidecar_raw::linear_dng::decode(path, largest)?;
-        return Ok(sidecar_engine::RgbaF32 { width: d.width, height: d.height, data: d.rgba }.downsampled(largest).oriented(flip));
+        return Ok(sidecar_engine::RgbaF32 {
+            width: d.width,
+            height: d.height,
+            data: d.rgba,
+        }
+        .downsampled(largest)
+        .oriented(flip));
     }
     let mut raw = RawFile::open(path)?;
     Ok(match (gpu, raw.mosaic()) {
         (Some(export::Kit { gpu: g, ingest, .. }), Ok(m)) => {
             let mul = raw.info().color.as_shot_mul;
-            let input = sidecar_engine::MosaicInput { width: m.width, height: m.height, data: &m.data, black: m.black, white: m.white, pattern: m.pattern, period: m.period };
-            ingest.proxy(g, &input, [mul[0] as f32, 1.0, mul[2] as f32], largest)?.oriented(m.flip)
+            let input = sidecar_engine::MosaicInput {
+                width: m.width,
+                height: m.height,
+                data: &m.data,
+                black: m.black,
+                white: m.white,
+                pattern: m.pattern,
+                period: m.period,
+            };
+            ingest
+                .proxy(g, &input, [mul[0] as f32, 1.0, mul[2] as f32], largest)?
+                .oriented(m.flip)
         }
         _ => {
             let linear = raw.develop_linear(true)?;
-            sidecar_engine::RgbaF32 { width: linear.width, height: linear.height, data: linear.rgba() }.downsampled(largest)
+            sidecar_engine::RgbaF32 {
+                width: linear.width,
+                height: linear.height,
+                data: linear.rgba(),
+            }
+            .downsampled(largest)
         }
     })
 }
@@ -421,7 +522,11 @@ async fn read_proxy(path: &std::path::Path) -> Option<(u32, u32, Bytes)> {
 /// first writer's tmp file already gone. The process id and a counter make every name distinct.
 fn unique_tmp(target: &std::path::Path) -> PathBuf {
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    target.with_extension(format!("tmp-{}-{}", std::process::id(), SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)))
+    target.with_extension(format!(
+        "tmp-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ))
 }
 
 /// Atomic write, mirroring the proxy cache's temp-then-rename pattern.
@@ -431,7 +536,9 @@ fn write_focus_png(path: &std::path::Path, mono: &sidecar_engine::Mono) -> Resul
         let mut info = png::Info::with_size(mono.width, mono.height);
         info.color_type = png::ColorType::Grayscale;
         info.bit_depth = png::BitDepth::Eight;
-        png::Encoder::with_info(&mut out, info)?.write_header()?.write_image_data(&mono.to_r8_bytes())?;
+        png::Encoder::with_info(&mut out, info)?
+            .write_header()?
+            .write_image_data(&mono.to_r8_bytes())?;
     }
     let tmp = unique_tmp(path);
     std::fs::write(&tmp, &out)?;
@@ -465,35 +572,79 @@ pub struct PreviewRequest {
 /// The develop pass the browser would have run, run here instead, over the same cached proxy and with the
 /// same parameters and shaders — so a browser without WebGPU sees the same picture, just later. See
 /// docs/ROADMAP.md, "Browsers without WebGPU".
-fn preview_jpeg(kit: &export::Kit, rendering: &export::Rendering, req: &PreviewRequest, proxy: (u32, u32, Bytes), masks: &[Option<sidecar_engine::RgbaF32>], depth: Option<&masks::DepthMap>) -> Result<Vec<u8>> {
+fn preview_jpeg(
+    kit: &export::Kit,
+    rendering: &export::Rendering,
+    req: &PreviewRequest,
+    proxy: (u32, u32, Bytes),
+    masks: &[Option<sidecar_engine::RgbaF32>],
+    depth: Option<&masks::DepthMap>,
+) -> Result<Vec<u8>> {
     let (width, height, bytes) = proxy;
-    let source = sidecar_engine::upload_rgba16(&kit.gpu, &sidecar_engine::RgbaF32::from_f16_bytes(width, height, &bytes));
+    let source = sidecar_engine::upload_rgba16(
+        &kit.gpu,
+        &sidecar_engine::RgbaF32::from_f16_bytes(width, height, &bytes),
+    );
     let source = rendering.correct(kit, &req.edit, source);
-    let depth_texture = depth.map(|d| rendering.refine_depth(kit, &source, rendering.depth_texture(kit, &req.edit, &d.image, 0), [width, height]));
-    let source = rendering.depth_effects(kit, &req.edit, depth.zip(depth_texture.as_ref()), source, [width, height], [0, 0]);
+    let depth_texture = depth.map(|d| {
+        rendering.refine_depth(
+            kit,
+            &source,
+            rendering.depth_texture(kit, &req.edit, &d.image, 0),
+            [width, height],
+        )
+    });
+    let source = rendering.depth_effects(
+        kit,
+        &req.edit,
+        depth.zip(depth_texture.as_ref()),
+        source,
+        [width, height],
+        [0, 0],
+    );
     let packed = rendering.pack(&req.edit, req.color_space);
     let profile = stocks::for_edit(&req.edit);
     let slide_response = stocks::response(&profile);
     // The proxy is oriented already, as the masks are.
     let mask_textures = rendering.mask_textures(kit, &req.edit, masks, 0, [width, height]);
-    let developed = kit.develop.render(&kit.gpu, &source, &packed.uniform, &packed.lut, &export::masks_for(&packed, &mask_textures, [0.0; 4], slide_response))?;
-    let developed = rendering.warp(kit, &req.edit, &developed, 0).unwrap_or(developed);
+    let developed = kit.develop.render(
+        &kit.gpu,
+        &source,
+        &packed.uniform,
+        &packed.lut,
+        &export::masks_for(&packed, &mask_textures, [0.0; 4], slide_response),
+    )?;
+    let developed = rendering
+        .warp(kit, &req.edit, &developed, 0)
+        .unwrap_or(developed);
     let img = sidecar_engine::read_rgba16(&kit.gpu, &developed)?;
     export::jpeg_bytes(&img, 88, req.color_space)
 }
 
 async fn preview(State(w): State<Arc<Worker>>, Json(req): Json<PreviewRequest>) -> Response {
     let Some(kit) = w.gpu.clone() else {
-        return (StatusCode::SERVICE_UNAVAILABLE, "This worker has no GPU; the fallback preview needs one.").into_response();
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "This worker has no GPU; the fallback preview needs one.",
+        )
+            .into_response();
     };
-    w.paths.lock().unwrap().insert(req.key.clone(), req.path.clone());
+    w.paths
+        .lock()
+        .unwrap()
+        .insert(req.key.clone(), req.path.clone());
     let mut edge = req.long_edge.unwrap_or(1600).clamp(256, 4096);
     // A crop keeps part of the proxy: develop a larger one so what is kept still fills the screen. Rounded up
     // to a few sizes, since each new size is a decode of its own.
     if let Some(g) = req.edit.geometry.as_ref().filter(|g| !g.is_identity()) {
-        let kept = (g.crop.right - g.crop.left).max(g.crop.bottom - g.crop.top).clamp(0.1, 1.0);
+        let kept = (g.crop.right - g.crop.left)
+            .max(g.crop.bottom - g.crop.top)
+            .clamp(0.1, 1.0);
         let wanted = (edge as f64 / kept) as u32;
-        edge = [edge, 2048, 2560, 3072, 4096].into_iter().find(|&e| e >= wanted).unwrap_or(4096);
+        edge = [edge, 2048, 2560, 3072, 4096]
+            .into_iter()
+            .find(|&e| e >= wanted)
+            .unwrap_or(4096);
     }
     let proxy = match w.proxy(&req.key, edge).await {
         Ok(p) => p,
@@ -505,8 +656,19 @@ async fn preview(State(w): State<Arc<Worker>>, Json(req): Json<PreviewRequest>) 
     };
     let masks = w.mask_images(&req.key, &req.edit).await;
     let depth = w.depth_map(&req.key, &req.edit).await;
-    match tokio::task::spawn_blocking(move || preview_jpeg(&kit, &rendering, &req, proxy, &masks, depth.as_ref())).await {
-        Ok(Ok(jpeg)) => ([("content-type", "image/jpeg"), ("cache-control", "no-store")], jpeg).into_response(),
+    match tokio::task::spawn_blocking(move || {
+        preview_jpeg(&kit, &rendering, &req, proxy, &masks, depth.as_ref())
+    })
+    .await
+    {
+        Ok(Ok(jpeg)) => (
+            [
+                ("content-type", "image/jpeg"),
+                ("cache-control", "no-store"),
+            ],
+            jpeg,
+        )
+            .into_response(),
         Ok(Err(e)) => internal(e),
         Err(e) => internal(e.into()),
     }
@@ -525,7 +687,13 @@ pub struct LoupeRequest {
     pub color_space: sidecar_color::DisplaySpace,
 }
 
-fn loupe_png(w: &Worker, kit: &export::Kit, req: &LoupeRequest, masks: &[Option<sidecar_engine::RgbaF32>], depth: Option<&masks::DepthMap>) -> Result<Vec<u8>> {
+fn loupe_png(
+    w: &Worker,
+    kit: &export::Kit,
+    req: &LoupeRequest,
+    masks: &[Option<sidecar_engine::RgbaF32>],
+    depth: Option<&masks::DepthMap>,
+) -> Result<Vec<u8>> {
     let session = {
         let mut sessions = w.sessions.lock().unwrap();
         sessions.iter().position(|s| s.key == req.key).map(|i| {
@@ -544,7 +712,16 @@ fn loupe_png(w: &Worker, kit: &export::Kit, req: &LoupeRequest, masks: &[Option<
             let mut sessions = w.sessions.lock().unwrap();
             // Two loupe requests on a cold photo both decode it; keep one, or the pair fills every slot.
             sessions.retain(|s| s.key != req.key);
-            sessions.insert(0, Session { key: req.key.clone(), source: tex.clone(), flip, sigma, rendering: rendering.clone() });
+            sessions.insert(
+                0,
+                Session {
+                    key: req.key.clone(),
+                    source: tex.clone(),
+                    flip,
+                    sigma,
+                    rendering: rendering.clone(),
+                },
+            );
             sessions.truncate(SESSION_LIMIT);
             (tex, flip, sigma, rendering)
         }
@@ -568,45 +745,90 @@ fn loupe_png(w: &Worker, kit: &export::Kit, req: &LoupeRequest, masks: &[Option<
                 Some(p) => kit.lens.apply(&kit.gpu, &small, &p, size),
                 None => small,
             };
-            Some(kit.develop.density_map(&kit.gpu, &small, [sw, sh], &packed.uniform, &packed.lut, &export::masks_for(&packed, &mask_textures, [0.0; 4], slide_response))?)
+            Some(kit.develop.density_map(
+                &kit.gpu,
+                &small,
+                [sw, sh],
+                &packed.uniform,
+                &packed.lut,
+                &export::masks_for(&packed, &mask_textures, [0.0; 4], slide_response),
+            )?)
         }
         false => None,
     };
-    let masks_at = |x: u32, y: u32| sidecar_engine::Masks { density: density.as_ref(), ..export::masks_for(&packed, &mask_textures, [x as f32, y as f32, sw as f32, sh as f32], slide_response) };
+    let masks_at = |x: u32, y: u32| sidecar_engine::Masks {
+        density: density.as_ref(),
+        ..export::masks_for(
+            &packed,
+            &mask_textures,
+            [x as f32, y as f32, sw as f32, sh as f32],
+            slide_response,
+        )
+    };
     // The whole frame's source, before any tile is cut from it: the refinement reads the photo and the map
     // across the same frame.
-    let depth_texture = depth.map(|d| rendering.refine_depth(kit, &source, rendering.depth_texture(kit, &req.edit, &d.image, flip), [sw, sh]));
-    let depth_params = depth.and_then(|d| sidecar_color::depth::pack(&req.edit, d.airlight, [sw, sh], [0.0; 2]));
+    let depth_texture = depth.map(|d| {
+        rendering.refine_depth(
+            kit,
+            &source,
+            rendering.depth_texture(kit, &req.edit, &d.image, flip),
+            [sw, sh],
+        )
+    });
+    let depth_params =
+        depth.and_then(|d| sidecar_color::depth::pack(&req.edit, d.airlight, [sw, sh], [0.0; 2]));
     // A rectangle of the sensor's pixels, developed as export develops it: denoised, sharpened, lens-corrected,
     // hazed and blurred by distance, through the masks.
     let develop_rect = |ux: u32, uy: u32, uw: u32, uh: u32| -> Result<Vec<f32>> {
-        let tile = match rendering.lens_params(&req.edit, [sw, sh], [ux as f64, uy as f64], [0.0; 2]) {
-            // The tile reads a region of the source the lens decides: find it, cut it with the detail filters'
-            // margin and the bicubic read's reach around it, denoise and sharpen that, then correct it into the
-            // tile — the order export uses, on less of the image.
-            Some(frame) => {
-                let (x0, y0, x1, y1) = sidecar_color::lens::source_bounds(&frame, (ux, uy, uw, uh));
-                let reach = m as f64 + 3.0;
-                let cx = (x0.floor() - reach).clamp(0.0, (sw - 1) as f64) as u32;
-                let cy = (y0.floor() - reach).clamp(0.0, (sh - 1) as f64) as u32;
-                let cw = ((x1.ceil() + reach).clamp(1.0, sw as f64) as u32).max(cx + 1) - cx;
-                let ch = ((y1.ceil() + reach).clamp(1.0, sh as f64) as u32).max(cy + 1) - cy;
-                let region = kit.detail.crop(&kit.gpu, &source, cx, cy, cw, ch);
-                let region = kit.detail.apply(&kit.gpu, region, sigma, &settings);
-                let params = rendering.lens_params(&req.edit, [sw, sh], [ux as f64, uy as f64], [cx as f64, cy as f64]).unwrap_or(frame);
-                kit.lens.apply(&kit.gpu, &region, &params, [uw, uh])
-            }
-            // Denoised and sharpened with the filters' margin, which is then cut.
-            None => {
-                let (cx, cy) = (ux.saturating_sub(m), uy.saturating_sub(m));
-                let (cw, ch) = ((ux + uw + m).min(sw) - cx, (uy + uh + m).min(sh) - cy);
-                let tile = kit.detail.crop(&kit.gpu, &source, cx, cy, cw, ch);
-                let tile = kit.detail.apply(&kit.gpu, tile, sigma, &settings);
-                kit.detail.crop(&kit.gpu, &tile, ux - cx, uy - cy, uw, uh)
-            }
-        };
-        let tile = rendering.depth_effects(kit, &req.edit, depth.zip(depth_texture.as_ref()), tile, [sw, sh], [ux, uy]);
-        let developed = kit.develop.render(&kit.gpu, &tile, &packed.uniform, &packed.lut, &masks_at(ux, uy))?;
+        let tile =
+            match rendering.lens_params(&req.edit, [sw, sh], [ux as f64, uy as f64], [0.0; 2]) {
+                // The tile reads a region of the source the lens decides: find it, cut it with the detail filters'
+                // margin and the bicubic read's reach around it, denoise and sharpen that, then correct it into the
+                // tile — the order export uses, on less of the image.
+                Some(frame) => {
+                    let (x0, y0, x1, y1) =
+                        sidecar_color::lens::source_bounds(&frame, (ux, uy, uw, uh));
+                    let reach = m as f64 + 3.0;
+                    let cx = (x0.floor() - reach).clamp(0.0, (sw - 1) as f64) as u32;
+                    let cy = (y0.floor() - reach).clamp(0.0, (sh - 1) as f64) as u32;
+                    let cw = ((x1.ceil() + reach).clamp(1.0, sw as f64) as u32).max(cx + 1) - cx;
+                    let ch = ((y1.ceil() + reach).clamp(1.0, sh as f64) as u32).max(cy + 1) - cy;
+                    let region = kit.detail.crop(&kit.gpu, &source, cx, cy, cw, ch);
+                    let region = kit.detail.apply(&kit.gpu, region, sigma, &settings);
+                    let params = rendering
+                        .lens_params(
+                            &req.edit,
+                            [sw, sh],
+                            [ux as f64, uy as f64],
+                            [cx as f64, cy as f64],
+                        )
+                        .unwrap_or(frame);
+                    kit.lens.apply(&kit.gpu, &region, &params, [uw, uh])
+                }
+                // Denoised and sharpened with the filters' margin, which is then cut.
+                None => {
+                    let (cx, cy) = (ux.saturating_sub(m), uy.saturating_sub(m));
+                    let (cw, ch) = ((ux + uw + m).min(sw) - cx, (uy + uh + m).min(sh) - cy);
+                    let tile = kit.detail.crop(&kit.gpu, &source, cx, cy, cw, ch);
+                    let tile = kit.detail.apply(&kit.gpu, tile, sigma, &settings);
+                    kit.detail.crop(&kit.gpu, &tile, ux - cx, uy - cy, uw, uh)
+                }
+            };
+        let tile = rendering.depth_effects(
+            kit,
+            &req.edit,
+            depth.zip(depth_texture.as_ref()),
+            tile,
+            [sw, sh],
+            [ux, uy],
+        );
+        let developed = kit.develop.render(
+            &kit.gpu,
+            &tile,
+            &packed.uniform,
+            &packed.lut,
+            &masks_at(ux, uy),
+        )?;
         Ok(sidecar_engine::read_rgba16(&kit.gpu, &developed)?.data)
     };
     // A rectangle of the picture (oriented pixels), developed.
@@ -619,8 +841,14 @@ fn loupe_png(w: &Worker, kit: &export::Kit, req: &LoupeRequest, masks: &[Option<
             // the low-resolution grid the whole picture's blur uses, then keep the tile.
             Some(p) => {
                 let (k, reach) = (p.scale(), p.reach());
-                let (ex, ey) = (ux.saturating_sub(reach) / k * k, uy.saturating_sub(reach) / k * k);
-                let (ew, eh) = ((ux + uw + reach).min(sw) - ex, (uy + uh + reach).min(sh) - ey);
+                let (ex, ey) = (
+                    ux.saturating_sub(reach) / k * k,
+                    uy.saturating_sub(reach) / k * k,
+                );
+                let (ew, eh) = (
+                    (ux + uw + reach).min(sw) - ex,
+                    (uy + uh + reach).min(sh) - ey,
+                );
                 let wide = develop_rect(ex, ey, ew, eh)?;
                 let (mx, my) = (ux - ex, uy - ey);
                 let mut data = Vec::with_capacity((uw * uh * 4) as usize);
@@ -631,13 +859,23 @@ fn loupe_png(w: &Worker, kit: &export::Kit, req: &LoupeRequest, masks: &[Option<
                 data
             }
         };
-        Ok(sidecar_engine::RgbaF32 { width: uw, height: uh, data }.oriented(flip))
+        Ok(sidecar_engine::RgbaF32 {
+            width: uw,
+            height: uh,
+            data,
+        }
+        .oriented(flip))
     };
     // A tile `size` big about `center` (0…1) in an image `frame` pixels big, kept inside it.
     let tile_at = |frame: [u32; 2]| {
-        let (tw, th) = (req.size[0].clamp(64, 1024).min(frame[0]), req.size[1].clamp(64, 1024).min(frame[1]));
-        let x = ((req.center[0].clamp(0.0, 1.0) * frame[0] as f32) as i64 - tw as i64 / 2).clamp(0, (frame[0] - tw) as i64) as u32;
-        let y = ((req.center[1].clamp(0.0, 1.0) * frame[1] as f32) as i64 - th as i64 / 2).clamp(0, (frame[1] - th) as i64) as u32;
+        let (tw, th) = (
+            req.size[0].clamp(64, 1024).min(frame[0]),
+            req.size[1].clamp(64, 1024).min(frame[1]),
+        );
+        let x = ((req.center[0].clamp(0.0, 1.0) * frame[0] as f32) as i64 - tw as i64 / 2)
+            .clamp(0, (frame[0] - tw) as i64) as u32;
+        let y = ((req.center[1].clamp(0.0, 1.0) * frame[1] as f32) as i64 - th as i64 / 2)
+            .clamp(0, (frame[1] - th) as i64) as u32;
         (x, y, tw, th)
     };
     let img = match req.edit.geometry.as_ref().filter(|g| !g.is_identity()) {
@@ -646,13 +884,22 @@ fn loupe_png(w: &Worker, kit: &export::Kit, req: &LoupeRequest, masks: &[Option<
         Some(g) => {
             let frame_out = sidecar_color::geometry::output_size(g, [ow, oh]);
             let tile = tile_at(frame_out);
-            let (x0, y0, x1, y1) = sidecar_color::geometry::warp_bounds(g, [ow, oh], 0, frame_out, tile);
+            let (x0, y0, x1, y1) =
+                sidecar_color::geometry::warp_bounds(g, [ow, oh], 0, frame_out, tile);
             let rx = (x0.floor() - 2.0).clamp(0.0, (ow - 1) as f64) as u32;
             let ry = (y0.floor() - 2.0).clamp(0.0, (oh - 1) as f64) as u32;
             let rw = ((x1.ceil() + 2.0).clamp(1.0, ow as f64) as u32).max(rx + 1) - rx;
             let rh = ((y1.ceil() + 2.0).clamp(1.0, oh as f64) as u32).max(ry + 1) - ry;
             let picture = sidecar_engine::upload_rgba16(&kit.gpu, &region(rx, ry, rw, rh)?);
-            let params = sidecar_color::geometry::warp_params(g, [ow, oh], 0, frame_out, [tile.0 as f64, tile.1 as f64], [tile.2, tile.3], [rx as f64, ry as f64]);
+            let params = sidecar_color::geometry::warp_params(
+                g,
+                [ow, oh],
+                0,
+                frame_out,
+                [tile.0 as f64, tile.1 as f64],
+                [tile.2, tile.3],
+                [rx as f64, ry as f64],
+            );
             sidecar_engine::read_rgba16(&kit.gpu, &kit.warp.apply(&kit.gpu, &picture, &params))?
         }
         None => {
@@ -660,42 +907,67 @@ fn loupe_png(w: &Worker, kit: &export::Kit, req: &LoupeRequest, masks: &[Option<
             region(ox, oy, tw, th)?
         }
     };
-    let rgb: Vec<u8> = img.data.as_chunks::<4>().0.iter().flat_map(|p| [0, 1, 2].map(|c| (export::srgb_encode(p[c]) * 255.0 + 0.5) as u8)).collect();
+    let rgb: Vec<u8> = img
+        .data
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .flat_map(|p| [0, 1, 2].map(|c| (export::srgb_encode(p[c]) * 255.0 + 0.5) as u8))
+        .collect();
     let mut out = Vec::new();
     {
         let mut info = png::Info::with_size(img.width, img.height);
         info.color_type = png::ColorType::Rgb;
         info.bit_depth = png::BitDepth::Eight;
         if req.color_space == sidecar_color::DisplaySpace::DisplayP3 {
-            info.icc_profile = Some(std::borrow::Cow::Borrowed(include_bytes!("../../../assets/icc/DisplayP3-v4.icc")));
+            info.icc_profile = Some(std::borrow::Cow::Borrowed(include_bytes!(
+                "../../../assets/icc/DisplayP3-v4.icc"
+            )));
         }
-        png::Encoder::with_info(&mut out, info)?.write_header()?.write_image_data(&rgb)?;
+        png::Encoder::with_info(&mut out, info)?
+            .write_header()?
+            .write_image_data(&rgb)?;
     }
     Ok(out)
 }
 
 async fn loupe(State(w): State<Arc<Worker>>, Json(req): Json<LoupeRequest>) -> Response {
     let Some(kit) = w.gpu.clone() else {
-        return (StatusCode::SERVICE_UNAVAILABLE, "This worker has no GPU; the loupe needs one.").into_response();
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "This worker has no GPU; the loupe needs one.",
+        )
+            .into_response();
     };
     let w2 = w.clone();
     let masks = w.mask_images(&req.key, &req.edit).await;
     let depth = w.depth_map(&req.key, &req.edit).await;
-    match tokio::task::spawn_blocking(move || loupe_png(&w2, &kit, &req, &masks, depth.as_ref())).await {
-        Ok(Ok(png)) => ([("content-type", "image/png"), ("cache-control", "no-store")], png).into_response(),
+    match tokio::task::spawn_blocking(move || loupe_png(&w2, &kit, &req, &masks, depth.as_ref()))
+        .await
+    {
+        Ok(Ok(png)) => (
+            [("content-type", "image/png"), ("cache-control", "no-store")],
+            png,
+        )
+            .into_response(),
         Ok(Err(e)) => internal(e),
         Err(e) => internal(e.into()),
     }
 }
 
 fn outbox_dir(w: &Worker, job: &str) -> Option<PathBuf> {
-    (job.len() == 32 && job.bytes().all(|b| b.is_ascii_hexdigit())).then(|| w.cache.join("outbox").join(job))
+    (job.len() == 32 && job.bytes().all(|b| b.is_ascii_hexdigit()))
+        .then(|| w.cache.join("outbox").join(job))
 }
 
 /// `POST /v1/render` — streams NDJSON `Progress` lines; the last is `done` or `failed`.
 async fn render(State(w): State<Arc<Worker>>, Json(req): Json<export::RenderRequest>) -> Response {
     let Some(kit) = w.gpu.clone() else {
-        return (StatusCode::SERVICE_UNAVAILABLE, "This worker has no GPU; exports need one.").into_response();
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "This worker has no GPU; exports need one.",
+        )
+            .into_response();
     };
     if outbox_dir(&w, &req.job_id).is_none() || req.file_name.contains('/') {
         return StatusCode::BAD_REQUEST.into_response();
@@ -710,11 +982,18 @@ async fn render(State(w): State<Arc<Worker>>, Json(req): Json<export::RenderRequ
         let tx2 = tx.clone();
         let masks = w2.mask_images(&req.key, &req.edit).await;
         let depth = w2.depth_map(&req.key, &req.edit).await;
-        let result = tokio::task::spawn_blocking(move || export::render(&kit, &req, &masks, depth.as_ref(), &outbox, &tx2)).await;
+        let result = tokio::task::spawn_blocking(move || {
+            export::render(&kit, &req, &masks, depth.as_ref(), &outbox, &tx2)
+        })
+        .await;
         let last = match result {
             Ok(Ok(done)) => done,
-            Ok(Err(e)) => export::Progress::Failed { message: format!("{e:#}") },
-            Err(e) => export::Progress::Failed { message: format!("render crashed: {e}") },
+            Ok(Err(e)) => export::Progress::Failed {
+                message: format!("{e:#}"),
+            },
+            Err(e) => export::Progress::Failed {
+                message: format!("render crashed: {e}"),
+            },
         };
         if let export::Progress::Failed { message } = &last {
             tracing::error!("export failed: {message}");
@@ -722,8 +1001,13 @@ async fn render(State(w): State<Arc<Worker>>, Json(req): Json<export::RenderRequ
         let _ = tx.send(last);
     });
     use futures_util::StreamExt;
-    let lines = tokio_stream::wrappers::UnboundedReceiverStream::new(rx).map(|p| Ok::<_, std::convert::Infallible>(serde_json::to_string(&p).unwrap() + "\n"));
-    ([("content-type", "application/x-ndjson")], axum::body::Body::from_stream(lines)).into_response()
+    let lines = tokio_stream::wrappers::UnboundedReceiverStream::new(rx)
+        .map(|p| Ok::<_, std::convert::Infallible>(serde_json::to_string(&p).unwrap() + "\n"));
+    (
+        [("content-type", "application/x-ndjson")],
+        axum::body::Body::from_stream(lines),
+    )
+        .into_response()
 }
 
 /// How long a rendered file stays fetchable after its job finishes. It used to be deleted the moment Immich
@@ -750,26 +1034,40 @@ fn sweep_outbox(cache: PathBuf) {
                 }
             }
             if swept > 0 {
-                tracing::info!("swept {swept} finished export{} from the outbox", if swept == 1 { "" } else { "s" });
+                tracing::info!(
+                    "swept {swept} finished export{} from the outbox",
+                    if swept == 1 { "" } else { "s" }
+                );
             }
             tokio::time::sleep(Duration::from_secs(3600)).await;
         }
     });
 }
 
-async fn outbox_file(State(w): State<Arc<Worker>>, Path((job, file)): Path<(String, String)>) -> Response {
-    let Some(dir) = outbox_dir(&w, &job) else { return StatusCode::NOT_FOUND.into_response() };
+async fn outbox_file(
+    State(w): State<Arc<Worker>>,
+    Path((job, file)): Path<(String, String)>,
+) -> Response {
+    let Some(dir) = outbox_dir(&w, &job) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
     if file.contains('/') || file.starts_with('.') {
         return StatusCode::NOT_FOUND.into_response();
     }
     match tokio::fs::File::open(dir.join(&file)).await {
-        Ok(f) => ([("content-type", "application/octet-stream")], axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(f))).into_response(),
+        Ok(f) => (
+            [("content-type", "application/octet-stream")],
+            axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(f)),
+        )
+            .into_response(),
         Err(_) => StatusCode::NOT_FOUND.into_response(),
     }
 }
 
 async fn outbox_delete(State(w): State<Arc<Worker>>, Path(job): Path<String>) -> Response {
-    let Some(dir) = outbox_dir(&w, &job) else { return StatusCode::NOT_FOUND.into_response() };
+    let Some(dir) = outbox_dir(&w, &job) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
     let _ = tokio::fs::remove_dir_all(dir).await;
     StatusCode::NO_CONTENT.into_response()
 }
@@ -801,14 +1099,19 @@ pub fn router(worker: Arc<Worker>) -> Router {
 /// The spectral colour stocks this deployment can render: empty unless the operator's two standards are there
 /// (`stocks`). The editor offers only these, so it never shows a stock that would not render.
 async fn film_stocks() -> Response {
-    Json(serde_json::json!({ "available": stocks::available(), "stocks": stocks::offered() })).into_response()
+    Json(serde_json::json!({ "available": stocks::available(), "stocks": stocks::offered() }))
+        .into_response()
 }
 
 /// One stock's profile (`slide::SlideProfile::to_bytes`): the slide's colours over its layers' log H, and three
 /// offsets. Measured on first use — about four seconds — then cached, so this blocks the once.
 async fn film_stock(Path(id): Path<String>) -> Response {
     match tokio::task::spawn_blocking(move || stocks::profile(&id)).await {
-        Ok(Some(p)) => ([(axum::http::header::CONTENT_TYPE, "application/octet-stream")], p.to_bytes()).into_response(),
+        Ok(Some(p)) => (
+            [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
+            p.to_bytes(),
+        )
+            .into_response(),
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(e) => internal(e.into()),
     }
@@ -818,7 +1121,11 @@ async fn lensfun_status(State(w): State<Arc<Worker>>) -> Response {
     Json(w.lensfun.status()).into_response()
 }
 
-async fn lensfun_put(State(w): State<Arc<Worker>>, Path(name): Path<String>, body: String) -> Response {
+async fn lensfun_put(
+    State(w): State<Arc<Worker>>,
+    Path(name): Path<String>,
+    body: String,
+) -> Response {
     let lf = w.lensfun.clone();
     match tokio::task::spawn_blocking(move || lf.put(&name, &body)).await {
         Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
@@ -863,12 +1170,19 @@ struct ProxyQuery {
     long_edge: Option<u32>,
 }
 
-async fn proxy_handler(State(w): State<Arc<Worker>>, Path(key): Path<String>, Query(q): Query<ProxyQuery>) -> Response {
+async fn proxy_handler(
+    State(w): State<Arc<Worker>>,
+    Path(key): Path<String>,
+    Query(q): Query<ProxyQuery>,
+) -> Response {
     let edge = q.long_edge.unwrap_or(DEFAULT_EDGE).clamp(256, 8192);
     match w.proxy(&key, edge).await {
         Ok((width, height, bytes)) => {
             let mut h = HeaderMap::new();
-            h.insert("content-type", HeaderValue::from_static("application/x-sidecar-rgba16f"));
+            h.insert(
+                "content-type",
+                HeaderValue::from_static("application/x-sidecar-rgba16f"),
+            );
             h.insert("x-width", width.into());
             h.insert("x-height", height.into());
             h.insert("x-process-version", PROCESS_VERSION.into());
@@ -890,7 +1204,10 @@ async fn masks_handler(State(w): State<Arc<Worker>>, Path(key): Path<String>) ->
     }
 }
 
-async fn mask_handler(State(w): State<Arc<Worker>>, Path((key, name)): Path<(String, String)>) -> Response {
+async fn mask_handler(
+    State(w): State<Arc<Worker>>,
+    Path((key, name)): Path<(String, String)>,
+) -> Response {
     match w.mask(&key, &name).await {
         Ok(Some(png)) => ([("content-type", "image/png")], png).into_response(),
         Ok(None) => (StatusCode::NOT_FOUND, "no such mask here").into_response(),
@@ -900,13 +1217,24 @@ async fn mask_handler(State(w): State<Arc<Worker>>, Path((key, name)): Path<(Str
 
 async fn camera_handler(State(w): State<Arc<Worker>>, Path(key): Path<String>) -> Response {
     match w.camera_jpeg(&key).await {
-        Ok(Some(jpeg)) => ([("content-type", "image/jpeg"), ("cache-control", "private, max-age=86400")], jpeg).into_response(),
+        Ok(Some(jpeg)) => (
+            [
+                ("content-type", "image/jpeg"),
+                ("cache-control", "private, max-age=86400"),
+            ],
+            jpeg,
+        )
+            .into_response(),
         Ok(None) => (StatusCode::NOT_FOUND, "this photo has no camera rendering").into_response(),
         Err(e) => internal(e),
     }
 }
 
-async fn focus_handler(State(w): State<Arc<Worker>>, Path(key): Path<String>, Query(q): Query<FocusQuery>) -> Response {
+async fn focus_handler(
+    State(w): State<Arc<Worker>>,
+    Path(key): Path<String>,
+    Query(q): Query<FocusQuery>,
+) -> Response {
     let edge = q.edge.unwrap_or(DEFAULT_EDGE).clamp(256, 8192);
     match w.focus(&key, edge).await {
         Ok(bytes) => ([("content-type", "image/png")], bytes).into_response(),
@@ -924,11 +1252,15 @@ mod tests {
     /// serial ones); the worker itself only ever makes one.
     static GPU_TURN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-    fn develop_developed(edit: &sidecar_color::EditParams, card: &sidecar_engine::RgbaF32) -> Option<sidecar_engine::RgbaF32> {
+    fn develop_developed(
+        edit: &sidecar_color::EditParams,
+        card: &sidecar_engine::RgbaF32,
+    ) -> Option<sidecar_engine::RgbaF32> {
         let _turn = GPU_TURN.blocking_lock();
         let gpu = sidecar_engine::Gpu::new_headless().ok()?;
         let pass = sidecar_engine::DevelopPass::new(&gpu).unwrap();
-        let rendering = export::Rendering::developed(sidecar_raw::SourceSpace::DisplayP3.camera_color());
+        let rendering =
+            export::Rendering::developed(sidecar_raw::SourceSpace::DisplayP3.camera_color());
         let packed = rendering.pack(edit, sidecar_color::DisplaySpace::DisplayP3);
         Some(pass.run(&gpu, card, &packed.uniform, &packed.lut).unwrap())
     }
@@ -940,10 +1272,23 @@ mod tests {
             let v = i as f32 / 63.0;
             data.extend([v, v, v, 0.0]);
         }
-        for p in [[1.0, 0.0, 0.0], [0.9, 0.1, 0.05], [0.2, 0.6, 0.9], [0.05, 0.05, 0.9], [0.5, 0.45, 0.4], [1.0, 1.0, 0.0], [0.02, 0.3, 0.02], [0.95, 0.6, 0.5]] {
+        for p in [
+            [1.0, 0.0, 0.0],
+            [0.9, 0.1, 0.05],
+            [0.2, 0.6, 0.9],
+            [0.05, 0.05, 0.9],
+            [0.5, 0.45, 0.4],
+            [1.0, 1.0, 0.0],
+            [0.02, 0.3, 0.02],
+            [0.95, 0.6, 0.5],
+        ] {
             data.extend([p[0], p[1], p[2], 0.0]);
         }
-        sidecar_engine::RgbaF32 { width: 72, height: 1, data }
+        sidecar_engine::RgbaF32 {
+            width: 72,
+            height: 1,
+            data,
+        }
     }
 
     fn encode(v: f32) -> f32 {
@@ -955,11 +1300,18 @@ mod tests {
     #[test]
     fn a_developed_file_is_shown_as_it_is_at_default_settings() {
         let card = test_card();
-        let Some(out) = develop_developed(&sidecar_color::EditParams::default(), &card) else { return eprintln!("skipping: no GPU") };
+        let Some(out) = develop_developed(&sidecar_color::EditParams::default(), &card) else {
+            return eprintln!("skipping: no GPU");
+        };
         for (i, (a, b)) in card.data.chunks(4).zip(out.data.chunks(4)).enumerate() {
             for c in 0..3 {
                 let d = (encode(a[c]) - encode(b[c])).abs() * 255.0;
-                assert!(d < 0.6, "pixel {i} channel {c}: {} → {} ({d:.2}/255)", a[c], b[c]);
+                assert!(
+                    d < 0.6,
+                    "pixel {i} channel {c}: {} → {} ({d:.2}/255)",
+                    a[c],
+                    b[c]
+                );
             }
         }
     }
@@ -968,34 +1320,62 @@ mod tests {
     #[test]
     fn developed_tone_controls_behave() {
         let card = test_card();
-        let grey = |img: &sidecar_engine::RgbaF32| -> Vec<f32> { img.data.chunks(4).take(64).map(|p| encode(p[1])).collect() };
+        let grey = |img: &sidecar_engine::RgbaF32| -> Vec<f32> {
+            img.data.chunks(4).take(64).map(|p| encode(p[1])).collect()
+        };
         let run = |f: &dyn Fn(&mut sidecar_color::EditParams)| {
             let mut e = sidecar_color::EditParams::default();
             f(&mut e);
             develop_developed(&e, &card).map(|o| grey(&o))
         };
-        let Some(base) = run(&|_| {}) else { return eprintln!("skipping: no GPU") };
+        let Some(base) = run(&|_| {}) else {
+            return eprintln!("skipping: no GPU");
+        };
         let monotone = |g: &[f32]| g.windows(2).all(|w| w[1] >= w[0] - 1e-3);
 
         let brighter = run(&|e| e.exposure.ev = 1.0).unwrap();
-        assert!(monotone(&brighter) && brighter[32] > base[32] + 0.1, "exposure +1 brightens mid grey");
-        assert!(brighter[63] <= 1.0 && brighter[62] < brighter[63], "and rolls off rather than clipping flat");
+        assert!(
+            monotone(&brighter) && brighter[32] > base[32] + 0.1,
+            "exposure +1 brightens mid grey"
+        );
+        assert!(
+            brighter[63] <= 1.0 && brighter[62] < brighter[63],
+            "and rolls off rather than clipping flat"
+        );
 
         let whites = run(&|e| e.tone.white_ev = 2.5).unwrap();
-        assert!(monotone(&whites) && (whites[55] - 1.0).abs() < 2e-3, "Whites +100 takes the top fifth to white");
+        assert!(
+            monotone(&whites) && (whites[55] - 1.0).abs() < 2e-3,
+            "Whites +100 takes the top fifth to white"
+        );
         let dim = run(&|e| e.tone.white_ev = 6.5).unwrap();
-        assert!((dim[63] - 0.8).abs() < 2e-3, "Whites −100 dims white to 80 %");
+        assert!(
+            (dim[63] - 0.8).abs() < 2e-3,
+            "Whites −100 dims white to 80 %"
+        );
 
         let lifted = run(&|e| e.tone.black_ev = -11.0).unwrap();
-        assert!((lifted[0] - 0.1).abs() < 2e-3, "Blacks +100 lifts black to 10 %");
+        assert!(
+            (lifted[0] - 0.1).abs() < 2e-3,
+            "Blacks +100 lifts black to 10 %"
+        );
         let crushed = run(&|e| e.tone.black_ev = -5.0).unwrap();
         for (b, c) in base.iter().zip(&crushed) {
-            assert!(if *b <= 0.1 { *c < 1e-3 } else { *c > 0.0 }, "Blacks −100 crushes the bottom tenth, and only it: {b} → {c}");
+            assert!(
+                if *b <= 0.1 { *c < 1e-3 } else { *c > 0.0 },
+                "Blacks −100 crushes the bottom tenth, and only it: {b} → {c}"
+            );
         }
 
         let contrast = run(&|e| e.tone.contrast = 1.5).unwrap();
-        assert!(monotone(&contrast) && contrast[10] < base[10] && contrast[55] > base[55], "Contrast + is an S around grey");
-        assert!((contrast[0] - base[0]).abs() < 2e-3 && (contrast[63] - base[63]).abs() < 2e-3, "with its ends fixed");
+        assert!(
+            monotone(&contrast) && contrast[10] < base[10] && contrast[55] > base[55],
+            "Contrast + is an S around grey"
+        );
+        assert!(
+            (contrast[0] - base[0]).abs() < 2e-3 && (contrast[63] - base[63]).abs() < 2e-3,
+            "with its ends fixed"
+        );
     }
 
     /// The waste this was written for: opening one photo fans out into four requests that all want the same
@@ -1009,10 +1389,25 @@ mod tests {
         let wait = Duration::from_millis(100);
 
         let held = w.decode_guard("aaa").await;
-        assert!(tokio::time::timeout(wait, w.decode_guard("bbb")).await.is_ok(), "a different photo shouldn't wait");
-        assert!(tokio::time::timeout(wait, w.decode_guard("aaa")).await.is_err(), "the same photo should wait");
+        assert!(
+            tokio::time::timeout(wait, w.decode_guard("bbb"))
+                .await
+                .is_ok(),
+            "a different photo shouldn't wait"
+        );
+        assert!(
+            tokio::time::timeout(wait, w.decode_guard("aaa"))
+                .await
+                .is_err(),
+            "the same photo should wait"
+        );
         drop(held);
-        assert!(tokio::time::timeout(wait, w.decode_guard("aaa")).await.is_ok(), "and go ahead once the first decode is done");
+        assert!(
+            tokio::time::timeout(wait, w.decode_guard("aaa"))
+                .await
+                .is_ok(),
+            "and go ahead once the first decode is done"
+        );
     }
 
     /// What went wrong on the real server: 0.2.1 stopped rotating a HEIC twice, and every proxy decoded
@@ -1034,9 +1429,16 @@ mod tests {
 
         let _turn = GPU_TURN.blocking_lock();
         let w = Worker::new(tmp.path().to_path_buf()).unwrap();
-        assert_ne!(w.proxy_path(&key, 2560), old, "the current code must not look at the old name");
+        assert_ne!(
+            w.proxy_path(&key, 2560),
+            old,
+            "the current code must not look at the old name"
+        );
         assert_ne!(w.focus_path(&key, 768), older);
-        assert!(!old.exists() && !older.exists(), "and Worker::new should have swept both");
+        assert!(
+            !old.exists() && !older.exists(),
+            "and Worker::new should have swept both"
+        );
     }
 
     /// Re-ingesting an unchanged file must not hash it again, and a changed one must. Proved by swapping in
@@ -1052,7 +1454,10 @@ mod tests {
             let mut out = Vec::new();
             let mut enc = png::Encoder::new(&mut out, 1, 1);
             enc.set_color(png::ColorType::Grayscale);
-            enc.write_header().unwrap().write_image_data(&[grey]).unwrap();
+            enc.write_header()
+                .unwrap()
+                .write_image_data(&[grey])
+                .unwrap();
             out
         };
         std::fs::write(&photo, png(10)).unwrap();
@@ -1061,10 +1466,24 @@ mod tests {
 
         let modified = std::fs::metadata(&photo).unwrap().modified().unwrap();
         std::fs::write(&photo, png(200)).unwrap();
-        std::fs::File::options().write(true).open(&photo).unwrap().set_modified(modified).unwrap();
-        assert_eq!(w.ingest(photo.clone()).await.unwrap().asset_key, first, "same size and mtime: not re-hashed");
+        std::fs::File::options()
+            .write(true)
+            .open(&photo)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+        assert_eq!(
+            w.ingest(photo.clone()).await.unwrap().asset_key,
+            first,
+            "same size and mtime: not re-hashed"
+        );
 
-        std::fs::File::options().write(true).open(&photo).unwrap().set_modified(modified + Duration::from_secs(1)).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&photo)
+            .unwrap()
+            .set_modified(modified + Duration::from_secs(1))
+            .unwrap();
         let second = w.ingest(photo.clone()).await.unwrap().asset_key;
         assert_ne!(second, first, "a new mtime is a new file");
         assert_eq!(second, sidecar_xmp::sha1_file(&photo).unwrap());
@@ -1079,18 +1498,30 @@ mod tests {
         for i in 0..32 {
             drop(w.decode_guard(&format!("key{i}")).await);
         }
-        assert!(w.decoding.lock().unwrap().len() <= 1, "dead entries should be swept as new ones are made");
+        assert!(
+            w.decoding.lock().unwrap().len() <= 1,
+            "dead entries should be swept as new ones are made"
+        );
     }
 
     #[test]
     fn focus_png_round_trips_and_leaves_no_temp_file() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("f.png");
-        let mono = sidecar_engine::Mono { width: 3, height: 2, data: vec![0.0, 0.5, 1.0, 1.0, 0.5, 0.0] };
+        let mono = sidecar_engine::Mono {
+            width: 3,
+            height: 2,
+            data: vec![0.0, 0.5, 1.0, 1.0, 0.5, 0.0],
+        };
         write_focus_png(&path, &mono).unwrap();
-        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 1, "only f.png should remain, no leftover tmp file");
+        assert_eq!(
+            std::fs::read_dir(tmp.path()).unwrap().count(),
+            1,
+            "only f.png should remain, no leftover tmp file"
+        );
 
-        let decoder = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(&path).unwrap()));
+        let decoder =
+            png::Decoder::new(std::io::BufReader::new(std::fs::File::open(&path).unwrap()));
         let mut reader = decoder.read_info().unwrap();
         assert_eq!((reader.info().width, reader.info().height), (3, 2));
         assert_eq!(reader.info().color_type, png::ColorType::Grayscale);
@@ -1106,7 +1537,11 @@ mod tests {
     fn concurrent_writes_to_the_same_target_never_collide_on_the_tmp_path() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("shared.png");
-        let mono = sidecar_engine::Mono { width: 2, height: 2, data: vec![0.0, 0.5, 1.0, 0.25] };
+        let mono = sidecar_engine::Mono {
+            width: 2,
+            height: 2,
+            data: vec![0.0, 0.5, 1.0, 0.25],
+        };
         let handles: Vec<_> = (0..8)
             .map(|_| {
                 let target = target.clone();
@@ -1117,6 +1552,10 @@ mod tests {
         for h in handles {
             h.join().unwrap().unwrap();
         }
-        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "only the final target should remain");
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            1,
+            "only the final target should remain"
+        );
     }
 }

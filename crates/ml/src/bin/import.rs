@@ -63,7 +63,10 @@ fn main() -> Result<()> {
         if std::fs::read_to_string(&path).ok().as_deref() != Some(code.as_str()) {
             std::fs::write(&path, code)?;
         }
-        reproducible(&generated.join(format!("{name}.bpk")), &dir.join(format!("{name}.bpk")))?;
+        reproducible(
+            &generated.join(format!("{name}.bpk")),
+            &dir.join(format!("{name}.bpk")),
+        )?;
         println!(
             "{name}: src/models/{name}.rs, {}",
             dir.join(format!("{name}.bpk")).display()
@@ -77,11 +80,20 @@ fn main() -> Result<()> {
 /// built. It identifies training state and inference never reads it, but it made every import write different
 /// bytes from the same model, so the `-ml` image's weights layer never came out the same twice.
 fn reproducible(from: &Path, to: &Path) -> Result<()> {
-    let reader = burn_pack::Reader::from_file(from).map_err(|e| anyhow::anyhow!("reading {}: {e:?}", from.display()))?;
+    let reader = burn_pack::Reader::from_file(from)
+        .map_err(|e| anyhow::anyhow!("reading {}: {e:?}", from.display()))?;
     let metadata = reader.metadata().clone();
-    let mut tensors = reader.into_tensors().map_err(|e| anyhow::anyhow!("reading {}: {e:?}", from.display()))?;
+    let mut tensors = reader
+        .into_tensors()
+        .map_err(|e| anyhow::anyhow!("reading {}: {e:?}", from.display()))?;
     tensors.iter_mut().for_each(|t| t.param_id = None);
-    let writer = metadata.iter().fold(burn_pack::Writer::new(tensors), |w, (k, v)| w.with_metadata(k, v));
-    writer.write_to_file(to).map_err(|e| anyhow::anyhow!("writing {}: {e:?}", to.display()))?;
+    let writer = metadata
+        .iter()
+        .fold(burn_pack::Writer::new(tensors), |w, (k, v)| {
+            w.with_metadata(k, v)
+        });
+    writer
+        .write_to_file(to)
+        .map_err(|e| anyhow::anyhow!("writing {}: {e:?}", to.display()))?;
     Ok(())
 }
