@@ -45,7 +45,16 @@ const MASK_SIZE: [u32; 2] = [256, 128];
 
 fn synthetic_masks() -> [Vec<u8>; 2] {
     let [w, h] = MASK_SIZE;
-    let at = |f: &dyn Fn(f64, f64) -> f64| (0..h).flat_map(|y| (0..w).map(move |x| (x, y))).map(|(x, y)| (f((x as f64 + 0.5) / w as f64, (y as f64 + 0.5) / h as f64).clamp(0.0, 1.0) * 255.0).round() as u8).collect::<Vec<u8>>();
+    let at = |f: &dyn Fn(f64, f64) -> f64| {
+        (0..h)
+            .flat_map(|y| (0..w).map(move |x| (x, y)))
+            .map(|(x, y)| {
+                (f((x as f64 + 0.5) / w as f64, (y as f64 + 0.5) / h as f64).clamp(0.0, 1.0)
+                    * 255.0)
+                    .round() as u8
+            })
+            .collect::<Vec<u8>>()
+    };
     let disc = at(&|u, v| 1.0 - (((u - 0.4) * 2.0).hypot(v - 0.5) * 3.0 - 0.6).clamp(0.0, 1.0));
     let ramp = at(&|u, v| u * 0.7 + v * 0.3);
     [disc, ramp]
@@ -55,14 +64,37 @@ fn synthetic_masks() -> [Vec<u8>; 2] {
 /// of the lens pass — warp, per-channel CA, gain — runs in both renderers.
 fn zv1() -> sidecar_color::lens::LensProfile {
     use sidecar_color::lens::Curve;
-    let knots = |v: &[f64], scale: f64| Curve(v.iter().enumerate().map(|(i, &x)| [i as f64 / (v.len() - 1) as f64, 1.0 + x * scale]).collect());
+    let knots = |v: &[f64], scale: f64| {
+        Curve(
+            v.iter()
+                .enumerate()
+                .map(|(i, &x)| [i as f64 / (v.len() - 1) as f64, 1.0 + x * scale])
+                .collect(),
+        )
+    };
     sidecar_color::lens::LensProfile {
         id: "sony".into(),
         label: "From the file (Sony)".into(),
         center: [0.5, 0.5],
-        distortion: Some(knots(&[1265.0, 1218.0, 1083.0, 860.0, 562.0, 209.0, -179.0, -580.0, -972.0, -1353.0, -1725.0], 1.0 / 16384.0)),
-        ca_red: Some(knots(&[0.0, 0.0, 128.0, 128.0, 128.0, 256.0, 384.0, 512.0, 896.0, 1152.0, 1536.0], 1.0 / 2097152.0)),
-        ca_blue: Some(knots(&[0.0, 896.0, 1024.0, 1024.0, 768.0, 512.0, 256.0, 0.0, 128.0, 0.0, 256.0], 1.0 / 2097152.0)),
+        distortion: Some(knots(
+            &[
+                1265.0, 1218.0, 1083.0, 860.0, 562.0, 209.0, -179.0, -580.0, -972.0, -1353.0,
+                -1725.0,
+            ],
+            1.0 / 16384.0,
+        )),
+        ca_red: Some(knots(
+            &[
+                0.0, 0.0, 128.0, 128.0, 128.0, 256.0, 384.0, 512.0, 896.0, 1152.0, 1536.0,
+            ],
+            1.0 / 2097152.0,
+        )),
+        ca_blue: Some(knots(
+            &[
+                0.0, 896.0, 1024.0, 1024.0, 768.0, 512.0, 256.0, 0.0, 128.0, 0.0, 256.0,
+            ],
+            1.0 / 2097152.0,
+        )),
         vignetting: Some(Curve(vec![[0.0, 1.0], [0.5, 1.15], [1.0, 1.9]])),
         required: true,
     }
@@ -76,14 +108,24 @@ fn adobe(m: [f64; 9]) -> [[f64; 3]; 3] {
 fn nikon_d850() -> CameraColor {
     CameraColor {
         as_shot_mul: [2.0996, 1.0, 1.4453],
-        calibrations: vec![Calibration { temperature_k: 6504.0, xyz_to_camera: adobe([10405.0, -3755.0, -1270.0, -5461.0, 13787.0, 1793.0, -1040.0, 2015.0, 6785.0]) }],
+        calibrations: vec![Calibration {
+            temperature_k: 6504.0,
+            xyz_to_camera: adobe([
+                10405.0, -3755.0, -1270.0, -5461.0, 13787.0, 1793.0, -1040.0, 2015.0, 6785.0,
+            ]),
+        }],
     }
 }
 
 fn fujifilm_xt4() -> CameraColor {
     CameraColor {
         as_shot_mul: [1.8672, 1.0, 1.7109],
-        calibrations: vec![Calibration { temperature_k: 6504.0, xyz_to_camera: adobe([13426.0, -6334.0, -1177.0, -4244.0, 12136.0, 2371.0, -580.0, 1303.0, 5980.0]) }],
+        calibrations: vec![Calibration {
+            temperature_k: 6504.0,
+            xyz_to_camera: adobe([
+                13426.0, -6334.0, -1177.0, -4244.0, 12136.0, 2371.0, -580.0, 1303.0, 5980.0,
+            ]),
+        }],
     }
 }
 
@@ -104,27 +146,48 @@ fn synthetic(camera: &CameraColor, width: u32, height: u32) -> RgbaF32 {
                 }
                 1 => {
                     let h = std::f64::consts::TAU * fx;
-                    let s = [0.0, 1.0, 2.0].map(|k| 0.5 + 0.5 * (h + k * std::f64::consts::TAU / 3.0).cos());
-                    ([s[0] * neutral[0], s[1], s[2] * neutral[2]].map(|v| 0.25 * v), 0.0)
+                    let s = [0.0, 1.0, 2.0]
+                        .map(|k| 0.5 + 0.5 * (h + k * std::f64::consts::TAU / 3.0).cos());
+                    (
+                        [s[0] * neutral[0], s[1], s[2] * neutral[2]].map(|v| 0.25 * v),
+                        0.0,
+                    )
                 }
                 2 => {
                     let v = 2f64.powf(-4.0 + 7.0 * fx);
                     let sat = fy * 4.0;
                     let c = [1.0, 0.35, 0.1].map(|p| 1.0 - sat * (1.0 - p));
-                    ([c[0] * neutral[0], c[1], c[2] * neutral[2]].map(|v2| v2 * v), 0.0)
+                    (
+                        [c[0] * neutral[0], c[1], c[2] * neutral[2]].map(|v2| v2 * v),
+                        0.0,
+                    )
                 }
                 _ => {
                     let v = 0.5 + 1.5 * fx;
-                    ([v.min(1.0) * 0.9, v.min(1.0), (v * 1.1).min(1.0) * 0.8], (fx * 1.4 - 0.2).clamp(0.0, 1.0))
+                    (
+                        [v.min(1.0) * 0.9, v.min(1.0), (v * 1.1).min(1.0) * 0.8],
+                        (fx * 1.4 - 0.2).clamp(0.0, 1.0),
+                    )
                 }
             };
             data.extend_from_slice(&[rgb[0] as f32, rgb[1] as f32, rgb[2] as f32, clip as f32]);
         }
     }
-    RgbaF32 { width, height, data }
+    RgbaF32 {
+        width,
+        height,
+        data,
+    }
 }
 
-type Fixture = (String, CameraColor, SourceKind, EditParams, DisplaySpace, Option<sidecar_color::lens::LensProfile>);
+type Fixture = (
+    String,
+    CameraColor,
+    SourceKind,
+    EditParams,
+    DisplaySpace,
+    Option<sidecar_color::lens::LensProfile>,
+);
 
 fn cases() -> Vec<Fixture> {
     let mut graded = EditParams::default();
@@ -135,9 +198,21 @@ fn cases() -> Vec<Fixture> {
     graded.exposure.highlight_blend = 1.0;
     graded.tone.contrast = 1.4;
     graded.tone.curve = vec![[0.0, 0.02], [0.25, 0.18], [0.7, 0.8], [1.0, 0.97]];
-    graded.mixer.blue = MixerBand { hue: 0.0, saturation: 0.0, luminance: -40.0 };
-    graded.mixer.orange = MixerBand { hue: 0.0, saturation: 30.0, luminance: 10.0 };
-    graded.mixer.green = MixerBand { hue: 50.0, saturation: -20.0, luminance: 0.0 };
+    graded.mixer.blue = MixerBand {
+        hue: 0.0,
+        saturation: 0.0,
+        luminance: -40.0,
+    };
+    graded.mixer.orange = MixerBand {
+        hue: 0.0,
+        saturation: 30.0,
+        luminance: 10.0,
+    };
+    graded.mixer.green = MixerBand {
+        hue: 50.0,
+        saturation: -20.0,
+        luminance: 0.0,
+    };
 
     let mut dark = EditParams::default();
     dark.exposure.ev = -2.0;
@@ -152,41 +227,113 @@ fn cases() -> Vec<Fixture> {
     phone.tone.white_ev = 3.5;
     phone.tone.black_ev = -9.0;
     phone.tone.curve = vec![[0.0, 0.0], [0.25, 0.22], [0.75, 0.8], [1.0, 1.0]];
-    phone.mixer.orange = MixerBand { hue: 0.0, saturation: 20.0, luminance: 5.0 };
+    phone.mixer.orange = MixerBand {
+        hue: 0.0,
+        saturation: 20.0,
+        luminance: 5.0,
+    };
     let heic = || sidecar_raw::SourceSpace::DisplayP3.camera_color();
 
     // Two masks, one inverted, every control moved: the mask stage in both renderers.
     let mut masked = graded.clone();
     masked.masks = vec![
-        MaskAdjustment { mask: "subject".into(), exposure: 1.0, contrast: 30.0, saturation: -40.0, temperature: 40.0, ..Default::default() },
-        MaskAdjustment { mask: "skin".into(), invert: true, amount: 70.0, exposure: -0.7, tint: -30.0, saturation: 25.0, ..Default::default() },
+        MaskAdjustment {
+            mask: "subject".into(),
+            exposure: 1.0,
+            contrast: 30.0,
+            saturation: -40.0,
+            temperature: 40.0,
+            ..Default::default()
+        },
+        MaskAdjustment {
+            mask: "skin".into(),
+            invert: true,
+            amount: 70.0,
+            exposure: -0.7,
+            tint: -30.0,
+            saturation: 25.0,
+            ..Default::default()
+        },
     ];
 
     // Layers reaching the whole edit: their own white and black points, curves and mixer, on a RAW and on a
     // developed file, whose tone path the layer's parameters blend through differently.
     let layer_mixer = sidecar_color::params::Mixer {
-        blue: MixerBand { hue: -30.0, saturation: 60.0, luminance: 20.0 },
-        red: MixerBand { hue: 20.0, saturation: -50.0, luminance: -10.0 },
+        blue: MixerBand {
+            hue: -30.0,
+            saturation: 60.0,
+            luminance: 20.0,
+        },
+        red: MixerBand {
+            hue: 20.0,
+            saturation: -50.0,
+            luminance: -10.0,
+        },
         ..Default::default()
     };
     let layers = vec![
-        MaskAdjustment { mask: "subject".into(), whites: -60.0, blacks: 40.0, curve: vec![[0.0, 0.05], [0.25, 0.32], [0.75, 0.7], [1.0, 0.95]], exposure: 0.4, ..Default::default() },
-        MaskAdjustment { mask: "brush".into(), invert: true, amount: 80.0, mixer: layer_mixer, contrast: -20.0, whites: 30.0, ..Default::default() },
+        MaskAdjustment {
+            mask: "subject".into(),
+            whites: -60.0,
+            blacks: 40.0,
+            curve: vec![[0.0, 0.05], [0.25, 0.32], [0.75, 0.7], [1.0, 0.95]],
+            exposure: 0.4,
+            ..Default::default()
+        },
+        MaskAdjustment {
+            mask: "brush".into(),
+            invert: true,
+            amount: 80.0,
+            mixer: layer_mixer,
+            contrast: -20.0,
+            whites: 30.0,
+            ..Default::default()
+        },
     ];
-    let layered = EditParams { masks: layers.clone(), ..graded.clone() };
-    let phone_layered = EditParams { masks: layers, ..phone.clone() };
+    let layered = EditParams {
+        masks: layers.clone(),
+        ..graded.clone()
+    };
+    let phone_layered = EditParams {
+        masks: layers,
+        ..phone.clone()
+    };
 
     // Film rendering: the per-channel curves blended with the neutral path, with and without layers on top.
-    let film = |e: &EditParams| EditParams { film: Some(sidecar_color::params::Film { amount: 80.0, interlayer: 60.0, ..Default::default() }), ..e.clone() };
+    let film = |e: &EditParams| EditParams {
+        film: Some(sidecar_color::params::Film {
+            amount: 80.0,
+            interlayer: 60.0,
+            ..Default::default()
+        }),
+        ..e.clone()
+    };
     let (graded_film, layered_film) = (film(&graded), film(&layered));
 
     // Black and white: a film type behind a filter, read from the table over the colour cube; with layers too.
-    let mono = |e: &EditParams, film: &str, filter: &str| EditParams { monochrome: Some(sidecar_color::params::Monochrome { film: film.into(), filter: filter.into(), ..Default::default() }), ..e.clone() };
-    let (graded_mono, layered_mono) = (mono(&graded, "panchromatic", "red"), mono(&layered, "orthochromatic", "none"));
+    let mono = |e: &EditParams, film: &str, filter: &str| EditParams {
+        monochrome: Some(sidecar_color::params::Monochrome {
+            film: film.into(),
+            filter: filter.into(),
+            ..Default::default()
+        }),
+        ..e.clone()
+    };
+    let (graded_mono, layered_mono) = (
+        mono(&graded, "panchromatic", "red"),
+        mono(&layered, "orthochromatic", "none"),
+    );
 
     // Grain: the hash and both octaves, in black and white, in film colour and on a developed file.
-    let grain = |e: &EditParams, amount: f64, size: f64| EditParams { grain: Some(sidecar_color::params::Grain { amount, size }), ..e.clone() };
-    let (grain_mono, grain_film, grain_heic) = (grain(&graded_mono, 80.0, 100.0), grain(&graded_film, 60.0, 30.0), grain(&phone, 100.0, 100.0));
+    let grain = |e: &EditParams, amount: f64, size: f64| EditParams {
+        grain: Some(sidecar_color::params::Grain { amount, size }),
+        ..e.clone()
+    };
+    let (grain_mono, grain_film, grain_heic) = (
+        grain(&graded_mono, 80.0, 100.0),
+        grain(&graded_film, 60.0, 30.0),
+        grain(&phone, 100.0, 100.0),
+    );
 
     // Developers: adjacency through the map (built by each side from the picture), development, compensation,
     // the stain's grain masking; and a light other than daylight.
@@ -197,7 +344,12 @@ fn cases() -> Vec<Fixture> {
         e
     };
     let dev_acutance = developed_mono(&grain_mono, "acutance", 1.0, "daylight");
-    let dev_staining = developed_mono(&grain(&layered_mono, 50.0, 60.0), "staining", -1.0, "tungsten");
+    let dev_staining = developed_mono(
+        &grain(&layered_mono, 50.0, 60.0),
+        "staining",
+        -1.0,
+        "tungsten",
+    );
     let dev_compensating = developed_mono(&graded_mono, "compensating", 0.5, "white-balance");
     // A named stock: HP5 Plus's sensitivity and toe, with grain and a developer.
     let mut stock_hp5 = developed_mono(&grain_mono, "staining", 0.0, "daylight");
@@ -206,40 +358,212 @@ fn cases() -> Vec<Fixture> {
     let mut stock_sfx = graded_mono.clone();
     stock_sfx.monochrome.as_mut().unwrap().film = "sfx-200".into();
 
-    let mut lens = EditParams { lens: Some(sidecar_color::params::Lens { profile: "sony".into(), ..Default::default() }), ..graded.clone() };
+    let mut lens = EditParams {
+        lens: Some(sidecar_color::params::Lens {
+            profile: "sony".into(),
+            ..Default::default()
+        }),
+        ..graded.clone()
+    };
     lens.lens.as_mut().unwrap().lateral_ca = 150.0;
 
     let mut cases: Vec<Fixture> = vec![
-        ("as-shot-srgb".into(), nikon_d850(), SourceKind::Raw, EditParams::default(), DisplaySpace::Srgb, None),
-        ("graded-p3".into(), nikon_d850(), SourceKind::Raw, graded.clone(), DisplaySpace::DisplayP3, None),
-        ("xtrans-dark".into(), fujifilm_xt4(), SourceKind::Raw, dark, DisplaySpace::Srgb, None),
-        ("heic-default".into(), heic(), SourceKind::Developed, EditParams::default(), DisplaySpace::DisplayP3, None),
-        ("heic-graded".into(), heic(), SourceKind::Developed, phone, DisplaySpace::Srgb, None),
-        ("lens-zv1".into(), nikon_d850(), SourceKind::Raw, lens, DisplaySpace::Srgb, Some(zv1())),
-        ("masks".into(), nikon_d850(), SourceKind::Raw, masked, DisplaySpace::Srgb, None),
-        ("layers".into(), nikon_d850(), SourceKind::Raw, layered.clone(), DisplaySpace::Srgb, None),
-        ("heic-layers".into(), heic(), SourceKind::Developed, phone_layered, DisplaySpace::DisplayP3, None),
-        ("film".into(), nikon_d850(), SourceKind::Raw, graded_film, DisplaySpace::Srgb, None),
-        ("film-layers".into(), nikon_d850(), SourceKind::Raw, layered_film, DisplaySpace::DisplayP3, None),
-        ("mono-red".into(), nikon_d850(), SourceKind::Raw, graded_mono, DisplaySpace::Srgb, None),
-        ("mono-ortho-layers".into(), nikon_d850(), SourceKind::Raw, layered_mono, DisplaySpace::Srgb, None),
-        ("grain-mono".into(), nikon_d850(), SourceKind::Raw, grain_mono, DisplaySpace::Srgb, None),
-        ("grain-film".into(), nikon_d850(), SourceKind::Raw, grain_film, DisplaySpace::Srgb, None),
-        ("grain-heic".into(), heic(), SourceKind::Developed, grain_heic, DisplaySpace::DisplayP3, None),
-        ("dev-acutance".into(), nikon_d850(), SourceKind::Raw, dev_acutance, DisplaySpace::Srgb, None),
-        ("dev-staining-layers".into(), nikon_d850(), SourceKind::Raw, dev_staining, DisplaySpace::Srgb, None),
-        ("dev-compensating".into(), nikon_d850(), SourceKind::Raw, dev_compensating, DisplaySpace::DisplayP3, None),
-        ("stock-hp5".into(), nikon_d850(), SourceKind::Raw, stock_hp5, DisplaySpace::Srgb, None),
-        ("stock-sfx-red".into(), nikon_d850(), SourceKind::Raw, stock_sfx, DisplaySpace::Srgb, None),
+        (
+            "as-shot-srgb".into(),
+            nikon_d850(),
+            SourceKind::Raw,
+            EditParams::default(),
+            DisplaySpace::Srgb,
+            None,
+        ),
+        (
+            "graded-p3".into(),
+            nikon_d850(),
+            SourceKind::Raw,
+            graded.clone(),
+            DisplaySpace::DisplayP3,
+            None,
+        ),
+        (
+            "xtrans-dark".into(),
+            fujifilm_xt4(),
+            SourceKind::Raw,
+            dark,
+            DisplaySpace::Srgb,
+            None,
+        ),
+        (
+            "heic-default".into(),
+            heic(),
+            SourceKind::Developed,
+            EditParams::default(),
+            DisplaySpace::DisplayP3,
+            None,
+        ),
+        (
+            "heic-graded".into(),
+            heic(),
+            SourceKind::Developed,
+            phone,
+            DisplaySpace::Srgb,
+            None,
+        ),
+        (
+            "lens-zv1".into(),
+            nikon_d850(),
+            SourceKind::Raw,
+            lens,
+            DisplaySpace::Srgb,
+            Some(zv1()),
+        ),
+        (
+            "masks".into(),
+            nikon_d850(),
+            SourceKind::Raw,
+            masked,
+            DisplaySpace::Srgb,
+            None,
+        ),
+        (
+            "layers".into(),
+            nikon_d850(),
+            SourceKind::Raw,
+            layered.clone(),
+            DisplaySpace::Srgb,
+            None,
+        ),
+        (
+            "heic-layers".into(),
+            heic(),
+            SourceKind::Developed,
+            phone_layered,
+            DisplaySpace::DisplayP3,
+            None,
+        ),
+        (
+            "film".into(),
+            nikon_d850(),
+            SourceKind::Raw,
+            graded_film,
+            DisplaySpace::Srgb,
+            None,
+        ),
+        (
+            "film-layers".into(),
+            nikon_d850(),
+            SourceKind::Raw,
+            layered_film,
+            DisplaySpace::DisplayP3,
+            None,
+        ),
+        (
+            "mono-red".into(),
+            nikon_d850(),
+            SourceKind::Raw,
+            graded_mono,
+            DisplaySpace::Srgb,
+            None,
+        ),
+        (
+            "mono-ortho-layers".into(),
+            nikon_d850(),
+            SourceKind::Raw,
+            layered_mono,
+            DisplaySpace::Srgb,
+            None,
+        ),
+        (
+            "grain-mono".into(),
+            nikon_d850(),
+            SourceKind::Raw,
+            grain_mono,
+            DisplaySpace::Srgb,
+            None,
+        ),
+        (
+            "grain-film".into(),
+            nikon_d850(),
+            SourceKind::Raw,
+            grain_film,
+            DisplaySpace::Srgb,
+            None,
+        ),
+        (
+            "grain-heic".into(),
+            heic(),
+            SourceKind::Developed,
+            grain_heic,
+            DisplaySpace::DisplayP3,
+            None,
+        ),
+        (
+            "dev-acutance".into(),
+            nikon_d850(),
+            SourceKind::Raw,
+            dev_acutance,
+            DisplaySpace::Srgb,
+            None,
+        ),
+        (
+            "dev-staining-layers".into(),
+            nikon_d850(),
+            SourceKind::Raw,
+            dev_staining,
+            DisplaySpace::Srgb,
+            None,
+        ),
+        (
+            "dev-compensating".into(),
+            nikon_d850(),
+            SourceKind::Raw,
+            dev_compensating,
+            DisplaySpace::DisplayP3,
+            None,
+        ),
+        (
+            "stock-hp5".into(),
+            nikon_d850(),
+            SourceKind::Raw,
+            stock_hp5,
+            DisplaySpace::Srgb,
+            None,
+        ),
+        (
+            "stock-sfx-red".into(),
+            nikon_d850(),
+            SourceKind::Raw,
+            stock_sfx,
+            DisplaySpace::Srgb,
+            None,
+        ),
     ];
     // Colour film, spectrally: only where this machine has the two standards the profile is measured through.
     if slide_standards().is_some() {
         let stock = |e: &EditParams, amount: f64, light: &str| EditParams {
-            film: Some(sidecar_color::params::Film { amount, interlayer: 45.0, stock: "provia-100f".into(), light: light.into() }),
+            film: Some(sidecar_color::params::Film {
+                amount,
+                interlayer: 45.0,
+                stock: "provia-100f".into(),
+                light: light.into(),
+            }),
             ..e.clone()
         };
-        cases.push(("slide-provia".into(), nikon_d850(), SourceKind::Raw, stock(&graded, 100.0, "daylight"), DisplaySpace::Srgb, None));
-        cases.push(("slide-provia-mixed".into(), nikon_d850(), SourceKind::Raw, stock(&layered, 70.0, "tungsten"), DisplaySpace::DisplayP3, None));
+        cases.push((
+            "slide-provia".into(),
+            nikon_d850(),
+            SourceKind::Raw,
+            stock(&graded, 100.0, "daylight"),
+            DisplaySpace::Srgb,
+            None,
+        ));
+        cases.push((
+            "slide-provia-mixed".into(),
+            nikon_d850(),
+            SourceKind::Raw,
+            stock(&layered, 70.0, "tungsten"),
+            DisplaySpace::DisplayP3,
+            None,
+        ));
     }
     cases
 }
@@ -247,7 +571,10 @@ fn cases() -> Vec<Fixture> {
 /// The operator's copies of ISO 5-3's Status A and ISO 7589's sensitometric daylight, as
 /// `sidecar_worker::stocks` reads them. Neither is part of Sidecar, so a machine without them renders no
 /// spectral stock and runs no such parity case.
-fn slide_standards() -> Option<(sidecar_color::slide::Densitometer, [f64; sidecar_color::spectral::SAMPLES])> {
+fn slide_standards() -> Option<(
+    sidecar_color::slide::Densitometer,
+    [f64; sidecar_color::spectral::SAMPLES],
+)> {
     let read = |var: &str| std::fs::read_to_string(std::env::var(var).ok()?).ok();
     let meter = sidecar_color::slide::Densitometer::parse(&read("SIDECAR_STATUS_A")?).ok()?;
     let daylight = sidecar_color::slide::parse_spectrum(&read("SIDECAR_ISO_DAYLIGHT")?).ok()?;
@@ -268,14 +595,25 @@ pub fn fixtures(dir: &Path) -> Result<()> {
     for (name, camera, source, edit, display, profile) in cases() {
         let src = synthetic(&camera, 512, 256);
         let stock = slide_profile(&edit);
-        let packed = sidecar_color::params::pack_with(&edit, &camera, source, display, stock.as_ref());
+        let packed =
+            sidecar_color::params::pack_with(&edit, &camera, source, display, stock.as_ref());
         std::fs::write(dir.join(format!("{name}.src.f16")), src.to_f16_bytes())?;
         std::fs::write(dir.join(format!("{name}.uniform.bin")), &packed.uniform)?;
-        std::fs::write(dir.join(format!("{name}.lut.f32")), bytemuck::cast_slice(&packed.lut))?;
+        std::fs::write(
+            dir.join(format!("{name}.lut.f32")),
+            bytemuck::cast_slice(&packed.lut),
+        )?;
         let lens = match (&profile, &edit.lens) {
             (Some(p), Some(l)) => {
                 let e = sidecar_color::lens::effective(p, l, src.width as f64 / src.height as f64);
-                let u = sidecar_color::lens::pack(&e, p.center, [src.width, src.height], 0, [0.0; 2], [0.0; 2]);
+                let u = sidecar_color::lens::pack(
+                    &e,
+                    p.center,
+                    [src.width, src.height],
+                    0,
+                    [0.0; 2],
+                    [0.0; 2],
+                );
                 std::fs::write(dir.join(format!("{name}.lens.bin")), bytemuck::bytes_of(&u))?;
                 true
             }
@@ -283,42 +621,88 @@ pub fn fixtures(dir: &Path) -> Result<()> {
         };
         let mono = !packed.mono_lut.is_empty();
         if mono {
-            std::fs::write(dir.join(format!("{name}.mono.f32")), bytemuck::cast_slice(&packed.mono_lut))?;
+            std::fs::write(
+                dir.join(format!("{name}.mono.f32")),
+                bytemuck::cast_slice(&packed.mono_lut),
+            )?;
         }
         let slide = !packed.slide_exposure.is_empty();
         if let (true, Some(stock)) = (slide, &stock) {
-            std::fs::write(dir.join(format!("{name}.slide_exposure.f32")), bytemuck::cast_slice(&packed.slide_exposure))?;
-            std::fs::write(dir.join(format!("{name}.slide_response.f32")), bytemuck::cast_slice(&stock.response))?;
+            std::fs::write(
+                dir.join(format!("{name}.slide_exposure.f32")),
+                bytemuck::cast_slice(&packed.slide_exposure),
+            )?;
+            std::fs::write(
+                dir.join(format!("{name}.slide_response.f32")),
+                bytemuck::cast_slice(&stock.response),
+            )?;
         }
         let masks = edit.masks.len().min(2) as u32;
         if masks > 0 {
             for (i, m) in synthetic_masks().iter().take(masks as usize).enumerate() {
                 std::fs::write(dir.join(format!("{name}.mask{i}.u8")), m)?;
             }
-            std::fs::write(dir.join(format!("{name}.masks.bin")), bytemuck::bytes_of(&packed.masks))?;
-            std::fs::write(dir.join(format!("{name}.curves.f32")), bytemuck::cast_slice(&packed.mask_curves))?;
+            std::fs::write(
+                dir.join(format!("{name}.masks.bin")),
+                bytemuck::bytes_of(&packed.masks),
+            )?;
+            std::fs::write(
+                dir.join(format!("{name}.curves.f32")),
+                bytemuck::cast_slice(&packed.mask_curves),
+            )?;
         }
-        println!("{name}: white balance {:.0} K, tint {:+.1}{}{}", packed.temperature_k, packed.tint, if lens { ", lens pass" } else { "" }, if masks > 0 { format!(", {masks} masks") } else { String::new() });
-        index.push(Case { name, width: src.width, height: src.height, lens, masks, mask_size: if masks > 0 { MASK_SIZE } else { [0; 2] }, mono, slide });
+        println!(
+            "{name}: white balance {:.0} K, tint {:+.1}{}{}",
+            packed.temperature_k,
+            packed.tint,
+            if lens { ", lens pass" } else { "" },
+            if masks > 0 {
+                format!(", {masks} masks")
+            } else {
+                String::new()
+            }
+        );
+        index.push(Case {
+            name,
+            width: src.width,
+            height: src.height,
+            lens,
+            masks,
+            mask_size: if masks > 0 { MASK_SIZE } else { [0; 2] },
+            mono,
+            slide,
+        });
     }
     std::fs::write(dir.join("index.json"), serde_json::to_vec_pretty(&index)?)?;
     Ok(())
 }
 
 fn load_index(dir: &Path) -> Result<Vec<Case>> {
-    Ok(serde_json::from_slice(&std::fs::read(dir.join("index.json")).context("index.json — run `parity fixtures` first")?)?)
+    Ok(serde_json::from_slice(
+        &std::fs::read(dir.join("index.json"))
+            .context("index.json — run `parity fixtures` first")?,
+    )?)
 }
 
 pub fn native(dir: &Path, out: &Path) -> Result<()> {
     std::fs::create_dir_all(out)?;
     let gpu = Gpu::new_headless()?;
-    println!("native adapter: {} ({:?})", gpu.adapter_info.name, gpu.adapter_info.backend);
+    println!(
+        "native adapter: {} ({:?})",
+        gpu.adapter_info.name, gpu.adapter_info.backend
+    );
     let pass = DevelopPass::new(&gpu)?;
     let lens_pass = sidecar_engine::lens::LensPass::new(&gpu)?;
     for case in load_index(dir)? {
-        let src = RgbaF32::from_f16_bytes(case.width, case.height, &std::fs::read(dir.join(format!("{}.src.f16", case.name)))?);
+        let src = RgbaF32::from_f16_bytes(
+            case.width,
+            case.height,
+            &std::fs::read(dir.join(format!("{}.src.f16", case.name)))?,
+        );
         let uniform = std::fs::read(dir.join(format!("{}.uniform.bin", case.name)))?;
-        let lut: Vec<f32> = bytemuck::cast_slice(&std::fs::read(dir.join(format!("{}.lut.f32", case.name)))?).to_vec();
+        let lut: Vec<f32> =
+            bytemuck::cast_slice(&std::fs::read(dir.join(format!("{}.lut.f32", case.name)))?)
+                .to_vec();
         let mut tex = sidecar_engine::upload_rgba16(&gpu, &src);
         if case.lens {
             let bytes = std::fs::read(dir.join(format!("{}.lens.bin", case.name)))?;
@@ -328,20 +712,41 @@ pub fn native(dir: &Path, out: &Path) -> Result<()> {
         let mut mask_textures = Vec::new();
         for i in 0..case.masks {
             let bytes = std::fs::read(dir.join(format!("{}.mask{i}.u8", case.name)))?;
-            let img = RgbaF32 { width: case.mask_size[0], height: case.mask_size[1], data: bytes.iter().flat_map(|&v| [v as f32 / 255.0; 4]).collect() };
+            let img = RgbaF32 {
+                width: case.mask_size[0],
+                height: case.mask_size[1],
+                data: bytes.iter().flat_map(|&v| [v as f32 / 255.0; 4]).collect(),
+            };
             mask_textures.push(Some(sidecar_engine::upload_rgba16(&gpu, &img)));
         }
-        let curves: Vec<f32> = if case.masks > 0 { bytemuck::cast_slice(&std::fs::read(dir.join(format!("{}.curves.f32", case.name)))?).to_vec() } else { Vec::new() };
-        let mono: Vec<f32> = if case.mono { bytemuck::cast_slice(&std::fs::read(dir.join(format!("{}.mono.f32", case.name)))?).to_vec() } else { Vec::new() };
+        let curves: Vec<f32> = if case.masks > 0 {
+            bytemuck::cast_slice(&std::fs::read(
+                dir.join(format!("{}.curves.f32", case.name)),
+            )?)
+            .to_vec()
+        } else {
+            Vec::new()
+        };
+        let mono: Vec<f32> = if case.mono {
+            bytemuck::cast_slice(&std::fs::read(dir.join(format!("{}.mono.f32", case.name)))?)
+                .to_vec()
+        } else {
+            Vec::new()
+        };
         let table = |what: &str| -> Result<Vec<f32>> {
             Ok(match case.slide {
-                true => bytemuck::cast_slice(&std::fs::read(dir.join(format!("{}.slide_{what}.f32", case.name)))?).to_vec(),
+                true => bytemuck::cast_slice(&std::fs::read(
+                    dir.join(format!("{}.slide_{what}.f32", case.name)),
+                )?)
+                .to_vec(),
                 false => Vec::new(),
             })
         };
         let (slide_exposure, slide_response) = (table("exposure")?, table("response")?);
         let masks = if case.masks > 0 {
-            let params: sidecar_color::params::MaskParams = bytemuck::pod_read_unaligned(&std::fs::read(dir.join(format!("{}.masks.bin", case.name)))?);
+            let params: sidecar_color::params::MaskParams = bytemuck::pod_read_unaligned(
+                &std::fs::read(dir.join(format!("{}.masks.bin", case.name)))?,
+            );
             sidecar_engine::Masks {
                 params,
                 textures: mask_textures.iter().map(Option::as_ref).collect(),
@@ -352,16 +757,30 @@ pub fn native(dir: &Path, out: &Path) -> Result<()> {
                 slide_response: &slide_response,
             }
         } else {
-            sidecar_engine::Masks { mono: &mono, slide_exposure: &slide_exposure, slide_response: &slide_response, ..sidecar_engine::Masks::none() }
+            sidecar_engine::Masks {
+                mono: &mono,
+                slide_exposure: &slide_exposure,
+                slide_response: &slide_response,
+                ..sidecar_engine::Masks::none()
+            }
         };
-        let img = sidecar_engine::read_rgba16(&gpu, &pass.render(&gpu, &tex, &uniform, &lut, &masks)?)?;
-        std::fs::write(out.join(format!("{}.native.f16", case.name)), img.to_f16_bytes())?;
+        let img =
+            sidecar_engine::read_rgba16(&gpu, &pass.render(&gpu, &tex, &uniform, &lut, &masks)?)?;
+        std::fs::write(
+            out.join(format!("{}.native.f16", case.name)),
+            img.to_f16_bytes(),
+        )?;
     }
     Ok(())
 }
 
 fn lab(p: &[f32]) -> Lab {
-    LinSrgb::new(p[0].clamp(0.0, 1.0), p[1].clamp(0.0, 1.0), p[2].clamp(0.0, 1.0)).into_color()
+    LinSrgb::new(
+        p[0].clamp(0.0, 1.0),
+        p[1].clamp(0.0, 1.0),
+        p[2].clamp(0.0, 1.0),
+    )
+    .into_color()
 }
 
 pub fn compare(dir: &Path, out: &Path) -> Result<()> {
@@ -369,17 +788,30 @@ pub fn compare(dir: &Path, out: &Path) -> Result<()> {
     for case in load_index(dir)? {
         let read = |kind: &str| -> Result<RgbaF32> {
             let path = out.join(format!("{}.{kind}.f16", case.name));
-            Ok(RgbaF32::from_f16_bytes(case.width, case.height, &std::fs::read(&path).with_context(|| path.display().to_string())?))
+            Ok(RgbaF32::from_f16_bytes(
+                case.width,
+                case.height,
+                &std::fs::read(&path).with_context(|| path.display().to_string())?,
+            ))
         };
         let (a, b) = (read("native")?, read("browser")?);
-        let mut de: Vec<f32> = a.data.chunks(4).zip(b.data.chunks(4)).map(|(p, q)| lab(p).difference(lab(q))).collect();
+        let mut de: Vec<f32> = a
+            .data
+            .chunks(4)
+            .zip(b.data.chunks(4))
+            .map(|(p, q)| lab(p).difference(lab(q)))
+            .collect();
         de.sort_by(f32::total_cmp);
         let mean = de.iter().sum::<f32>() / de.len() as f32;
         let p99 = de[(de.len() as f32 * 0.99) as usize];
         let max = *de.last().unwrap();
         let ok = mean <= MEAN_LIMIT && p99 <= P99_LIMIT;
         failed |= !ok;
-        println!("{:<14} mean ΔE {mean:.4}  p99 {p99:.4}  max {max:.4}  {}", case.name, if ok { "pass" } else { "FAIL" });
+        println!(
+            "{:<14} mean ΔE {mean:.4}  p99 {p99:.4}  max {max:.4}  {}",
+            case.name,
+            if ok { "pass" } else { "FAIL" }
+        );
     }
     if failed {
         bail!("parity outside limits (mean ≤ {MEAN_LIMIT}, p99 ≤ {P99_LIMIT})");

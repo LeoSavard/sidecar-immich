@@ -30,7 +30,12 @@ pub struct Curve(pub Vec<[f64; 2]>);
 impl Curve {
     /// A curve sampled from a function at `n` evenly spaced radii over `0 ..= r_max`.
     pub fn sample(n: usize, r_max: f64, f: impl Fn(f64) -> f64) -> Self {
-        Curve((0..n).map(|i| i as f64 / (n - 1) as f64 * r_max).map(|r| [r, f(r)]).collect())
+        Curve(
+            (0..n)
+                .map(|i| i as f64 / (n - 1) as f64 * r_max)
+                .map(|r| [r, f(r)])
+                .collect(),
+        )
     }
 
     pub fn eval(&self, r: f64) -> f64 {
@@ -114,7 +119,11 @@ impl Effective {
 /// Apply the edit's strengths to a profile. `aspect` is width ÷ height of the unoriented image, which sets
 /// where its edges are for the zoom search.
 pub fn effective(profile: &LensProfile, lens: &Lens, aspect: f64) -> Effective {
-    let (sd, sc, sv) = (strength(lens.distortion), strength(lens.lateral_ca), strength(lens.vignetting));
+    let (sd, sc, sv) = (
+        strength(lens.distortion),
+        strength(lens.lateral_ca),
+        strength(lens.vignetting),
+    );
     let mut flags = 0;
     let mut knots = [[1.0; 4]; KNOTS];
     for (i, k) in knots.iter_mut().enumerate() {
@@ -124,8 +133,14 @@ pub fn effective(profile: &LensProfile, lens: &Lens, aspect: f64) -> Effective {
             flags |= DISTORTION;
         }
         if sc > 0.0 && (profile.ca_red.is_some() || profile.ca_blue.is_some()) {
-            k[1] = profile.ca_red.as_ref().map_or(1.0, |c| 1.0 + sc * (c.eval(r) - 1.0));
-            k[2] = profile.ca_blue.as_ref().map_or(1.0, |c| 1.0 + sc * (c.eval(r) - 1.0));
+            k[1] = profile
+                .ca_red
+                .as_ref()
+                .map_or(1.0, |c| 1.0 + sc * (c.eval(r) - 1.0));
+            k[2] = profile
+                .ca_blue
+                .as_ref()
+                .map_or(1.0, |c| 1.0 + sc * (c.eval(r) - 1.0));
             flags |= CHROMATIC;
         }
         if let Some(c) = profile.vignetting.as_ref().filter(|_| sv > 0.0) {
@@ -134,7 +149,11 @@ pub fn effective(profile: &LensProfile, lens: &Lens, aspect: f64) -> Effective {
             flags |= VIGNETTING;
         }
     }
-    let mut e = Effective { knots, flags, zoom: 1.0 };
+    let mut e = Effective {
+        knots,
+        flags,
+        zoom: 1.0,
+    };
     if flags & (DISTORTION | CHROMATIC) != 0 {
         e.zoom = fill_zoom(&e, profile.center, aspect);
     }
@@ -151,7 +170,12 @@ fn fill_zoom(e: &Effective, center: [f64; 2], aspect: f64) -> f64 {
     let hd = (aspect * aspect + 1.0).sqrt() / 2.0;
     let (w, h) = (aspect / hd, 1.0 / hd);
     let c = [(center[0] - 0.5) * w, (center[1] - 0.5) * h];
-    let (x0, x1, y0, y1) = (-w / 2.0 - c[0], w / 2.0 - c[0], -h / 2.0 - c[1], h / 2.0 - c[1]);
+    let (x0, x1, y0, y1) = (
+        -w / 2.0 - c[0],
+        w / 2.0 - c[0],
+        -h / 2.0 - c[1],
+        h / 2.0 - c[1],
+    );
     let boundary: Vec<[f64; 2]> = (0..=64)
         .flat_map(|i| {
             let t = i as f64 / 64.0;
@@ -213,7 +237,14 @@ pub fn oriented_center(c: [f64; 2], flip: i32) -> [f64; 2] {
 /// and orientation, `flip` the orientation applied to reach it from the sensor's; `out_offset` and
 /// `in_offset` place the output and input textures within that frame (zero for a whole image; a loupe tile
 /// and the source crop it reads set them).
-pub fn pack(e: &Effective, center: [f64; 2], frame: [u32; 2], flip: i32, out_offset: [f64; 2], in_offset: [f64; 2]) -> LensParams {
+pub fn pack(
+    e: &Effective,
+    center: [f64; 2],
+    frame: [u32; 2],
+    flip: i32,
+    out_offset: [f64; 2],
+    in_offset: [f64; 2],
+) -> LensParams {
     let c = oriented_center(center, flip);
     let (w, h) = (frame[0] as f64, frame[1] as f64);
     LensParams {
@@ -248,7 +279,12 @@ pub fn source_bounds(p: &LensParams, rect: (u32, u32, u32, u32)) -> (f64, f64, f
     let steps = 64;
     for i in 0..=steps {
         let t = i as f64 / steps as f64;
-        for q in [[x + w * t, y], [x + w * t, y + h], [x, y + h * t], [x + w, y + h * t]] {
+        for q in [
+            [x + w * t, y],
+            [x + w * t, y + h],
+            [x, y + h * t],
+            [x + w, y + h * t],
+        ] {
             let u = [(q[0] - c[0]) / hd * zoom, (q[1] - c[1]) / hd * zoom];
             let k = at((u[0] * u[0] + u[1] * u[1]).sqrt());
             for s in [k[0], k[0] * k[1], k[0] * k[2]] {
@@ -271,7 +307,13 @@ mod tests {
             center: [0.5, 0.5],
             // A ZV-1 at 9.4 mm, from its own table (see sidecar_raw::lens).
             distortion: Some(Curve(
-                [1265, 1218, 1083, 860, 562, 209, -179, -580, -972, -1353, -1725].iter().enumerate().map(|(i, &v)| [i as f64 / 10.0, 1.0 + v as f64 / 16384.0]).collect(),
+                [
+                    1265, 1218, 1083, 860, 562, 209, -179, -580, -972, -1353, -1725,
+                ]
+                .iter()
+                .enumerate()
+                .map(|(i, &v)| [i as f64 / 10.0, 1.0 + v as f64 / 16384.0])
+                .collect(),
             )),
             ca_red: None,
             ca_blue: None,
@@ -293,7 +335,12 @@ mod tests {
     #[test]
     fn no_profile_or_zero_strength_is_the_identity() {
         let mut p = barrel();
-        let off = Lens { distortion: 0.0, lateral_ca: 0.0, vignetting: 0.0, ..Default::default() };
+        let off = Lens {
+            distortion: 0.0,
+            lateral_ca: 0.0,
+            vignetting: 0.0,
+            ..Default::default()
+        };
         let e = effective(&p, &off, 1.5);
         assert_eq!((e.flags, e.zoom), (0, 1.0));
         assert!(e.knots.iter().all(|k| *k == [1.0; 4]));
@@ -314,13 +361,25 @@ mod tests {
         let mut touches = false;
         for i in 0..=200 {
             let t = i as f64 / 200.0;
-            for u in [[w * (t - 0.5), -h / 2.0], [w * (t - 0.5), h / 2.0], [-w / 2.0, h * (t - 0.5)], [w / 2.0, h * (t - 0.5)]] {
+            for u in [
+                [w * (t - 0.5), -h / 2.0],
+                [w * (t - 0.5), h / 2.0],
+                [-w / 2.0, h * (t - 0.5)],
+                [w / 2.0, h * (t - 0.5)],
+            ] {
                 let p = e.source([u[0] * e.zoom, u[1] * e.zoom]);
-                assert!(p[0].abs() <= w / 2.0 + 1e-3 && p[1].abs() <= h / 2.0 + 1e-3, "{u:?} reads {p:?}");
-                touches |= (p[0].abs() - w / 2.0).abs() < 2e-3 || (p[1].abs() - h / 2.0).abs() < 2e-3;
+                assert!(
+                    p[0].abs() <= w / 2.0 + 1e-3 && p[1].abs() <= h / 2.0 + 1e-3,
+                    "{u:?} reads {p:?}"
+                );
+                touches |=
+                    (p[0].abs() - w / 2.0).abs() < 2e-3 || (p[1].abs() - h / 2.0).abs() < 2e-3;
             }
         }
-        assert!(touches, "the widest view should reach the photo's edge somewhere");
+        assert!(
+            touches,
+            "the widest view should reach the photo's edge somewhere"
+        );
     }
 
     #[test]
@@ -328,7 +387,15 @@ mod tests {
         let mut p = barrel();
         p.vignetting = Some(Curve(vec![[0.0, 1.0], [1.0, 4.0]]));
         let full = effective(&p, &Lens::default(), 1.5);
-        let half = effective(&p, &Lens { distortion: 50.0, vignetting: 50.0, ..Default::default() }, 1.5);
+        let half = effective(
+            &p,
+            &Lens {
+                distortion: 50.0,
+                vignetting: 50.0,
+                ..Default::default()
+            },
+            1.5,
+        );
         let i = KNOTS * 2 / 3;
         assert!(((half.knots[i][0] - 1.0) - (full.knots[i][0] - 1.0) / 2.0).abs() < 1e-12);
         assert!((half.knots[i][3].log2() - full.knots[i][3].log2() / 2.0).abs() < 1e-12);
@@ -348,15 +415,36 @@ mod tests {
     fn uniform_layout_matches_wgsl() {
         let src = sidecar_shaders::compose("lens/params.wgsl").unwrap();
         let module = naga::front::wgsl::parse_str(&src).unwrap();
-        let (_, ty) = module.types.iter().find(|(_, t)| t.name.as_deref() == Some("LensParams")).unwrap();
-        let naga::TypeInner::Struct { members, span } = &ty.inner else { panic!("not a struct") };
+        let (_, ty) = module
+            .types
+            .iter()
+            .find(|(_, t)| t.name.as_deref() == Some("LensParams"))
+            .unwrap();
+        let naga::TypeInner::Struct { members, span } = &ty.inner else {
+            panic!("not a struct")
+        };
         assert_eq!(*span as usize, std::mem::size_of::<LensParams>());
         assert_eq!(std::mem::size_of::<LensParams>(), 1072);
-        let off = |n: &str| members.iter().find(|m| m.name.as_deref() == Some(n)).unwrap().offset as usize;
+        let off = |n: &str| {
+            members
+                .iter()
+                .find(|m| m.name.as_deref() == Some(n))
+                .unwrap()
+                .offset as usize
+        };
         assert_eq!(off("center"), std::mem::offset_of!(LensParams, center));
-        assert_eq!(off("out_offset"), std::mem::offset_of!(LensParams, out_offset));
-        assert_eq!(off("in_offset"), std::mem::offset_of!(LensParams, in_offset));
-        assert_eq!(off("half_diag"), std::mem::offset_of!(LensParams, half_diag));
+        assert_eq!(
+            off("out_offset"),
+            std::mem::offset_of!(LensParams, out_offset)
+        );
+        assert_eq!(
+            off("in_offset"),
+            std::mem::offset_of!(LensParams, in_offset)
+        );
+        assert_eq!(
+            off("half_diag"),
+            std::mem::offset_of!(LensParams, half_diag)
+        );
         assert_eq!(off("zoom"), std::mem::offset_of!(LensParams, zoom));
         assert_eq!(off("r_scale"), std::mem::offset_of!(LensParams, r_scale));
         assert_eq!(off("flags"), std::mem::offset_of!(LensParams, flags));

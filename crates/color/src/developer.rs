@@ -33,7 +33,13 @@ pub struct Developer {
 /// The developers by id, as `Monochrome.developer` names them. An id this version doesn't know is the standard
 /// developer: the negative still develops, as any developer would develop it.
 pub fn developer(id: &str) -> Developer {
-    let d = |adjacency, reach_mm, compensation, grain, stain| Developer { adjacency, reach_mm, compensation, grain, stain };
+    let d = |adjacency, reach_mm, compensation, grain, stain| Developer {
+        adjacency,
+        reach_mm,
+        compensation,
+        grain,
+        stain,
+    };
     match id {
         // A solvent fine-grain developer: finer grain, no edge effects.
         "fine-grain" => d(0.0, 0.1, 0.0, 0.75, 0.0),

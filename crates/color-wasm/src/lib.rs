@@ -96,27 +96,41 @@ fn respond(result: Result<Vec<u8>, String>) -> *const u8 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sc_pack(ptr: *const u8, len: usize) -> *const u8 {
     let input = unsafe { std::slice::from_raw_parts(ptr, len) };
-    respond(serde_json::from_slice::<Request>(input).map_err(|e| e.to_string()).map(|req| {
-        let profile = req.slide_profile.map(|h| sidecar_color::slide::SlideProfile::header(h.offsets, h.scale, h.side));
-        let p = sidecar_color::params::pack_with(&req.edit, &req.camera, req.source, req.display, profile.as_ref());
-        let mut out = Vec::with_capacity(p.uniform.len() + p.lut.len() * 4 + 16);
-        out.extend_from_slice(&p.uniform);
-        p.lut.iter().for_each(|v| out.extend_from_slice(&v.to_le_bytes()));
-        out.extend_from_slice(&p.temperature_k.to_le_bytes());
-        out.extend_from_slice(&p.tint.to_le_bytes());
-        out.extend_from_slice(bytemuck::bytes_of(&p.masks));
-        out.extend_from_slice(bytemuck::cast_slice(&p.mask_curves));
-        // Two tables over the colour cube follow, at most one of them non-empty: black and white's exposures,
-        // and a spectral stock's layer responses — the latter built here from the sheet's sensitivities and the
-        // scene's light, all public (its *response* table is not in this stream; the browser already has it).
-        // Each is preceded by its length in floats, so the reader never has to guess from the uniform or from
-        // the sizes.
-        out.extend_from_slice(&(p.mono_lut.len() as u32).to_le_bytes());
-        out.extend_from_slice(bytemuck::cast_slice(&p.mono_lut));
-        out.extend_from_slice(&(p.slide_exposure.len() as u32).to_le_bytes());
-        out.extend_from_slice(bytemuck::cast_slice(&p.slide_exposure));
-        out
-    }))
+    respond(
+        serde_json::from_slice::<Request>(input)
+            .map_err(|e| e.to_string())
+            .map(|req| {
+                let profile = req.slide_profile.map(|h| {
+                    sidecar_color::slide::SlideProfile::header(h.offsets, h.scale, h.side)
+                });
+                let p = sidecar_color::params::pack_with(
+                    &req.edit,
+                    &req.camera,
+                    req.source,
+                    req.display,
+                    profile.as_ref(),
+                );
+                let mut out = Vec::with_capacity(p.uniform.len() + p.lut.len() * 4 + 16);
+                out.extend_from_slice(&p.uniform);
+                p.lut
+                    .iter()
+                    .for_each(|v| out.extend_from_slice(&v.to_le_bytes()));
+                out.extend_from_slice(&p.temperature_k.to_le_bytes());
+                out.extend_from_slice(&p.tint.to_le_bytes());
+                out.extend_from_slice(bytemuck::bytes_of(&p.masks));
+                out.extend_from_slice(bytemuck::cast_slice(&p.mask_curves));
+                // Two tables over the colour cube follow, at most one of them non-empty: black and white's exposures,
+                // and a spectral stock's layer responses — the latter built here from the sheet's sensitivities and the
+                // scene's light, all public (its *response* table is not in this stream; the browser already has it).
+                // Each is preceded by its length in floats, so the reader never has to guess from the uniform or from
+                // the sizes.
+                out.extend_from_slice(&(p.mono_lut.len() as u32).to_le_bytes());
+                out.extend_from_slice(bytemuck::cast_slice(&p.mono_lut));
+                out.extend_from_slice(&(p.slide_exposure.len() as u32).to_le_bytes());
+                out.extend_from_slice(bytemuck::cast_slice(&p.slide_exposure));
+                out
+            }),
+    )
 }
 
 #[derive(Deserialize)]
@@ -136,9 +150,14 @@ struct GeometryRequest {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sc_geometry(ptr: *const u8, len: usize) -> *const u8 {
     let input = unsafe { std::slice::from_raw_parts(ptr, len) };
-    respond(serde_json::from_slice::<GeometryRequest>(input).map_err(|e| e.to_string()).and_then(|req| {
-        serde_json::to_vec(&sidecar_color::geometry::frame(&req.geometry, req.size)).map_err(|e| e.to_string())
-    }))
+    respond(
+        serde_json::from_slice::<GeometryRequest>(input)
+            .map_err(|e| e.to_string())
+            .and_then(|req| {
+                serde_json::to_vec(&sidecar_color::geometry::frame(&req.geometry, req.size))
+                    .map_err(|e| e.to_string())
+            }),
+    )
 }
 
 /// `{ geometry, before, size }` → the geometry with its crop fitted after the change (`geometry::fit`), as JSON.
@@ -148,11 +167,16 @@ pub unsafe extern "C" fn sc_geometry(ptr: *const u8, len: usize) -> *const u8 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sc_geometry_fit(ptr: *const u8, len: usize) -> *const u8 {
     let input = unsafe { std::slice::from_raw_parts(ptr, len) };
-    respond(serde_json::from_slice::<GeometryRequest>(input).map_err(|e| e.to_string()).and_then(|req| {
-        let a = req.size[0] as f64 / req.size[1].max(1) as f64;
-        let before = req.before.unwrap_or_default();
-        serde_json::to_vec(&sidecar_color::geometry::fit(&req.geometry, &before, a)).map_err(|e| e.to_string())
-    }))
+    respond(
+        serde_json::from_slice::<GeometryRequest>(input)
+            .map_err(|e| e.to_string())
+            .and_then(|req| {
+                let a = req.size[0] as f64 / req.size[1].max(1) as f64;
+                let before = req.before.unwrap_or_default();
+                serde_json::to_vec(&sidecar_color::geometry::fit(&req.geometry, &before, a))
+                    .map_err(|e| e.to_string())
+            }),
+    )
 }
 
 #[derive(Deserialize)]
@@ -175,14 +199,25 @@ struct LensRequest {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sc_pack_lens(ptr: *const u8, len: usize) -> *const u8 {
     let input = unsafe { std::slice::from_raw_parts(ptr, len) };
-    respond(serde_json::from_slice::<LensRequest>(input).map_err(|e| e.to_string()).map(|req| {
-        let e = sidecar_color::lens::effective(&req.profile, &req.lens, req.sensor_aspect);
-        if e.flags == 0 {
-            return Vec::new();
-        }
-        let p = sidecar_color::lens::pack(&e, req.profile.center, req.frame, req.flip, [0.0; 2], [0.0; 2]);
-        bytemuck::bytes_of(&p).to_vec()
-    }))
+    respond(
+        serde_json::from_slice::<LensRequest>(input)
+            .map_err(|e| e.to_string())
+            .map(|req| {
+                let e = sidecar_color::lens::effective(&req.profile, &req.lens, req.sensor_aspect);
+                if e.flags == 0 {
+                    return Vec::new();
+                }
+                let p = sidecar_color::lens::pack(
+                    &e,
+                    req.profile.center,
+                    req.frame,
+                    req.flip,
+                    [0.0; 2],
+                    [0.0; 2],
+                );
+                bytemuck::bytes_of(&p).to_vec()
+            }),
+    )
 }
 
 #[derive(Deserialize, Default)]
@@ -206,12 +241,22 @@ struct ToneCurveRequest {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sc_tone_curve_lut(ptr: *const u8, len: usize) -> *const u8 {
     let input = unsafe { std::slice::from_raw_parts(ptr, len) };
-    respond(serde_json::from_slice::<ToneCurveRequest>(input).map_err(|e| e.to_string()).map(|req| {
-        let lut = sidecar_color::spline::tone_curve_lut(&req.curve, req.highlights, req.shadows, sidecar_color::spline::LUT_SIZE);
-        let mut out = Vec::with_capacity(lut.len() * 4);
-        lut.iter().for_each(|v| out.extend_from_slice(&v.to_le_bytes()));
-        out
-    }))
+    respond(
+        serde_json::from_slice::<ToneCurveRequest>(input)
+            .map_err(|e| e.to_string())
+            .map(|req| {
+                let lut = sidecar_color::spline::tone_curve_lut(
+                    &req.curve,
+                    req.highlights,
+                    req.shadows,
+                    sidecar_color::spline::LUT_SIZE,
+                );
+                let mut out = Vec::with_capacity(lut.len() * 4);
+                lut.iter()
+                    .for_each(|v| out.extend_from_slice(&v.to_le_bytes()));
+                out
+            }),
+    )
 }
 
 #[derive(Deserialize)]
@@ -229,13 +274,19 @@ struct NeutralRequest {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sc_white_from_neutral(ptr: *const u8, len: usize) -> *const u8 {
     let input = unsafe { std::slice::from_raw_parts(ptr, len) };
-    respond(serde_json::from_slice::<NeutralRequest>(input).map_err(|e| e.to_string()).and_then(|req| {
-        if !req.neutral.iter().all(|v| v.is_finite() && *v > 0.0) {
-            return Err("the patch has a channel at zero".into());
-        }
-        let (t, tint) = sidecar_color::cct::xy_to_temp_tint(req.camera.neutral_xy(req.neutral));
-        serde_json::to_vec(&serde_json::json!({ "temperatureK": t, "tint": tint })).map_err(|e| e.to_string())
-    }))
+    respond(
+        serde_json::from_slice::<NeutralRequest>(input)
+            .map_err(|e| e.to_string())
+            .and_then(|req| {
+                if !req.neutral.iter().all(|v| v.is_finite() && *v > 0.0) {
+                    return Err("the patch has a channel at zero".into());
+                }
+                let (t, tint) =
+                    sidecar_color::cct::xy_to_temp_tint(req.camera.neutral_xy(req.neutral));
+                serde_json::to_vec(&serde_json::json!({ "temperatureK": t, "tint": tint }))
+                    .map_err(|e| e.to_string())
+            }),
+    )
 }
 
 #[derive(Deserialize)]
@@ -255,9 +306,15 @@ struct DepthRequest {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sc_pack_depth(ptr: *const u8, len: usize) -> *const u8 {
     let input = unsafe { std::slice::from_raw_parts(ptr, len) };
-    respond(serde_json::from_slice::<DepthRequest>(input).map_err(|e| e.to_string()).map(|req| {
-        sidecar_color::depth::pack(&req.edit, req.airlight, req.frame, [0.0; 2]).map(|p| bytemuck::bytes_of(&p).to_vec()).unwrap_or_default()
-    }))
+    respond(
+        serde_json::from_slice::<DepthRequest>(input)
+            .map_err(|e| e.to_string())
+            .map(|req| {
+                sidecar_color::depth::pack(&req.edit, req.airlight, req.frame, [0.0; 2])
+                    .map(|p| bytemuck::bytes_of(&p).to_vec())
+                    .unwrap_or_default()
+            }),
+    )
 }
 
 #[derive(Deserialize)]
@@ -273,7 +330,13 @@ struct EdgeRequest {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sc_mask_edge(ptr: *const u8, len: usize) -> *const u8 {
     let input = unsafe { std::slice::from_raw_parts(ptr, len) };
-    respond(serde_json::from_slice::<EdgeRequest>(input).map_err(|e| e.to_string()).and_then(|req| serde_json::to_vec(&req.edge.plan(req.size)).map_err(|e| e.to_string())))
+    respond(
+        serde_json::from_slice::<EdgeRequest>(input)
+            .map_err(|e| e.to_string())
+            .and_then(|req| {
+                serde_json::to_vec(&req.edge.plan(req.size)).map_err(|e| e.to_string())
+            }),
+    )
 }
 
 /// Default edit parameters as length-prefixed JSON, so the web app never duplicates them.

@@ -21,12 +21,18 @@ impl Monotone {
         if n < 2 {
             return None;
         }
-        let d: Vec<f64> = (0..n - 1).map(|k| (pts[k + 1][1] - pts[k][1]) / (pts[k + 1][0] - pts[k][0])).collect();
+        let d: Vec<f64> = (0..n - 1)
+            .map(|k| (pts[k + 1][1] - pts[k][1]) / (pts[k + 1][0] - pts[k][0]))
+            .collect();
         let mut m = vec![0.0; n];
         m[0] = d[0];
         m[n - 1] = d[n - 2];
         for k in 1..n - 1 {
-            m[k] = if d[k - 1] * d[k] <= 0.0 { 0.0 } else { (d[k - 1] + d[k]) / 2.0 };
+            m[k] = if d[k - 1] * d[k] <= 0.0 {
+                0.0
+            } else {
+                (d[k - 1] + d[k]) / 2.0
+            };
         }
         for k in 0..n - 1 {
             if d[k] == 0.0 {
@@ -53,18 +59,27 @@ impl Monotone {
         if x >= pts[n - 1][0] {
             return pts[n - 1][1];
         }
-        let k = pts.windows(2).position(|w| x < w[1][0]).expect("x is inside the points");
+        let k = pts
+            .windows(2)
+            .position(|w| x < w[1][0])
+            .expect("x is inside the points");
         let h = pts[k + 1][0] - pts[k][0];
         let t = (x - pts[k][0]) / h;
         let (t2, t3) = (t * t, t * t * t);
-        (2.0 * t3 - 3.0 * t2 + 1.0) * pts[k][1] + (t3 - 2.0 * t2 + t) * h * m[k] + (-2.0 * t3 + 3.0 * t2) * pts[k + 1][1] + (t3 - t2) * h * m[k + 1]
+        (2.0 * t3 - 3.0 * t2 + 1.0) * pts[k][1]
+            + (t3 - 2.0 * t2 + t) * h * m[k]
+            + (-2.0 * t3 + 3.0 * t2) * pts[k + 1][1]
+            + (t3 - t2) * h * m[k + 1]
     }
 }
 
 /// The tone curve's lookup table: `size` samples over 0…1 of the monotone cubic through `points` (clamped to
 /// the unit square), or the identity when there aren't two points.
 pub fn monotone_lut(points: &[[f64; 2]], size: usize) -> Vec<f32> {
-    let clamped: Vec<[f64; 2]> = points.iter().map(|p| [p[0].clamp(0.0, 1.0), p[1].clamp(0.0, 1.0)]).collect();
+    let clamped: Vec<[f64; 2]> = points
+        .iter()
+        .map(|p| [p[0].clamp(0.0, 1.0), p[1].clamp(0.0, 1.0)])
+        .collect();
     let curve = Monotone::new(&clamped);
     (0..size)
         .map(|i| {
@@ -143,7 +158,10 @@ mod tests {
     fn identity_and_monotone_s_curve() {
         let id = monotone_lut(&[], 5);
         assert_eq!(id, vec![0.0, 0.25, 0.5, 0.75, 1.0]);
-        let s = monotone_lut(&[[0.0, 0.0], [0.25, 0.15], [0.75, 0.9], [1.0, 1.0]], LUT_SIZE);
+        let s = monotone_lut(
+            &[[0.0, 0.0], [0.25, 0.15], [0.75, 0.9], [1.0, 1.0]],
+            LUT_SIZE,
+        );
         assert!(s.windows(2).all(|w| w[1] >= w[0]));
         assert!((s[LUT_SIZE / 4] - 0.15).abs() < 0.01);
     }
@@ -157,17 +175,36 @@ mod tests {
         for h in [-100.0, -60.0, 0.0, 60.0, 100.0] {
             for s in [-100.0, -60.0, 0.0, 60.0, 100.0] {
                 let lut = tone_curve_lut(&[], h, s, n);
-                assert!(lut[0].abs() < 1e-6, "highlights {h}, shadows {s}: black became {}", lut[0]);
-                assert!((lut[n - 1] - 1.0).abs() < 1e-6, "highlights {h}, shadows {s}: white became {}", lut[n - 1]);
+                assert!(
+                    lut[0].abs() < 1e-6,
+                    "highlights {h}, shadows {s}: black became {}",
+                    lut[0]
+                );
+                assert!(
+                    (lut[n - 1] - 1.0).abs() < 1e-6,
+                    "highlights {h}, shadows {s}: white became {}",
+                    lut[n - 1]
+                );
                 // Nor may they clip a band at either end flat, which is the same fault wearing a clamp.
-                assert!(lut[1] > lut[0] && lut[n - 1] > lut[n - 2], "highlights {h}, shadows {s}: an end is flat");
-                assert!(lut.windows(2).all(|w| w[1] >= w[0]), "highlights {h}, shadows {s}: not monotone");
+                assert!(
+                    lut[1] > lut[0] && lut[n - 1] > lut[n - 2],
+                    "highlights {h}, shadows {s}: an end is flat"
+                );
+                assert!(
+                    lut.windows(2).all(|w| w[1] >= w[0]),
+                    "highlights {h}, shadows {s}: not monotone"
+                );
             }
         }
         // The ends are pinned for a drawn curve too, not just the identity.
         let drawn = [[0.0, 0.0], [0.5, 0.42], [1.0, 1.0]];
         let lut = tone_curve_lut(&drawn, 100.0, -100.0, n);
-        assert!(lut[0].abs() < 1e-6 && (lut[n - 1] - 1.0).abs() < 1e-6, "a drawn curve's ends moved: {} {}", lut[0], lut[n - 1]);
+        assert!(
+            lut[0].abs() < 1e-6 && (lut[n - 1] - 1.0).abs() < 1e-6,
+            "a drawn curve's ends moved: {} {}",
+            lut[0],
+            lut[n - 1]
+        );
     }
 
     #[test]
@@ -176,7 +213,10 @@ mod tests {
         assert_eq!(highlight_weight(0.25), 0.0);
         assert_eq!(highlight_weight(0.75), 1.0);
         assert_eq!(highlight_weight(1.0), 1.0);
-        assert!((highlight_weight(0.5) - 0.5).abs() < 1e-9, "the midpoint is where the two are equal, not a seam");
+        assert!(
+            (highlight_weight(0.5) - 0.5).abs() < 1e-9,
+            "the midpoint is where the two are equal, not a seam"
+        );
         for x in [0.0, 0.1, 0.25, 0.4, 0.5, 0.6, 0.75, 0.9, 1.0] {
             let w = highlight_weight(x);
             assert!((0.0..=1.0).contains(&w));
@@ -191,19 +231,30 @@ mod tests {
         for v in [-100.0, -42.0, 0.0, 17.0, 100.0] {
             let lut = tone_curve_lut(&[], v, 0.0, LUT_SIZE);
             let expected = 0.75 + v / 100.0 * HIGHLIGHT_SHADOW_SCALE;
-            assert!((lut[(0.75 * (LUT_SIZE - 1) as f64).round() as usize] as f64 - expected).abs() < 1e-3, "highlights={v}");
+            assert!(
+                (lut[(0.75 * (LUT_SIZE - 1) as f64).round() as usize] as f64 - expected).abs()
+                    < 1e-3,
+                "highlights={v}"
+            );
         }
         for v in [-100.0, -42.0, 0.0, 17.0, 100.0] {
             let lut = tone_curve_lut(&[], 0.0, v, LUT_SIZE);
             let expected = 0.25 + v / 100.0 * HIGHLIGHT_SHADOW_SCALE;
-            assert!((lut[(0.25 * (LUT_SIZE - 1) as f64).round() as usize] as f64 - expected).abs() < 1e-3, "shadows={v}");
+            assert!(
+                (lut[(0.25 * (LUT_SIZE - 1) as f64).round() as usize] as f64 - expected).abs()
+                    < 1e-3,
+                "shadows={v}"
+            );
         }
     }
 
     #[test]
     fn zero_highlights_and_shadows_is_exactly_the_manual_curve() {
         let points = [[0.0, 0.0], [0.3, 0.2], [0.7, 0.85], [1.0, 1.0]];
-        assert_eq!(tone_curve_lut(&points, 0.0, 0.0, LUT_SIZE), monotone_lut(&points, LUT_SIZE));
+        assert_eq!(
+            tone_curve_lut(&points, 0.0, 0.0, LUT_SIZE),
+            monotone_lut(&points, LUT_SIZE)
+        );
     }
 
     #[test]

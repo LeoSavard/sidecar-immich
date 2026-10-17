@@ -51,7 +51,10 @@ impl RgbaF32 {
         if scale >= 1.0 {
             return self.clone();
         }
-        let (dw, dh) = (((self.width as f64 * scale).round() as u32).max(1), ((self.height as f64 * scale).round() as u32).max(1));
+        let (dw, dh) = (
+            ((self.width as f64 * scale).round() as u32).max(1),
+            ((self.height as f64 * scale).round() as u32).max(1),
+        );
         let (wx, wy) = (area_weights(self.width, dw), area_weights(self.height, dh));
         let sw = self.width as usize;
         let mut tmp = vec![0f32; dw as usize * self.height as usize * 4];
@@ -69,12 +72,17 @@ impl RgbaF32 {
             for &(s, w) in ws {
                 for x in 0..dw as usize {
                     for c in 0..4 {
-                        data[(y * dw as usize + x) * 4 + c] += tmp[(s * dw as usize + x) * 4 + c] * w;
+                        data[(y * dw as usize + x) * 4 + c] +=
+                            tmp[(s * dw as usize + x) * 4 + c] * w;
                     }
                 }
             }
         }
-        RgbaF32 { width: dw, height: dh, data }
+        RgbaF32 {
+            width: dw,
+            height: dh,
+            data,
+        }
     }
 
     /// Apply a LibRaw orientation. `flip` is a bit set — 4 transposes, 2 mirrors top to bottom, 1 mirrors
@@ -102,7 +110,11 @@ impl RgbaF32 {
                 data.extend_from_slice(&self.data[i..i + 4]);
             }
         }
-        RgbaF32 { width: nw as u32, height: nh as u32, data }
+        RgbaF32 {
+            width: nw as u32,
+            height: nh as u32,
+            data,
+        }
     }
 
     pub fn to_f16_bytes(&self) -> Vec<u8> {
@@ -112,7 +124,11 @@ impl RgbaF32 {
 
     pub fn from_f16_bytes(width: u32, height: u32, bytes: &[u8]) -> Self {
         let half: &[half::f16] = bytemuck::cast_slice(bytes);
-        Self { width, height, data: half.iter().map(|v| v.to_f32()).collect() }
+        Self {
+            width,
+            height,
+            data: half.iter().map(|v| v.to_f32()).collect(),
+        }
     }
 }
 
@@ -128,8 +144,17 @@ pub fn inverse_flip(flip: i32) -> i32 {
 
 /// Where a rectangle of the image `oriented(flip)` produces lies in the image before orientation, for a
 /// source of `sw` × `sh`. Both are `(x, y, width, height)` in pixels.
-pub fn source_rect(flip: i32, sw: u32, sh: u32, (x, y, w, h): (u32, u32, u32, u32)) -> (u32, u32, u32, u32) {
-    let (mut x, mut y, w, h) = if flip & 4 != 0 { (y, x, h, w) } else { (x, y, w, h) };
+pub fn source_rect(
+    flip: i32,
+    sw: u32,
+    sh: u32,
+    (x, y, w, h): (u32, u32, u32, u32),
+) -> (u32, u32, u32, u32) {
+    let (mut x, mut y, w, h) = if flip & 4 != 0 {
+        (y, x, h, w)
+    } else {
+        (x, y, w, h)
+    };
     if flip & 2 != 0 {
         y = sh - y - h;
     }
@@ -156,7 +181,10 @@ impl Mono {
         if scale >= 1.0 {
             return self.clone();
         }
-        let (dw, dh) = (((self.width as f64 * scale).round() as u32).max(1), ((self.height as f64 * scale).round() as u32).max(1));
+        let (dw, dh) = (
+            ((self.width as f64 * scale).round() as u32).max(1),
+            ((self.height as f64 * scale).round() as u32).max(1),
+        );
         let (wx, wy) = (area_weights(self.width, dw), area_weights(self.height, dh));
         let sw = self.width as usize;
         let mut tmp = vec![f32::NEG_INFINITY; dw as usize * self.height as usize];
@@ -177,12 +205,19 @@ impl Mono {
                 }
             }
         }
-        Mono { width: dw, height: dh, data }
+        Mono {
+            width: dw,
+            height: dh,
+            data,
+        }
     }
 
     /// Display-ready `r8unorm` bytes: clamp to 0…1 and round.
     pub fn to_r8_bytes(&self) -> Vec<u8> {
-        self.data.iter().map(|&v| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8).collect()
+        self.data
+            .iter()
+            .map(|&v| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8)
+            .collect()
     }
 }
 
@@ -193,7 +228,11 @@ pub fn upload_rgba16(gpu: &Gpu, img: &RgbaF32) -> wgpu::Texture {
         &gpu.queue,
         &wgpu::TextureDescriptor {
             label: Some("rgba16"),
-            size: wgpu::Extent3d { width: img.width, height: img.height, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: img.width,
+                height: img.height,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -210,12 +249,28 @@ pub fn upload_rgba16(gpu: &Gpu, img: &RgbaF32) -> wgpu::Texture {
 pub fn read_rgba16(gpu: &Gpu, tex: &wgpu::Texture) -> Result<RgbaF32> {
     let (w, h) = (tex.width(), tex.height());
     let bytes_per_row = (8 * w).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
-    let buf = gpu.device.create_buffer(&wgpu::BufferDescriptor { label: Some("readback"), size: (bytes_per_row * h) as u64, usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false });
+    let buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("readback"),
+        size: (bytes_per_row * h) as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
     let mut enc = gpu.device.create_command_encoder(&Default::default());
     enc.copy_texture_to_buffer(
         tex.as_image_copy(),
-        wgpu::TexelCopyBufferInfo { buffer: &buf, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(bytes_per_row), rows_per_image: Some(h) } },
-        wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buf,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(bytes_per_row),
+                rows_per_image: Some(h),
+            },
+        },
+        wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
     );
     gpu.queue.submit([enc.finish()]);
     let slice = buf.slice(..);
@@ -259,15 +314,25 @@ impl Gpu {
             let have = adapter.limits();
             let limits = wgpu::Limits {
                 max_texture_dimension_2d: have.max_texture_dimension_2d.min(16384),
-                max_storage_textures_per_shader_stage: have.max_storage_textures_per_shader_stage.min(8),
+                max_storage_textures_per_shader_stage: have
+                    .max_storage_textures_per_shader_stage
+                    .min(8),
                 max_buffer_size: have.max_buffer_size.min(u32::MAX as u64),
                 ..wgpu::Limits::default()
             };
             let (device, queue) = adapter
-                .request_device(&wgpu::DeviceDescriptor { label: Some("sidecar"), required_limits: limits, ..Default::default() })
+                .request_device(&wgpu::DeviceDescriptor {
+                    label: Some("sidecar"),
+                    required_limits: limits,
+                    ..Default::default()
+                })
                 .await
                 .context("requesting GPU device")?;
-            Ok(Self { adapter_info, device, queue })
+            Ok(Self {
+                adapter_info,
+                device,
+                queue,
+            })
         })
     }
 }
@@ -277,7 +342,9 @@ impl Gpu {
 #[cfg(test)]
 pub(crate) fn test_gpu() -> Result<&'static Gpu, String> {
     static GPU: std::sync::OnceLock<Result<Gpu, String>> = std::sync::OnceLock::new();
-    GPU.get_or_init(|| Gpu::new_headless().map_err(|e| format!("{e:#}"))).as_ref().map_err(Clone::clone)
+    GPU.get_or_init(|| Gpu::new_headless().map_err(|e| format!("{e:#}")))
+        .as_ref()
+        .map_err(Clone::clone)
 }
 
 #[cfg(test)]
@@ -286,42 +353,91 @@ mod tests {
 
     /// A 3 × 2 image whose every pixel is its own index, so any remap is visible.
     fn indexed() -> RgbaF32 {
-        RgbaF32 { width: 3, height: 2, data: (0..6).flat_map(|i| [i as f32; 4]).collect() }
+        RgbaF32 {
+            width: 3,
+            height: 2,
+            data: (0..6).flat_map(|i| [i as f32; 4]).collect(),
+        }
     }
 
     /// The area filter keeps the mean, and turns per-pixel clip flags in alpha into the fraction clipped.
     #[test]
     fn downsampling_averages_and_turns_clip_flags_into_coverage() {
-        let img = RgbaF32 { width: 4, height: 2, data: [[1.0, 0.0, 0.0, 1.0], [0.5, 0.5, 0.5, 0.0]].concat().repeat(4) };
+        let img = RgbaF32 {
+            width: 4,
+            height: 2,
+            data: [[1.0, 0.0, 0.0, 1.0], [0.5, 0.5, 0.5, 0.0]]
+                .concat()
+                .repeat(4),
+        };
         let small = img.downsampled(2);
         assert_eq!((small.width, small.height), (2, 1));
-        assert!((small.data[0] - 0.75).abs() < 1e-6 && (small.data[3] - 0.5).abs() < 1e-6, "{:?}", &small.data[..4]);
+        assert!(
+            (small.data[0] - 0.75).abs() < 1e-6 && (small.data[3] - 0.5).abs() < 1e-6,
+            "{:?}",
+            &small.data[..4]
+        );
     }
 
     #[test]
     fn rotations_and_mirrors_land_where_exif_says() {
         let rows = |img: RgbaF32| -> Vec<Vec<u32>> {
-            img.data.chunks(4 * img.width as usize).map(|r| r.chunks(4).map(|p| p[0] as u32).collect()).collect()
+            img.data
+                .chunks(4 * img.width as usize)
+                .map(|r| r.chunks(4).map(|p| p[0] as u32).collect())
+                .collect()
         };
         // 0 1 2
         // 3 4 5
         assert_eq!(rows(indexed().oriented(0)), [[0, 1, 2], [3, 4, 5]]);
-        assert_eq!(rows(indexed().oriented(1)), [[2, 1, 0], [5, 4, 3]], "EXIF 2, mirrored left to right");
+        assert_eq!(
+            rows(indexed().oriented(1)),
+            [[2, 1, 0], [5, 4, 3]],
+            "EXIF 2, mirrored left to right"
+        );
         assert_eq!(rows(indexed().oriented(3)), [[5, 4, 3], [2, 1, 0]], "180°");
-        assert_eq!(rows(indexed().oriented(2)), [[3, 4, 5], [0, 1, 2]], "EXIF 4, mirrored top to bottom");
-        assert_eq!(rows(indexed().oriented(6)), [[3, 0], [4, 1], [5, 2]], "90° clockwise");
-        assert_eq!(rows(indexed().oriented(5)), [[2, 5], [1, 4], [0, 3]], "90° counter-clockwise");
-        assert_eq!(rows(indexed().oriented(4)), [[0, 3], [1, 4], [2, 5]], "EXIF 5, transposed");
-        assert_eq!(rows(indexed().oriented(7)), [[5, 2], [4, 1], [3, 0]], "EXIF 7, transversed");
+        assert_eq!(
+            rows(indexed().oriented(2)),
+            [[3, 4, 5], [0, 1, 2]],
+            "EXIF 4, mirrored top to bottom"
+        );
+        assert_eq!(
+            rows(indexed().oriented(6)),
+            [[3, 0], [4, 1], [5, 2]],
+            "90° clockwise"
+        );
+        assert_eq!(
+            rows(indexed().oriented(5)),
+            [[2, 5], [1, 4], [0, 3]],
+            "90° counter-clockwise"
+        );
+        assert_eq!(
+            rows(indexed().oriented(4)),
+            [[0, 3], [1, 4], [2, 5]],
+            "EXIF 5, transposed"
+        );
+        assert_eq!(
+            rows(indexed().oriented(7)),
+            [[5, 2], [4, 1], [3, 0]],
+            "EXIF 7, transversed"
+        );
     }
 
     /// The loupe cuts its tile out of the unoriented image with this, then orients it: the two must agree.
     #[test]
     fn inverse_flip_undoes_every_orientation() {
-        let img = RgbaF32 { width: 3, height: 2, data: (0..6).flat_map(|i| [i as f32; 4]).collect() };
+        let img = RgbaF32 {
+            width: 3,
+            height: 2,
+            data: (0..6).flat_map(|i| [i as f32; 4]).collect(),
+        };
         for flip in 0..8 {
             let back = img.clone().oriented(flip).oriented(inverse_flip(flip));
-            assert_eq!((back.width, back.height, &back.data), (img.width, img.height, &img.data), "flip {flip}");
+            assert_eq!(
+                (back.width, back.height, &back.data),
+                (img.width, img.height, &img.data),
+                "flip {flip}"
+            );
         }
     }
 
@@ -334,7 +450,11 @@ mod tests {
                 let (sx, sy, sw, sh) = source_rect(flip, 3, 2, (x, y, 1, 1));
                 assert_eq!((sw, sh), (1, 1));
                 let want = out.data[((y * out.width + x) * 4) as usize];
-                assert_eq!(src.data[((sy * 3 + sx) * 4) as usize], want, "flip {flip} at {x},{y}");
+                assert_eq!(
+                    src.data[((sy * 3 + sx) * 4) as usize],
+                    want,
+                    "flip {flip} at {x},{y}"
+                );
             }
         }
     }

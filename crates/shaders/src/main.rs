@@ -6,7 +6,9 @@ use std::path::PathBuf;
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let [dir] = args.as_slice() else { bail!("usage: sidecar-shaders <dir>") };
+    let [dir] = args.as_slice() else {
+        bail!("usage: sidecar-shaders <dir>")
+    };
     let dir = PathBuf::from(dir);
     std::fs::create_dir_all(&dir)?;
     for entry in sidecar_shaders::WEB_ENTRIES {

@@ -27,7 +27,17 @@ pub const AMEND_WINDOW_S: i64 = 180;
 fn touched(delta: &Value, removed: &[String]) -> Vec<String> {
     fn walk(v: &Value, path: String, out: &mut Vec<String>) {
         match v {
-            Value::Object(m) => m.iter().for_each(|(k, v)| walk(v, if path.is_empty() { k.clone() } else { format!("{path}.{k}") }, out)),
+            Value::Object(m) => m.iter().for_each(|(k, v)| {
+                walk(
+                    v,
+                    if path.is_empty() {
+                        k.clone()
+                    } else {
+                        format!("{path}.{k}")
+                    },
+                    out,
+                )
+            }),
             _ => out.push(path),
         }
     }
@@ -42,7 +52,10 @@ fn touched(delta: &Value, removed: &[String]) -> Vec<String> {
 fn setting(path: &str) -> &str {
     ["whiteBalance", "lens", "geometry"]
         .into_iter()
-        .find(|group| path.strip_prefix(group).is_some_and(|rest| rest.is_empty() || rest.starts_with('.')))
+        .find(|group| {
+            path.strip_prefix(group)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
+        })
         .unwrap_or(path)
 }
 
@@ -118,9 +131,21 @@ fn canonical(edit: &EditParams) -> Value {
 
 /// Fields of `child` that differ from `parent`, recursing into objects; arrays and scalars are replaced whole.
 /// A field `child` doesn't have — left out at its default, as saturation 0 or no geometry is — is removed.
-fn diff(parent: &Value, child: &Value, path: &str, delta: &mut Map<String, Value>, removed: &mut Vec<String>) {
+fn diff(
+    parent: &Value,
+    child: &Value,
+    path: &str,
+    delta: &mut Map<String, Value>,
+    removed: &mut Vec<String>,
+) {
     let Value::Object(c) = child else { return };
-    let dotted = |k: &str| if path.is_empty() { k.to_string() } else { format!("{path}.{k}") };
+    let dotted = |k: &str| {
+        if path.is_empty() {
+            k.to_string()
+        } else {
+            format!("{path}.{k}")
+        }
+    };
     if let Value::Object(p) = parent {
         removed.extend(p.keys().filter(|k| !c.contains_key(*k)).map(|k| dotted(k)));
     }
@@ -150,21 +175,29 @@ fn clear(v: &mut Value, dotted: &str) {
     let mut at = v;
     let mut parts = dotted.split('.').peekable();
     while let Some(part) = parts.next() {
-        let Some(obj) = at.as_object_mut() else { return };
+        let Some(obj) = at.as_object_mut() else {
+            return;
+        };
         // Removed, not set to null: a field left out at its default reads back as that default, and null
         // isn't a number. (Histories written before this held only fields that read null as none.)
         if parts.peek().is_none() {
             obj.remove(part);
             return;
         }
-        let Some(next) = obj.get_mut(part) else { return };
+        let Some(next) = obj.get_mut(part) else {
+            return;
+        };
         at = next;
     }
 }
 
 /// `YYYY-MM-DDTHH:MM:SSZ`, as `utc_now` writes it → Unix seconds.
 fn unix_of(stamp: &str) -> Option<i64> {
-    let n: Vec<i64> = stamp.split(|c: char| !c.is_ascii_digit()).filter(|s| !s.is_empty()).map(|s| s.parse().ok()).collect::<Option<_>>()?;
+    let n: Vec<i64> = stamp
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.parse().ok())
+        .collect::<Option<_>>()?;
     let [year, month, day, hour, minute, second] = <[i64; 6]>::try_from(n.get(..6)?).ok()?;
     let y = year - i64::from(month <= 2);
     let era = y.div_euclid(400);
@@ -175,7 +208,10 @@ fn unix_of(stamp: &str) -> Option<i64> {
 }
 
 fn now_unix() -> i64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// A short id, unique within one photo's history.
@@ -183,8 +219,15 @@ fn new_id(parent: &str, etag: &str) -> String {
     use sha2::Digest;
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
-    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-    let seed = format!("{parent}:{etag}:{nanos}:{}:{}", std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed));
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let seed = format!(
+        "{parent}:{etag}:{nanos}:{}:{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    );
     hex::encode(&sha2::Sha256::digest(seed.as_bytes())[..6])
 }
 
@@ -210,9 +253,13 @@ impl History {
             delta: canonical(&original),
             removed: Vec::new(),
         };
-        let mut h = History { head: ORIGINAL.into(), nodes: vec![root] };
+        let mut h = History {
+            head: ORIGINAL.into(),
+            nodes: vec![root],
+        };
         if etag_of(current) != h.nodes[0].etag {
-            h.push(ORIGINAL, current, NodeKind::Imported, None, None).expect("the root exists");
+            h.push(ORIGINAL, current, NodeKind::Imported, None, None)
+                .expect("the root exists");
             // Until the first save stores it, this history is rebuilt on every read, so the node's id must come
             // out the same each time: the editor sends it back as the base of its save, and a random id would
             // be gone by then ("this photo's history has no version …" on every photo edited before 0.3.0).
@@ -252,7 +299,9 @@ impl History {
         let mut chain = Vec::new();
         let mut at = Some(id.to_string());
         while let Some(i) = at {
-            let n = self.node(&i).ok_or_else(|| SidecarError::UnknownVersion { id: i.clone() })?;
+            let n = self
+                .node(&i)
+                .ok_or_else(|| SidecarError::UnknownVersion { id: i.clone() })?;
             chain.push(n);
             at = n.parent.clone();
             if chain.len() > self.nodes.len() {
@@ -270,7 +319,14 @@ impl History {
     }
 
     /// Append a node for `edit` under `parent`, storing only what differs from it.
-    fn push(&mut self, parent: &str, edit: &EditParams, kind: NodeKind, session: Option<&str>, user: Option<&str>) -> Result<String> {
+    fn push(
+        &mut self,
+        parent: &str,
+        edit: &EditParams,
+        kind: NodeKind,
+        session: Option<&str>,
+        user: Option<&str>,
+    ) -> Result<String> {
         let (delta, removed) = self.delta_from(parent, edit)?;
         let etag = etag_of(edit);
         let id = new_id(parent, &etag);
@@ -312,18 +368,31 @@ impl History {
             if !c.checkpoint && self.amendable(c, exported) {
                 self.node_mut(c.base).expect("checked").kind = NodeKind::Save;
             }
-            return Ok(Committed { head: self.head.clone(), forked: false });
+            return Ok(Committed {
+                head: self.head.clone(),
+                forked: false,
+            });
         }
 
-        let kind = if c.checkpoint { NodeKind::Auto } else { NodeKind::Save };
+        let kind = if c.checkpoint {
+            NodeKind::Auto
+        } else {
+            NodeKind::Save
+        };
         if !forked && self.amendable(c, exported) && self.same_controls(c)? {
-            let parent = self.node(c.base).and_then(|n| n.parent.clone()).expect("an amendable node has a parent");
+            let parent = self
+                .node(c.base)
+                .and_then(|n| n.parent.clone())
+                .expect("an amendable node has a parent");
             let (delta, removed) = self.delta_from(&parent, c.edit)?;
             if delta.as_object().is_some_and(Map::is_empty) && removed.is_empty() {
                 // Undone back to where the step began: the step goes, rather than staying as "no changes".
                 self.nodes.retain(|n| n.id != c.base);
                 self.head = parent;
-                return Ok(Committed { head: self.head.clone(), forked: false });
+                return Ok(Committed {
+                    head: self.head.clone(),
+                    forked: false,
+                });
             }
             let n = self.node_mut(c.base).expect("checked");
             (n.delta, n.removed, n.etag, n.kind) = (delta, removed, etag, kind);
@@ -331,13 +400,18 @@ impl History {
             self.head = self.push(c.base, c.edit, kind, c.session, c.user)?;
         }
         self.prune(exported);
-        Ok(Committed { head: self.head.clone(), forked })
+        Ok(Committed {
+            head: self.head.clone(),
+            forked,
+        })
     }
 
     /// Can this save fold into the head instead of adding a node? Only this session's own recent,
     /// unlabelled, unexported checkpoint that nothing has branched from.
     fn amendable(&self, c: &Commit, exported: &[String]) -> bool {
-        let Some(head) = self.node(&self.head) else { return false };
+        let Some(head) = self.node(&self.head) else {
+            return false;
+        };
         head.id == c.base
             && head.kind == NodeKind::Auto
             && c.session.is_some()
@@ -358,7 +432,9 @@ impl History {
         let (delta, removed) = self.delta_from(&head.id, c.edit)?;
         let before = touched(&head.delta, &head.removed);
         let before: Vec<&str> = before.iter().map(|p| setting(p)).collect();
-        Ok(touched(&delta, &removed).iter().any(|p| before.contains(&setting(p))))
+        Ok(touched(&delta, &removed)
+            .iter()
+            .any(|p| before.contains(&setting(p))))
     }
 
     /// Move the head to `id`, and return the edit it holds.
@@ -369,8 +445,12 @@ impl History {
     }
 
     pub fn set_label(&mut self, id: &str, label: Option<String>) -> Result<()> {
-        let n = self.node_mut(id).ok_or_else(|| SidecarError::UnknownVersion { id: id.into() })?;
-        n.label = label.map(|l| l.trim().to_string()).filter(|l| !l.is_empty());
+        let n = self
+            .node_mut(id)
+            .ok_or_else(|| SidecarError::UnknownVersion { id: id.into() })?;
+        n.label = label
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty());
         Ok(())
     }
 
@@ -383,14 +463,30 @@ impl History {
                     && n.id != self.head
                     && n.label.is_none()
                     && !exported.contains(&n.etag)
-                    && self.nodes.iter().filter(|c| c.parent.as_deref() == Some(n.id.as_str())).count() == 1
+                    && self
+                        .nodes
+                        .iter()
+                        .filter(|c| c.parent.as_deref() == Some(n.id.as_str()))
+                        .count()
+                        == 1
             });
             let Some(i) = squashable else { return };
             let gone = self.nodes.remove(i);
-            let parent = gone.parent.clone().expect("only the original has no parent");
-            let child = self.nodes.iter().position(|c| c.parent.as_deref() == Some(gone.id.as_str())).expect("counted above");
-            let Ok(edit) = self.edit_of_through(&self.nodes[child].id, &gone) else { return };
-            let Ok((delta, removed)) = self.delta_from(&parent, &edit) else { return };
+            let parent = gone
+                .parent
+                .clone()
+                .expect("only the original has no parent");
+            let child = self
+                .nodes
+                .iter()
+                .position(|c| c.parent.as_deref() == Some(gone.id.as_str()))
+                .expect("counted above");
+            let Ok(edit) = self.edit_of_through(&self.nodes[child].id, &gone) else {
+                return;
+            };
+            let Ok((delta, removed)) = self.delta_from(&parent, &edit) else {
+                return;
+            };
             let c = &mut self.nodes[child];
             (c.parent, c.delta, c.removed) = (Some(parent), delta, removed);
         }
@@ -416,7 +512,10 @@ impl SidecarDoc {
     }
 
     fn set_history(&mut self, h: &History) -> Result<()> {
-        let obj = self.sidecar.as_object_mut().expect("sc:Sidecar is an object");
+        let obj = self
+            .sidecar
+            .as_object_mut()
+            .expect("sc:Sidecar is an object");
         obj.insert("history".into(), serde_json::to_value(h)?);
         Ok(())
     }
@@ -447,6 +546,9 @@ impl SidecarDoc {
 
     /// ETags recorded by `sc:Exports`: the edits exports were made from.
     pub fn exported_etags(&self) -> Vec<String> {
-        self.exports().iter().filter_map(|e| e["editEtag"].as_str().map(String::from)).collect()
+        self.exports()
+            .iter()
+            .filter_map(|e| e["editEtag"].as_str().map(String::from))
+            .collect()
     }
 }

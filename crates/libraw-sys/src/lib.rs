@@ -57,7 +57,12 @@ unsafe extern "C" {
     pub fn sc_open(raw: *mut c_void, path: *const c_char) -> c_int;
     pub fn sc_unpack(raw: *mut c_void) -> c_int;
     pub fn sc_get_info(raw: *mut c_void, info: *mut sc_info);
-    pub fn sc_develop_linear(raw: *mut c_void, half_size: c_int, quality: c_int, out: *mut sc_image) -> c_int;
+    pub fn sc_develop_linear(
+        raw: *mut c_void,
+        half_size: c_int,
+        quality: c_int,
+        out: *mut sc_image,
+    ) -> c_int;
     pub fn sc_image_free(img: *mut sc_image);
     pub fn sc_strerror(code: c_int) -> *const c_char;
 }
