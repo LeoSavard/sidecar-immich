@@ -3,6 +3,11 @@
 What's known to be missing or wrong, roughly in the order it's worth doing. The specification is
 [`DESIGN.md`](DESIGN.md); its build log records what the code actually does today.
 
+> **New features are paused** (owner's call, 2026-10-16). The current work is maintainability,
+> standardization and widening the project past a single Immich deployment: see [`V2.md`](V2.md), which
+> reorders what is below. Items here keep their place in the queue; the queue is just not what is being
+> worked through at the moment.
+
 ## Correctness and quality
 
 **Tone curve above middle grey.** The logistic base curve begins shouldering immediately above grey, so
@@ -38,9 +43,11 @@ ranking eyes and faces first. Noise is already handled.
 
 **Highlight reconstruction** leaves faint bluish blotches at the edges of reconstructed areas.
 
-**X-Trans at full resolution** still runs LibRaw's Markesteijn on the CPU; only Bayer has a GPU demosaic for
-loupe and export. Porting LibRaw's algorithm to WGSL (CDDL-1.0, so the port keeps that header) is the
-remaining piece of milestone 5. `DSCF7611.RAF` is the test case.
+**X-Trans at full resolution — parked, and out of milestone 5** (owner's call, 2026-10-16: the Fuji body is
+gone, and nobody else has asked). It still runs LibRaw's Markesteijn on the CPU; only Bayer has a GPU demosaic
+for loupe and export, so an X-Trans file is slower, not broken. Porting LibRaw's algorithm to WGSL (CDDL-1.0,
+so the port keeps that header) is what it would take, and `DSCF7611.RAF` is the test case if demand ever
+appears. Milestone 5 is otherwise complete; this is no longer what is holding it open.
 
 **iPhone parity is unverified.** The ΔE2000 harness compares Chromium against the server; Safari on Metal has
 never been in the loop. It needs a way to run the browser side on a phone and post results back.
@@ -218,7 +225,11 @@ for the new `DisplaySpace` and saves it as the setting, so `/settings` and the n
 
 ## Housekeeping
 
-- The Rust sources are hand-wrapped well past rustfmt's comfort at any `max_width`; either adopt a formatter
-  and take the one-time diff, or leave it deliberately and say so.
+- **Adopt rustfmt — now a priority**, not housekeeping (owner's call, 2026-10-16: maintainability over new
+  features). The sources are hand-wrapped past what rustfmt will reproduce, so the diff never reaches zero and
+  the only question is how large a one-time reflow to accept: measured at **20,365** diff lines at
+  `max_width = 100`, **12,583** at 140, **9,688** at 160 and **7,012** at 200, against ~41,000 lines of Rust.
+  It goes in one commit that changes nothing else, whose SHA is then added to `.git-blame-ignore-revs` so
+  `git blame` steps over it, and a `cargo fmt --check` gate joins clippy in CI. See [`V2.md`](V2.md).
 - `deploy/remote-proxy/` is a worked example of one setup: a reverse proxy on another host reaching this one
   over a VPN. A real deployment's copy lives in the git-ignored `deploy/local/`.
