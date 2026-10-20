@@ -204,6 +204,25 @@ fn carry_unknown(fresh: &mut Value, stored: &Value, round_trip: &Value) {
     }
 }
 
+/// What makes two `sc:Exports` entries the same render: the edit they came from and the settings the file was
+/// made with. A file name follows from exactly these fields, and the destination deliberately isn't one of
+/// them — the same render asked for twice, once for Immich and once for the device, is one file either way.
+const EXPORT_IDENTITY: &[&str] = &["editEtag", "format", "colorSpace", "quality", "longEdge"];
+
+pub fn same_render(a: &Value, b: &Value) -> bool {
+    EXPORT_IDENTITY.iter().all(|k| a.get(*k).unwrap_or(&Value::Null) == b.get(*k).unwrap_or(&Value::Null))
+}
+
+/// `src`'s fields over `dst`'s, leaving `dst`'s alone where `src` says nothing (a `null` or a missing key).
+fn overlay(dst: &mut Value, src: Value) {
+    let (Value::Object(d), Value::Object(s)) = (dst, src) else { return };
+    for (k, v) in s {
+        if !v.is_null() {
+            d.insert(k, v);
+        }
+    }
+}
+
 pub fn etag_of(edit: &EditParams) -> String {
     use sha2::Digest;
     hex::encode(sha2::Sha256::digest(serde_json::to_vec(edit).expect("edit params serialize")))
@@ -331,11 +350,21 @@ impl SidecarDoc {
         Ok(())
     }
 
-    pub fn append_export(&mut self, entry: Value) {
+    /// Record a finished export. An entry for the same render — the same edit, the same settings, so the same
+    /// file — is filled in rather than duplicated: a version saved to the device and sent to Immich afterwards
+    /// is one file, recorded once. Whatever the earlier entry held and this one doesn't mention is kept.
+    pub fn record_export(&mut self, entry: Value) {
         let obj = self.sidecar.as_object_mut().unwrap();
-        match obj.entry("exports").or_insert(Value::Array(Vec::new())) {
-            Value::Array(a) => a.push(entry),
-            other => *other = Value::Array(vec![entry]),
+        let list = match obj.entry("exports").or_insert(Value::Array(Vec::new())) {
+            Value::Array(a) => a,
+            other => {
+                *other = Value::Array(vec![entry]);
+                return;
+            }
+        };
+        match list.iter_mut().find(|e| same_render(e, &entry)) {
+            Some(found) => overlay(found, entry),
+            None => list.push(entry),
         }
     }
 
