@@ -161,7 +161,7 @@ fn keeps_fields_from_a_newer_sidecar_and_exports() {
     update(&original, &roots, |d| {
         d.set_edit(&EditParams::default(), "x")?;
         d.sidecar["edit"]["masks"] = serde_json::json!([{ "kind": "radial", "exposure": 0.5 }]);
-        d.append_export(serde_json::json!({ "version": 1, "editEtag": "123456", "file": "a-v1.jpg" }));
+        d.record_export(serde_json::json!({ "version": 1, "editEtag": "123456", "file": "a-v1.jpg" }));
         Ok(())
     })
     .unwrap();
@@ -175,6 +175,44 @@ fn keeps_fields_from_a_newer_sidecar_and_exports() {
     assert_eq!(doc.sidecar["edit"]["masks"][0]["kind"], "radial");
     assert_eq!(doc.sidecar["edit"]["masks"][0]["exposure"], 0.5);
     assert_eq!(doc.exports()[0]["editEtag"], "123456", "all-digit ETags stay strings");
+}
+
+/// An export saved to the device and sent to Immich afterwards is one file: the second record fills the
+/// first in rather than making a second version of the same render, and keeps the time the file was made.
+#[test]
+fn recording_the_same_render_twice_fills_one_entry_in() {
+    let tmp = tempfile::tempdir().unwrap();
+    let roots = [tmp.path().canonicalize().unwrap()];
+    let original = fixture(tmp.path(), "c.NEF");
+    let entry = |immich: Value, exported: &str| {
+        serde_json::json!({
+            "version": 1, "editEtag": "abc", "file": "c-v1.jpg", "format": "jpeg", "colorSpace": "srgb",
+            "quality": 92, "longEdge": null, "exported": exported, "immichAssetId": immich,
+        })
+    };
+    update(&original, &roots, |d| {
+        d.set_edit(&EditParams::default(), "x")?;
+        d.record_export(entry(Value::Null, "2026-10-19T10:00:00Z"));
+        Ok(())
+    })
+    .unwrap();
+    update(&original, &roots, |d| {
+        d.record_export(entry(Value::from("im-1"), "2026-10-19T10:00:00Z"));
+        // Another size of the same edit is its own file, and its own entry.
+        d.record_export(serde_json::json!({
+            "version": 1, "editEtag": "abc", "file": "c-v1-2048px.jpg", "format": "jpeg", "colorSpace": "srgb",
+            "quality": 92, "longEdge": 2048, "exported": "2026-10-19T11:00:00Z", "immichAssetId": Value::Null,
+        }));
+        Ok(())
+    })
+    .unwrap();
+    let exports = SidecarDoc::load(&original).unwrap().exports();
+    assert_eq!(exports.len(), 2, "{exports:#?}");
+    assert_eq!(exports[0]["immichAssetId"], "im-1");
+    assert_eq!(exports[0]["exported"], "2026-10-19T10:00:00Z", "the file was rendered then; the upload didn't remake it");
+    assert_eq!(exports[1]["file"], "c-v1-2048px.jpg");
+    assert_eq!(exports[1]["longEdge"], 2048);
+    assert!(exports[1].get("immichAssetId").is_none(), "a null field isn't written, and reads back absent");
 }
 
 #[test]
