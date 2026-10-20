@@ -3,10 +3,10 @@
 What's known to be missing or wrong, roughly in the order it's worth doing. The specification is
 [`DESIGN.md`](DESIGN.md); its build log records what the code actually does today.
 
-> **New features are paused** (owner's call, 2026-10-16). The current work is maintainability,
-> standardization and widening the project past a single Immich deployment: see [`V2.md`](V2.md), which
-> reorders what is below. Items here keep their place in the queue; the queue is just not what is being
-> worked through at the moment.
+> **New features are paused** (owner's call, 2026-10-16). The current work is maintainability and
+> standardization: see [`V2.md`](V2.md), which reorders what is below. Items here keep their place in the
+> queue; the queue is just not what is being worked through at the moment. Immich stays the library manager
+> (2026-10-20), so V2's library seam is deferred rather than queued.
 
 ## Correctness and quality
 
