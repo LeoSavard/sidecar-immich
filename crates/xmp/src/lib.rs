@@ -26,13 +26,32 @@ const ROOT: &str = "Sidecar";
 /// Fields that stay strings even when they look numeric. The history's ids and ETags are hex, which a number
 /// parser takes for a float often enough ("12e456…"), and a label is whatever the person typed.
 const STRING_FIELDS: &[&str] = &[
-    "mode", "sourceSha1", "modified", "editEtag", "file", "immichAssetId", "exported", "format", "colorSpace", "head", "id", "parent",
-    "etag", "created", "kind", "label", "user", "session", "removed",
+    "mode",
+    "sourceSha1",
+    "modified",
+    "editEtag",
+    "file",
+    "immichAssetId",
+    "exported",
+    "format",
+    "colorSpace",
+    "head",
+    "id",
+    "parent",
+    "etag",
+    "created",
+    "kind",
+    "label",
+    "user",
+    "session",
+    "removed",
 ];
 
 #[derive(Debug, thiserror::Error)]
 pub enum SidecarError {
-    #[error("this sidecar was written by a newer Sidecar (process version {found}); update Sidecar to edit this photo")]
+    #[error(
+        "this sidecar was written by a newer Sidecar (process version {found}); update Sidecar to edit this photo"
+    )]
     NewerProcessVersion { found: u64 },
     #[error("the sidecar changed on disk while Sidecar was writing it")]
     ChangedOnDisk,
@@ -63,8 +82,14 @@ pub fn sidecar_path_for(original: &Path) -> PathBuf {
 /// answer this question later than `access(2)` can. `save` is still the authority, and reports
 /// `SidecarError::NotWritable` when this was too optimistic.
 pub fn writable_beside(original: &Path) -> bool {
-    let Some(dir) = original.parent() else { return false };
-    rustix::fs::access(dir, rustix::fs::Access::WRITE_OK | rustix::fs::Access::EXEC_OK).is_ok()
+    let Some(dir) = original.parent() else {
+        return false;
+    };
+    rustix::fs::access(
+        dir,
+        rustix::fs::Access::WRITE_OK | rustix::fs::Access::EXEC_OK,
+    )
+    .is_ok()
 }
 
 fn register() -> Result<()> {
@@ -74,12 +99,16 @@ fn register() -> Result<()> {
 
 fn pascal(k: &str) -> String {
     let mut c = k.chars();
-    c.next().map(|f| f.to_ascii_uppercase().to_string() + c.as_str()).unwrap_or_default()
+    c.next()
+        .map(|f| f.to_ascii_uppercase().to_string() + c.as_str())
+        .unwrap_or_default()
 }
 
 fn camel(k: &str) -> String {
     let mut c = k.chars();
-    c.next().map(|f| f.to_ascii_lowercase().to_string() + c.as_str()).unwrap_or_default()
+    c.next()
+        .map(|f| f.to_ascii_lowercase().to_string() + c.as_str())
+        .unwrap_or_default()
 }
 
 /// Iterator names are `sc:Sidecar/sc:Edit`; property paths drop the first prefix: `Sidecar/sc:Edit`.
@@ -110,11 +139,17 @@ fn coerce(key: &str, s: &str) -> Value {
 }
 
 fn read_node(meta: &XmpMeta, path: &str, key: &str) -> Value {
-    let Some(v) = meta.property(NS, path) else { return Value::Null };
+    let Some(v) = meta.property(NS, path) else {
+        return Value::Null;
+    };
     if v.is_struct() {
         let mut obj = Map::new();
         let full = format!("{PREFIX}:{path}");
-        for child in meta.iter(IterOptions::default().property(NS, path).immediate_children_only()) {
+        for child in meta.iter(
+            IterOptions::default()
+                .property(NS, path)
+                .immediate_children_only(),
+        ) {
             if child.name == full || child.value.is_qualifier() {
                 continue;
             }
@@ -126,7 +161,11 @@ fn read_node(meta: &XmpMeta, path: &str, key: &str) -> Value {
         Value::Object(obj)
     } else if v.is_array() {
         let n = meta.array_len(NS, path);
-        Value::Array((1..=n).map(|i| read_node(meta, &format!("{path}[{i}]"), key)).collect())
+        Value::Array(
+            (1..=n)
+                .map(|i| read_node(meta, &format!("{path}[{i}]"), key))
+                .collect(),
+        )
     } else {
         coerce(key, &v.value)
     }
@@ -151,18 +190,36 @@ fn write_node(meta: &mut XmpMeta, path: &str, v: &Value) -> Result<()> {
             Ok(())
         }
         Value::Array(items) => {
-            meta.set_property(NS, path, &XmpValue::new(String::new()).set_is_array(true).set_is_ordered(true))?;
+            meta.set_property(
+                NS,
+                path,
+                &XmpValue::new(String::new())
+                    .set_is_array(true)
+                    .set_is_ordered(true),
+            )?;
             let array = XmpValue::new(path.to_string()).set_is_ordered(true);
             for (i, item) in items.iter().enumerate() {
                 match item {
                     Value::Object(map) => {
-                        meta.append_array_item(NS, &array, &XmpValue::new(String::new()).set_is_struct(true))?;
+                        meta.append_array_item(
+                            NS,
+                            &array,
+                            &XmpValue::new(String::new()).set_is_struct(true),
+                        )?;
                         for (k, val) in map {
-                            write_node(meta, &format!("{path}[{}]/{PREFIX}:{}", i + 1, pascal(k)), val)?;
+                            write_node(
+                                meta,
+                                &format!("{path}[{}]/{PREFIX}:{}", i + 1, pascal(k)),
+                                val,
+                            )?;
                         }
                     }
                     Value::Array(pair) if pair.len() == 2 && pair.iter().all(Value::is_number) => {
-                        meta.append_array_item(NS, &array, &XmpValue::new(format!("{}, {}", pair[0], pair[1])))?;
+                        meta.append_array_item(
+                            NS,
+                            &array,
+                            &XmpValue::new(format!("{}, {}", pair[0], pair[1])),
+                        )?;
                     }
                     other => meta.append_array_item(NS, &array, &XmpValue::new(scalar(other)))?,
                 }
@@ -191,7 +248,9 @@ pub(crate) fn merge(dst: &mut Value, src: Value) {
 /// which is harmless to carry and is only carried where `fresh` doesn't set it. Arrays are `fresh`'s alone
 /// (a mask layer keeps a newer version's fields in its own `other`).
 fn carry_unknown(fresh: &mut Value, stored: &Value, round_trip: &Value) {
-    let (Value::Object(f), Value::Object(s)) = (fresh, stored) else { return };
+    let (Value::Object(f), Value::Object(s)) = (fresh, stored) else {
+        return;
+    };
     let r = round_trip.as_object();
     for (k, v) in s {
         match (r.and_then(|r| r.get(k)), f.get_mut(k)) {
@@ -204,14 +263,44 @@ fn carry_unknown(fresh: &mut Value, stored: &Value, round_trip: &Value) {
     }
 }
 
+/// What makes two `sc:Exports` entries the same render: the edit they came from and the settings the file was
+/// made with. A file name follows from exactly these fields, and the destination deliberately isn't one of
+/// them — the same render asked for twice, once for Immich and once for the device, is one file either way.
+const EXPORT_IDENTITY: &[&str] = &["editEtag", "format", "colorSpace", "quality", "longEdge"];
+
+pub fn same_render(a: &Value, b: &Value) -> bool {
+    EXPORT_IDENTITY
+        .iter()
+        .all(|k| a.get(*k).unwrap_or(&Value::Null) == b.get(*k).unwrap_or(&Value::Null))
+}
+
+/// `src`'s fields over `dst`'s, leaving `dst`'s alone where `src` says nothing (a `null` or a missing key).
+fn overlay(dst: &mut Value, src: Value) {
+    let (Value::Object(d), Value::Object(s)) = (dst, src) else {
+        return;
+    };
+    for (k, v) in s {
+        if !v.is_null() {
+            d.insert(k, v);
+        }
+    }
+}
+
 pub fn etag_of(edit: &EditParams) -> String {
     use sha2::Digest;
-    hex::encode(sha2::Sha256::digest(serde_json::to_vec(edit).expect("edit params serialize")))
+    hex::encode(sha2::Sha256::digest(
+        serde_json::to_vec(edit).expect("edit params serialize"),
+    ))
 }
 
 /// Now, as an RFC 3339 UTC timestamp.
 pub fn utc_now() -> String {
-    rfc3339(SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0))
+    rfc3339(
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0),
+    )
 }
 
 /// Unix seconds as an RFC 3339 UTC timestamp, without external crates (days-from-civil, H. Hinnant).
@@ -226,7 +315,12 @@ pub fn rfc3339(secs: i64) -> String {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = yoe + era * 400 + (m <= 2) as i64;
-    format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", rem / 3600, rem / 60 % 60, rem % 60)
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        rem / 3600,
+        rem / 60 % 60,
+        rem % 60
+    )
 }
 
 /// The SHA-1 of a file's bytes: the asset key, and the `SourceSha1` a sidecar records. Blocking.
@@ -265,8 +359,10 @@ impl SidecarDoc {
         let path = sidecar_path_for(original);
         let stamp = stamp(&path);
         let meta = if stamp.is_some() {
-            let text = std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-            text.parse::<XmpMeta>().with_context(|| format!("parsing {}", path.display()))?
+            let text = std::fs::read_to_string(&path)
+                .with_context(|| format!("reading {}", path.display()))?;
+            text.parse::<XmpMeta>()
+                .with_context(|| format!("parsing {}", path.display()))?
         } else {
             XmpMeta::new()?
         };
@@ -274,7 +370,12 @@ impl SidecarDoc {
             Value::Object(o) => Value::Object(o),
             _ => Value::Object(Map::new()),
         };
-        Ok(Self { path, meta, stamp, sidecar })
+        Ok(Self {
+            path,
+            meta,
+            stamp,
+            sidecar,
+        })
     }
 
     pub fn process_version(&self) -> Option<u64> {
@@ -290,14 +391,23 @@ impl SidecarDoc {
 
     /// True when a newer Sidecar wrote this file; the editor opens it read-only.
     pub fn is_read_only(&self) -> bool {
-        self.process_version().is_some_and(|v| v > PROCESS_VERSION as u64)
+        self.process_version()
+            .is_some_and(|v| v > PROCESS_VERSION as u64)
     }
 
     pub fn edit(&self) -> EditParams {
-        let mut edit: EditParams = self.sidecar.get("edit").cloned().and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
+        let mut edit: EditParams = self
+            .sidecar
+            .get("edit")
+            .cloned()
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default();
         // The sidecar's own version is the one an older Sidecar wrote; the edit inside carries it too, but a
         // sidecar from before the field existed has none, which means 1.
-        let stored = self.process_version().unwrap_or(1).min(edit.process_version as u64) as u32;
+        let stored = self
+            .process_version()
+            .unwrap_or(1)
+            .min(edit.process_version as u64) as u32;
         edit.process_version = stored;
         edit.migrate();
         edit
@@ -308,11 +418,18 @@ impl SidecarDoc {
     }
 
     pub fn exports(&self) -> Vec<Value> {
-        self.sidecar.get("exports").and_then(Value::as_array).cloned().unwrap_or_default()
+        self.sidecar
+            .get("exports")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
     }
 
     pub fn set_edit(&mut self, edit: &EditParams, source_sha1: &str) -> Result<()> {
-        if let Some(found) = self.process_version().filter(|&v| v > PROCESS_VERSION as u64) {
+        if let Some(found) = self
+            .process_version()
+            .filter(|&v| v > PROCESS_VERSION as u64)
+        {
             bail!(SidecarError::NewerProcessVersion { found });
         }
         let obj = self.sidecar.as_object_mut().unwrap();
@@ -324,47 +441,92 @@ impl SidecarDoc {
         // must leave the file, or turning something off would never be saved.
         let stored = obj.get("edit").cloned().unwrap_or(Value::Null);
         let mut fresh = serde_json::to_value(edit)?;
-        if let Some(round_trip) = serde_json::from_value::<EditParams>(stored.clone()).ok().and_then(|e| serde_json::to_value(e).ok()) {
+        if let Some(round_trip) = serde_json::from_value::<EditParams>(stored.clone())
+            .ok()
+            .and_then(|e| serde_json::to_value(e).ok())
+        {
             carry_unknown(&mut fresh, &stored, &round_trip);
         }
         obj.insert("edit".into(), fresh);
         Ok(())
     }
 
-    pub fn append_export(&mut self, entry: Value) {
+    /// Record a finished export. An entry for the same render — the same edit, the same settings, so the same
+    /// file — is filled in rather than duplicated: a version saved to the device and sent to Immich afterwards
+    /// is one file, recorded once. Whatever the earlier entry held and this one doesn't mention is kept.
+    pub fn record_export(&mut self, entry: Value) {
         let obj = self.sidecar.as_object_mut().unwrap();
-        match obj.entry("exports").or_insert(Value::Array(Vec::new())) {
-            Value::Array(a) => a.push(entry),
-            other => *other = Value::Array(vec![entry]),
+        let list = match obj.entry("exports").or_insert(Value::Array(Vec::new())) {
+            Value::Array(a) => a,
+            other => {
+                *other = Value::Array(vec![entry]);
+                return;
+            }
+        };
+        match list.iter_mut().find(|e| same_render(e, &entry)) {
+            Some(found) => overlay(found, entry),
+            None => list.push(entry),
         }
     }
 
     /// Guarded atomic write. `allowed_roots` are the canonical library mounts the sidecar must live under.
     pub fn save(mut self, original: &Path, allowed_roots: &[PathBuf]) -> Result<()> {
-        let original_real = original.canonicalize().with_context(|| format!("{} is missing", original.display()))?;
+        let original_real = original
+            .canonicalize()
+            .with_context(|| format!("{} is missing", original.display()))?;
         if !std::fs::metadata(&original_real)?.is_file() {
             bail!("{} is not a regular file", original.display());
         }
         if !allowed_roots.iter().any(|r| original_real.starts_with(r)) {
             bail!("{} is outside the configured libraries", original.display());
         }
-        let dir = original_real.parent().context("original has no directory")?;
-        let name = self.path.file_name().context("sidecar has no file name")?.to_string_lossy().into_owned();
-        if !name.ends_with(".xmp") || self.path.parent().map(|p| p.canonicalize().ok()) != Some(Some(dir.to_path_buf())) {
-            bail!("refusing to write {}: not an .xmp beside its original", self.path.display());
+        let dir = original_real
+            .parent()
+            .context("original has no directory")?;
+        let name = self
+            .path
+            .file_name()
+            .context("sidecar has no file name")?
+            .to_string_lossy()
+            .into_owned();
+        if !name.ends_with(".xmp")
+            || self.path.parent().map(|p| p.canonicalize().ok()) != Some(Some(dir.to_path_buf()))
+        {
+            bail!(
+                "refusing to write {}: not an .xmp beside its original",
+                self.path.display()
+            );
         }
 
         let _ = self.meta.delete_property(NS, ROOT);
         write_node(&mut self.meta, ROOT, &self.sidecar)?;
-        let text = self.meta.to_string_with_options(ToStringOptions::default().omit_packet_wrapper())?;
+        let text = self
+            .meta
+            .to_string_with_options(ToStringOptions::default().omit_packet_wrapper())?;
 
-        let tmp = dir.join(format!(".{name}.tmp-{}", std::process::id() as u64 ^ SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_nanos() as u64));
-        let mut f = match std::fs::File::options().write(true).create_new(true).open(&tmp) {
+        let tmp = dir.join(format!(
+            ".{name}.tmp-{}",
+            std::process::id() as u64
+                ^ SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)?
+                    .as_nanos() as u64
+        ));
+        let mut f = match std::fs::File::options()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+        {
             Ok(f) => f,
             // Worth its own error: the photo opens and edits normally, and only the save fails, so the raw
             // "Permission denied (os error 13)" reaches the user after the work is already done.
-            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => bail!(SidecarError::NotWritable { dir: dir.to_path_buf() }),
-            Err(e) => return Err(anyhow::Error::new(e).context(format!("creating {}", tmp.display()))),
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                bail!(SidecarError::NotWritable {
+                    dir: dir.to_path_buf()
+                })
+            }
+            Err(e) => {
+                return Err(anyhow::Error::new(e).context(format!("creating {}", tmp.display())));
+            }
         };
         let result = (|| -> Result<()> {
             f.write_all(text.as_bytes())?;
@@ -384,14 +546,24 @@ impl SidecarDoc {
 }
 
 /// Load, apply `change`, save; retried when the file changed on disk in between (up to three attempts).
-pub fn update(original: &Path, allowed_roots: &[PathBuf], mut change: impl FnMut(&mut SidecarDoc) -> Result<()>) -> Result<String> {
+pub fn update(
+    original: &Path,
+    allowed_roots: &[PathBuf],
+    mut change: impl FnMut(&mut SidecarDoc) -> Result<()>,
+) -> Result<String> {
     for attempt in 0..3 {
         let mut doc = SidecarDoc::load(original)?;
         change(&mut doc)?;
         let etag = doc.etag();
         match doc.save(original, allowed_roots) {
             Ok(()) => return Ok(etag),
-            Err(e) if attempt < 2 && e.downcast_ref::<SidecarError>().is_some_and(|e| matches!(e, SidecarError::ChangedOnDisk)) => continue,
+            Err(e)
+                if attempt < 2
+                    && e.downcast_ref::<SidecarError>()
+                        .is_some_and(|e| matches!(e, SidecarError::ChangedOnDisk)) =>
+            {
+                continue;
+            }
             Err(e) => return Err(e),
         }
     }
@@ -403,8 +575,11 @@ pub fn update(original: &Path, allowed_roots: &[PathBuf], mut change: impl FnMut
 pub fn embed_in_image(path: &Path, sidecar: &Value) -> Result<()> {
     register()?;
     let mut file = XmpFile::new()?;
-    file.open_file(path, OpenFileOptions::default().for_update().use_smart_handler())
-        .with_context(|| format!("opening {} for XMP update", path.display()))?;
+    file.open_file(
+        path,
+        OpenFileOptions::default().for_update().use_smart_handler(),
+    )
+    .with_context(|| format!("opening {} for XMP update", path.display()))?;
     let mut meta = file.xmp().unwrap_or(XmpMeta::new()?);
     let _ = meta.delete_property(NS, ROOT);
     write_node(&mut meta, ROOT, sidecar)?;

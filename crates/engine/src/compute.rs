@@ -30,7 +30,12 @@ pub enum Res<'a> {
 impl Kernel {
     pub fn new(gpu: &Gpu, entry: &str, bindings: &[B]) -> Result<Self> {
         let src = sidecar_shaders::compose(entry)?;
-        let module = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some(entry), source: wgpu::ShaderSource::Wgsl(src.into()) });
+        let module = gpu
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(entry),
+                source: wgpu::ShaderSource::Wgsl(src.into()),
+            });
         let entries: Vec<_> = bindings
             .iter()
             .enumerate()
@@ -39,31 +44,80 @@ impl Kernel {
                 visibility: wgpu::ShaderStages::COMPUTE,
                 count: None,
                 ty: match b {
-                    B::Uniform => wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
-                    B::Tex => wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: false }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
-                    B::TexF => wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
-                    B::TexU => wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Uint, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
+                    B::Uniform => wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    B::Tex => wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    B::TexF => wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    B::TexU => wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Uint,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
                     B::Samp => wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    B::Store(f) => wgpu::BindingType::StorageTexture { access: wgpu::StorageTextureAccess::WriteOnly, format: *f, view_dimension: wgpu::TextureViewDimension::D2 },
+                    B::Store(f) => wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        format: *f,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
                 },
             })
             .collect();
-        let layout = gpu.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some(entry), entries: &entries });
-        let pl = gpu.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some(entry), bind_group_layouts: &[Some(&layout)], ..Default::default() });
-        let pipeline = gpu.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some(entry),
-            layout: Some(&pl),
-            module: &module,
-            entry_point: Some("main"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let layout = gpu
+            .device
+            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some(entry),
+                entries: &entries,
+            });
+        let pl = gpu
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some(entry),
+                bind_group_layouts: &[Some(&layout)],
+                ..Default::default()
+            });
+        let pipeline = gpu
+            .device
+            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(entry),
+                layout: Some(&pl),
+                module: &module,
+                entry_point: Some("main"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
         Ok(Self { pipeline, layout })
     }
 
-    pub fn run<P: bytemuck::Pod>(&self, gpu: &Gpu, enc: &mut wgpu::CommandEncoder, params: &P, size: [u32; 2], res: &[Res]) {
-        let ubo = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::bytes_of(params), usage: wgpu::BufferUsages::UNIFORM });
-        let mut entries = vec![wgpu::BindGroupEntry { binding: 0, resource: ubo.as_entire_binding() }];
+    pub fn run<P: bytemuck::Pod>(
+        &self,
+        gpu: &Gpu,
+        enc: &mut wgpu::CommandEncoder,
+        params: &P,
+        size: [u32; 2],
+        res: &[Res],
+    ) {
+        let ubo = gpu
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: None,
+                contents: bytemuck::bytes_of(params),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let mut entries = vec![wgpu::BindGroupEntry {
+            binding: 0,
+            resource: ubo.as_entire_binding(),
+        }];
         for (i, r) in res.iter().enumerate() {
             entries.push(wgpu::BindGroupEntry {
                 binding: i as u32 + 1,
@@ -73,7 +127,11 @@ impl Kernel {
                 },
             });
         }
-        let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &self.layout, entries: &entries });
+        let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &self.layout,
+            entries: &entries,
+        });
         let mut pass = enc.begin_compute_pass(&Default::default());
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &bind, &[]);
@@ -84,12 +142,18 @@ impl Kernel {
 pub fn texture(gpu: &Gpu, w: u32, h: u32, format: F) -> wgpu::Texture {
     gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: None,
-        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::STORAGE_BINDING
+            | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     })
 }
@@ -97,4 +161,3 @@ pub fn texture(gpu: &Gpu, w: u32, h: u32, format: F) -> wgpu::Texture {
 pub fn view(t: &wgpu::Texture) -> wgpu::TextureView {
     t.create_view(&Default::default())
 }
-

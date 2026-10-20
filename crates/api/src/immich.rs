@@ -45,7 +45,11 @@ pub struct ImmichAsset {
 /// Content type for an upload. Everything Sidecar can open that has no registered image type — every RAW —
 /// goes up as bytes, which Immich accepts: it types an asset from the extension, not this header.
 fn mime_for(file_name: &str) -> &'static str {
-    match file_name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).as_deref() {
+    match file_name
+        .rsplit_once('.')
+        .map(|(_, e)| e.to_ascii_lowercase())
+        .as_deref()
+    {
         Some("jpg" | "jpeg") => "image/jpeg",
         Some("tif" | "tiff") => "image/tiff",
         Some("png") => "image/png",
@@ -79,21 +83,39 @@ impl Immich {
 
     /// `GET /api/users/me` — needs `user.read`.
     pub async fn me(&self, key: &str) -> Result<ImmichUser> {
-        let r = self.http.get(self.url("/users/me")).header("x-api-key", key).send().await.context("reaching Immich")?;
+        let r = self
+            .http
+            .get(self.url("/users/me"))
+            .header("x-api-key", key)
+            .send()
+            .await
+            .context("reaching Immich")?;
         Ok(Self::check(r).await?.json().await?)
     }
 
     /// `POST /api/search/metadata` — needs `asset.read`. Returns the first page of assets.
     pub async fn search(&self, key: &str, mut body: Value) -> Result<Vec<ImmichAsset>> {
         body["size"] = json!(50);
-        let r = self.http.post(self.url("/search/metadata")).header("x-api-key", key).json(&body).send().await.context("reaching Immich")?;
+        let r = self
+            .http
+            .post(self.url("/search/metadata"))
+            .header("x-api-key", key)
+            .json(&body)
+            .send()
+            .await
+            .context("reaching Immich")?;
         let v: Value = Self::check(r).await?.json().await?;
         Ok(serde_json::from_value(v["assets"]["items"].clone())?)
     }
 
     /// `GET /api/assets/{id}/thumbnail?size=thumbnail` — needs `asset.view`.
     pub async fn thumbnail(&self, key: &str, id: &str) -> Result<reqwest::Response> {
-        let r = self.http.get(self.url(&format!("/assets/{id}/thumbnail?size=thumbnail"))).header("x-api-key", key).send().await?;
+        let r = self
+            .http
+            .get(self.url(&format!("/assets/{id}/thumbnail?size=thumbnail")))
+            .header("x-api-key", key)
+            .send()
+            .await?;
         Self::check(r).await
     }
 
@@ -101,35 +123,77 @@ impl Immich {
     /// duplicates per user by checksum and answers `{ id, status: "duplicate" }`, which counts as success.
     /// Used both for finished exports and for a photo handed in from the editing device, so `file_name` is
     /// what decides the type — Immich goes by the extension too.
-    pub async fn upload(&self, key: &str, file_name: &str, bytes: Vec<u8>, captured_at: &str) -> Result<String> {
-        let part = reqwest::multipart::Part::bytes(bytes).file_name(file_name.to_string()).mime_str(mime_for(file_name))?;
+    pub async fn upload(
+        &self,
+        key: &str,
+        file_name: &str,
+        bytes: Vec<u8>,
+        captured_at: &str,
+    ) -> Result<String> {
+        let part = reqwest::multipart::Part::bytes(bytes)
+            .file_name(file_name.to_string())
+            .mime_str(mime_for(file_name))?;
         let form = reqwest::multipart::Form::new()
             .part("assetData", part)
             .text("filename", file_name.to_string())
             .text("fileCreatedAt", captured_at.to_string())
             .text("fileModifiedAt", sidecar_xmp::utc_now());
-        let r = self.http.post(self.url("/assets")).header("x-api-key", key).multipart(form).send().await.context("uploading to Immich")?;
+        let r = self
+            .http
+            .post(self.url("/assets"))
+            .header("x-api-key", key)
+            .multipart(form)
+            .send()
+            .await
+            .context("uploading to Immich")?;
         let v: Value = Self::check(r).await?.json().await?;
-        v["id"].as_str().map(String::from).context("Immich didn't return an asset id")
+        v["id"]
+            .as_str()
+            .map(String::from)
+            .context("Immich didn't return an asset id")
     }
 
     /// `GET /api/assets/{id}` — needs `asset.read`.
     pub async fn asset(&self, key: &str, id: &str) -> Result<ImmichAsset> {
-        let r = self.http.get(self.url(&format!("/assets/{id}"))).header("x-api-key", key).send().await?;
+        let r = self
+            .http
+            .get(self.url(&format!("/assets/{id}")))
+            .header("x-api-key", key)
+            .send()
+            .await?;
         Ok(Self::check(r).await?.json().await?)
     }
 
     /// Stack an export with its RAW. `POST /api/stacks` makes the first id primary and merges any existing stack
     /// whose *primary* is listed, so the current primary is passed rather than the RAW once a stack exists.
     /// Needs `stack.create` and `asset.update`.
-    pub async fn stack_export(&self, key: &str, raw_id: &str, export_id: &str, make_primary: bool) -> Result<()> {
+    pub async fn stack_export(
+        &self,
+        key: &str,
+        raw_id: &str,
+        export_id: &str,
+        make_primary: bool,
+    ) -> Result<()> {
         let raw = self.asset(key, raw_id).await?;
-        let anchor = raw.stack.map(|s| s.primary_asset_id).unwrap_or_else(|| raw_id.to_string());
+        let anchor = raw
+            .stack
+            .map(|s| s.primary_asset_id)
+            .unwrap_or_else(|| raw_id.to_string());
         if anchor == export_id {
             return Ok(());
         }
-        let ids = if make_primary { vec![export_id, &anchor] } else { vec![anchor.as_str(), export_id] };
-        let r = self.http.post(self.url("/stacks")).header("x-api-key", key).json(&json!({ "assetIds": ids })).send().await?;
+        let ids = if make_primary {
+            vec![export_id, &anchor]
+        } else {
+            vec![anchor.as_str(), export_id]
+        };
+        let r = self
+            .http
+            .post(self.url("/stacks"))
+            .header("x-api-key", key)
+            .json(&json!({ "assetIds": ids }))
+            .send()
+            .await?;
         Self::check(r).await.map(|_| ())
     }
 

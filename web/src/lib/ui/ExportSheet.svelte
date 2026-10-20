@@ -20,6 +20,9 @@ server whether or not this page stays open; reopening the sheet later shows the 
 	let warning = $state('');
 	let saving = $state(false);
 	let immich = $state(true);
+	// Set when the render was started to put the file on this device: the share sheet opens as soon as it
+	// finishes, instead of asking for a second tap on a button that has just been replaced by itself.
+	let thenSave = $state(false);
 	let source: EventSource | null = null;
 
 	// Without an Immich library there is nowhere to upload to, so the device is the only destination and the
@@ -60,6 +63,10 @@ server whether or not this page stays open; reopening the sheet later shows the 
 			overall = 1;
 			phase = 'done';
 			source?.close();
+			if (thenSave) {
+				thenSave = false;
+				saveToDevice();
+			}
 		});
 		// The render and any upload succeeded, but something after them didn't — recording the version in the
 		// sidecar, most often. Worth saying, not worth throwing the export away over.
@@ -73,10 +80,15 @@ server whether or not this page stays open; reopening the sheet later shows the 
 		});
 	}
 
-	async function start() {
+	/**
+	 * Export with the sheet's settings. `destination` overrides the picker for this one render without
+	 * becoming the remembered choice: it is how a file already in one place is sent to the other.
+	 */
+	async function start(destination: Destination = settings.destination, save = false) {
 		try {
 			localStorage.setItem('sidecar.export', JSON.stringify(settings));
 		} catch {}
+		thenSave = save;
 		phase = 'running';
 		stage = 'Saving your edit';
 		overall = 0;
@@ -92,11 +104,12 @@ server whether or not this page stays open; reopening the sheet later shows the 
 		const r = await fetch('/api/exports', {
 			method: 'POST',
 			headers: { 'content-type': 'application/json', 'idempotency-key': crypto.randomUUID() },
-			body: JSON.stringify({ assetKey, editEtag: etag, ...settings })
+			body: JSON.stringify({ assetKey, editEtag: etag, ...settings, destination })
 		});
 		if (r.status === 200) {
 			const { existing } = await r.json();
 			result = { ...existing, existing: true };
+			thenSave = false;
 			phase = 'done';
 			return;
 		}
@@ -199,7 +212,7 @@ server whether or not this page stays open; reopening the sheet later shows the 
 					</fieldset>
 				{/if}
 				{#if phase === 'failed'}<p class="text-danger">{error}</p>{/if}
-				<button type="button" class="h-11 rounded bg-fg font-medium text-ground" onclick={start}>{phase === 'failed' ? 'Try again' : 'Export'}</button>
+				<button type="button" class="h-11 rounded bg-fg font-medium text-ground" onclick={() => start()}>{phase === 'failed' ? 'Try again' : 'Export'}</button>
 			</div>
 		{:else if phase === 'running'}
 			<div class="grid gap-2 text-sm" aria-live="polite">
@@ -212,7 +225,7 @@ server whether or not this page stays open; reopening the sheet later shows the 
 		{:else if result}
 			<div class="grid gap-3 text-sm" aria-live="polite">
 				<p>
-					{#if result.existing}Already exported as <span class="font-mono">{result.file}</span>.
+					{#if result.existing}Already in Immich as <span class="font-mono">{result.file}</span>.
 					{:else if result.immichAssetId}Saved to Immich as <span class="font-mono">{result.file}</span>, stacked with the original.
 					{:else}Exported <span class="font-mono">{result.file}</span>.{/if}
 				</p>
@@ -222,6 +235,15 @@ server whether or not this page stays open; reopening the sheet later shows the 
 					<button type="button" class="h-11 rounded bg-fg font-medium text-ground disabled:opacity-60" disabled={saving} onclick={saveToDevice}>
 						{saving ? 'Preparing…' : 'Save to this device'}
 					</button>
+				{:else if result.existing}
+					<!-- In Immich, with the local copy dropped: it has to be rendered again before it can be
+					     handed over, so the button says what it does for the person, not what that takes. -->
+					<button type="button" class="h-11 rounded bg-fg font-medium text-ground" onclick={() => start('both', true)}>Save to this device</button>
+				{/if}
+				{#if immich && !result.immichAssetId}
+					<!-- The same version, from the same edit, under the same name: one more place, not one more
+					     version. -->
+					<button type="button" class="h-11 rounded bg-raised font-medium" onclick={() => start('both')}>Also save to Immich</button>
 				{/if}
 			</div>
 		{/if}

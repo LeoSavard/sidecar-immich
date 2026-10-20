@@ -120,12 +120,22 @@ The global Saturation slider (PR #4: one commit for the core, one for the UI) is
   `./dev/run bash -c 'cd web && npm run generate'` (a second or two), then a reload.
 - **Worktrees are isolated**: each gets its own cargo target directory, server state and container
   (`sidecar-serve-<worktree>`). sccache shares compiled dependencies between them.
+- **Formatting is rustfmt's, not yours**: `rustfmt.toml` sets `max_width = 100`, which is rustfmt's own
+  default, stated so it cannot drift with a future toolchain. `cargo fmt --all` before you push; CI checks it.
+  The width is deliberately narrow for a codebase this wide, and the reason is mechanical rather than
+  aesthetic: git is line-granular, so two branches that touch *different* arguments of one wide call collide
+  in the same hunk, where at 100 those arguments sit on their own lines and merge cleanly. With a stack of
+  branches that each merge `main` back down, that is the difference between a conflict and no conflict.
+  `git blame` gets the same benefit. The one-time reflow is recorded in `.git-blame-ignore-revs`, so run
+  `git config blame.ignoreRevsFile .git-blame-ignore-revs` once in your clone and blame will step over it
+  (GitHub honours the file automatically).
 - **Fast checks**: `./dev/run cargo check -p <crate>`, `./dev/run cargo test -p <crate>`,
   `./dev/run bash -c 'cd web && npm run check'`.
 - **Before pushing, run what CI runs** (`.github/workflows/ci.yml`), or the branch goes red and so does every
   branch above it. `check` and `test` passing is *not* the gate; clippy is, with warnings denied:
 
   ```bash
+  ./dev/run cargo fmt --all --check
   ./dev/run cargo clippy --workspace --exclude sidecar-ml --all-targets -- -D warnings
   ./dev/run cargo test --workspace --exclude sidecar-ml
   ./dev/run bash -c 'cd /src && TS_RS_EXPORT_DIR=/src/web/src/lib/generated cargo test -q -p sidecar-color --features ts export_bindings'

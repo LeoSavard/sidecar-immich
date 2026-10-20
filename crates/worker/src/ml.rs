@@ -45,7 +45,14 @@ pub struct Face {
 }
 
 /// The channels `parts` returns, in order (mirrors `sidecar_ml::PARTS`).
-pub const PARTS: [&str; 6] = ["background", "hair", "body-skin", "face-skin", "clothes", "other"];
+pub const PARTS: [&str; 6] = [
+    "background",
+    "hair",
+    "body-skin",
+    "face-skin",
+    "clothes",
+    "other",
+];
 
 pub struct Ml {
     program: PathBuf,
@@ -67,21 +74,37 @@ impl Drop for Running {
 }
 
 fn on_path(program: &str) -> Option<PathBuf> {
-    std::env::split_paths(&std::env::var_os("PATH")?).map(|d| d.join(program)).find(|p| p.is_file())
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|d| d.join(program))
+        .find(|p| p.is_file())
 }
 
 impl Ml {
     /// The program from `SIDECAR_ML` or the `PATH`, the weights from `SIDECAR_ML_MODELS` or the image's
     /// default. `None` when either is missing. `cache` is where it keeps tuned kernels and compiled shaders.
     pub fn discover(cache: &Path) -> Option<Self> {
-        let program = std::env::var_os("SIDECAR_ML").map(PathBuf::from).or_else(|| on_path("sidecar-ml"))?;
-        let models = std::env::var_os("SIDECAR_ML_MODELS").map_or_else(|| PathBuf::from(DEFAULT_MODELS), PathBuf::from);
+        let program = std::env::var_os("SIDECAR_ML")
+            .map(PathBuf::from)
+            .or_else(|| on_path("sidecar-ml"))?;
+        let models = std::env::var_os("SIDECAR_ML_MODELS")
+            .map_or_else(|| PathBuf::from(DEFAULT_MODELS), PathBuf::from);
         if !program.is_file() || !WEIGHTS.iter().all(|w| models.join(w).is_file()) {
-            tracing::info!("no machine-learning models here: masks are unavailable (the -ml image has them)");
+            tracing::info!(
+                "no machine-learning models here: masks are unavailable (the -ml image has them)"
+            );
             return None;
         }
-        tracing::info!("masks from {} with the models in {}", program.display(), models.display());
-        Some(Self { program, models, cache: cache.to_path_buf(), running: Mutex::new(None) })
+        tracing::info!(
+            "masks from {} with the models in {}",
+            program.display(),
+            models.display()
+        );
+        Some(Self {
+            program,
+            models,
+            cache: cache.to_path_buf(),
+            running: Mutex::new(None),
+        })
     }
 
     fn start(&self) -> Result<Running> {
@@ -95,15 +118,24 @@ impl Ml {
             .stdin(Stdio::from(OwnedFd::from(theirs)))
             .spawn()
             .with_context(|| format!("starting {}", self.program.display()))?;
-        Ok(Running { child, socket: ours })
+        Ok(Running {
+            child,
+            socket: ours,
+        })
     }
 
     /// One request and its reply. A process that exited while idle, or died, is started again and the request
     /// sent once more: the first write or read to a gone process fails, so nothing is lost but the attempt.
-    fn call(&self, header: serde_json::Value, pixels: &[u8]) -> Result<(serde_json::Value, Vec<u8>)> {
+    fn call(
+        &self,
+        header: serde_json::Value,
+        pixels: &[u8],
+    ) -> Result<(serde_json::Value, Vec<u8>)> {
         let mut running = self.running.lock().unwrap_or_else(|p| p.into_inner());
         for attempt in 0..2 {
-            let alive = running.as_mut().is_some_and(|r| matches!(r.child.try_wait(), Ok(None)));
+            let alive = running
+                .as_mut()
+                .is_some_and(|r| matches!(r.child.try_wait(), Ok(None)));
             if !alive {
                 *running = Some(self.start()?);
             }
@@ -126,8 +158,18 @@ impl Ml {
     fn planes(&self, task: &str, picture: &Picture, long_edge: u32) -> Result<Planes> {
         let header = serde_json::json!({ "task": task, "width": picture.width, "height": picture.height, "longEdge": long_edge });
         let (reply, data) = self.call(header, &picture.rgb)?;
-        let dim = |k: &str| reply[k].as_u64().map(|v| v as u32).with_context(|| format!("sidecar-ml sent no {k}"));
-        Ok(Planes { width: dim("width")?, height: dim("height")?, channels: dim("channels")?, data })
+        let dim = |k: &str| {
+            reply[k]
+                .as_u64()
+                .map(|v| v as u32)
+                .with_context(|| format!("sidecar-ml sent no {k}"))
+        };
+        Ok(Planes {
+            width: dim("width")?,
+            height: dim("height")?,
+            channels: dim("channels")?,
+            data,
+        })
     }
 
     /// The main subject, a soft mask at `long_edge` at most.
@@ -153,7 +195,11 @@ impl Ml {
 }
 
 /// Write one framed request, read one framed reply (the format is in crates/ml/src/main.rs).
-fn exchange(socket: &mut UnixStream, header: &serde_json::Value, pixels: &[u8]) -> Result<(serde_json::Value, Vec<u8>)> {
+fn exchange(
+    socket: &mut UnixStream,
+    header: &serde_json::Value,
+    pixels: &[u8],
+) -> Result<(serde_json::Value, Vec<u8>)> {
     let header = serde_json::to_vec(header)?;
     socket.write_all(&(header.len() as u32).to_le_bytes())?;
     socket.write_all(&header)?;
@@ -164,10 +210,19 @@ fn exchange(socket: &mut UnixStream, header: &serde_json::Value, pixels: &[u8]) 
     socket.read_exact(&mut reply)?;
     let reply: serde_json::Value = serde_json::from_slice(&reply)?;
     if reply["ok"] != true {
-        bail!("sidecar-ml: {}", reply["error"].as_str().unwrap_or("failed"));
+        bail!(
+            "sidecar-ml: {}",
+            reply["error"].as_str().unwrap_or("failed")
+        );
     }
-    let size: u64 = ["width", "height", "channels"].iter().map(|k| reply[*k].as_u64().unwrap_or(0)).product();
-    ensure!(size <= 64 << 20, "sidecar-ml sent an implausible {size}-byte reply");
+    let size: u64 = ["width", "height", "channels"]
+        .iter()
+        .map(|k| reply[*k].as_u64().unwrap_or(0))
+        .product();
+    ensure!(
+        size <= 64 << 20,
+        "sidecar-ml sent an implausible {size}-byte reply"
+    );
     let mut payload = vec![0u8; size as usize];
     socket.read_exact(&mut payload)?;
     Ok((reply, payload))

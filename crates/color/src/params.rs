@@ -85,7 +85,11 @@ pub struct LensBlur {
 
 impl Default for LensBlur {
     fn default() -> Self {
-        Self { amount: 50.0, focus: 100.0, range: 10.0 }
+        Self {
+            amount: 50.0,
+            focus: 100.0,
+            range: 10.0,
+        }
     }
 }
 
@@ -130,7 +134,10 @@ impl EditParams {
     /// it hands out; an edit built fresh (no anchor points to find) is unaffected either way.
     fn migrate_highlight_shadow_anchors(&mut self) {
         let anchor_offset = |curve: &[[f64; 2]], x: f64| {
-            curve.iter().find(|p| (p[0] - x).abs() < 1e-6).map(|p| (p[1] - x) / HIGHLIGHT_SHADOW_SCALE * 100.0)
+            curve
+                .iter()
+                .find(|p| (p[0] - x).abs() < 1e-6)
+                .map(|p| (p[1] - x) / HIGHLIGHT_SHADOW_SCALE * 100.0)
         };
         if let Some(v) = anchor_offset(&self.tone.curve, 0.25) {
             self.tone.shadows = v;
@@ -138,7 +145,9 @@ impl EditParams {
         if let Some(v) = anchor_offset(&self.tone.curve, 0.75) {
             self.tone.highlights = v;
         }
-        self.tone.curve.retain(|p| (p[0] - 0.25).abs() >= 1e-6 && (p[0] - 0.75).abs() >= 1e-6);
+        self.tone
+            .curve
+            .retain(|p| (p[0] - 0.25).abs() >= 1e-6 && (p[0] - 0.75).abs() >= 1e-6);
     }
 }
 
@@ -162,7 +171,11 @@ pub struct WhiteBalance {
 
 impl Default for WhiteBalance {
     fn default() -> Self {
-        Self { mode: WhiteBalanceMode::AsShot, temperature_k: 5500.0, tint: 0.0 }
+        Self {
+            mode: WhiteBalanceMode::AsShot,
+            temperature_k: 5500.0,
+            tint: 0.0,
+        }
     }
 }
 
@@ -176,7 +189,10 @@ pub struct Exposure {
 
 impl Default for Exposure {
     fn default() -> Self {
-        Self { ev: 0.0, highlight_blend: 0.5 }
+        Self {
+            ev: 0.0,
+            highlight_blend: 0.5,
+        }
     }
 }
 
@@ -243,7 +259,16 @@ pub struct Mixer {
 
 impl Mixer {
     pub fn bands(&self) -> [MixerBand; 8] {
-        [self.red, self.orange, self.yellow, self.green, self.aqua, self.blue, self.purple, self.magenta]
+        [
+            self.red,
+            self.orange,
+            self.yellow,
+            self.green,
+            self.aqua,
+            self.blue,
+            self.purple,
+            self.magenta,
+        ]
     }
 }
 
@@ -260,7 +285,13 @@ pub struct Detail {
 
 impl Default for Detail {
     fn default() -> Self {
-        Self { sharpen_amount: 0.0, sharpen_radius: 1.0, sharpen_iterations: 10, denoise_luminance: 0.0, denoise_chroma: 0.0 }
+        Self {
+            sharpen_amount: 0.0,
+            sharpen_radius: 1.0,
+            sharpen_iterations: 10,
+            denoise_luminance: 0.0,
+            denoise_chroma: 0.0,
+        }
     }
 }
 
@@ -295,7 +326,12 @@ pub struct Film {
 
 impl Default for Film {
     fn default() -> Self {
-        Self { amount: 100.0, interlayer: 45.0, stock: String::new(), light: "daylight".into() }
+        Self {
+            amount: 100.0,
+            interlayer: 45.0,
+            stock: String::new(),
+            light: "daylight".into(),
+        }
     }
 }
 
@@ -317,7 +353,10 @@ pub struct Grain {
 
 impl Default for Grain {
     fn default() -> Self {
-        Self { amount: 40.0, size: 50.0 }
+        Self {
+            amount: 40.0,
+            size: 50.0,
+        }
     }
 }
 
@@ -331,7 +370,12 @@ impl Grain {
     /// the frame's long edge.
     pub fn uniform(grain: Option<&Grain>) -> [f32; 4] {
         match grain.filter(|g| g.amount > 0.0) {
-            Some(g) => [(g.amount.min(100.0) / 100.0 * GRAIN_STOPS) as f32, (g.microns() / FRAME_MICRONS) as f32, 0.0, 0.0],
+            Some(g) => [
+                (g.amount.min(100.0) / 100.0 * GRAIN_STOPS) as f32,
+                (g.microns() / FRAME_MICRONS) as f32,
+                0.0,
+                0.0,
+            ],
             None => [0.0; 4],
         }
     }
@@ -361,7 +405,12 @@ pub struct Lens {
 
 impl Default for Lens {
     fn default() -> Self {
-        Self { profile: String::new(), distortion: 100.0, lateral_ca: 100.0, vignetting: 100.0 }
+        Self {
+            profile: String::new(),
+            distortion: 100.0,
+            lateral_ca: 100.0,
+            vignetting: 100.0,
+        }
     }
 }
 
@@ -481,7 +530,12 @@ impl MaskRange {
         match range {
             Some(r) => {
                 let (a, b) = (r.from.clamp(0.0, 100.0), r.to.clamp(0.0, 100.0));
-                [(a.min(b) / 100.0) as f32, (a.max(b) / 100.0) as f32, (r.feather.clamp(0.0, 100.0) / 100.0) as f32, 1.0]
+                [
+                    (a.min(b) / 100.0) as f32,
+                    (a.max(b) / 100.0) as f32,
+                    (r.feather.clamp(0.0, 100.0) / 100.0) as f32,
+                    1.0,
+                ]
             }
             None => [0.0; 4],
         }
@@ -504,7 +558,11 @@ pub struct MaskEdge {
 
 impl Default for MaskEdge {
     fn default() -> Self {
-        Self { width: 20.0, feather: 100.0, shift: 0.0 }
+        Self {
+            width: 20.0,
+            feather: 100.0,
+            shift: 0.0,
+        }
     }
 }
 
@@ -544,7 +602,13 @@ fn is_standard(v: &str) -> bool {
 
 impl Default for Monochrome {
     fn default() -> Self {
-        Self { film: "panchromatic".into(), filter: "none".into(), light: "daylight".into(), developer: "standard".into(), development: 0.0 }
+        Self {
+            film: "panchromatic".into(),
+            filter: "none".into(),
+            light: "daylight".into(),
+            developer: "standard".into(),
+            development: 0.0,
+        }
     }
 }
 
@@ -597,15 +661,31 @@ pub struct EdgeParams {
 impl EdgePlan {
     /// Pass 0: average the mask down into `small`.
     pub fn down(&self) -> EdgeParams {
-        EdgeParams { size: self.small.map(|v| v as f32), mode: 0, scale: self.scale as f32, ..Default::default() }
+        EdgeParams {
+            size: self.small.map(|v| v as f32),
+            mode: 0,
+            scale: self.scale as f32,
+            ..Default::default()
+        }
     }
     /// Pass 1: blur across (`down` false) or down.
     pub fn blur(&self, down: bool) -> EdgeParams {
-        EdgeParams { size: self.small.map(|v| v as f32), mode: 1, dir: if down { [0.0, 1.0] } else { [1.0, 0.0] }, radius: self.radius, ..Default::default() }
+        EdgeParams {
+            size: self.small.map(|v| v as f32),
+            mode: 1,
+            dir: if down { [0.0, 1.0] } else { [1.0, 0.0] },
+            radius: self.radius,
+            ..Default::default()
+        }
     }
     /// Pass 2: threshold into the mask, `size` pixels.
     pub fn threshold(&self, size: [u32; 2]) -> EdgeParams {
-        EdgeParams { size: size.map(|v| v as f32), mode: 2, ramp: [self.threshold, self.ramp, 0.0, 0.0], ..Default::default() }
+        EdgeParams {
+            size: size.map(|v| v as f32),
+            mode: 2,
+            ramp: [self.threshold, self.ramp, 0.0, 0.0],
+            ..Default::default()
+        }
     }
 }
 
@@ -630,12 +710,26 @@ pub struct Stroke {
 
 impl Default for Stroke {
     fn default() -> Self {
-        Self { erase: false, radius: 0.05, feather: 0.5, flow: 1.0, points: Vec::new() }
+        Self {
+            erase: false,
+            radius: 0.05,
+            feather: 0.5,
+            flow: 1.0,
+            points: Vec::new(),
+        }
     }
 }
 
 /// The masks the models make, which an adjustment can name. Kept in step with the worker's `masks::NAMES`.
-pub const MASK_NAMES: [&str; 7] = ["subject", "skin", "face-skin", "body-skin", "hair", "clothes", "depth"];
+pub const MASK_NAMES: [&str; 7] = [
+    "subject",
+    "skin",
+    "face-skin",
+    "body-skin",
+    "hair",
+    "clothes",
+    "depth",
+];
 /// A mask painted from nothing: only its strokes.
 pub const BRUSH: &str = "brush";
 
@@ -688,12 +782,17 @@ pub struct MaskParams {
 /// Relative white balance for a mask: gains in camera space that move the global white point `(t, tint)` by
 /// the mask's temperature and tint. Temperature ±100 is ±40 mired, tint ±100 is ±30 tint units. The matrix
 /// is kept from the global white balance; a local shift is small enough for that to hold.
-fn mask_gains(camera: &CameraColor, global: &camera::ResolvedWhiteBalance, m: &MaskAdjustment) -> [f64; 3] {
+fn mask_gains(
+    camera: &CameraColor,
+    global: &camera::ResolvedWhiteBalance,
+    m: &MaskAdjustment,
+) -> [f64; 3] {
     if m.temperature == 0.0 && m.tint == 0.0 {
         return [1.0; 3];
     }
     // Warmer means assuming a bluer light: a higher temperature, a lower mired value.
-    let mired = (1e6 / global.temperature_k - 0.4 * m.temperature.clamp(-100.0, 100.0)).clamp(20.0, 1000.0);
+    let mired =
+        (1e6 / global.temperature_k - 0.4 * m.temperature.clamp(-100.0, 100.0)).clamp(20.0, 1000.0);
     let tint = global.tint + 0.3 * m.tint.clamp(-100.0, 100.0);
     let local = camera::resolve(camera, crate::cct::temp_tint_to_xy(1e6 / mired, tint));
     [0, 1, 2].map(|i| local.mul[i] / global.mul[i])
@@ -783,8 +882,17 @@ fn display_tone(edit: &EditParams) -> [f32; 4] {
     let t = &edit.tone;
     let blacks = ((DEFAULT_BLACK_EV - t.black_ev) / 3.0).clamp(-1.0, 1.0);
     let whites = ((DEFAULT_WHITE_EV - t.white_ev) / 2.0).clamp(-1.0, 1.0);
-    let knee = if edit.exposure.ev > 0.0 { (1.0 - 0.3 * edit.exposure.ev).clamp(0.4, 1.0) } else { 1.0 };
-    [blacks as f32, whites as f32, t.contrast.max(0.1) as f32, knee as f32]
+    let knee = if edit.exposure.ev > 0.0 {
+        (1.0 - 0.3 * edit.exposure.ev).clamp(0.4, 1.0)
+    } else {
+        1.0
+    };
+    [
+        blacks as f32,
+        whites as f32,
+        t.contrast.max(0.1) as f32,
+        knee as f32,
+    ]
 }
 
 pub struct Packed {
@@ -826,7 +934,12 @@ fn tone_params(edit: &EditParams, developed: bool) -> [f32; 4] {
         black = moved.min(t.white_ev - 1.0);
         k *= (t.white_ev - black) / (t.white_ev - t.black_ev);
     }
-    [black as f32, t.white_ev as f32, k as f32, tone::pivot_for(black, t.white_ev, k) as f32]
+    [
+        black as f32,
+        t.white_ev as f32,
+        k as f32,
+        tone::pivot_for(black, t.white_ev, k) as f32,
+    ]
 }
 
 /// The curve of the named stock this edit renders in black and white, from a RAW (a developed file's tones were
@@ -853,7 +966,9 @@ fn mixer_params(mixer: &Mixer) -> [[f32; 4]; 8] {
 
 /// The identity curve, as a LUT row.
 fn identity_lut() -> Vec<f32> {
-    (0..LUT_SIZE).map(|i| i as f32 / (LUT_SIZE - 1) as f32).collect()
+    (0..LUT_SIZE)
+        .map(|i| i as f32 / (LUT_SIZE - 1) as f32)
+        .collect()
 }
 
 /// A layer at full weight: its white and black points moved from the global ones as the global sliders move
@@ -874,25 +989,50 @@ fn layer_edit(edit: &EditParams, m: &MaskAdjustment) -> EditParams {
 ///
 /// Only the profile's offsets, scale and side are read — never its response table, which goes to the GPU
 /// directly — so a caller that already holds the table can pass a `SlideProfile::header`.
-pub fn pack_with(edit: &EditParams, camera: &CameraColor, source: SourceKind, display: DisplaySpace, profile: Option<&crate::slide::SlideProfile>) -> Packed {
+pub fn pack_with(
+    edit: &EditParams,
+    camera: &CameraColor,
+    source: SourceKind,
+    display: DisplaySpace,
+    profile: Option<&crate::slide::SlideProfile>,
+) -> Packed {
     pack_inner(edit, camera, source, display, profile)
 }
 
-pub fn pack(edit: &EditParams, camera: &CameraColor, source: SourceKind, display: DisplaySpace) -> Packed {
+pub fn pack(
+    edit: &EditParams,
+    camera: &CameraColor,
+    source: SourceKind,
+    display: DisplaySpace,
+) -> Packed {
     pack_inner(edit, camera, source, display, None)
 }
 
-fn pack_inner(edit: &EditParams, camera: &CameraColor, source: SourceKind, display: DisplaySpace, profile: Option<&crate::slide::SlideProfile>) -> Packed {
+fn pack_inner(
+    edit: &EditParams,
+    camera: &CameraColor,
+    source: SourceKind,
+    display: DisplaySpace,
+    profile: Option<&crate::slide::SlideProfile>,
+) -> Packed {
     let white_xy = match edit.white_balance.mode {
         WhiteBalanceMode::AsShot => camera.as_shot_xy(),
-        WhiteBalanceMode::Custom => crate::cct::temp_tint_to_xy(edit.white_balance.temperature_k, edit.white_balance.tint),
+        WhiteBalanceMode::Custom => {
+            crate::cct::temp_tint_to_xy(edit.white_balance.temperature_k, edit.white_balance.tint)
+        }
     };
     let wb = camera::resolve(camera, white_xy);
     let developed = source == SourceKind::Developed;
     let mono_lut = edit
         .monochrome
         .as_ref()
-        .and_then(|m| crate::spectral::mono_lut(&m.film, &m.filter, &crate::spectral::light(&m.light, wb.temperature_k)?))
+        .and_then(|m| {
+            crate::spectral::mono_lut(
+                &m.film,
+                &m.filter,
+                &crate::spectral::light(&m.light, wb.temperature_k)?,
+            )
+        })
         .unwrap_or_default();
     let mono = !mono_lut.is_empty();
     // Colour film, spectrally: the stock's own chain, which needs both the public half (its sheet's
@@ -919,16 +1059,29 @@ fn pack_inner(edit: &EditParams, camera: &CameraColor, source: SourceKind, displ
         tone,
         // Highlight blending neutralises what white balance does to sensor-clipped pixels; a developed file
         // has no sensor clipping to speak of.
-        hl_strength: if developed { 0.0 } else { edit.exposure.highlight_blend.clamp(0.0, 1.0) as f32 },
+        hl_strength: if developed {
+            0.0
+        } else {
+            edit.exposure.highlight_blend.clamp(0.0, 1.0) as f32
+        },
         display_referred: if developed { 1.0 } else { 0.0 },
         saturation: (edit.saturation.clamp(-100.0, 100.0) / 100.0) as f32,
         _pad1: 0.0,
         mixer: mixer_params(&edit.mixer),
         film: match (&edit.film, developed || mono || slide.is_some()) {
-            (Some(f), false) => [(f.amount.clamp(0.0, 100.0) / 100.0) as f32, (f.interlayer.clamp(0.0, 100.0) / 100.0 * FILM_INTERLAYER) as f32, 0.0, 0.0],
+            (Some(f), false) => [
+                (f.amount.clamp(0.0, 100.0) / 100.0) as f32,
+                (f.interlayer.clamp(0.0, 100.0) / 100.0 * FILM_INTERLAYER) as f32,
+                0.0,
+                0.0,
+            ],
             _ => [0.0; 4],
         },
-        mono: if mono { [1.0, crate::spectral::GRID as f32, 0.0, 0.0] } else { [0.0; 4] },
+        mono: if mono {
+            [1.0, crate::spectral::GRID as f32, 0.0, 0.0]
+        } else {
+            [0.0; 4]
+        },
         grain: Grain::uniform(edit.grain.as_ref()),
         developer: [0.0; 4],
         stock: match stock_curve(edit, developed) {
@@ -937,7 +1090,11 @@ fn pack_inner(edit: &EditParams, camera: &CameraColor, source: SourceKind, displ
         },
         slide: match &slide {
             Some((_, p)) => [
-                (edit.film.as_ref().map_or(0.0, |f| f.amount.clamp(0.0, 100.0)) / 100.0) as f32,
+                (edit
+                    .film
+                    .as_ref()
+                    .map_or(0.0, |f| f.amount.clamp(0.0, 100.0))
+                    / 100.0) as f32,
                 crate::spectral::GRID as f32,
                 p.side as f32,
                 0.0,
@@ -964,11 +1121,21 @@ fn pack_inner(edit: &EditParams, camera: &CameraColor, source: SourceKind, displ
     // Black and white's developer and development, and what they do to the grain.
     if let Some(m) = edit.monochrome.as_ref().filter(|_| mono) {
         let d = crate::developer::developer(&m.developer);
-        params.developer = [d.adjacency as f32, (d.reach_mm * 1000.0 / FRAME_MICRONS) as f32, crate::developer::gamma(m.development) as f32, d.compensation as f32];
+        params.developer = [
+            d.adjacency as f32,
+            (d.reach_mm * 1000.0 / FRAME_MICRONS) as f32,
+            crate::developer::gamma(m.development) as f32,
+            d.compensation as f32,
+        ];
         params.grain[0] *= (d.grain * crate::developer::development_grain(m.development)) as f32;
         params.grain[2] = d.stain as f32;
     }
-    let mut masks = MaskParams { frame: [0.0; 4], count: 0, _pad: [0; 3], layers: [MaskLayer::default(); MAX_MASKS] };
+    let mut masks = MaskParams {
+        frame: [0.0; 4],
+        count: 0,
+        _pad: [0; 3],
+        layers: [MaskLayer::default(); MAX_MASKS],
+    };
     let mut mask_curves = Vec::with_capacity(MAX_MASKS * LUT_SIZE);
     for i in 0..MAX_MASKS {
         let m = edit.masks.get(i);
@@ -987,14 +1154,34 @@ fn pack_inner(edit: &EditParams, camera: &CameraColor, source: SourceKind, displ
         let tone_map = tone_params(&layer_edit(edit, m), developed);
         let flag = |on: bool| if on { 1.0 } else { 0.0 };
         masks.layers[i] = MaskLayer {
-            gain: [g[0] as f32, g[1] as f32, g[2] as f32, m.exposure.clamp(-5.0, 5.0) as f32],
-            tone: [unit(m.contrast), unit(m.saturation), (m.amount.clamp(0.0, 100.0) / 100.0) as f32, flag(m.invert)],
+            gain: [
+                g[0] as f32,
+                g[1] as f32,
+                g[2] as f32,
+                m.exposure.clamp(-5.0, 5.0) as f32,
+            ],
+            tone: [
+                unit(m.contrast),
+                unit(m.saturation),
+                (m.amount.clamp(0.0, 100.0) / 100.0) as f32,
+                flag(m.invert),
+            ],
             tone_map,
-            flags: [flag(m.has_curve()), flag(m.mixer != Mixer::default()), flag(tone_map != tone), 0.0],
+            flags: [
+                flag(m.has_curve()),
+                flag(m.mixer != Mixer::default()),
+                flag(tone_map != tone),
+                0.0,
+            ],
             mixer: mixer_params(&m.mixer),
         };
     }
-    let lut = tone_curve_lut(&edit.tone.curve, edit.tone.highlights, edit.tone.shadows, LUT_SIZE);
+    let lut = tone_curve_lut(
+        &edit.tone.curve,
+        edit.tone.highlights,
+        edit.tone.shadows,
+        LUT_SIZE,
+    );
     Packed {
         uniform: bytemuck::bytes_of(&params).to_vec(),
         lut,
@@ -1015,7 +1202,12 @@ mod tests {
     /// RAW-only highlight blend off whatever the stored strength says.
     #[test]
     fn a_developed_file_packs_neutral_at_default() {
-        let p = pack(&EditParams::default(), &crate::camera::nikon_d850(), SourceKind::Developed, DisplaySpace::Srgb);
+        let p = pack(
+            &EditParams::default(),
+            &crate::camera::nikon_d850(),
+            SourceKind::Developed,
+            DisplaySpace::Srgb,
+        );
         let params: &DevelopParams = bytemuck::from_bytes(&p.uniform);
         assert_eq!(params.tone, [0.0, 0.0, 1.0, 1.0]);
         assert_eq!((params.hl_strength, params.display_referred), (0.0, 1.0));
@@ -1024,9 +1216,18 @@ mod tests {
         edit.tone.white_ev = 2.5;
         edit.tone.black_ev = -5.0;
         edit.exposure.ev = 1.0;
-        let p = pack(&edit, &crate::camera::nikon_d850(), SourceKind::Developed, DisplaySpace::Srgb);
+        let p = pack(
+            &edit,
+            &crate::camera::nikon_d850(),
+            SourceKind::Developed,
+            DisplaySpace::Srgb,
+        );
         let params: &DevelopParams = bytemuck::from_bytes(&p.uniform);
-        assert_eq!(params.tone, [-1.0, 1.0, 1.0, 0.7], "Blacks −100, Whites +100, shoulder at 0.7 for +1 EV");
+        assert_eq!(
+            params.tone,
+            [-1.0, 1.0, 1.0, 0.7],
+            "Blacks −100, Whites +100, shoulder at 0.7 for +1 EV"
+        );
     }
 
     #[test]
@@ -1035,19 +1236,40 @@ mod tests {
         let module = naga::front::wgsl::parse_str(&src).unwrap();
         let mut layouter = naga::proc::Layouter::default();
         layouter.update(module.to_ctx()).unwrap();
-        let (handle, ty) = module.types.iter().find(|(_, t)| t.name.as_deref() == Some("DevelopParams")).unwrap();
-        let naga::TypeInner::Struct { members, span } = &ty.inner else { panic!("not a struct") };
+        let (handle, ty) = module
+            .types
+            .iter()
+            .find(|(_, t)| t.name.as_deref() == Some("DevelopParams"))
+            .unwrap();
+        let naga::TypeInner::Struct { members, span } = &ty.inner else {
+            panic!("not a struct")
+        };
         assert_eq!(*span as usize, std::mem::size_of::<DevelopParams>());
         assert_eq!(layouter[handle].size as usize, 416);
         let rust = [
             ("wb_mul", std::mem::offset_of!(DevelopParams, wb_mul)),
             ("exposure", std::mem::offset_of!(DevelopParams, exposure)),
-            ("cam_to_work", std::mem::offset_of!(DevelopParams, cam_to_work)),
-            ("work_to_disp", std::mem::offset_of!(DevelopParams, work_to_disp)),
+            (
+                "cam_to_work",
+                std::mem::offset_of!(DevelopParams, cam_to_work),
+            ),
+            (
+                "work_to_disp",
+                std::mem::offset_of!(DevelopParams, work_to_disp),
+            ),
             ("tone", std::mem::offset_of!(DevelopParams, tone)),
-            ("hl_strength", std::mem::offset_of!(DevelopParams, hl_strength)),
-            ("display_referred", std::mem::offset_of!(DevelopParams, display_referred)),
-            ("saturation", std::mem::offset_of!(DevelopParams, saturation)),
+            (
+                "hl_strength",
+                std::mem::offset_of!(DevelopParams, hl_strength),
+            ),
+            (
+                "display_referred",
+                std::mem::offset_of!(DevelopParams, display_referred),
+            ),
+            (
+                "saturation",
+                std::mem::offset_of!(DevelopParams, saturation),
+            ),
             ("mixer", std::mem::offset_of!(DevelopParams, mixer)),
             ("film", std::mem::offset_of!(DevelopParams, film)),
             ("mono", std::mem::offset_of!(DevelopParams, mono)),
@@ -1056,40 +1278,86 @@ mod tests {
             ("stock", std::mem::offset_of!(DevelopParams, stock)),
             ("shoulder", std::mem::offset_of!(DevelopParams, shoulder)),
             ("slide", std::mem::offset_of!(DevelopParams, slide)),
-            ("slide_log_h", std::mem::offset_of!(DevelopParams, slide_log_h)),
-            ("slide_tone", std::mem::offset_of!(DevelopParams, slide_tone)),
+            (
+                "slide_log_h",
+                std::mem::offset_of!(DevelopParams, slide_log_h),
+            ),
+            (
+                "slide_tone",
+                std::mem::offset_of!(DevelopParams, slide_tone),
+            ),
         ];
         for (name, off) in rust {
-            let m = members.iter().find(|m| m.name.as_deref() == Some(name)).unwrap();
+            let m = members
+                .iter()
+                .find(|m| m.name.as_deref() == Some(name))
+                .unwrap();
             assert_eq!(m.offset as usize, off, "{name}");
         }
-        let p = pack(&EditParams::default(), &crate::camera::nikon_d850(), SourceKind::Raw, DisplaySpace::Srgb);
+        let p = pack(
+            &EditParams::default(),
+            &crate::camera::nikon_d850(),
+            SourceKind::Raw,
+            DisplaySpace::Srgb,
+        );
         assert_eq!(p.uniform.len(), 416);
         assert_eq!(p.lut.len(), LUT_SIZE);
         // exposure sits at byte 12
-        assert_eq!(f32::from_le_bytes(p.uniform[12..16].try_into().unwrap()), 1.0);
+        assert_eq!(
+            f32::from_le_bytes(p.uniform[12..16].try_into().unwrap()),
+            1.0
+        );
     }
 
     #[test]
     fn global_saturation_packs_to_the_same_scale_a_mask_layer_uses() {
         let cam = crate::camera::nikon_d850();
-        let neutral = pack(&EditParams::default(), &cam, SourceKind::Raw, DisplaySpace::Srgb);
+        let neutral = pack(
+            &EditParams::default(),
+            &cam,
+            SourceKind::Raw,
+            DisplaySpace::Srgb,
+        );
         let params: &DevelopParams = bytemuck::from_bytes(&neutral.uniform);
         assert_eq!(params.saturation, 0.0);
 
-        let edit = EditParams { saturation: 50.0, ..Default::default() };
+        let edit = EditParams {
+            saturation: 50.0,
+            ..Default::default()
+        };
         let boosted = pack(&edit, &cam, SourceKind::Raw, DisplaySpace::Srgb);
         let params: &DevelopParams = bytemuck::from_bytes(&boosted.uniform);
-        assert_eq!(params.saturation, 0.5, "same -100..100 -> -1..1 scale as MaskAdjustment.saturation's `unit`");
+        assert_eq!(
+            params.saturation, 0.5,
+            "same -100..100 -> -1..1 scale as MaskAdjustment.saturation's `unit`"
+        );
     }
 
     #[test]
     fn film_packs_for_a_raw_and_never_for_a_developed_file() {
         let cam = crate::camera::nikon_d850();
-        let at = |edit: &EditParams, source| *bytemuck::from_bytes::<DevelopParams>(&pack(edit, &cam, source, DisplaySpace::Srgb).uniform);
-        assert_eq!(at(&EditParams::default(), SourceKind::Raw).film, [0.0; 4], "absent is the neutral rendering");
-        let edit = EditParams { film: Some(Film { amount: 50.0, interlayer: 100.0, ..Default::default() }), ..Default::default() };
-        assert_eq!(at(&edit, SourceKind::Raw).film, [0.5, FILM_INTERLAYER as f32, 0.0, 0.0]);
+        let at = |edit: &EditParams, source| {
+            *bytemuck::from_bytes::<DevelopParams>(
+                &pack(edit, &cam, source, DisplaySpace::Srgb).uniform,
+            )
+        };
+        assert_eq!(
+            at(&EditParams::default(), SourceKind::Raw).film,
+            [0.0; 4],
+            "absent is the neutral rendering"
+        );
+        let edit = EditParams {
+            film: Some(Film {
+                amount: 50.0,
+                interlayer: 100.0,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            at(&edit, SourceKind::Raw).film,
+            [0.5, FILM_INTERLAYER as f32, 0.0, 0.0]
+        );
         assert_eq!(at(&edit, SourceKind::Developed).film, [0.0; 4]);
     }
 
@@ -1097,11 +1365,32 @@ mod tests {
     fn edge_params_layout_matches_wgsl() {
         let src = sidecar_shaders::compose("client/mask_edge.wgsl").unwrap();
         let module = naga::front::wgsl::parse_str(&src).unwrap();
-        let (_, ty) = module.types.iter().find(|(_, t)| t.name.as_deref() == Some("EdgeParams")).unwrap();
-        let naga::TypeInner::Struct { members, span } = &ty.inner else { panic!("not a struct") };
+        let (_, ty) = module
+            .types
+            .iter()
+            .find(|(_, t)| t.name.as_deref() == Some("EdgeParams"))
+            .unwrap();
+        let naga::TypeInner::Struct { members, span } = &ty.inner else {
+            panic!("not a struct")
+        };
         assert_eq!(*span as usize, std::mem::size_of::<EdgeParams>());
-        for (name, off) in [("size", std::mem::offset_of!(EdgeParams, size)), ("mode", std::mem::offset_of!(EdgeParams, mode)), ("scale", std::mem::offset_of!(EdgeParams, scale)), ("dir", std::mem::offset_of!(EdgeParams, dir)), ("radius", std::mem::offset_of!(EdgeParams, radius)), ("ramp", std::mem::offset_of!(EdgeParams, ramp))] {
-            assert_eq!(members.iter().find(|m| m.name.as_deref() == Some(name)).unwrap().offset as usize, off, "{name}");
+        for (name, off) in [
+            ("size", std::mem::offset_of!(EdgeParams, size)),
+            ("mode", std::mem::offset_of!(EdgeParams, mode)),
+            ("scale", std::mem::offset_of!(EdgeParams, scale)),
+            ("dir", std::mem::offset_of!(EdgeParams, dir)),
+            ("radius", std::mem::offset_of!(EdgeParams, radius)),
+            ("ramp", std::mem::offset_of!(EdgeParams, ramp)),
+        ] {
+            assert_eq!(
+                members
+                    .iter()
+                    .find(|m| m.name.as_deref() == Some(name))
+                    .unwrap()
+                    .offset as usize,
+                off,
+                "{name}"
+            );
         }
     }
 
@@ -1109,50 +1398,125 @@ mod tests {
     /// texels; shifting out lowers the threshold; an edge too narrow to see is none.
     #[test]
     fn edge_plans_follow_the_mask_size() {
-        let edge = MaskEdge { width: 100.0, feather: 50.0, shift: 100.0 };
+        let edge = MaskEdge {
+            width: 100.0,
+            feather: 50.0,
+            shift: 100.0,
+        };
         let p = edge.plan([4000, 3000]).unwrap();
         assert_eq!((p.scale, p.small, p.radius), (13, [308, 231], 200.0 / 13.0));
         assert!((p.threshold - 0.05).abs() < 1e-6 && p.ramp == 0.5);
         let proxy = edge.plan([1000, 750]).unwrap();
-        assert_eq!((proxy.scale, proxy.radius), (4, 12.5), "the same edge on a proxy, in its pixels");
+        assert_eq!(
+            (proxy.scale, proxy.radius),
+            (4, 12.5),
+            "the same edge on a proxy, in its pixels"
+        );
         assert_eq!(MaskEdge { width: 0.0, ..edge }.plan([4000, 3000]), None);
-        assert_eq!(MaskEdge { shift: -100.0, ..edge }.plan([100, 100]).unwrap().threshold, 0.95);
+        assert_eq!(
+            MaskEdge {
+                shift: -100.0,
+                ..edge
+            }
+            .plan([100, 100])
+            .unwrap()
+            .threshold,
+            0.95
+        );
     }
 
     /// A layer's range stays out of the edit until set, packs low end first, and a depth layer renders.
     #[test]
     fn a_mask_range_is_left_out_until_set_and_packs_in_order() {
-        let plain = MaskAdjustment { mask: "depth".into(), ..Default::default() };
+        let plain = MaskAdjustment {
+            mask: "depth".into(),
+            ..Default::default()
+        };
         assert!(serde_json::to_value(&plain).unwrap().get("range").is_none());
-        let r = MaskRange { from: 80.0, to: 20.0, feather: 10.0 };
+        let r = MaskRange {
+            from: 80.0,
+            to: 20.0,
+            feather: 10.0,
+        };
         assert_eq!(MaskRange::uniform(Some(&r)), [0.2, 0.8, 0.1, 1.0]);
         assert_eq!(MaskRange::uniform(None), [0.0; 4]);
-        let ranged = MaskAdjustment { range: Some(r), ..plain };
+        let ranged = MaskAdjustment {
+            range: Some(r),
+            ..plain
+        };
         assert!(ranged.renders());
-        assert_eq!(serde_json::to_value(&ranged).unwrap()["range"], serde_json::json!({ "from": 80.0, "to": 20.0, "feather": 10.0 }));
+        assert_eq!(
+            serde_json::to_value(&ranged).unwrap()["range"],
+            serde_json::json!({ "from": 80.0, "to": 20.0, "feather": 10.0 })
+        );
     }
 
     /// Black and white packs its table and switches film rendering off; colour packs none.
     #[test]
     fn monochrome_packs_its_table() {
         let cam = crate::camera::nikon_d850();
-        let colour = pack(&EditParams { film: Some(Film::default()), ..Default::default() }, &cam, SourceKind::Raw, DisplaySpace::Srgb);
+        let colour = pack(
+            &EditParams {
+                film: Some(Film::default()),
+                ..Default::default()
+            },
+            &cam,
+            SourceKind::Raw,
+            DisplaySpace::Srgb,
+        );
         assert!(colour.mono_lut.is_empty());
-        let edit = EditParams { film: Some(Film::default()), monochrome: Some(Monochrome::default()), ..Default::default() };
+        let edit = EditParams {
+            film: Some(Film::default()),
+            monochrome: Some(Monochrome::default()),
+            ..Default::default()
+        };
         let p = pack(&edit, &cam, SourceKind::Raw, DisplaySpace::Srgb);
         let params: &DevelopParams = bytemuck::from_bytes(&p.uniform);
         assert_eq!(p.mono_lut.len(), crate::spectral::GRID.pow(3));
         assert_eq!(params.mono, [1.0, crate::spectral::GRID as f32, 0.0, 0.0]);
         assert_eq!(params.film, [0.0; 4], "film rendering gives way");
-        let unknown = EditParams { monochrome: Some(Monochrome { film: "velvia".into(), ..Default::default() }), ..Default::default() };
-        assert!(pack(&unknown, &cam, SourceKind::Raw, DisplaySpace::Srgb).mono_lut.is_empty(), "an unknown film is colour");
-        assert!(serde_json::to_value(EditParams::default()).unwrap().get("monochrome").is_none());
+        let unknown = EditParams {
+            monochrome: Some(Monochrome {
+                film: "velvia".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(
+            pack(&unknown, &cam, SourceKind::Raw, DisplaySpace::Srgb)
+                .mono_lut
+                .is_empty(),
+            "an unknown film is colour"
+        );
+        assert!(
+            serde_json::to_value(EditParams::default())
+                .unwrap()
+                .get("monochrome")
+                .is_none()
+        );
         // Daylight is left out; an edit written before `light` existed reads as daylight.
-        assert_eq!(serde_json::to_value(Monochrome::default()).unwrap(), serde_json::json!({ "film": "panchromatic", "filter": "none" }));
-        let old: Monochrome = serde_json::from_value(serde_json::json!({ "film": "orthochromatic", "filter": "red" })).unwrap();
+        assert_eq!(
+            serde_json::to_value(Monochrome::default()).unwrap(),
+            serde_json::json!({ "film": "panchromatic", "filter": "none" })
+        );
+        let old: Monochrome = serde_json::from_value(
+            serde_json::json!({ "film": "orthochromatic", "filter": "red" }),
+        )
+        .unwrap();
         assert_eq!(old.light, "daylight");
-        let candle = EditParams { monochrome: Some(Monochrome { light: "candle".into(), ..Default::default() }), ..Default::default() };
-        assert!(pack(&candle, &cam, SourceKind::Raw, DisplaySpace::Srgb).mono_lut.is_empty(), "an unknown light is colour");
+        let candle = EditParams {
+            monochrome: Some(Monochrome {
+                light: "candle".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(
+            pack(&candle, &cam, SourceKind::Raw, DisplaySpace::Srgb)
+                .mono_lut
+                .is_empty(),
+            "an unknown light is colour"
+        );
     }
 
     /// A named stock packs its curve for a RAW and moves the black point to its fog, keeping grey; a film class and
@@ -1160,13 +1524,42 @@ mod tests {
     #[test]
     fn a_stock_packs_its_toe_and_black_point() {
         let cam = crate::camera::nikon_d850();
-        let at = |film: &str, source| *bytemuck::from_bytes::<DevelopParams>(&pack(&EditParams { monochrome: Some(Monochrome { film: film.into(), ..Default::default() }), ..Default::default() }, &cam, source, DisplaySpace::Srgb).uniform);
+        let at = |film: &str, source| {
+            *bytemuck::from_bytes::<DevelopParams>(
+                &pack(
+                    &EditParams {
+                        monochrome: Some(Monochrome {
+                            film: film.into(),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                    &cam,
+                    source,
+                    DisplaySpace::Srgb,
+                )
+                .uniform,
+            )
+        };
         let hp5 = at("hp5-plus", SourceKind::Raw);
         let c = crate::stock::curve("hp5-plus").unwrap();
-        assert_eq!(hp5.stock, [1.0, c.toe_at as f32, c.toe_width as f32, c.shoulder as f32]);
-        assert_eq!(hp5.shoulder, [c.shoulder_at as f32, c.shoulder_width as f32, 0.0, 0.0]);
-        assert!((hp5.tone[0] as f64 - (c.floor() - 0.5)).abs() < 1e-5, "black {}", hp5.tone[0]);
-        assert!(hp5.tone[2] < at("panchromatic", SourceKind::Raw).tone[2], "steepness follows the narrower range");
+        assert_eq!(
+            hp5.stock,
+            [1.0, c.toe_at as f32, c.toe_width as f32, c.shoulder as f32]
+        );
+        assert_eq!(
+            hp5.shoulder,
+            [c.shoulder_at as f32, c.shoulder_width as f32, 0.0, 0.0]
+        );
+        assert!(
+            (hp5.tone[0] as f64 - (c.floor() - 0.5)).abs() < 1e-5,
+            "black {}",
+            hp5.tone[0]
+        );
+        assert!(
+            hp5.tone[2] < at("panchromatic", SourceKind::Raw).tone[2],
+            "steepness follows the narrower range"
+        );
         assert_eq!(at("panchromatic", SourceKind::Raw).stock, [0.0; 4]);
         assert_eq!(at("hp5-plus", SourceKind::Developed).stock, [0.0; 4]);
     }
@@ -1176,18 +1569,62 @@ mod tests {
     #[test]
     fn a_developer_packs_its_effects_and_grain() {
         let cam = crate::camera::nikon_d850();
-        let at = |edit: &EditParams| *bytemuck::from_bytes::<DevelopParams>(&pack(edit, &cam, SourceKind::Raw, DisplaySpace::Srgb).uniform);
-        let grain = Some(Grain { amount: 50.0, size: 50.0 });
-        assert_eq!(at(&EditParams { grain: grain.clone(), ..Default::default() }).developer, [0.0; 4], "colour has none");
-        let plain = at(&EditParams { grain: grain.clone(), monochrome: Some(Monochrome::default()), ..Default::default() });
-        assert_eq!(plain.developer, [0.0, (0.1 * 1000.0 / FRAME_MICRONS) as f32, 1.0, 0.0]);
-        let pushed = Monochrome { developer: "acutance".into(), development: 1.0, ..Default::default() };
-        let p = at(&EditParams { grain, monochrome: Some(pushed), ..Default::default() });
+        let at = |edit: &EditParams| {
+            *bytemuck::from_bytes::<DevelopParams>(
+                &pack(edit, &cam, SourceKind::Raw, DisplaySpace::Srgb).uniform,
+            )
+        };
+        let grain = Some(Grain {
+            amount: 50.0,
+            size: 50.0,
+        });
+        assert_eq!(
+            at(&EditParams {
+                grain: grain.clone(),
+                ..Default::default()
+            })
+            .developer,
+            [0.0; 4],
+            "colour has none"
+        );
+        let plain = at(&EditParams {
+            grain: grain.clone(),
+            monochrome: Some(Monochrome::default()),
+            ..Default::default()
+        });
+        assert_eq!(
+            plain.developer,
+            [0.0, (0.1 * 1000.0 / FRAME_MICRONS) as f32, 1.0, 0.0]
+        );
+        let pushed = Monochrome {
+            developer: "acutance".into(),
+            development: 1.0,
+            ..Default::default()
+        };
+        let p = at(&EditParams {
+            grain,
+            monochrome: Some(pushed),
+            ..Default::default()
+        });
         assert_eq!((p.developer[0], p.developer[2]), (0.35, 1.25));
-        assert!((p.grain[0] / plain.grain[0] - 1.2 * 1.15).abs() < 1e-5, "grain {} vs {}", p.grain[0], plain.grain[0]);
-        let staining = at(&EditParams { monochrome: Some(Monochrome { developer: "staining".into(), ..Default::default() }), ..Default::default() });
+        assert!(
+            (p.grain[0] / plain.grain[0] - 1.2 * 1.15).abs() < 1e-5,
+            "grain {} vs {}",
+            p.grain[0],
+            plain.grain[0]
+        );
+        let staining = at(&EditParams {
+            monochrome: Some(Monochrome {
+                developer: "staining".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
         assert_eq!(staining.grain[2], 0.5);
-        assert_eq!(serde_json::to_value(Monochrome::default()).unwrap(), serde_json::json!({ "film": "panchromatic", "filter": "none" }));
+        assert_eq!(
+            serde_json::to_value(Monochrome::default()).unwrap(),
+            serde_json::json!({ "film": "panchromatic", "filter": "none" })
+        );
     }
 
     /// Grain packs its strength and its size on the frame; none, or none at amount 0, packs zeros.
@@ -1195,24 +1632,66 @@ mod tests {
     fn grain_packs_strength_and_size() {
         let cam = crate::camera::nikon_d850();
         let at = |grain: Option<Grain>| {
-            let p = pack(&EditParams { grain, ..Default::default() }, &cam, SourceKind::Raw, DisplaySpace::Srgb);
+            let p = pack(
+                &EditParams {
+                    grain,
+                    ..Default::default()
+                },
+                &cam,
+                SourceKind::Raw,
+                DisplaySpace::Srgb,
+            );
             bytemuck::from_bytes::<DevelopParams>(&p.uniform).grain
         };
         assert_eq!(at(None), [0.0; 4]);
-        assert_eq!(at(Some(Grain { amount: 0.0, size: 50.0 })), [0.0; 4]);
-        let g = at(Some(Grain { amount: 50.0, size: 100.0 }));
+        assert_eq!(
+            at(Some(Grain {
+                amount: 0.0,
+                size: 50.0
+            })),
+            [0.0; 4]
+        );
+        let g = at(Some(Grain {
+            amount: 50.0,
+            size: 100.0,
+        }));
         assert!((g[0] - 0.3).abs() < 1e-6);
         assert!((g[1] as f64 - 40.0 / 36_000.0).abs() < 1e-9);
-        assert!((Grain { amount: 0.0, size: 0.0 }.microns() - 5.0).abs() < 1e-9);
-        assert!(serde_json::to_value(EditParams::default()).unwrap().get("grain").is_none());
+        assert!(
+            (Grain {
+                amount: 0.0,
+                size: 0.0
+            }
+            .microns()
+                - 5.0)
+                .abs()
+                < 1e-9
+        );
+        assert!(
+            serde_json::to_value(EditParams::default())
+                .unwrap()
+                .get("grain")
+                .is_none()
+        );
     }
 
     #[test]
     fn film_is_left_out_until_chosen() {
-        assert!(serde_json::to_value(EditParams::default()).unwrap().get("film").is_none());
-        let e = EditParams { film: Some(Film::default()), ..Default::default() };
+        assert!(
+            serde_json::to_value(EditParams::default())
+                .unwrap()
+                .get("film")
+                .is_none()
+        );
+        let e = EditParams {
+            film: Some(Film::default()),
+            ..Default::default()
+        };
         let json = serde_json::to_value(&e).unwrap();
-        assert_eq!(json["film"], serde_json::json!({ "amount": 100.0, "interlayer": 45.0 }));
+        assert_eq!(
+            json["film"],
+            serde_json::json!({ "amount": 100.0, "interlayer": 45.0 })
+        );
         assert_eq!(serde_json::from_value::<EditParams>(json).unwrap(), e);
     }
 
@@ -1220,7 +1699,10 @@ mod tests {
     fn saturation_is_left_out_until_set() {
         let json = serde_json::to_value(EditParams::default()).unwrap();
         assert!(json.get("saturation").is_none());
-        let e = EditParams { saturation: 25.0, ..Default::default() };
+        let e = EditParams {
+            saturation: 25.0,
+            ..Default::default()
+        };
         let json = serde_json::to_value(&e).unwrap();
         assert_eq!(json["saturation"], 25.0);
         let back: EditParams = serde_json::from_value(json).unwrap();
@@ -1234,7 +1716,11 @@ mod tests {
         let json = serde_json::to_value(EditParams::default()).unwrap();
         assert!(json.get("masks").is_none());
         let mut e = EditParams::default();
-        e.masks.push(MaskAdjustment { mask: "subject".into(), exposure: 0.5, ..Default::default() });
+        e.masks.push(MaskAdjustment {
+            mask: "subject".into(),
+            exposure: 0.5,
+            ..Default::default()
+        });
         let back: EditParams = serde_json::from_value(serde_json::to_value(&e).unwrap()).unwrap();
         assert_eq!(back, e);
     }
@@ -1243,33 +1729,75 @@ mod tests {
     fn masks_pack_their_gains_and_weights() {
         let cam = crate::camera::nikon_d850();
         let mut e = EditParams::default();
-        e.masks.push(MaskAdjustment { mask: "subject".into(), exposure: 1.0, contrast: 50.0, amount: 50.0, invert: true, ..Default::default() });
-        e.masks.push(MaskAdjustment { mask: "skin".into(), temperature: 50.0, ..Default::default() });
+        e.masks.push(MaskAdjustment {
+            mask: "subject".into(),
+            exposure: 1.0,
+            contrast: 50.0,
+            amount: 50.0,
+            invert: true,
+            ..Default::default()
+        });
+        e.masks.push(MaskAdjustment {
+            mask: "skin".into(),
+            temperature: 50.0,
+            ..Default::default()
+        });
         let m = pack(&e, &cam, SourceKind::Raw, DisplaySpace::Srgb).masks;
         assert_eq!(m.count, 2);
         assert_eq!(m.layers[0].gain, [1.0, 1.0, 1.0, 1.0]);
         assert_eq!(m.layers[0].tone, [0.5, 0.0, 0.5, 1.0]);
-        assert_eq!(m.layers[0].flags, [0.0; 4], "exposure alone leaves a RAW's tone map, curve and mixer");
+        assert_eq!(
+            m.layers[0].flags, [0.0; 4],
+            "exposure alone leaves a RAW's tone map, curve and mixer"
+        );
         let [r, g, b, _] = m.layers[1].gain;
-        assert!(r > 1.0 && b < 1.0 && (g - 1.0).abs() < 1e-6, "warmer: more red, less blue, green fixed: {:?}", m.layers[1].gain);
+        assert!(
+            r > 1.0 && b < 1.0 && (g - 1.0).abs() < 1e-6,
+            "warmer: more red, less blue, green fixed: {:?}",
+            m.layers[1].gain
+        );
     }
 
     #[test]
     fn mask_layout_matches_wgsl() {
         let src = sidecar_shaders::compose("develop/masks.wgsl").unwrap();
         let module = naga::front::wgsl::parse_str(&src).unwrap();
-        let (_, ty) = module.types.iter().find(|(_, t)| t.name.as_deref() == Some("MaskParams")).unwrap();
-        let naga::TypeInner::Struct { members, span } = &ty.inner else { panic!("not a struct") };
+        let (_, ty) = module
+            .types
+            .iter()
+            .find(|(_, t)| t.name.as_deref() == Some("MaskParams"))
+            .unwrap();
+        let naga::TypeInner::Struct { members, span } = &ty.inner else {
+            panic!("not a struct")
+        };
         assert_eq!(*span as usize, std::mem::size_of::<MaskParams>());
         assert_eq!(std::mem::size_of::<MaskParams>(), 1568);
-        let off = |n: &str| members.iter().find(|m| m.name.as_deref() == Some(n)).unwrap().offset as usize;
+        let off = |n: &str| {
+            members
+                .iter()
+                .find(|m| m.name.as_deref() == Some(n))
+                .unwrap()
+                .offset as usize
+        };
         assert_eq!(off("frame"), std::mem::offset_of!(MaskParams, frame));
         assert_eq!(off("count"), std::mem::offset_of!(MaskParams, count));
         assert_eq!(off("layers"), std::mem::offset_of!(MaskParams, layers));
-        let (_, ty) = module.types.iter().find(|(_, t)| t.name.as_deref() == Some("MaskLayer")).unwrap();
-        let naga::TypeInner::Struct { members, span } = &ty.inner else { panic!("not a struct") };
+        let (_, ty) = module
+            .types
+            .iter()
+            .find(|(_, t)| t.name.as_deref() == Some("MaskLayer"))
+            .unwrap();
+        let naga::TypeInner::Struct { members, span } = &ty.inner else {
+            panic!("not a struct")
+        };
         assert_eq!(*span as usize, std::mem::size_of::<MaskLayer>());
-        let off = |n: &str| members.iter().find(|m| m.name.as_deref() == Some(n)).unwrap().offset as usize;
+        let off = |n: &str| {
+            members
+                .iter()
+                .find(|m| m.name.as_deref() == Some(n))
+                .unwrap()
+                .offset as usize
+        };
         assert_eq!(off("gain"), std::mem::offset_of!(MaskLayer, gain));
         assert_eq!(off("tone"), std::mem::offset_of!(MaskLayer, tone));
         assert_eq!(off("tone_map"), std::mem::offset_of!(MaskLayer, tone_map));
@@ -1299,7 +1827,8 @@ mod tests {
         assert_eq!(lens.lateral_ca, 100.0);
         assert_eq!(lens.vignetting, 100.0);
 
-        let round_tripped: EditParams = serde_json::from_value(serde_json::to_value(&e).unwrap()).unwrap();
+        let round_tripped: EditParams =
+            serde_json::from_value(serde_json::to_value(&e).unwrap()).unwrap();
         assert_eq!(round_tripped, e);
     }
 
@@ -1307,10 +1836,31 @@ mod tests {
     /// adds nothing, so its ETag and 0.4's ability to render it are unchanged.
     #[test]
     fn a_layer_with_only_old_fields_serializes_as_before() {
-        let m = MaskAdjustment { mask: "subject".into(), exposure: 0.5, ..Default::default() };
+        let m = MaskAdjustment {
+            mask: "subject".into(),
+            exposure: 0.5,
+            ..Default::default()
+        };
         let json = serde_json::to_value(&m).unwrap();
-        let keys: Vec<&str> = json.as_object().unwrap().keys().map(String::as_str).collect();
-        assert_eq!(keys, ["amount", "contrast", "exposure", "invert", "mask", "saturation", "temperature", "tint"]);
+        let keys: Vec<&str> = json
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "amount",
+                "contrast",
+                "exposure",
+                "invert",
+                "mask",
+                "saturation",
+                "temperature",
+                "tint"
+            ]
+        );
         let back: MaskAdjustment = serde_json::from_value(json).unwrap();
         assert!(back.renders() && back.other.is_empty());
     }
@@ -1327,25 +1877,46 @@ mod tests {
             blacks: -30.0,
             curve: vec![[0.0, 0.0], [0.5, 0.6], [1.0, 1.0]],
             mixer,
-            strokes: vec![Stroke { points: vec![[0.5, 0.5]], ..Default::default() }],
+            strokes: vec![Stroke {
+                points: vec![[0.5, 0.5]],
+                ..Default::default()
+            }],
             ..Default::default()
         });
         assert!(e.masks[0].renders());
         let p = pack(&e, &cam, SourceKind::Raw, DisplaySpace::Srgb);
         let l = p.masks.layers[0];
         assert_eq!(l.flags, [1.0, 1.0, 1.0, 0.0]);
-        assert_eq!((l.tone_map[0], l.tone_map[1]), ((DEFAULT_BLACK_EV + 0.9) as f32, (DEFAULT_WHITE_EV - 1.0) as f32));
+        assert_eq!(
+            (l.tone_map[0], l.tone_map[1]),
+            (
+                (DEFAULT_BLACK_EV + 0.9) as f32,
+                (DEFAULT_WHITE_EV - 1.0) as f32
+            )
+        );
         assert_eq!(l.mixer[5][1], 0.5);
         assert_eq!(p.mask_curves.len(), MAX_MASKS * LUT_SIZE);
-        assert!(p.mask_curves[LUT_SIZE / 2] > 0.55, "row 0 is the layer's curve");
-        assert!((p.mask_curves[LUT_SIZE + LUT_SIZE / 2] - 0.5).abs() < 1e-3, "row 1 is the identity");
+        assert!(
+            p.mask_curves[LUT_SIZE / 2] > 0.55,
+            "row 0 is the layer's curve"
+        );
+        assert!(
+            (p.mask_curves[LUT_SIZE + LUT_SIZE / 2] - 0.5).abs() < 1e-3,
+            "row 1 is the identity"
+        );
     }
 
     #[test]
     fn geometry_is_left_out_until_set() {
         let json = serde_json::to_value(EditParams::default()).unwrap();
         assert!(json.get("geometry").is_none());
-        let e = EditParams { geometry: Some(crate::geometry::Geometry { angle: 2.5, ..Default::default() }), ..Default::default() };
+        let e = EditParams {
+            geometry: Some(crate::geometry::Geometry {
+                angle: 2.5,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
         let back: EditParams = serde_json::from_value(serde_json::to_value(&e).unwrap()).unwrap();
         assert_eq!(back, e);
     }
@@ -1356,7 +1927,12 @@ mod tests {
     #[test]
     fn migration_carries_old_anchor_points_into_the_new_fields() {
         let mut e = EditParams::default();
-        e.tone.curve = vec![[0.0, 0.0], [0.3, 0.22], [0.75, 0.75 + 20.0 / 100.0 * HIGHLIGHT_SHADOW_SCALE], [1.0, 1.0]];
+        e.tone.curve = vec![
+            [0.0, 0.0],
+            [0.3, 0.22],
+            [0.75, 0.75 + 20.0 / 100.0 * HIGHLIGHT_SHADOW_SCALE],
+            [1.0, 1.0],
+        ];
         e.migrate_highlight_shadow_anchors();
         assert!((e.tone.highlights - 20.0).abs() < 1e-9);
         assert_eq!(e.tone.shadows, 0.0);
@@ -1379,12 +1955,29 @@ mod tests {
         let mut e = EditParams::default();
         let old_y = 0.25 + (-35.0_f64) / 100.0 * HIGHLIGHT_SHADOW_SCALE;
         e.tone.curve = vec![[0.0, 0.0], [0.25, old_y], [1.0, 1.0]];
-        let before = pack(&e, &crate::camera::nikon_d850(), SourceKind::Raw, DisplaySpace::Srgb).lut;
+        let before = pack(
+            &e,
+            &crate::camera::nikon_d850(),
+            SourceKind::Raw,
+            DisplaySpace::Srgb,
+        )
+        .lut;
 
         e.migrate_highlight_shadow_anchors();
-        let after = pack(&e, &crate::camera::nikon_d850(), SourceKind::Raw, DisplaySpace::Srgb).lut;
+        let after = pack(
+            &e,
+            &crate::camera::nikon_d850(),
+            SourceKind::Raw,
+            DisplaySpace::Srgb,
+        )
+        .lut;
 
         let i = (0.25 * (LUT_SIZE - 1) as f64).round() as usize;
-        assert!((before[i] - after[i]).abs() < 1e-3, "before={}, after={}", before[i], after[i]);
+        assert!(
+            (before[i] - after[i]).abs() < 1e-3,
+            "before={}, after={}",
+            before[i],
+            after[i]
+        );
     }
 }

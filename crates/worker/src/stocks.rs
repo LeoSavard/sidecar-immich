@@ -41,7 +41,10 @@ fn cache_dir() -> &'static Mutex<Option<PathBuf>> {
 pub fn set_cache_dir(dir: &Path) {
     let dir = dir.join("stocks");
     if let Err(e) = std::fs::create_dir_all(&dir) {
-        return tracing::warn!("no cache for film stock profiles at {}: {e:#}", dir.display());
+        return tracing::warn!(
+            "no cache for film stock profiles at {}: {e:#}",
+            dir.display()
+        );
     }
     *cache_dir().lock().unwrap() = Some(dir);
 }
@@ -95,7 +98,11 @@ pub fn available() -> bool {
 /// The stocks this deployment can render, by id: every stock `sidecar_color::slide` knows, if the standards are
 /// there, and none otherwise. The editor asks so it offers only what will render.
 pub fn offered() -> &'static [&'static str] {
-    if available() { sidecar_color::slide::STOCKS } else { &[] }
+    if available() {
+        sidecar_color::slide::STOCKS
+    } else {
+        &[]
+    }
 }
 
 /// The profile of the stock `id` names: from memory, then the cache, then measured. `None` for an unknown stock
@@ -115,7 +122,13 @@ pub fn profile(id: &str) -> Option<Arc<SlideProfile>> {
 
 /// The cache file for a stock, if there is a cache directory.
 fn cache_path(id: &str) -> Option<PathBuf> {
-    Some(cache_dir().lock().unwrap().as_ref()?.join(format!("{id}-v{GENERATION}.profile")))
+    Some(
+        cache_dir()
+            .lock()
+            .unwrap()
+            .as_ref()?
+            .join(format!("{id}-v{GENERATION}.profile")),
+    )
 }
 
 fn measure(id: &str) -> Option<SlideProfile> {
@@ -127,9 +140,14 @@ fn measure(id: &str) -> Option<SlideProfile> {
                     tracing::debug!("film stock {id}: profile from {}", path.display());
                     return Some(p);
                 }
-                None => tracing::warn!("film stock {id}: {} is not a profile, measuring again", path.display()),
+                None => tracing::warn!(
+                    "film stock {id}: {} is not a profile, measuring again",
+                    path.display()
+                ),
             },
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => tracing::warn!("film stock {id}: {}: {e:#}", path.display()),
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                tracing::warn!("film stock {id}: {}: {e:#}", path.display())
+            }
             Err(_) => {}
         }
     }
@@ -137,11 +155,17 @@ fn measure(id: &str) -> Option<SlideProfile> {
     let stock = sidecar_color::slide::slide(id)?;
     let started = std::time::Instant::now();
     let profile = stock.profile(meter, daylight);
-    tracing::info!("film stock {id}: profile measured in {:?}", started.elapsed());
+    tracing::info!(
+        "film stock {id}: profile measured in {:?}",
+        started.elapsed()
+    );
     if let Some(path) = &path
         && let Err(e) = std::fs::write(path, profile.to_bytes())
     {
-        tracing::warn!("film stock {id}: could not cache its profile at {}: {e:#}", path.display());
+        tracing::warn!(
+            "film stock {id}: could not cache its profile at {}: {e:#}",
+            path.display()
+        );
     }
     Some(profile)
 }
@@ -149,7 +173,9 @@ fn measure(id: &str) -> Option<SlideProfile> {
 /// The profile an edit needs, if it names a stock this deployment can render.
 pub fn for_edit(edit: &sidecar_color::EditParams) -> Option<Arc<SlideProfile>> {
     let film = edit.film.as_ref()?;
-    (!film.stock.is_empty()).then(|| profile(&film.stock)).flatten()
+    (!film.stock.is_empty())
+        .then(|| profile(&film.stock))
+        .flatten()
 }
 
 /// A profile's response table, or `&[]` — what `export::masks_for` takes.
