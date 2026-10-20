@@ -36,7 +36,70 @@ or an adapted lens leave nothing useful.
 What is left of peaking is in "Subject-aware tools" below: weighting the measure by the subject mask, and
 ranking eyes and faces first. Noise is already handled.
 
-**Highlight reconstruction** leaves faint bluish blotches at the edges of reconstructed areas.
+**Highlight reconstruction — low priority, and it is not what this entry used to claim.** The item said
+"leaves faint bluish blotches at the edges of reconstructed areas", and no such artifact could be reproduced:
+the blotches in the obvious test photo are the sky and the trees beyond a window, confirmed by the owner and
+by switching reconstruction off. What the pass *is* for is narrower and worth stating correctly, because it
+is not detail recovery.
+
+A raw file clips per channel, and not at the same scene luminance: a neutral white puts its largest raw
+response in green, which is exactly why green's white-balance multiplier is 1 and red's is above it, so green
+pins first and red keeps recording for roughly log₂(red multiplier) — about a stop — afterwards. Measured on
+this repository's own fixtures: on `_D5N3075.NEF` green clips on 12.5 % of samples, blue on 10.0 % and **red
+on only 2.3 %**, so about a tenth of that frame has green pinned while red is still a live measurement; on
+`DSC01899.ARW` green clips on 0.14 % of samples and **red and blue on none at all**. In that band
+reconstruction is solving for the pinned channel from two measured ones, not inventing. Above it — every
+channel pinned, which is the core of a blown window — there is nothing left and anything drawn is inpainting
+from the neighbours.
+
+**So the value is avoiding false colour, not recovering texture**, and it matters most to exactly the
+workflow that pulls highlights down with the curve: in the transition band green is frozen while red and blue
+climb, the white-balance gains turn that into a magenta drift, and a tone curve lifts the tinted near-white
+into visible range where it reads as a pink patch. Left clipped to white it would never be seen. The develop
+pass's `highlight_blend` is a second net for the hopeless case.
+
+The measurements below stand, and `sidecar-dev hilite <raw> <dir> [--crop]` is how to repeat them: it buckets
+the proxy by its alpha — the fraction of source samples that clipped under each output pixel, so 0 is
+untouched picture and 1 the heart of a blown area — and prints the mean chromaticity `r/(r+g+b)`, `b/(r+g+b)` of each bucket in white-balanced
+camera RGB, where a neutral reads 0.333. It also counts, on the mosaic itself, how often each colour actually
+reaches saturation, which is what decides whether a blown area still holds an honest measurement.
+
+On `_D5N3075.NEF` (Nikon D5, a blown window, as shot 4,640 K; R clips on 2.3 % of samples, G 12.5 %, B 10.0 %)
+the picture outside blown areas sits at r 0.344, b 0.337, and the fully-clipped core at **r 0.279, b 0.396**.
+Turning reconstruction off (`SIDECAR_NO_HILITE=1`, the diagnostic switch in `ingest.rs`) puts that same core at
+**r 0.353, b 0.400** — so reconstruction lifts green, which is its job, but takes red down with it, and that
+red deficit is the cast. On `DSC01899.ARW` (Sony ZV-1, only green clipping, 0.14 % of samples) it behaves:
+green comes back and red and blue fall proportionally.
+
+*Ruled out, by experiment rather than by reading:*
+
+- **The `wgt == 0` fallback in `hilite_reduce.wgsl`** (every tap in a 5×5 clipped, so the level has no colour
+  to average and falls back to "white"). It is a real latent bug — raw `(1, 1, 1)` is not neutral, since white
+  balance still multiplies it, so it paints lilac, and neutral would be `1/wb`, the convention the
+  desaturation target four lines above already uses. But painting the fallback pure green leaves the picture
+  visually identical and moves the core's chromaticity by 0.002: the path is reached, then diluted to nothing
+  as `assemble` renormalizes each finer level against real data. Worth fixing for tidiness, not for this.
+- **The desaturation in the same pass** (`P.desat`, 0.3). Setting it to 0 changes nothing visible.
+- **The `scale` that rescales the coarse estimate**, in `hilite_doub.wgsl`. A clipped channel's ratio
+  `sample / estimate` is an underestimate — the sample stopped at saturation — so averaging it in drags the
+  scale down and steals from channels that did not clip. That reasoning is sound and dropping clipped channels
+  from the average is probably right on its own merits, but **it cannot be this artifact**: `doub` replaces the
+  pixel with `upsm * scale`, and chromaticity is scale-invariant, so `scale` sets brightness and the *hue comes
+  entirely from the pyramid estimate*. Measured: no chromaticity change at all.
+- **The blotches in the obvious test crop.** `--crop` picks the densest patch of partly-clipped pixels, and on
+  this photo it lands on soft lilac and grey blobs in the window that look exactly like the artifact — and
+  they are still there with reconstruction switched off. They are the scene (glare and whatever is outside the
+  glass), not the pass. Anyone chasing this should run that A/B before trusting their eyes, as should have
+  happened here first.
+
+*Where to look next, if anyone returns to this.* The hue of a reconstructed pixel is the pyramid estimate's
+hue, so that is the only place a shift can come from. In a fully-blown core there are no unclipped taps
+nearby, so the estimate is carried in from coarse levels — the surroundings — and a window's surroundings are
+the room, which is far from the window's own colour. That fits the measured red deficit; the next experiment
+is to dump each pyramid level as an image and find the level where the hue departs, rather than guess again.
+But note what the per-channel census above implies: the fully-blown core is the case with no data in it, and
+the band that *does* carry data is the one where the pass already measures correctly. So this is a small
+refinement to a stage that is working, which is why the entry now sits low rather than at the top.
 
 **X-Trans at full resolution** still runs LibRaw's Markesteijn on the CPU; only Bayer has a GPU demosaic for
 loupe and export. Porting LibRaw's algorithm to WGSL (CDDL-1.0, so the port keeps that header) is the
