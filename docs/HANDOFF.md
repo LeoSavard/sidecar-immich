@@ -5,33 +5,47 @@ For whoever picks this up next, person or agent. [`ARCHITECTURE.md`](ARCHITECTUR
 checked), [`ROADMAP.md`](ROADMAP.md) what's known to be missing. This page is the state of play; update it when
 you stop.
 
-*Last updated 2026-10-16.*
+*Last updated 2026-10-20.*
 
 ## Open pull requests
 
-**#1–#24 are merged.** `main` holds colour film from a data sheet (PROVIA 100F), the depth map upsampled
-against the photo (#22), the curve's pinned endpoints (#23), the tone controls grading a stock (#24), and —
-merged on 2026-10-16 — Apple's depth/matte aux image (#1) and the HDR gain map read and carried, unapplied
-(#2). The two long-held branches turned out not to be blocked at all; see "What changed under #1" below.
+**Everything up to #32 is merged.** `main` holds the whole first iteration — colour film from a data sheet,
+the depth pipeline, Apple's depth/matte aux image (#1) and the HDR gain map read and carried, unapplied (#2) —
+and, on 2026-10-20: the highlight-reconstruction measurement (#26), **rustfmt at 100 columns with a CI gate**
+(#29), `V2.md` and the desktop survey (#27, #30), and two fixes reported from the editor (#31, #32).
 
-**New features are paused** from 2026-10-16 (owner's call). The work is maintainability, standardization and
-widening the project past a single Immich deployment: [`V2.md`](V2.md) is the programme.
+**New features are paused** from 2026-10-16 (owner's call). The work is maintainability and standardization;
+[`V2.md`](V2.md) is the programme. **Immich stays the library manager** (owner's call, 2026-10-20), so what
+was "widen past a single Immich deployment" is now one item: a configuration with no Immich in it, which is
+what a filesystem *editor* needs. The filesystem flavour itself stays, for use cases that are not the owner's —
+an editor, never a second library. #28 (`find_by_name`, searching a folder library) was closed under that
+decision; its branch keeps the code and its six tests.
 
-Five pull requests are open. All are green on CI, all were brought up to date with `main` that night, and
-**none of them changes a pixel**:
+Two pull requests are open, and **neither changes a pixel**:
 
 | # | Branch | What | State |
 |---|---|---|---|
 | 21 | `worktree-tone-curve` | The log-log straight segment above middle grey, built and measured, rendering nothing | Needs the owner: which shoulder order, and what Contrast should mean above grey (see Open questions) |
-| 26 | `hilite-fringe` | Highlight reconstruction measured, three causes ruled out, the entry rewritten | Ready |
-| 27 | `v2-plan` | `V2.md`, and the roadmap reordered under it | Ready |
-| 28 | `library-name-search` | `find_by_name`: a folder library can be searched without Immich | Ready |
-| 29 | `format-rust` | rustfmt at 100 columns, and the reflow | Ready — **merge it last**, see below |
+| 25 | `handoff-state` | This page | — |
 
-**Merge order matters now, for once.** #29 reformats every Rust source, so it conflicts with any open branch
-that touches Rust. Merge #21, #26, #27 and #28 first, then #29. If a branch is still open afterwards,
-resolving needs no judgement: `git merge main`, take the branch's own side on any Rust conflict,
-`cargo fmt --all`, commit.
+**The formatter is a gate now.** `cargo fmt --all --check` runs in CI beside clippy and `rustfmt.toml` fixes
+`max_width = 100`. A branch open when #29 landed pays for it once: `git merge main`, keep the branch's own
+side on any Rust conflict, `cargo fmt --all`, commit. #21 crossed it that way and the merge itself was clean.
+The reflow's SHA is in `.git-blame-ignore-revs` — `git config blame.ignoreRevsFile .git-blame-ignore-revs`
+makes local blame step over it, and GitHub already does.
+
+*What the reformat cost, for the next time one is proposed.* #29 sat open three days and had to be merged down
+**twice in one hour** — once for #31's export work, once for #26's measurement tool — because every Rust
+branch that lands while a reformat is open collides with it. The resolution is mechanical on a formatting-only
+branch (take `main`'s version of the conflicted file, re-run `cargo fmt --all`, and it is `rustfmt(main)` by
+construction), but it is paid per landing. A formatting change is cheap the day it is written and compounds
+daily after.
+
+**The branches were tidied on 2026-10-20.** 24 merged local branches and the 12 worktrees for merged work are
+gone; `.claude/worktrees` went from 5.0 GB to 673 MB. What is left is `main`, the open branches, and two kept
+on purpose: `worktree-depth-spike` (one commit, the Depth Anything V2 / burn-onnx spike, also on GitHub) and
+`worktree-lens-correction` (local only, 41 commits from September, superseded by `main` but the one branch
+whose history `main` does not contain). The matching remote branches are deleted separately, by hand.
 
 **What changed under #1 while it sat.** It was parked in favour of the gain map because a depth map's best use
 needed a blur renderer nobody had written. That renderer shipped — lens blur, haze by distance, range layers
@@ -74,9 +88,11 @@ cd ~/Claude/sidecar/deploy/local && docker compose up -d
 ```
 
 `sidecar:latest-test` holds everything through #19, so it predates #20 and everything after it — the depth
-edges, the pinned curve endpoints, a stock that the tone controls can grade, and the withdrawal of Double-X.
-**Rebuild it before the next hand-over, from `main`:** the stack has landed, and none of the open pull
-requests changes a pixel, so `main` is the whole of what there is to ship.
+edges, the pinned curve endpoints, a stock that the tone controls can grade, the withdrawal of Double-X, and
+the export fixes of 2026-10-20 (a version is the edit; its files say in their names where they differ; an
+Immich link copied from the People tab opens). **Rebuild it before the next hand-over, from `main`:** the
+stack has landed and neither open pull request changes a pixel, so `main` is the whole of what there is to
+ship.
 
 **To get the colour stocks in a real deployment**, the image needs the owner's two ISO tables mounted and
 named, since Sidecar carries neither and will not render a stock without them. In `deploy/local/compose.yaml`,
@@ -139,22 +155,23 @@ code.
 **Features are paused**, so don't start one. [`V2.md`](V2.md) is the agreed direction and says what order to
 work in; the queue below it in ROADMAP keeps its places but is not what is being worked through.
 
-The live piece is **workstream B, the library seam** — making Immich one adapter among several rather than
-the substrate, which is what "broader use cases" means in code. #28 is its first commit:
-`sidecar_template::find_by_name`, so a folder library can be searched by name, which was the one step in
-`resolve.rs`'s chain with no answer but Immich's. What is left of B:
+The live work is **Workstream A**. A1 and A2 — rustfmt and its CI gate — are done; what is left is:
 
-1. A `Library` abstraction over what `resolve.rs` actually needs, implemented twice — the Immich one (move
-   today's behaviour wholesale) and a folder one — because a seam with one implementation is a guess.
-2. Wire `find_by_name` into the picker's `search_by_name`, which returns nothing without Immich today.
-3. Let a `Root` be configured with no `immich_prefix` and no Immich section at all.
+1. **The three silent traps**, the maintainability target because no test catches them: a
+   `shaders/client/*.wgsl` missing from `WEB_ENTRIES`, a wasm request struct without
+   `#[serde(rename_all = "camelCase")]`, and `npm run check` passing against stale wasm and stale WGSL.
+2. **The generated uniform mirrors** — fifteen `#[repr(C)]` structs hand-mirrored in WGSL. The naga check is
+   good and stays; the hand-mirroring is the part worth deleting.
+3. **A5: replace `immich.enabled()`** — a stringly-typed "is the URL non-empty" test read in a dozen places —
+   with the presence of an adapter. It is what stops the next feature re-introducing the coupling by accident,
+   and it is worth doing whether or not a second flavour ever ships.
 
-A design note worth keeping from the survey: the Immich coupling is **three** concerns, not one, and they
-want separating rather than merging — library lookup (`resolve.rs`), identity and auth (`session.rs` takes
-the user from Immich's `/users/me`), and the export destination (`export.rs` uploads and stacks).
-`Destination::Device` already exists, so the third seam is half-built too. Replacing `immich.enabled()` —
-a stringly-typed "is the URL non-empty" check — with the presence of an adapter is the standardization half
-of the same change.
+**Workstream B is one item**, after 2026-10-20: a configuration with no `[immich]` section and a `Root`
+without `immich_prefix`, because that is what a filesystem editor needs and Workstream C cannot start without
+it. The rest of the seam turned out to be already answered — `OpenQuery` takes a plain path, a single-user
+desktop app has no accounts, `Destination::Device` already writes locally. The survey's wider finding, that
+the coupling is three concerns rather than one, is kept in [`V2.md`](V2.md) for whoever asks the bigger
+question later.
 
 If something smaller and self-contained is wanted instead, ROADMAP's **Rec.2020 SDR export** needs no
 decision from anyone: the 16-bit TIFF path exists and wants the matrix and an ICC profile. It is a *gamut*,
@@ -172,4 +189,8 @@ not HDR — the HDR half is #2's, and blocked.
 - **Library photos** are the owner's: read them, copy them under `testdata/cache/library/` with a *new* file
   name, never write under `/mnt/storage/`.
 - **Licensing** rules are in `CLAUDE.md`; every new third-party source goes in `NOTICE` and
-  `THIRD_PARTY_NOTICES.md`.
+  `THIRD_PARTY_NOTICES.md`. A correction from the desktop survey, since it is the shape of mistake to expect:
+  Real-ESRGAN's *code* is BSD-3-Clause but its distributed **weight files carry no licence statement at all**,
+  which grants nothing. Check the weights separately from the code, every time.
+- **`cargo fmt --all` before pushing**, now that CI gates it, with the rest of ARCHITECTURE's "Before pushing,
+  run what CI runs".
