@@ -15,9 +15,25 @@
 
 	let link = $state('');
 	let linkError = $state('');
+
+	const UUID = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
+
+	/**
+	 * The photo's own id in an Immich link. Several of Immich's views put the id of whatever was being
+	 * browsed in front of it — `/people/<person>/photos/<asset>`, an album, a shared link — so the first id
+	 * in the link is not the photo. The one after `/photo/` or `/photos/` is; in a shape this doesn't know,
+	 * the photo's id is the last one (`?assetId=`, `?at=`), which is still better than the first.
+	 */
+	function assetIdIn(url: string): string | undefined {
+		const path = url.match(new RegExp(`/photos?/(${UUID})`, 'i'));
+		if (path) return path[1];
+		const all = url.match(new RegExp(UUID, 'gi'));
+		return all?.[all.length - 1];
+	}
+
 	function openLink(e: SubmitEvent) {
 		e.preventDefault();
-		const id = link.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i)?.[0];
+		const id = assetIdIn(link);
 		if (!id) {
 			linkError = "That doesn't look like an Immich photo link. Copy it from the photo's page in Immich.";
 			return;
