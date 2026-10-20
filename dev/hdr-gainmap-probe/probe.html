@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!--
+  One patch at a time, full-screen, for a colorimeter to read off a phone screen. Loads ./out/manifest.json
+  (run generate.sh first) and steps through calibration patches (plain CSS colour) and real Ultra HDR JPEGs
+  (an <img>, which Safari/Chrome tone-map on an HDR-capable screen; a non-HDR-aware browser just shows the
+  flat SDR base — the format's own backward-compatibility, not a bug here).
+
+  Controls: tap/click the right half (or → / space) to advance, left half (or ←) to go back. The current
+  patch's id and parameters are shown at the bottom so whoever is holding the colorimeter can read out loud
+  what to type into measure.py.
+-->
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>HDR gain map probe</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  #patch { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; }
+  #patch img { width: 100%; height: 100%; object-fit: cover; }
+  #swatch { width: 100%; height: 100%; }
+  #label {
+    position: absolute; left: 0; right: 0; bottom: 0; padding: 12px 16px;
+    font: 14px/1.4 -apple-system, system-ui, sans-serif; color: #0f0; background: rgba(0,0,0,0.6);
+    white-space: pre-wrap;
+  }
+  #error { position: absolute; inset: 0; color: #f55; font: 16px monospace; padding: 20px; background: #000; }
+</style>
+</head>
+<body>
+<div id="patch"></div>
+<div id="label"></div>
+<div id="error" style="display:none"></div>
+<script>
+let patches = [];
+let i = 0;
+
+function render() {
+  const p = patches[i];
+  const host = document.getElementById('patch');
+  host.innerHTML = '';
+  if (p.calibration) {
+    const sw = document.createElement('div');
+    sw.id = 'swatch';
+    sw.style.background = `rgb(${p.rgb[0]}, ${p.rgb[1]}, ${p.rgb[2]})`;
+    host.appendChild(sw);
+  } else {
+    const img = document.createElement('img');
+    img.src = `out/${p.file}`;
+    host.appendChild(img);
+  }
+  document.getElementById('label').textContent =
+    `[${i + 1}/${patches.length}] ${p.id}\n${p.label}` +
+    (p.predictedLinearHdr !== undefined ? `\npredicted linear HDR (×SDR white) = ${p.predictedLinearHdr}` : '');
+}
+
+function next() { i = (i + 1) % patches.length; render(); }
+function prev() { i = (i - 1 + patches.length) % patches.length; render(); }
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowRight' || e.key === ' ') next();
+  if (e.key === 'ArrowLeft') prev();
+});
+document.addEventListener('click', (e) => {
+  (e.clientX > window.innerWidth / 2) ? next() : prev();
+});
+
+fetch('out/manifest.json')
+  .then((r) => { if (!r.ok) throw new Error(`fetching out/manifest.json: ${r.status}`); return r.json(); })
+  .then((data) => { patches = data; render(); })
+  .catch((e) => {
+    document.getElementById('error').style.display = 'block';
+    document.getElementById('error').textContent =
+      'Could not load out/manifest.json: ' + e.message +
+      '\n\nRun ./generate.sh first, and serve this directory with an HTTP server ' +
+      '(file:// URLs can\'t fetch() on most browsers) — e.g. python3 -m http.server, ' +
+      'then open http://<this-computer>:8000/probe.html on the phone.';
+  });
+</script>
+</body>
+</html>
