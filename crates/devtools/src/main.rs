@@ -4,6 +4,7 @@
 //! `sidecar-dev parity compare <out>`     compare <case>.native.f16 with <case>.browser.f16 (ΔE2000)
 //! `sidecar-dev develop <raw> <out.png> [long_edge]`  decode → proxy → GPU develop (as shot) → PNG
 //! `sidecar-dev png <in.f16> <width> <height> <out.png>`  sRGB-encode a display-linear RGBA16F dump for viewing
+//! `sidecar-dev hilite <raw> <dir> [--crop]`  chromaticity by clip coverage: what reconstruction leaves
 //! `sidecar-dev lens <file>…`             the lens correction and identity each file yields
 //! `sidecar-dev radial <list>`            measured radial falloff per RAW (vignetting checks)
 //! `sidecar-dev camera-jpeg <list>`       a RAW's lens profile checked against the camera's own JPEG
@@ -37,6 +38,9 @@ fn main() -> Result<()> {
                 &std::fs::read(input)?,
             );
             write_png(&img, out.as_ref())
+        }
+        ["hilite", input, out_dir, rest @ ..] => {
+            hilite(input.as_ref(), out_dir.as_ref(), rest.contains(&"--crop"))
         }
         ["radial", list] => radial(list.as_ref()),
         ["linear-dng", input, out, rest @ ..] => {
@@ -205,6 +209,179 @@ fn develop(input: &std::path::Path, out: &std::path::Path, long_edge: u32) -> Re
         (t_proxy - t_demosaic).as_secs_f64() * 1e3,
         t_gpu.as_secs_f64() * 1e3
     );
+    Ok(())
+}
+
+/// What highlight reconstruction leaves behind, measured rather than squinted at: the proxy's alpha is the
+/// fraction of source pixels that clipped under each output pixel, so bucketing by it sorts untouched picture
+/// (0) from the heart of a blown area (1) with the reconstructed rim in between. For each bucket this prints
+/// the mean chromaticity in white-balanced camera RGB — `r/(r+g+b)` and `b/(r+g+b)`, which a neutral renders
+/// at 0.333 each — so a cast shows up as a number instead of an impression, and its sign says which way.
+/// `--crop` writes the worst region magnified, for looking at.
+fn hilite(input: &std::path::Path, out_dir: &std::path::Path, crop: bool) -> Result<()> {
+    const BUCKETS: usize = 10;
+    let gpu = sidecar_engine::Gpu::new_headless()?;
+    let ing = sidecar_engine::Ingest::new(&gpu)?;
+    let raw = sidecar_raw::RawFile::open(input)?;
+    let info = raw.info();
+    let m = raw.mosaic()?;
+    let mul = info.color.as_shot_mul;
+    let input_m = sidecar_engine::MosaicInput {
+        width: m.width,
+        height: m.height,
+        data: &m.data,
+        black: m.black,
+        white: m.white,
+        pattern: m.pattern,
+        period: m.period,
+    };
+    let proxy = ing
+        .proxy(&gpu, &input_m, [mul[0] as f32, 1.0, mul[2] as f32], 1600)?
+        .oriented(m.flip);
+    let wb = sidecar_color::camera::resolve(&info.color, info.color.as_shot_xy());
+
+    // Which channels actually reach saturation, counted on the mosaic itself. This is what decides whether a
+    // blown area still holds a usable measurement: where only one colour has clipped, the other two are real
+    // and reconstruction has something honest to hold on to; where all three have gone, it is inventing.
+    {
+        let blk = m.black.iter().copied().fold(f32::MAX, f32::min);
+        let white_obs =
+            ((m.data.iter().copied().max().unwrap_or(0) as f32 - blk) / (m.white - blk)).min(1.0);
+        let clip = if white_obs > 0.5 {
+            (white_obs * 0.98).min(0.985)
+        } else {
+            0.985
+        };
+        let mut hit = [0u64; 3];
+        let mut seen = [0u64; 3];
+        for (i, &v) in m.data.iter().enumerate() {
+            let (x, y) = ((i as u32) % m.width, (i as u32) / m.width);
+            let c = match m.pattern[(y % m.period) as usize][(x % m.period) as usize] {
+                3 => 1,
+                c => c,
+            } as usize;
+            let n = (v as f32 - m.black[c]) / (m.white - m.black[c]);
+            seen[c] += 1;
+            if n >= clip {
+                hit[c] += 1;
+            }
+        }
+        let pct = |c: usize| 100.0 * hit[c] as f64 / seen[c].max(1) as f64;
+        println!(
+            "  mosaic at clip {clip:.3}: R {:.3} %, G {:.3} %, B {:.3} %",
+            pct(0),
+            pct(1),
+            pct(2)
+        );
+    }
+
+    let (mut sum, mut n) = ([[0f64; 3]; BUCKETS], [0u64; BUCKETS]);
+    for p in proxy.data.chunks(4) {
+        let c = [
+            p[0] as f64 * wb.mul[0],
+            p[1] as f64,
+            p[2] as f64 * wb.mul[2],
+        ];
+        let t = c[0] + c[1] + c[2];
+        if t <= 1e-6 {
+            continue;
+        }
+        let b = ((p[3].clamp(0.0, 1.0) * BUCKETS as f32) as usize).min(BUCKETS - 1);
+        for i in 0..3 {
+            sum[b][i] += c[i] / t;
+        }
+        n[b] += 1;
+    }
+    println!(
+        "{} {} · proxy {}×{} · as shot {:.0} K {:+.0}",
+        info.make, info.model, proxy.width, proxy.height, wb.temperature_k, wb.tint
+    );
+    println!("  clip coverage   pixels      r/(r+g+b)   b/(r+g+b)");
+    for b in 0..BUCKETS {
+        if n[b] == 0 {
+            continue;
+        }
+        let (lo, hi) = (b as f64 / BUCKETS as f64, (b + 1) as f64 / BUCKETS as f64);
+        let k = n[b] as f64;
+        println!(
+            "  {lo:.1}–{hi:.1}  {:>12}      {:.4}      {:.4}",
+            n[b],
+            sum[b][0] / k,
+            sum[b][2] / k
+        );
+    }
+
+    if crop {
+        // The densest window of partly-clipped pixels: where a rim artifact would live.
+        let (w, h) = (proxy.width as usize, proxy.height as usize);
+        let (side, step) = (160usize, 16usize);
+        let (mut best, mut at) = (0f64, (0usize, 0usize));
+        let mut y = 0;
+        while y + side <= h {
+            let mut x = 0;
+            while x + side <= w {
+                let mut score = 0.0;
+                for yy in (y..y + side).step_by(4) {
+                    for xx in (x..x + side).step_by(4) {
+                        let a = proxy.data[(yy * w + xx) * 4 + 3];
+                        if (0.05..0.95).contains(&a) {
+                            score += 1.0;
+                        }
+                    }
+                }
+                if score > best {
+                    (best, at) = (score, (x, y));
+                }
+                x += step;
+            }
+            y += step;
+        }
+        let pass = sidecar_engine::DevelopPass::new(&gpu)?;
+        let packed = sidecar_color::pack(
+            &Default::default(),
+            &info.color,
+            info.source_kind,
+            sidecar_color::DisplaySpace::Srgb,
+        );
+        let masks = sidecar_engine::Masks {
+            mono: &packed.mono_lut,
+            ..sidecar_engine::Masks::none()
+        };
+        let dev = sidecar_engine::read_rgba16(
+            &gpu,
+            &pass.render(
+                &gpu,
+                &sidecar_engine::upload_rgba16(&gpu, &proxy),
+                &packed.uniform,
+                &packed.lut,
+                &masks,
+            )?,
+        )?;
+        const Z: usize = 4;
+        let mut cut = sidecar_engine::RgbaF32 {
+            width: (side * Z) as u32,
+            height: (side * Z) as u32,
+            data: vec![0.0; side * Z * side * Z * 4],
+        };
+        for yy in 0..side * Z {
+            for xx in 0..side * Z {
+                let src = ((at.1 + yy / Z) * w + at.0 + xx / Z) * 4;
+                let dst = (yy * side * Z + xx) * 4;
+                cut.data[dst..dst + 4].copy_from_slice(&dev.data[src..src + 4]);
+            }
+        }
+        std::fs::create_dir_all(out_dir)?;
+        let stem = input
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        write_png(&cut, &out_dir.join(format!("{stem}-rim.png")))?;
+        println!(
+            "  worst rim at {},{} ({} partly-clipped samples) → {stem}-rim.png",
+            at.0, at.1, best as u64
+        );
+    }
     Ok(())
 }
 

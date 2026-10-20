@@ -332,6 +332,14 @@ impl Ingest {
                 Res::View(&view(&cfa)),
             ],
         );
+        // Diagnostic only, for `sidecar-dev hilite` (ROADMAP, "Highlight reconstruction"): keep the clipped
+        // mosaic instead of the reconstructed one, which is the A/B that says whether something in a blown
+        // area was invented here or was already in the picture. Never set in a deployment.
+        let cfa = if std::env::var_os("SIDECAR_NO_HILITE").is_some() {
+            norm.clone()
+        } else {
+            cfa
+        };
 
         // Demosaic.
         let rgb = if sensor == 0 {
