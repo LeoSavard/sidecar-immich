@@ -69,7 +69,11 @@ pub fn straight_stops(u: f64, white_ev: f64, order: f64) -> f64 {
 /// Where the straight segment gives way, in stops above middle grey (`straight_stops`).
 pub fn straight_knee(white_ev: f64, order: f64) -> f64 {
     let (w, n) = (white_ev.max(1e-6), order.max(1.000_001));
-    if w <= HEADROOM_STOPS { w } else { ((n * HEADROOM_STOPS - w) / (n - 1.0)).clamp(0.0, HEADROOM_STOPS) }
+    if w <= HEADROOM_STOPS {
+        w
+    } else {
+        ((n * HEADROOM_STOPS - w) / (n - 1.0)).clamp(0.0, HEADROOM_STOPS)
+    }
 }
 
 #[cfg(test)]
@@ -89,8 +93,15 @@ mod tests {
             srgb_decode(normalized(x, k, p))
         };
         // The candidate as it would actually be used: the logistic below grey, the straight segment above it.
-        let straight_y = |u: f64, n: f64| if u < 0.0 { logistic_y(u) } else { 0.18 * 2f64.powf(straight_stops(u, white_ev, n)) };
-        let slope = |f: &dyn Fn(f64) -> f64, u: f64| ((f(u + 0.05) / f(u - 0.05)).log2() / 0.1).abs();
+        let straight_y = |u: f64, n: f64| {
+            if u < 0.0 {
+                logistic_y(u)
+            } else {
+                0.18 * 2f64.powf(straight_stops(u, white_ev, n))
+            }
+        };
+        let slope =
+            |f: &dyn Fn(f64) -> f64, u: f64| ((f(u + 0.05) / f(u - 0.05)).log2() / 0.1).abs();
         let orders = [2.0, 3.0, 4.0];
         println!("white_ev {white_ev}, headroom {HEADROOM_STOPS:.2} stops above grey");
         print!("  knee (stops above grey): ");
@@ -98,7 +109,10 @@ mod tests {
             print!("order {n:.0} at {:.2}   ", straight_knee(white_ev, n));
         }
         println!("\n\n  log-log slope — the share of its contrast a detail keeps");
-        println!("  {:>6}  {:>9}  {:>8}  {:>8}  {:>8}", "EV", "logistic", "order 2", "order 3", "order 4");
+        println!(
+            "  {:>6}  {:>9}  {:>8}  {:>8}  {:>8}",
+            "EV", "logistic", "order 2", "order 3", "order 4"
+        );
         for u in [-2.0, -1.0, -0.5, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0] {
             print!("  {u:>6.1}  {:>9.3}", slope(&logistic_y, u));
             for n in orders {
@@ -107,13 +121,30 @@ mod tests {
             println!();
         }
         // The roadmap's measurements of the curve as it stands, which is what this is to be judged against.
-        assert!((slope(&logistic_y, 1.0) - 0.80).abs() < 0.08, "logistic at +1 EV: {}", slope(&logistic_y, 1.0));
-        assert!((slope(&logistic_y, 2.0) - 0.57).abs() < 0.08, "logistic at +2 EV: {}", slope(&logistic_y, 2.0));
+        assert!(
+            (slope(&logistic_y, 1.0) - 0.80).abs() < 0.08,
+            "logistic at +1 EV: {}",
+            slope(&logistic_y, 1.0)
+        );
+        assert!(
+            (slope(&logistic_y, 2.0) - 0.57).abs() < 0.08,
+            "logistic at +2 EV: {}",
+            slope(&logistic_y, 2.0)
+        );
         // Order 3 is the one the roadmap describes: a stop for a stop through the upper midtones, paid for
         // above +2 EV. Order 2's knee sits so low that it is already shouldering at +1.
-        assert!(slope(&|x| straight_y(x, 3.0), 1.0) > 0.95, "order 3 at +1 EV");
-        assert!(slope(&|x| straight_y(x, 3.0), 3.0) < slope(&logistic_y, 3.0), "the shoulder is where it is paid for");
-        assert!(slope(&|x| straight_y(x, 2.0), 1.0) < 0.9, "order 2 is already into its shoulder at +1 EV");
+        assert!(
+            slope(&|x| straight_y(x, 3.0), 1.0) > 0.95,
+            "order 3 at +1 EV"
+        );
+        assert!(
+            slope(&|x| straight_y(x, 3.0), 3.0) < slope(&logistic_y, 3.0),
+            "the shoulder is where it is paid for"
+        );
+        assert!(
+            slope(&|x| straight_y(x, 2.0), 1.0) < 0.9,
+            "order 2 is already into its shoulder at +1 EV"
+        );
         // Shadows are the logistic's, untouched: the candidate only replaces the curve above grey.
         for n in orders {
             // Grey is still grey, and white is still white.
@@ -121,8 +152,16 @@ mod tests {
             assert!((straight_stops(white_ev, white_ev, n) - HEADROOM_STOPS).abs() < 1e-12);
             // No kink at the knee: the straight segment meets the shoulder with the same slope.
             let k = straight_knee(white_ev, n);
-            let d = |u: f64| (straight_stops(u + 1e-6, white_ev, n) - straight_stops(u - 1e-6, white_ev, n)) / 2e-6;
-            assert!((d(k - 1e-5) - d(k + 1e-5)).abs() < 1e-3, "order {n}: {} vs {}", d(k - 1e-5), d(k + 1e-5));
+            let d = |u: f64| {
+                (straight_stops(u + 1e-6, white_ev, n) - straight_stops(u - 1e-6, white_ev, n))
+                    / 2e-6
+            };
+            assert!(
+                (d(k - 1e-5) - d(k + 1e-5)).abs() < 1e-3,
+                "order {n}: {} vs {}",
+                d(k - 1e-5),
+                d(k + 1e-5)
+            );
             // Monotone, so no tone ever goes backwards.
             let mut last = f64::MIN;
             for i in 0..=200 {
@@ -134,7 +173,11 @@ mod tests {
     }
 
     fn srgb_decode(e: f64) -> f64 {
-        if e <= 0.04045 { e / 12.92 } else { ((e + 0.055) / 1.055).powf(2.4) }
+        if e <= 0.04045 {
+            e / 12.92
+        } else {
+            ((e + 0.055) / 1.055).powf(2.4)
+        }
     }
 
     #[test]
