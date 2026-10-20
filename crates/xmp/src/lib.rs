@@ -396,12 +396,13 @@ impl SidecarDoc {
     }
 
     pub fn edit(&self) -> EditParams {
-        let mut edit: EditParams = self
-            .sidecar
-            .get("edit")
-            .cloned()
-            .and_then(|v| serde_json::from_value(v).ok())
-            .unwrap_or_default();
+        // No edit stored is not an old edit: there is nothing to reinterpret, and migrating the defaults
+        // would hand back something that differs from `EditParams::default()` — which reads as an edit the
+        // photo doesn't have (a stray `Imported` history node), and loses what the current defaults mean.
+        let Some(stored_edit) = self.sidecar.get("edit").cloned() else {
+            return EditParams::default();
+        };
+        let mut edit: EditParams = serde_json::from_value(stored_edit).unwrap_or_default();
         // The sidecar's own version is the one an older Sidecar wrote; the edit inside carries it too, but a
         // sidecar from before the field existed has none, which means 1.
         let stored = self

@@ -11,13 +11,61 @@ What's known to be missing or wrong, roughly in the order it's worth doing. The 
 
 ## Correctness and quality
 
-**Tone curve above middle grey.** The logistic base curve begins shouldering immediately above grey, so
+**Middle grey sat a stop below where the curve assumes — fixed, `PROCESS_VERSION` 3.** `normalize.wgsl`
+scales sensor saturation to 1.0 and the tone curve reads middle grey at 0.18 of that, i.e. 2.47 stops of
+headroom. A correctly exposed capture does not put grey there: cameras meter lower to keep highlight room.
+**Measured against the cameras' own JPEGs: 1.15 stops lower (median), over 196 files sampled at random from
+the library and stratified by body, lens and exposure — 11 bodies, 14 lenses, four brands.** The consequence
+was this page's old "default rendering is darker than the camera's JPEG": Sidecar rendered the camera's
+middle grey at **−1.31 EV** (IQR −1.53…−1.13). The method is a *ranked* comparison — the rank of middle grey
+in the camera's rendering, read at the same rank in Sidecar's — so crop, scale and orientation cannot
+corrupt it.
+
+What it is not: the deficit is flat across scene brightness (darkest third −1.14, middle −1.19, brightest
+−1.11), so it is not a metering artifact; and every lens group tracks its body, so optics play no part. It is
+a constant, and it is now `Exposure::baseline_ev` (`BASELINE_EV`, 1.15), applied to a RAW before the person's
+own Exposure and not at all to a developed file, which its own maker already rendered. Re-rendering all 196
+puts grey at **−0.01 EV** (IQR −0.21…+0.15). An edit from before the bump keeps the picture it had: `migrate`
+gives it no baseline.
+
+*Two things this leaves.* **A per-model baseline.** One constant leaves a residual per body, from −0.45 EV
+(Nikon D5) to +0.32 EV (Sony ZV-1); the medians measured here are D3 1.20, X100F 1.19, D7000 1.13, D5 1.52,
+EOS M3 1.10, ZV-1 0.86, D3200 1.32, D3000 0.91, A7RM4 1.14. This is what the DNG spec's `BaselineExposure`
+exists for. Worth doing from more than one library, and worth knowing that Nikon's Active D-Lighting is baked
+into the previews this was measured against, the likeliest reason the D5 is the outlier. **The white point**
+— next.
+
+**Nothing reaches display white.** Saturation sits 2.47 stops over the curve's grey while the default
+`whiteEv` puts display white at 4.5 — `0.18 × 2^4.5`, four times saturation — so the top two stops of the
+curve's range describe light the sensor cannot produce. Measured: **0 of 196 frames had a single pixel at
+white**, brightest pixel median 0.611 linear; on the 66 frames where the camera itself clips, 0.689. A blown
+window renders as light grey, which is also why highlight-reconstruction artifacts are *visible* there — the
+camera's rendering clips them to white and they vanish. The measurement says `whiteEv` should default to
+**3.63** (IQR 3.48…3.81), which with the baseline put the brightest pixel at 0.965 linear on clipping frames.
+
+Not done with the baseline because it collides with something: for a *developed* file `white_ev` is not a
+white point but the Whites slider, read against `DEFAULT_WHITE_EV` in `display_tone`, and `EditParams` cannot
+tell a RAW's edit from a JPEG's — so moving the constant would silently move Whites to −43 on every existing
+edit of a developed file. That needs its own design (a separate zero for the developed path, or a stored one)
+and its own migration. `Whites` at +100 already subtracts 2.0 stops, landing on 2.5 — within 0.03 of the
+headroom figure — which is why lowering Whites has been the working answer.
+
+**Tone curve above middle grey.** *Read this against the two entries above: the shoulder is not where the
+darkness was.* The candidate curve at order 3 moved the median brightness by 0.02 EV. The logistic base
+curve begins shouldering immediately above grey, so
 raising exposure flattens upper-midtone texture — measured log-log slope 0.80 at +1 EV, 0.57 at +2 EV, 0.40
 at +2.5 EV. The real constraint is headroom (sRGB holds 2.47 stops above grey; the default `whiteEv` asks for
 4.5), so the shape can only decide *where* the compression is spent, not avoid it. A straight segment in
 encoded space was built and measured: it raises +2 EV to 0.63 but pushes shadow contrast from 1.29 to 2.37 at
 −2 EV, which is worse. A straight segment in *log-log* space holds ~0.98 at +1 EV with neutral shadows and
-costs highlights above +2 EV. Either is a `ProcessVersion` bump. Decide with pictures, not slopes.
+costs highlights above +2 EV (built on #21, `tone::straight_stops`). Either is a `ProcessVersion` bump.
+Decide with pictures, not slopes.
+
+Note what the white point does to this question: `straight_stops` returns the identity whenever `whiteEv` is
+at or under the display's 2.47 stops of headroom, so if the white point comes down to what the sensor
+delivers, a stop of scene light is a stop of picture all the way to white and there is no shoulder to choose.
+The shoulder survives only as the price of headroom deliberately kept above saturation for reconstructed
+highlights — and then the order is exactly the knob for it.
 
 **Focus peaking at full resolution — done**, in `sidecar_engine::focus`. It used to run in the view pass over
 the proxy, where downsampling had already averaged the high frequencies away, so it reported edge *contrast*

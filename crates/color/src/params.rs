@@ -12,7 +12,7 @@ use crate::tone;
 /// `migrate_highlight_shadow_anchors`) — an edit saved under version 1 needs its curve read differently, not
 /// just a field that defaults to off, so this is a real bump rather than an additive field. See
 /// docs/ROADMAP.md, "Curve editor: Highlights and Shadows stop sharing points with the manual curve".
-pub const PROCESS_VERSION: u32 = 2;
+pub const PROCESS_VERSION: u32 = 3;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
@@ -123,6 +123,11 @@ impl EditParams {
         if self.process_version < 2 {
             self.migrate_highlight_shadow_anchors();
         }
+        if self.process_version < 3 {
+            // Rendered before there was a baseline, and its picture is the one the person approved: it keeps
+            // the exposure it was rendered at. Only a new edit starts from the measured placement.
+            self.exposure.baseline_ev = 0.0;
+        }
         self.process_version = self.process_version.max(PROCESS_VERSION);
     }
 
@@ -184,13 +189,30 @@ impl Default for WhiteBalance {
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "edit/"))]
 pub struct Exposure {
     pub ev: f64,
+    /// The rendering's own reference exposure, in stops, applied to a RAW before anything the person set.
+    /// Not a control: it says where a correctly exposed capture's middle grey sits under the sensor's
+    /// saturation, which is not the `0.18` the curve assumes. Measured at **1.15 stops** across 196 files
+    /// from 11 bodies and 14 lenses (`BASELINE_EV`); without it Sidecar renders 1.3 stops under the camera's
+    /// own JPEG, which was ROADMAP's "default rendering is darker than the camera's".
+    ///
+    /// Stored per edit rather than applied as a constant so that an edit made before `PROCESS_VERSION` 3
+    /// keeps the picture it had: `migrate` sets it to zero for those, and only a new edit gets the baseline.
+    pub baseline_ev: f64,
     pub highlight_blend: f64,
 }
+
+/// Where a correctly exposed capture puts middle grey, in stops below sensor saturation, against the `0.18`
+/// the tone curve assumes. Measured against the cameras' own JPEGs: median 1.15 stops over 196 files, 11
+/// bodies, 14 lenses, four brands, and flat across scene brightness (`docs/ROADMAP.md`, "Middle grey sat a
+/// stop below where the curve assumes"). Per body the median ran from 0.86 (Sony ZV-1) to 1.52 (Nikon D5),
+/// so a per-model table is the refinement this constant stands in for.
+pub const BASELINE_EV: f64 = 1.15;
 
 impl Default for Exposure {
     fn default() -> Self {
         Self {
             ev: 0.0,
+            baseline_ev: BASELINE_EV,
             highlight_blend: 0.5,
         }
     }
@@ -1050,7 +1072,16 @@ fn pack_inner(
     let tone = tone_params(edit, developed);
     let mut params = DevelopParams {
         wb_mul: wb.mul.map(|v| v as f32),
-        exposure: 2f64.powf(edit.exposure.ev) as f32,
+        // A developed file is already a picture — its own maker placed its grey — so the baseline is a RAW's
+        // alone. `edit.exposure.ev` is the person's, on top.
+        exposure: 2f64.powf(
+            edit.exposure.ev
+                + if developed {
+                    0.0
+                } else {
+                    edit.exposure.baseline_ev
+                },
+        ) as f32,
         cam_to_work: to_mat3(&wb.cam_to_rec2020),
         work_to_disp: to_mat3(match display {
             DisplaySpace::Srgb => &mat::REC2020_TO_SRGB,
@@ -1302,11 +1333,69 @@ mod tests {
         );
         assert_eq!(p.uniform.len(), 416);
         assert_eq!(p.lut.len(), LUT_SIZE);
-        // exposure sits at byte 12
-        assert_eq!(
-            f32::from_le_bytes(p.uniform[12..16].try_into().unwrap()),
-            1.0
+        // exposure sits at byte 12, and for a RAW at default it is the baseline, not 1.0
+        let gain = |p: &Packed| f32::from_le_bytes(p.uniform[12..16].try_into().unwrap());
+        assert_eq!(gain(&p), 2f64.powf(BASELINE_EV) as f32);
+        let dev = pack(
+            &EditParams::default(),
+            &crate::camera::nikon_d850(),
+            SourceKind::Developed,
+            DisplaySpace::Srgb,
         );
+        assert_eq!(
+            gain(&dev),
+            1.0,
+            "a developed file was already rendered by whatever wrote it"
+        );
+    }
+
+    /// The baseline is the rendering's, not the person's: it moves the gain a RAW is developed at, leaves a
+    /// developed file alone, and adds to whatever Exposure the person set rather than replacing it.
+    #[test]
+    fn the_baseline_exposes_a_raw_and_leaves_a_developed_file_alone() {
+        let cam = crate::camera::nikon_d850();
+        let gain = |e: &EditParams, k| {
+            let p = pack(e, &cam, k, DisplaySpace::Srgb);
+            f32::from_le_bytes(p.uniform[12..16].try_into().unwrap()) as f64
+        };
+        let d = EditParams::default();
+        assert!((gain(&d, SourceKind::Raw) - 2f64.powf(BASELINE_EV)).abs() < 1e-5);
+        assert!((gain(&d, SourceKind::Developed) - 1.0).abs() < 1e-6);
+        let mut plus = EditParams::default();
+        plus.exposure.ev = 1.0;
+        assert!(
+            (gain(&plus, SourceKind::Raw) - 2f64.powf(1.0 + BASELINE_EV)).abs() < 1e-5,
+            "the person's stacks on the baseline"
+        );
+    }
+
+    /// An edit made before `PROCESS_VERSION` 3 was approved as the picture it rendered, so it keeps that
+    /// picture: migration gives it no baseline. A new edit gets the measured one.
+    #[test]
+    fn an_edit_from_before_the_baseline_keeps_the_exposure_it_was_rendered_at() {
+        let mut old: EditParams =
+            serde_json::from_str(r#"{"processVersion":2,"exposure":{"ev":0.5}}"#).unwrap();
+        old.migrate();
+        assert_eq!(old.exposure.baseline_ev, 0.0);
+        assert_eq!(
+            old.exposure.ev, 0.5,
+            "the person's own exposure is untouched"
+        );
+        assert_eq!(old.process_version, PROCESS_VERSION);
+        let p = pack(
+            &old,
+            &crate::camera::nikon_d850(),
+            SourceKind::Raw,
+            DisplaySpace::Srgb,
+        );
+        let gain = f32::from_le_bytes(p.uniform[12..16].try_into().unwrap()) as f64;
+        assert!(
+            (gain - 2f64.powf(0.5)).abs() < 1e-5,
+            "renders exactly as it did before the bump"
+        );
+        let mut fresh = EditParams::default();
+        fresh.migrate();
+        assert_eq!(fresh.exposure.baseline_ev, BASELINE_EV);
     }
 
     #[test]
