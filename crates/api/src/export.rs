@@ -85,13 +85,21 @@ impl Job {
     fn push(&self, kind: &str, data: Value) {
         let mut ev = self.events.lock().unwrap();
         let id = ev.len() as u64 + 1;
-        ev.push(JobEvent { id, kind: kind.into(), data });
+        ev.push(JobEvent {
+            id,
+            kind: kind.into(),
+            data,
+        });
         drop(ev);
         self.notify.notify_waiters();
     }
 
     fn finished(&self) -> bool {
-        self.events.lock().unwrap().last().is_some_and(|e| e.kind == "done" || e.kind == "failed")
+        self.events
+            .lock()
+            .unwrap()
+            .last()
+            .is_some_and(|e| e.kind == "done" || e.kind == "failed")
     }
 }
 
@@ -114,7 +122,10 @@ impl Jobs {
         let mut by_id = self.by_id.lock().unwrap();
         let before = by_id.len();
         by_id.retain(|_, j| !(j.finished() && j.created.elapsed() > JOB_TTL));
-        self.by_idempotency.lock().unwrap().retain(|_, id| by_id.contains_key(id));
+        self.by_idempotency
+            .lock()
+            .unwrap()
+            .retain(|_, id| by_id.contains_key(id));
         before - by_id.len()
     }
 }
@@ -135,14 +146,27 @@ fn render_of(req: &ExportRequest) -> Value {
 /// Did this export reach the library? An entry without an Immich id is a render that only ever went to the
 /// device, which is the whole reason a later export to Immich has to go ahead and upload it.
 fn in_immich(entry: &Value) -> bool {
-    entry["immichAssetId"].as_str().is_some_and(|id| !id.is_empty())
+    entry["immichAssetId"]
+        .as_str()
+        .is_some_and(|id| !id.is_empty())
 }
 
 /// The version number an edit's exports share. A version is the **edit**, not the file: the same edit
 /// exported again — another format, another size, another destination — keeps its number, and only an edit
 /// that has never been exported takes the next one.
 fn version_for(exports: &[Value], edit_etag: &str) -> u64 {
-    exports.iter().find(|e| e["editEtag"] == edit_etag).and_then(|e| e["version"].as_u64()).unwrap_or_else(|| exports.iter().filter_map(|e| e["version"].as_u64()).max().unwrap_or(0) + 1)
+    exports
+        .iter()
+        .find(|e| e["editEtag"] == edit_etag)
+        .and_then(|e| e["version"].as_u64())
+        .unwrap_or_else(|| {
+            exports
+                .iter()
+                .filter_map(|e| e["version"].as_u64())
+                .max()
+                .unwrap_or(0)
+                + 1
+        })
 }
 
 /// What a file name says beyond its version. The plain name is the full-size sRGB JPEG at the default
@@ -162,8 +186,15 @@ fn settings_suffix(req: &ExportRequest) -> String {
     s
 }
 
-pub async fn create(State(app): State<Arc<App>>, ApiUser(user): ApiUser, headers: HeaderMap, Json(mut req): Json<ExportRequest>) -> Response {
-    let Some(rec) = crate::asset_for(&app, &user, &req.asset_key).await else { return StatusCode::NOT_FOUND.into_response() };
+pub async fn create(
+    State(app): State<Arc<App>>,
+    ApiUser(user): ApiUser,
+    headers: HeaderMap,
+    Json(mut req): Json<ExportRequest>,
+) -> Response {
+    let Some(rec) = crate::asset_for(&app, &user, &req.asset_key).await else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
     if !matches!(req.format.as_str(), "jpeg" | "tiff") {
         return (StatusCode::BAD_REQUEST, "format must be jpeg or tiff").into_response();
     }
@@ -172,7 +203,10 @@ pub async fn create(State(app): State<Arc<App>>, ApiUser(user): ApiUser, headers
     if req.format == "tiff" {
         req.quality = quality();
     }
-    let idem = headers.get("idempotency-key").and_then(|v| v.to_str().ok()).map(|v| format!("{}:{v}", user.id));
+    let idem = headers
+        .get("idempotency-key")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| format!("{}:{v}", user.id));
     if let Some(k) = &idem
         && let Some(id) = app.jobs.by_idempotency.lock().unwrap().get(k).cloned()
     {
@@ -180,13 +214,18 @@ pub async fn create(State(app): State<Arc<App>>, ApiUser(user): ApiUser, headers
     }
 
     let path = rec.path.clone();
-    let doc = match tokio::task::spawn_blocking(move || sidecar_xmp::SidecarDoc::load(&path)).await {
+    let doc = match tokio::task::spawn_blocking(move || sidecar_xmp::SidecarDoc::load(&path)).await
+    {
         Ok(Ok(d)) => d,
         Ok(Err(e)) => return crate::internal(e),
         Err(e) => return crate::internal(e.into()),
     };
     if doc.etag() != req.edit_etag {
-        return (StatusCode::CONFLICT, "Save your edit before exporting; the sidecar has changed.").into_response();
+        return (
+            StatusCode::CONFLICT,
+            "Save your edit before exporting; the sidecar has changed.",
+        )
+            .into_response();
     }
     // An identical export already in `sc:Exports` answers the request on its own — nothing renders twice —
     // but only where that file already is. Wanted on this device, it has to be rendered again: the copy that
@@ -195,7 +234,10 @@ pub async fn create(State(app): State<Arc<App>>, ApiUser(user): ApiUser, headers
     // number and its name, and `run` is told what the record already covers.
     let exports = doc.exports();
     let render = render_of(&req);
-    let already = exports.iter().find(|e| sidecar_xmp::same_render(e, &render)).cloned();
+    let already = exports
+        .iter()
+        .find(|e| sidecar_xmp::same_render(e, &render))
+        .cloned();
     if let Some(existing) = &already
         && !req.destination.to_device()
         && in_immich(existing)
@@ -203,8 +245,18 @@ pub async fn create(State(app): State<Arc<App>>, ApiUser(user): ApiUser, headers
         return (StatusCode::OK, Json(json!({ "existing": existing }))).into_response();
     }
 
-    if !app.jobs.numbering.lock().unwrap().insert(req.asset_key.clone()) {
-        return (StatusCode::CONFLICT, "An export of this photo is being prepared; try again in a moment.").into_response();
+    if !app
+        .jobs
+        .numbering
+        .lock()
+        .unwrap()
+        .insert(req.asset_key.clone())
+    {
+        return (
+            StatusCode::CONFLICT,
+            "An export of this photo is being prepared; try again in a moment.",
+        )
+            .into_response();
     }
     let version = version_for(&exports, &req.edit_etag);
     let ext = if req.format == "tiff" { "tif" } else { "jpg" };
@@ -213,28 +265,68 @@ pub async fn create(State(app): State<Arc<App>>, ApiUser(user): ApiUser, headers
     let file_name = already
         .as_ref()
         .and_then(|e| e["file"].as_str().map(String::from))
-        .unwrap_or_else(|| format!("{}-v{version}{}.{ext}", file_stem(&rec.file_name), settings_suffix(&req)));
+        .unwrap_or_else(|| {
+            format!(
+                "{}-v{version}{}.{ext}",
+                file_stem(&rec.file_name),
+                settings_suffix(&req)
+            )
+        });
 
-    let job = Arc::new(Job { id: random_hex(16), user_id: user.id.clone(), created: std::time::Instant::now(), events: Mutex::new(Vec::new()), notify: tokio::sync::Notify::new() });
-    app.jobs.by_id.lock().unwrap().insert(job.id.clone(), job.clone());
+    let job = Arc::new(Job {
+        id: random_hex(16),
+        user_id: user.id.clone(),
+        created: std::time::Instant::now(),
+        events: Mutex::new(Vec::new()),
+        notify: tokio::sync::Notify::new(),
+    });
+    app.jobs
+        .by_id
+        .lock()
+        .unwrap()
+        .insert(job.id.clone(), job.clone());
     if let Some(k) = idem {
-        app.jobs.by_idempotency.lock().unwrap().insert(k, job.id.clone());
+        app.jobs
+            .by_idempotency
+            .lock()
+            .unwrap()
+            .insert(k, job.id.clone());
     }
     job.push("queued", json!({ "version": version, "file": file_name }));
     let (app2, job2, edit, name2) = (app.clone(), job.clone(), doc.edit(), file_name.clone());
     tokio::spawn(async move {
-        let outcome = run(&app2, &job2, &user, &rec, &req, edit, version, &name2, already).await;
+        let outcome = run(
+            &app2, &job2, &user, &rec, &req, edit, version, &name2, already,
+        )
+        .await;
         app2.jobs.numbering.lock().unwrap().remove(&req.asset_key);
         if let Err(e) = outcome {
             tracing::error!("export {}: {e:#}", job2.id);
-            job2.push("failed", json!({ "message": format!("{e:#}"), "retryable": true }));
+            job2.push(
+                "failed",
+                json!({ "message": format!("{e:#}"), "retryable": true }),
+            );
         }
     });
-    (StatusCode::ACCEPTED, Json(json!({ "jobId": job.id, "version": version, "file": file_name }))).into_response()
+    (
+        StatusCode::ACCEPTED,
+        Json(json!({ "jobId": job.id, "version": version, "file": file_name })),
+    )
+        .into_response()
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn run(app: &Arc<App>, job: &Job, user: &crate::session::User, rec: &AssetRecord, req: &ExportRequest, edit: EditParams, version: u64, file_name: &str, recorded: Option<Value>) -> Result<()> {
+async fn run(
+    app: &Arc<App>,
+    job: &Job,
+    user: &crate::session::User,
+    rec: &AssetRecord,
+    req: &ExportRequest,
+    edit: EditParams,
+    version: u64,
+    file_name: &str,
+    recorded: Option<Value>,
+) -> Result<()> {
     let sidecar = json!({
         "processVersion": sidecar_color::params::PROCESS_VERSION,
         "sourceSha1": req.asset_key,
@@ -247,7 +339,13 @@ async fn run(app: &Arc<App>, job: &Job, user: &crate::session::User, rec: &Asset
         "colorSpace": req.color_space, "quality": req.quality, "longEdge": req.long_edge, "sidecar": sidecar,
         "key": req.asset_key,
     });
-    let resp = app.http.post(app.worker("/v1/render")).json(&body).send().await.context("reaching the worker")?;
+    let resp = app
+        .http
+        .post(app.worker("/v1/render"))
+        .json(&body)
+        .send()
+        .await
+        .context("reaching the worker")?;
     if !resp.status().is_success() {
         bail!("{}", resp.text().await.unwrap_or_default());
     }
@@ -278,17 +376,41 @@ async fn run(app: &Arc<App>, job: &Job, user: &crate::session::User, rec: &Asset
     let in_library = recorded.as_ref().is_some_and(in_immich);
     if app.immich.enabled() && req.destination != Destination::Device && !in_library {
         job.push("progress", json!({ "stage": "upload", "overall": 0.88 }));
-        let file = app.http.get(app.worker(&format!("/v1/outbox/{}/{}", job.id, file_name))).send().await?.error_for_status()?.bytes().await?;
-        let meta: Value = app.http.get(app.worker(&format!("/v1/assets/{}/meta", req.asset_key))).send().await?.json().await?;
-        let captured = meta["info"]["capturedUnix"].as_i64().filter(|&t| t > 0).map(sidecar_xmp::rfc3339).unwrap_or_else(sidecar_xmp::utc_now);
-        let id = app.immich.upload(&user.api_key, file_name, file.to_vec(), &captured).await?;
+        let file = app
+            .http
+            .get(app.worker(&format!("/v1/outbox/{}/{}", job.id, file_name)))
+            .send()
+            .await?
+            .error_for_status()?
+            .bytes()
+            .await?;
+        let meta: Value = app
+            .http
+            .get(app.worker(&format!("/v1/assets/{}/meta", req.asset_key)))
+            .send()
+            .await?
+            .json()
+            .await?;
+        let captured = meta["info"]["capturedUnix"]
+            .as_i64()
+            .filter(|&t| t > 0)
+            .map(sidecar_xmp::rfc3339)
+            .unwrap_or_else(sidecar_xmp::utc_now);
+        let id = app
+            .immich
+            .upload(&user.api_key, file_name, file.to_vec(), &captured)
+            .await?;
         job.push("progress", json!({ "stage": "stack", "overall": 0.95 }));
         let raw_id = match &rec.immich_asset_id {
             Some(id) => Some(id.clone()),
-            None => crate::resolve::immich_asset_at(app, user, &rec.path).await?.map(|a| a.id),
+            None => crate::resolve::immich_asset_at(app, user, &rec.path)
+                .await?
+                .map(|a| a.id),
         };
         if let Some(raw_id) = raw_id {
-            app.immich.stack_export(&user.api_key, &raw_id, &id, req.format == "jpeg").await?;
+            app.immich
+                .stack_export(&user.api_key, &raw_id, &id, req.format == "jpeg")
+                .await?;
         }
         immich_asset_id = Some(id);
     }
@@ -308,13 +430,18 @@ async fn run(app: &Arc<App>, job: &Job, user: &crate::session::User, rec: &Asset
         // An export that reached Immich is not lost when the sidecar can't be written, so this one failure
         // is reported and stepped over rather than failing the job: the photo's version history misses an
         // entry, and the file the person asked for still arrives.
-        let saved = tokio::task::spawn_blocking(move || sidecar_xmp::update(&path, &roots, |d| {
-            d.record_export(entry.clone());
-            Ok(())
-        }))
+        let saved = tokio::task::spawn_blocking(move || {
+            sidecar_xmp::update(&path, &roots, |d| {
+                d.record_export(entry.clone());
+                Ok(())
+            })
+        })
         .await?;
         if let Err(e) = saved {
-            tracing::error!("recording export v{version} of {}: {e:#}", rec.path.display());
+            tracing::error!(
+                "recording export v{version} of {}: {e:#}",
+                rec.path.display()
+            );
             job.push("warning", json!({ "message": format!("{e}") }));
         }
     }
@@ -323,59 +450,141 @@ async fn run(app: &Arc<App>, job: &Job, user: &crate::session::User, rec: &Asset
     // the render reached Immich and this device isn't asking for it too. What stays is swept by the worker.
     // A re-render of an export that is already in Immich still belongs to that asset, so the finished event
     // names it rather than reporting the photo as never uploaded.
-    let immich_id = immich_asset_id.clone().or_else(|| recorded.as_ref().and_then(|e| e["immichAssetId"].as_str().map(String::from)));
-    let download = (req.destination.to_device() || immich_id.is_none()).then(|| format!("/api/exports/{}/file", job.id));
+    let immich_id = immich_asset_id.clone().or_else(|| {
+        recorded
+            .as_ref()
+            .and_then(|e| e["immichAssetId"].as_str().map(String::from))
+    });
+    let download = (req.destination.to_device() || immich_id.is_none())
+        .then(|| format!("/api/exports/{}/file", job.id));
     if download.is_none() {
-        let _ = app.http.delete(app.worker(&format!("/v1/outbox/{}", job.id))).send().await;
+        let _ = app
+            .http
+            .delete(app.worker(&format!("/v1/outbox/{}", job.id)))
+            .send()
+            .await;
     }
     job.push("done", json!({ "version": version, "file": file_name, "bytes": done["bytes"], "width": done["width"], "height": done["height"], "immichAssetId": immich_id, "download": download }));
     Ok(())
 }
 
 fn job_for(app: &App, user: &crate::session::User, id: &str) -> Option<Arc<Job>> {
-    app.jobs.by_id.lock().unwrap().get(id).filter(|j| j.user_id == user.id).cloned()
+    app.jobs
+        .by_id
+        .lock()
+        .unwrap()
+        .get(id)
+        .filter(|j| j.user_id == user.id)
+        .cloned()
 }
 
-pub async fn status(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Path(id): Path<String>) -> Response {
-    let Some(job) = job_for(&app, &user, &id) else { return StatusCode::NOT_FOUND.into_response() };
+pub async fn status(
+    State(app): State<Arc<App>>,
+    ApiUser(user): ApiUser,
+    Path(id): Path<String>,
+) -> Response {
+    let Some(job) = job_for(&app, &user, &id) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
     let events = job.events.lock().unwrap().clone();
     Json(json!({ "jobId": id, "last": events.last(), "finished": job.finished() })).into_response()
 }
 
-pub async fn events(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Path(id): Path<String>, headers: HeaderMap) -> Response {
-    let Some(job) = job_for(&app, &user, &id) else { return StatusCode::NOT_FOUND.into_response() };
-    let after = headers.get("last-event-id").and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
-    let stream = futures_util::stream::unfold((job, after, false), |(job, mut sent, ended)| async move {
-        if ended {
-            return None;
-        }
-        loop {
-            let waiter = job.clone();
-            let notified = waiter.notify.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-            let next = job.events.lock().unwrap().iter().find(|e| e.id > sent).cloned();
-            if let Some(e) = next {
-                sent = e.id;
-                let terminal = e.kind == "done" || e.kind == "failed";
-                let event = Event::default().id(e.id.to_string()).event(e.kind).json_data(e.data).unwrap();
-                return Some((Ok::<_, std::convert::Infallible>(event), (job, sent, terminal)));
+pub async fn events(
+    State(app): State<Arc<App>>,
+    ApiUser(user): ApiUser,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(job) = job_for(&app, &user, &id) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let after = headers
+        .get("last-event-id")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0);
+    let stream =
+        futures_util::stream::unfold((job, after, false), |(job, mut sent, ended)| async move {
+            if ended {
+                return None;
             }
-            notified.await;
-        }
-    });
-    Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)).text("keepalive")).into_response()
+            loop {
+                let waiter = job.clone();
+                let notified = waiter.notify.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                let next = job
+                    .events
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|e| e.id > sent)
+                    .cloned();
+                if let Some(e) = next {
+                    sent = e.id;
+                    let terminal = e.kind == "done" || e.kind == "failed";
+                    let event = Event::default()
+                        .id(e.id.to_string())
+                        .event(e.kind)
+                        .json_data(e.data)
+                        .unwrap();
+                    return Some((
+                        Ok::<_, std::convert::Infallible>(event),
+                        (job, sent, terminal),
+                    ));
+                }
+                notified.await;
+            }
+        });
+    Sse::new(stream)
+        .keep_alive(
+            KeepAlive::new()
+                .interval(Duration::from_secs(15))
+                .text("keepalive"),
+        )
+        .into_response()
 }
 
 /// Download a finished export that wasn't uploaded (no Immich configured).
-pub async fn file(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Path(id): Path<String>) -> Response {
-    let Some(job) = job_for(&app, &user, &id) else { return StatusCode::NOT_FOUND.into_response() };
-    let done = job.events.lock().unwrap().iter().find(|e| e.kind == "done").map(|e| e.data.clone());
-    let Some(name) = done.as_ref().and_then(|d| d["file"].as_str()).map(String::from) else { return StatusCode::NOT_FOUND.into_response() };
-    let mut resp = crate::relay(app.http.get(app.worker(&format!("/v1/outbox/{id}/{name}"))).send().await).await;
-    let ct = if name.ends_with(".tif") { "image/tiff" } else { "image/jpeg" };
-    resp.headers_mut().insert("content-type", ct.parse().unwrap());
-    resp.headers_mut().insert("content-disposition", attachment(&name));
+pub async fn file(
+    State(app): State<Arc<App>>,
+    ApiUser(user): ApiUser,
+    Path(id): Path<String>,
+) -> Response {
+    let Some(job) = job_for(&app, &user, &id) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let done = job
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|e| e.kind == "done")
+        .map(|e| e.data.clone());
+    let Some(name) = done
+        .as_ref()
+        .and_then(|d| d["file"].as_str())
+        .map(String::from)
+    else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let mut resp = crate::relay(
+        app.http
+            .get(app.worker(&format!("/v1/outbox/{id}/{name}")))
+            .send()
+            .await,
+    )
+    .await;
+    let ct = if name.ends_with(".tif") {
+        "image/tiff"
+    } else {
+        "image/jpeg"
+    };
+    resp.headers_mut()
+        .insert("content-type", ct.parse().unwrap());
+    resp.headers_mut()
+        .insert("content-disposition", attachment(&name));
     resp
 }
 
@@ -383,12 +592,30 @@ pub async fn file(State(app): State<Arc<App>>, ApiUser(user): ApiUser, Path(id):
 /// non-ASCII name (browsers read it as Latin-1) and broke on a `"`; RFC 6266 has browsers prefer the UTF-8
 /// `filename*`, and the plain one stays as an ASCII fallback.
 fn attachment(name: &str) -> axum::http::HeaderValue {
-    let fallback: String = name.chars().map(|c| if c.is_ascii_graphic() && c != '"' && c != '\\' || c == ' ' { c } else { '_' }).collect();
+    let fallback: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_graphic() && c != '"' && c != '\\' || c == ' ' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
     let encoded: String = name
         .bytes()
-        .map(|b| if b.is_ascii_alphanumeric() || b"!#$&+-.^_`|~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") })
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || b"!#$&+-.^_`|~".contains(&b) {
+                (b as char).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
         .collect();
-    axum::http::HeaderValue::from_str(&format!("attachment; filename=\"{fallback}\"; filename*=UTF-8''{encoded}")).expect("ASCII only")
+    axum::http::HeaderValue::from_str(&format!(
+        "attachment; filename=\"{fallback}\"; filename*=UTF-8''{encoded}"
+    ))
+    .expect("ASCII only")
 }
 
 #[cfg(test)]
@@ -399,10 +626,19 @@ mod tests {
     fn finished_jobs_expire_and_running_ones_stay() {
         let jobs = Jobs::default();
         let job = |id: &str, age: Duration, kind: &str| {
-            let j = Arc::new(Job { id: id.into(), user_id: "u".into(), created: std::time::Instant::now() - age, events: Mutex::default(), notify: Default::default() });
+            let j = Arc::new(Job {
+                id: id.into(),
+                user_id: "u".into(),
+                created: std::time::Instant::now() - age,
+                events: Mutex::default(),
+                notify: Default::default(),
+            });
             j.push(kind, json!({}));
             jobs.by_id.lock().unwrap().insert(id.into(), j);
-            jobs.by_idempotency.lock().unwrap().insert(format!("u:{id}"), id.into());
+            jobs.by_idempotency
+                .lock()
+                .unwrap()
+                .insert(format!("u:{id}"), id.into());
         };
         let day = Duration::from_secs(25 * 3600);
         job("old-done", day, "done");
@@ -415,15 +651,22 @@ mod tests {
 
     #[test]
     fn download_names_survive_accents_and_quotes() {
-        assert_eq!(attachment("IMG_1-v2.jpg").to_str().unwrap(), "attachment; filename=\"IMG_1-v2.jpg\"; filename*=UTF-8''IMG_1-v2.jpg");
-        assert_eq!(attachment("Été \"1\".jpg").to_str().unwrap(), "attachment; filename=\"_t_ _1_.jpg\"; filename*=UTF-8''%C3%89t%C3%A9%20%221%22.jpg");
+        assert_eq!(
+            attachment("IMG_1-v2.jpg").to_str().unwrap(),
+            "attachment; filename=\"IMG_1-v2.jpg\"; filename*=UTF-8''IMG_1-v2.jpg"
+        );
+        assert_eq!(
+            attachment("Été \"1\".jpg").to_str().unwrap(),
+            "attachment; filename=\"_t_ _1_.jpg\"; filename*=UTF-8''%C3%89t%C3%A9%20%221%22.jpg"
+        );
     }
 
     /// A client that predates the destination picker sends no `destination` at all, and has to keep getting
     /// what it has always got: uploaded to Immich, stacked, local copy dropped.
     #[test]
     fn a_request_without_a_destination_still_means_immich() {
-        let req: ExportRequest = serde_json::from_str(r#"{"assetKey":"a","editEtag":"b"}"#).unwrap();
+        let req: ExportRequest =
+            serde_json::from_str(r#"{"assetKey":"a","editEtag":"b"}"#).unwrap();
         assert_eq!(req.destination, Destination::Immich);
         assert!(!req.destination.to_device());
         assert_eq!(req.format, "jpeg");
@@ -432,9 +675,21 @@ mod tests {
     #[test]
     fn both_destinations_keep_the_file_for_the_browser() {
         for (json, want, to_device) in [
-            (r#"{"assetKey":"a","editEtag":"b","destination":"device"}"#, Destination::Device, true),
-            (r#"{"assetKey":"a","editEtag":"b","destination":"both"}"#, Destination::Both, true),
-            (r#"{"assetKey":"a","editEtag":"b","destination":"immich"}"#, Destination::Immich, false),
+            (
+                r#"{"assetKey":"a","editEtag":"b","destination":"device"}"#,
+                Destination::Device,
+                true,
+            ),
+            (
+                r#"{"assetKey":"a","editEtag":"b","destination":"both"}"#,
+                Destination::Both,
+                true,
+            ),
+            (
+                r#"{"assetKey":"a","editEtag":"b","destination":"immich"}"#,
+                Destination::Immich,
+                false,
+            ),
         ] {
             let req: ExportRequest = serde_json::from_str(json).unwrap();
             assert_eq!(req.destination, want);
@@ -451,8 +706,15 @@ mod tests {
     #[test]
     fn destination_is_not_part_of_what_makes_two_exports_the_same() {
         let entry = json!({ "editEtag": "b", "format": "jpeg", "colorSpace": "srgb", "quality": 92, "longEdge": null });
-        for json in [r#"{"assetKey":"a","editEtag":"b"}"#, r#"{"assetKey":"a","editEtag":"b","destination":"device"}"#, r#"{"assetKey":"a","editEtag":"b","destination":"both"}"#] {
-            assert!(sidecar_xmp::same_render(&entry, &render_of(&request(json))), "{json}");
+        for json in [
+            r#"{"assetKey":"a","editEtag":"b"}"#,
+            r#"{"assetKey":"a","editEtag":"b","destination":"device"}"#,
+            r#"{"assetKey":"a","editEtag":"b","destination":"both"}"#,
+        ] {
+            assert!(
+                sidecar_xmp::same_render(&entry, &render_of(&request(json))),
+                "{json}"
+            );
         }
     }
 
@@ -463,8 +725,13 @@ mod tests {
     fn an_export_that_only_reached_the_device_is_not_in_the_library() {
         let to_device = json!({ "editEtag": "b", "file": "a-v1.jpg", "immichAssetId": null });
         assert!(!in_immich(&to_device));
-        assert!(!in_immich(&json!({ "editEtag": "b", "file": "a-v1.jpg" })), "an entry written without the field reads the same way");
-        assert!(in_immich(&json!({ "editEtag": "b", "immichAssetId": "im-1" })));
+        assert!(
+            !in_immich(&json!({ "editEtag": "b", "file": "a-v1.jpg" })),
+            "an entry written without the field reads the same way"
+        );
+        assert!(in_immich(
+            &json!({ "editEtag": "b", "immichAssetId": "im-1" })
+        ));
     }
 
     /// A version is the edit. Exporting the same edit again — another size, another format, another place —
@@ -477,7 +744,11 @@ mod tests {
             json!({ "version": 2, "editEtag": "bbb", "format": "jpeg" }),
         ];
         assert_eq!(version_for(&exports, "aaa"), 1);
-        assert_eq!(version_for(&exports, "bbb"), 2, "an edit gone back to keeps the number it had");
+        assert_eq!(
+            version_for(&exports, "bbb"),
+            2,
+            "an edit gone back to keeps the number it had"
+        );
         assert_eq!(version_for(&exports, "ccc"), 3);
         assert_eq!(version_for(&[], "aaa"), 1);
     }
@@ -488,15 +759,42 @@ mod tests {
     fn settings_that_change_the_file_change_its_name() {
         let name = |json: &str| {
             let req = request(json);
-            format!("DSC_1234-v1{}.{}", settings_suffix(&req), if req.format == "tiff" { "tif" } else { "jpg" })
+            format!(
+                "DSC_1234-v1{}.{}",
+                settings_suffix(&req),
+                if req.format == "tiff" { "tif" } else { "jpg" }
+            )
         };
-        assert_eq!(name(r#"{"assetKey":"a","editEtag":"b"}"#), "DSC_1234-v1.jpg");
-        assert_eq!(name(r#"{"assetKey":"a","editEtag":"b","format":"tiff"}"#), "DSC_1234-v1.tif");
-        assert_eq!(name(r#"{"assetKey":"a","editEtag":"b","longEdge":2048}"#), "DSC_1234-v1-2048px.jpg");
-        assert_eq!(name(r#"{"assetKey":"a","editEtag":"b","colorSpace":"display-p3"}"#), "DSC_1234-v1-p3.jpg");
-        assert_eq!(name(r#"{"assetKey":"a","editEtag":"b","quality":80}"#), "DSC_1234-v1-q80.jpg");
-        assert_eq!(name(r#"{"assetKey":"a","editEtag":"b","longEdge":1024,"colorSpace":"display-p3","quality":100}"#), "DSC_1234-v1-1024px-p3-q100.jpg");
+        assert_eq!(
+            name(r#"{"assetKey":"a","editEtag":"b"}"#),
+            "DSC_1234-v1.jpg"
+        );
+        assert_eq!(
+            name(r#"{"assetKey":"a","editEtag":"b","format":"tiff"}"#),
+            "DSC_1234-v1.tif"
+        );
+        assert_eq!(
+            name(r#"{"assetKey":"a","editEtag":"b","longEdge":2048}"#),
+            "DSC_1234-v1-2048px.jpg"
+        );
+        assert_eq!(
+            name(r#"{"assetKey":"a","editEtag":"b","colorSpace":"display-p3"}"#),
+            "DSC_1234-v1-p3.jpg"
+        );
+        assert_eq!(
+            name(r#"{"assetKey":"a","editEtag":"b","quality":80}"#),
+            "DSC_1234-v1-q80.jpg"
+        );
+        assert_eq!(
+            name(
+                r#"{"assetKey":"a","editEtag":"b","longEdge":1024,"colorSpace":"display-p3","quality":100}"#
+            ),
+            "DSC_1234-v1-1024px-p3-q100.jpg"
+        );
         // A 16-bit TIFF has no quality to put in its name; `create` drops the one the sheet sends with it.
-        assert_eq!(name(r#"{"assetKey":"a","editEtag":"b","format":"tiff","quality":80}"#), "DSC_1234-v1.tif");
+        assert_eq!(
+            name(r#"{"assetKey":"a","editEtag":"b","format":"tiff","quality":80}"#),
+            "DSC_1234-v1.tif"
+        );
     }
 }

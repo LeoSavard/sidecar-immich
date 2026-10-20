@@ -54,13 +54,27 @@ async fn main() -> Result<()> {
             let listen = app.config.server.listen.clone();
             serve(&listen, sidecar_api::router(app)).await
         }
-        Command::Worker { listen, cache } => serve(&listen, sidecar_worker::router(sidecar_worker::Worker::new(cache)?)).await,
+        Command::Worker { listen, cache } => {
+            serve(
+                &listen,
+                sidecar_worker::router(sidecar_worker::Worker::new(cache)?),
+            )
+            .await
+        }
         Command::Dev { config, cache } => {
             let app = api_app(config)?;
             let worker = sidecar_worker::Worker::new(cache)?;
-            let worker_listen = app.config.server.worker_url.trim_start_matches("http://").to_string();
+            let worker_listen = app
+                .config
+                .server
+                .worker_url
+                .trim_start_matches("http://")
+                .to_string();
             let api_listen = app.config.server.listen.clone();
-            tokio::try_join!(serve(&worker_listen, sidecar_worker::router(worker)), serve(&api_listen, sidecar_api::router(app)))?;
+            tokio::try_join!(
+                serve(&worker_listen, sidecar_worker::router(worker)),
+                serve(&api_listen, sidecar_api::router(app))
+            )?;
             Ok(())
         }
     }

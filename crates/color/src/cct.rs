@@ -11,8 +11,10 @@ pub const TINT_SCALE: f64 = 3000.0;
 
 fn locus_uv(t: f64) -> [f64; 2] {
     let t2 = t * t;
-    let u = (0.860117757 + 1.54118254e-4 * t + 1.28641212e-7 * t2) / (1.0 + 8.42420235e-4 * t + 7.08145163e-7 * t2);
-    let v = (0.317398726 + 4.22806245e-5 * t + 4.20481691e-8 * t2) / (1.0 - 2.89741816e-5 * t + 1.61456053e-7 * t2);
+    let u = (0.860117757 + 1.54118254e-4 * t + 1.28641212e-7 * t2)
+        / (1.0 + 8.42420235e-4 * t + 7.08145163e-7 * t2);
+    let v = (0.317398726 + 4.22806245e-5 * t + 4.20481691e-8 * t2)
+        / (1.0 - 2.89741816e-5 * t + 1.61456053e-7 * t2);
     [u, v]
 }
 
@@ -93,12 +95,20 @@ mod tests {
     fn positive_tint_moves_the_illuminant_toward_green() {
         let neutral = xy_to_uv(temp_tint_to_xy(5500.0, 0.0));
         let magenta_image = xy_to_uv(temp_tint_to_xy(5500.0, 40.0));
-        assert!(magenta_image[1] > neutral[1], "{magenta_image:?} vs {neutral:?}");
+        assert!(
+            magenta_image[1] > neutral[1],
+            "{magenta_image:?} vs {neutral:?}"
+        );
     }
 
     #[test]
     fn round_trip() {
-        for &(t, tint) in &[(2800.0, 0.0), (5000.0, 20.0), (7500.0, -35.0), (12000.0, 5.0)] {
+        for &(t, tint) in &[
+            (2800.0, 0.0),
+            (5000.0, 20.0),
+            (7500.0, -35.0),
+            (12000.0, 5.0),
+        ] {
             let (t2, tint2) = xy_to_temp_tint(temp_tint_to_xy(t, tint));
             assert!((t2 - t).abs() / t < 0.002, "{t} -> {t2}");
             assert!((tint2 - tint).abs() < 0.5, "{tint} -> {tint2}");
