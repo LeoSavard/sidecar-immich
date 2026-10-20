@@ -120,12 +120,24 @@ fn main() -> Result<()> {
         .stack_size(sidecar_ml::STACK)
         .spawn(move || {
             let result = (|| {
-                let precision = if cli.f32 { Precision::F32 } else { Precision::Auto };
+                let precision = if cli.f32 {
+                    Precision::F32
+                } else {
+                    Precision::Auto
+                };
                 let mut ml = Ml::new(&cli.models, precision)?;
-                eprintln!("sidecar-ml: GPU ready, {}", if ml.half() { "f16" } else { "f32" });
+                eprintln!(
+                    "sidecar-ml: GPU ready, {}",
+                    if ml.half() { "f16" } else { "f32" }
+                );
                 match cli.command {
                     Command::Serve { idle } => serve(&mut ml, Duration::from_secs(idle)),
-                    Command::Run { task, picture, out, long_edge } => run(&mut ml, task, &picture, out.as_deref(), long_edge),
+                    Command::Run {
+                        task,
+                        picture,
+                        out,
+                        long_edge,
+                    } => run(&mut ml, task, &picture, out.as_deref(), long_edge),
                 }
             })();
             leave(result)
@@ -168,7 +180,11 @@ fn keep_caches_in(dir: &Path) -> Result<()> {
 }
 
 fn answer(ml: &mut Ml, request: &Request, pixels: &[u8]) -> Result<Answer> {
-    let picture = Picture { width: request.width, height: request.height, rgb: pixels };
+    let picture = Picture {
+        width: request.width,
+        height: request.height,
+        rgb: pixels,
+    };
     Ok(match request.task {
         Task::Faces => Answer::Faces(ml.faces(picture)?),
         Task::Subject => Answer::Planes(ml.subject(picture, request.long_edge)?),
@@ -198,7 +214,14 @@ fn serve(ml: &mut Ml, idle: Duration) -> Result<()> {
         let (request, pixels) = match rx.recv_timeout(idle) {
             Ok(Ok(frame)) => frame,
             Ok(Err(e)) => {
-                write_frame(&mut replies, &Reply { error: Some(format!("{e:#}")), ..Reply::default() }, &[])?;
+                write_frame(
+                    &mut replies,
+                    &Reply {
+                        error: Some(format!("{e:#}")),
+                        ..Reply::default()
+                    },
+                    &[],
+                )?;
                 continue;
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -209,16 +232,51 @@ fn serve(ml: &mut Ml, idle: Duration) -> Result<()> {
         };
         // A panic inside burn leaves the GPU in an unknown state: report it, then exit and let the worker
         // start a fresh process for the next request.
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| answer(ml, &request, &pixels)));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            answer(ml, &request, &pixels)
+        }));
         let (reply, payload) = match result {
-            Ok(Ok(Answer::Faces(faces))) => (Reply { ok: true, faces: Some(faces), ..Reply::default() }, Vec::new()),
-            Ok(Ok(Answer::Planes(p))) => {
-                (Reply { ok: true, width: Some(p.width), height: Some(p.height), channels: Some(p.channels), ..Reply::default() }, p.data)
-            }
-            Ok(Ok(Answer::Done)) => (Reply { ok: true, ..Reply::default() }, Vec::new()),
-            Ok(Err(e)) => (Reply { error: Some(format!("{e:#}")), ..Reply::default() }, Vec::new()),
+            Ok(Ok(Answer::Faces(faces))) => (
+                Reply {
+                    ok: true,
+                    faces: Some(faces),
+                    ..Reply::default()
+                },
+                Vec::new(),
+            ),
+            Ok(Ok(Answer::Planes(p))) => (
+                Reply {
+                    ok: true,
+                    width: Some(p.width),
+                    height: Some(p.height),
+                    channels: Some(p.channels),
+                    ..Reply::default()
+                },
+                p.data,
+            ),
+            Ok(Ok(Answer::Done)) => (
+                Reply {
+                    ok: true,
+                    ..Reply::default()
+                },
+                Vec::new(),
+            ),
+            Ok(Err(e)) => (
+                Reply {
+                    error: Some(format!("{e:#}")),
+                    ..Reply::default()
+                },
+                Vec::new(),
+            ),
             Err(_) => {
-                write_frame(&mut replies, &Reply { error: Some("the model crashed".into()), ..Reply::default() }, &[])?;
+                write_frame(
+                    &mut replies,
+                    &Reply {
+                        error: Some("the model crashed".into()),
+                        ..Reply::default()
+                    },
+                    &[],
+                )?;
                 bail!("a model panicked");
             }
         };
@@ -242,9 +300,19 @@ fn read_request(socket: &mut UnixStream) -> std::io::Result<Result<(Request, Vec
     let size = request.width as u64 * request.height as u64;
     if !matches!(request.task, Task::Warm) && (size == 0 || size > MAX_PIXELS) {
         // The pixels can't be skipped without trusting the size, so the stream is out of step: end it.
-        return Err(std::io::Error::other(format!("a {} × {} picture", request.width, request.height)));
+        return Err(std::io::Error::other(format!(
+            "a {} × {} picture",
+            request.width, request.height
+        )));
     }
-    let mut pixels = vec![0u8; if matches!(request.task, Task::Warm) { 0 } else { size as usize * 3 }];
+    let mut pixels = vec![
+        0u8;
+        if matches!(request.task, Task::Warm) {
+            0
+        } else {
+            size as usize * 3
+        }
+    ];
     socket.read_exact(&mut pixels)?;
     Ok(Ok((request, pixels)))
 }
@@ -259,10 +327,18 @@ fn write_frame(socket: &mut UnixStream, reply: &Reply, payload: &[u8]) -> Result
 
 fn run(ml: &mut Ml, task: Task, path: &Path, out: Option<&Path>, long_edge: u32) -> Result<()> {
     let (width, height, rgb) = decode(path)?;
-    let request = Request { task, width, height, long_edge };
+    let request = Request {
+        task,
+        width,
+        height,
+        long_edge,
+    };
     let started = std::time::Instant::now();
     let answer = answer(ml, &request, &rgb)?;
-    eprintln!("sidecar-ml: {task:?} in {:.0} ms", started.elapsed().as_secs_f64() * 1e3);
+    eprintln!(
+        "sidecar-ml: {task:?} in {:.0} ms",
+        started.elapsed().as_secs_f64() * 1e3
+    );
     match answer {
         Answer::Faces(faces) => println!("{}", serde_json::to_string_pretty(&faces)?),
         Answer::Planes(planes) => {
@@ -277,7 +353,14 @@ fn run(ml: &mut Ml, task: Task, path: &Path, out: Option<&Path>, long_edge: u32)
 /// Parts as colours (background black, hair brown, body skin tan, face skin pink, clothes blue, other green);
 /// a subject or depth mask as grey.
 fn write_png(path: &Path, planes: &Planes) -> Result<()> {
-    const COLOURS: [[f32; 3]; 6] = [[0.0, 0.0, 0.0], [200.0, 120.0, 40.0], [240.0, 200.0, 170.0], [255.0, 150.0, 150.0], [60.0, 90.0, 220.0], [120.0, 220.0, 120.0]];
+    const COLOURS: [[f32; 3]; 6] = [
+        [0.0, 0.0, 0.0],
+        [200.0, 120.0, 40.0],
+        [240.0, 200.0, 170.0],
+        [255.0, 150.0, 150.0],
+        [60.0, 90.0, 220.0],
+        [120.0, 220.0, 120.0],
+    ];
     let (colour, data) = if planes.channels as usize == PARTS.len() {
         let rgb = planes
             .data
@@ -285,7 +368,13 @@ fn write_png(path: &Path, planes: &Planes) -> Result<()> {
             .0
             .iter()
             .flat_map(|p| {
-                let mix = |c: usize| p.iter().zip(&COLOURS).map(|(w, col)| *w as f32 / 255.0 * col[c]).sum::<f32>().round() as u8;
+                let mix = |c: usize| {
+                    p.iter()
+                        .zip(&COLOURS)
+                        .map(|(w, col)| *w as f32 / 255.0 * col[c])
+                        .sum::<f32>()
+                        .round() as u8
+                };
                 [mix(0), mix(1), mix(2)]
             })
             .collect();
@@ -293,7 +382,11 @@ fn write_png(path: &Path, planes: &Planes) -> Result<()> {
     } else {
         (png::ColorType::Grayscale, planes.data.clone())
     };
-    let mut encoder = png::Encoder::new(std::io::BufWriter::new(std::fs::File::create(path)?), planes.width, planes.height);
+    let mut encoder = png::Encoder::new(
+        std::io::BufWriter::new(std::fs::File::create(path)?),
+        planes.width,
+        planes.height,
+    );
     encoder.set_color(colour);
     encoder.set_depth(png::BitDepth::Eight);
     encoder.write_header()?.write_image_data(&data)?;
@@ -312,16 +405,34 @@ fn decode(path: &Path) -> Result<(u32, u32, Vec<u8>)> {
         let channels = info.color_type.samples();
         let rgb = buf[..info.buffer_size()]
             .chunks_exact(channels)
-            .flat_map(|p| if channels < 3 { [p[0]; 3] } else { [p[0], p[1], p[2]] })
+            .flat_map(|p| {
+                if channels < 3 {
+                    [p[0]; 3]
+                } else {
+                    [p[0], p[1], p[2]]
+                }
+            })
             .collect();
         return Ok((info.width, info.height, rgb));
     }
     let mut decoder = zune_jpeg::JpegDecoder::new(std::io::Cursor::new(bytes));
     let pixels = decoder.decode().context("decoding the JPEG")?;
     let info = decoder.info().context("JPEG has no frame header")?;
-    let channels = decoder.output_colorspace().map(|c| c.num_components()).unwrap_or(3);
+    let channels = decoder
+        .output_colorspace()
+        .map(|c| c.num_components())
+        .unwrap_or(3);
     let (w, h) = (info.width as usize, info.height as usize);
     ensure!(pixels.len() == w * h * channels, "unexpected JPEG layout");
-    let rgb = pixels.chunks_exact(channels).flat_map(|p| if channels < 3 { [p[0]; 3] } else { [p[0], p[1], p[2]] }).collect();
+    let rgb = pixels
+        .chunks_exact(channels)
+        .flat_map(|p| {
+            if channels < 3 {
+                [p[0]; 3]
+            } else {
+                [p[0], p[1], p[2]]
+            }
+        })
+        .collect();
     Ok((w as u32, h as u32, rgb))
 }

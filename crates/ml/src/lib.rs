@@ -334,7 +334,16 @@ fn normalized(values: &[f32]) -> Vec<f32> {
     let at = |q: f32| sorted[((sorted.len() - 1) as f32 * q).round() as usize];
     let (lo, hi) = (at(0.01), at(0.99));
     let span = (hi - lo).max(1e-6);
-    values.iter().map(|v| if v.is_finite() { ((v - lo) / span).clamp(0.0, 1.0) } else { 0.0 }).collect()
+    values
+        .iter()
+        .map(|v| {
+            if v.is_finite() {
+                ((v - lo) / span).clamp(0.0, 1.0)
+            } else {
+                0.0
+            }
+        })
+        .collect()
 }
 
 /// A square model output stretched back to the picture's aspect ratio, at `long_edge` at most.

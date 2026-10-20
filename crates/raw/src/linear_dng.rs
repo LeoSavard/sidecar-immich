@@ -45,11 +45,19 @@ struct Tiff<'a> {
 impl<'a> Tiff<'a> {
     fn u16(&self, o: usize) -> Option<u16> {
         let b: [u8; 2] = self.d.get(o..o + 2)?.try_into().ok()?;
-        Some(if self.le { u16::from_le_bytes(b) } else { u16::from_be_bytes(b) })
+        Some(if self.le {
+            u16::from_le_bytes(b)
+        } else {
+            u16::from_be_bytes(b)
+        })
     }
     fn u32(&self, o: usize) -> Option<u32> {
         let b: [u8; 4] = self.d.get(o..o + 4)?.try_into().ok()?;
-        Some(if self.le { u32::from_le_bytes(b) } else { u32::from_be_bytes(b) })
+        Some(if self.le {
+            u32::from_le_bytes(b)
+        } else {
+            u32::from_be_bytes(b)
+        })
     }
 
     /// One IFD's tags, and the offset of the next IFD.
@@ -67,7 +75,11 @@ impl<'a> Tiff<'a> {
                 _ => continue,
             };
             let total = size * count;
-            let at = if total <= 4 { e + 8 } else { self.u32(e + 8)? as usize };
+            let at = if total <= 4 {
+                e + 8
+            } else {
+                self.u32(e + 8)? as usize
+            };
             if self.d.len() < at + total || count > 1 << 24 {
                 continue;
             }
@@ -80,13 +92,22 @@ impl<'a> Tiff<'a> {
                     8 => self.u16(o).unwrap_or(0) as i16 as f64,
                     4 | 13 => self.u32(o).unwrap_or(0) as f64,
                     9 => self.u32(o).unwrap_or(0) as i32 as f64,
-                    5 => self.u32(o).unwrap_or(0) as f64 / self.u32(o + 4).unwrap_or(1).max(1) as f64,
-                    10 => self.u32(o).unwrap_or(0) as i32 as f64 / (self.u32(o + 4).unwrap_or(1) as i32).max(1) as f64,
+                    5 => {
+                        self.u32(o).unwrap_or(0) as f64 / self.u32(o + 4).unwrap_or(1).max(1) as f64
+                    }
+                    10 => {
+                        self.u32(o).unwrap_or(0) as i32 as f64
+                            / (self.u32(o + 4).unwrap_or(1) as i32).max(1) as f64
+                    }
                     11 => f32::from_bits(self.u32(o).unwrap_or(0)) as f64,
                     _ => 0.0,
                 }
             };
-            let values = if typ == 2 { Vec::new() } else { (0..count).map(value).collect() };
+            let values = if typ == 2 {
+                Vec::new()
+            } else {
+                (0..count).map(value).collect()
+            };
             tags.insert(tag, Field { values });
         }
         Some((tags, self.u32(off + 2 + 12 * n)? as usize))
@@ -113,12 +134,24 @@ fn layout(d: &[u8]) -> Option<Layout> {
     }
     let (ifd0, _) = t.ifd(t.u32(4)? as usize)?;
     // Full resolution: NewSubfileType 0, in IFD0 itself or one of its SubIFDs (tag 330).
-    let full = |tags: &Tags| tags.get(&254).and_then(|f| f.values.first()).copied().unwrap_or(0.0) == 0.0;
+    let full = |tags: &Tags| {
+        tags.get(&254)
+            .and_then(|f| f.values.first())
+            .copied()
+            .unwrap_or(0.0)
+            == 0.0
+    };
     if full(&ifd0) && ifd0.contains_key(&324) {
-        return Some(Layout { main: ifd0.clone(), ifd0 });
+        return Some(Layout {
+            main: ifd0.clone(),
+            ifd0,
+        });
     }
     let subs: Vec<usize> = ifd0.get(&330)?.values.iter().map(|&v| v as usize).collect();
-    let main = subs.into_iter().filter_map(|o| t.ifd(o).map(|x| x.0)).find(full)?;
+    let main = subs
+        .into_iter()
+        .filter_map(|o| t.ifd(o).map(|x| x.0))
+        .find(full)?;
     Some(Layout { ifd0, main })
 }
 
@@ -128,18 +161,27 @@ fn first(tags: &Tags, tag: u16) -> Option<f64> {
 
 /// True for a DNG whose full-resolution image is linear RGB in JPEG XL tiles — what this module decodes.
 pub fn is_supported(path: &Path) -> bool {
-    if !path.extension().is_some_and(|e| e.eq_ignore_ascii_case("dng")) {
+    if !path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("dng"))
+    {
         return false;
     }
     // The IFDs sit near the start in every DNG seen; the tile data is what's large.
-    let Ok(head) = read_head(path, 1 << 20) else { return false };
-    layout(&head).is_some_and(|l| first(&l.main, 259) == Some(52546.0) && first(&l.main, 262) == Some(34892.0))
+    let Ok(head) = read_head(path, 1 << 20) else {
+        return false;
+    };
+    layout(&head).is_some_and(|l| {
+        first(&l.main, 259) == Some(52546.0) && first(&l.main, 262) == Some(34892.0)
+    })
 }
 
 fn read_head(path: &Path, n: usize) -> std::io::Result<Vec<u8>> {
     use std::io::Read;
     let mut buf = Vec::with_capacity(n);
-    std::fs::File::open(path)?.take(n as u64).read_to_end(&mut buf)?;
+    std::fs::File::open(path)?
+        .take(n as u64)
+        .read_to_end(&mut buf)?;
     Ok(buf)
 }
 
@@ -152,18 +194,33 @@ fn matrix(tags: &Tags, tag: u16) -> Option<[[f64; 3]; 3]> {
 fn color(ifd0: &Tags) -> CameraColor {
     let mut calibrations = Vec::new();
     for (m, i) in [(50721, 50778), (50722, 50779)] {
-        if let (Some(m), Some(t)) = (matrix(ifd0, m), first(ifd0, i).and_then(|code| crate::illuminant_temperature(code as u16))) {
-            calibrations.push(Calibration { temperature_k: t, xyz_to_camera: m });
+        if let (Some(m), Some(t)) = (
+            matrix(ifd0, m),
+            first(ifd0, i).and_then(|code| crate::illuminant_temperature(code as u16)),
+        ) {
+            calibrations.push(Calibration {
+                temperature_k: t,
+                xyz_to_camera: m,
+            });
         }
     }
     if calibrations.is_empty()
         && let Some(m) = matrix(ifd0, 50721)
     {
-        calibrations.push(Calibration { temperature_k: 6504.0, xyz_to_camera: m });
+        calibrations.push(Calibration {
+            temperature_k: 6504.0,
+            xyz_to_camera: m,
+        });
     }
-    let neutral = ifd0.get(&50728).map(|f| f.values.clone()).filter(|v| v.len() == 3 && v.iter().all(|&x| x > 0.0));
+    let neutral = ifd0
+        .get(&50728)
+        .map(|f| f.values.clone())
+        .filter(|v| v.len() == 3 && v.iter().all(|&x| x > 0.0));
     let as_shot_mul = neutral.map_or([1.0, 1.0, 1.0], |n| [n[1] / n[0], 1.0, n[1] / n[2]]);
-    CameraColor { as_shot_mul, calibrations }
+    CameraColor {
+        as_shot_mul,
+        calibrations,
+    }
 }
 
 /// Metadata for the develop pass and the editor, shaped like the RAW path's. `exif` supplies what a TIFF walk
@@ -171,7 +228,10 @@ fn color(ifd0: &Tags) -> CameraColor {
 pub fn info(path: &Path, exif: &crate::decoded::Exif) -> Result<RawInfo, LinearDngError> {
     let head = read_head(path, 1 << 20).map_err(|e| bad(e.to_string()))?;
     let l = layout(&head).ok_or(LinearDngError::NotThisKind)?;
-    let (w, h) = (first(&l.main, 256).unwrap_or(0.0) as u32, first(&l.main, 257).unwrap_or(0.0) as u32);
+    let (w, h) = (
+        first(&l.main, 256).unwrap_or(0.0) as u32,
+        first(&l.main, 257).unwrap_or(0.0) as u32,
+    );
     let flip = crate::decoded::flip_from_orientation(first(&l.ifd0, 274).unwrap_or(1.0) as i64);
     let rotated = flip & 4 != 0;
     Ok(RawInfo {
@@ -212,8 +272,14 @@ pub fn decode(path: &Path, max_edge: u32) -> Result<Linear, LinearDngError> {
     if first(m, 259) != Some(52546.0) || first(m, 262) != Some(34892.0) {
         return Err(LinearDngError::NotThisKind);
     }
-    let (w, h) = (first(m, 256).ok_or_else(|| bad("no width"))? as usize, first(m, 257).ok_or_else(|| bad("no height"))? as usize);
-    let (tw, th) = (first(m, 322).ok_or_else(|| bad("not tiled"))? as usize, first(m, 323).ok_or_else(|| bad("not tiled"))? as usize);
+    let (w, h) = (
+        first(m, 256).ok_or_else(|| bad("no width"))? as usize,
+        first(m, 257).ok_or_else(|| bad("no height"))? as usize,
+    );
+    let (tw, th) = (
+        first(m, 322).ok_or_else(|| bad("not tiled"))? as usize,
+        first(m, 323).ok_or_else(|| bad("not tiled"))? as usize,
+    );
     let offsets = &m.get(&324).ok_or_else(|| bad("no tile offsets"))?.values;
     let counts = &m.get(&325).ok_or_else(|| bad("no tile sizes"))?.values;
     let (across, down) = (w.div_ceil(tw), h.div_ceil(th));
@@ -233,18 +299,26 @@ pub fn decode(path: &Path, max_edge: u32) -> Result<Linear, LinearDngError> {
     // One tile: its rendered width, height, channel count and samples.
     let tile = |i: usize| -> Result<(usize, usize, usize, Vec<f32>), LinearDngError> {
         let (o, c) = (offsets[i] as usize, counts[i] as usize);
-        let bytes = data.get(o..o + c).ok_or_else(|| bad("tile past the end of the file"))?;
-        let mut img = jxl_oxide::JxlImage::builder().read(std::io::Cursor::new(bytes)).map_err(|e| LinearDngError::Tile(e.to_string()))?;
+        let bytes = data
+            .get(o..o + c)
+            .ok_or_else(|| bad("tile past the end of the file"))?;
+        let mut img = jxl_oxide::JxlImage::builder()
+            .read(std::io::Cursor::new(bytes))
+            .map_err(|e| LinearDngError::Tile(e.to_string()))?;
         // Lightroom tags each tile as BT.2100 primaries with the sRGB transfer curve so JPEG XL's perceptual
         // coding spends its bits sensibly; the samples themselves are the DNG's linear values. Rendering in that
         // same encoding with a linear transfer hands them back unchanged in colour — the default render
         // returned them gamma-encoded, which developed as a flat, magenta picture.
-        if let jxl_oxide::color::ColourEncoding::Enum(e) = &img.image_header().metadata.colour_encoding {
+        if let jxl_oxide::color::ColourEncoding::Enum(e) =
+            &img.image_header().metadata.colour_encoding
+        {
             let mut linear = e.clone();
             linear.tf = jxl_oxide::color::TransferFunction::Linear;
             img.request_color_encoding(linear);
         }
-        let render = img.render_frame(0).map_err(|e| LinearDngError::Tile(e.to_string()))?;
+        let render = img
+            .render_frame(0)
+            .map_err(|e| LinearDngError::Tile(e.to_string()))?;
         let fb = render.image_all_channels();
         if fb.channels() < 3 {
             return Err(LinearDngError::Tile(format!("{} channels", fb.channels())));
@@ -255,7 +329,10 @@ pub fn decode(path: &Path, max_edge: u32) -> Result<Linear, LinearDngError> {
     // at one row of full-resolution tiles.
     use rayon::prelude::*;
     for ty in 0..down {
-        let row: Vec<_> = (0..across).into_par_iter().map(|tx| tile(ty * across + tx)).collect::<Result<_, _>>()?;
+        let row: Vec<_> = (0..across)
+            .into_par_iter()
+            .map(|tx| tile(ty * across + tx))
+            .collect::<Result<_, _>>()?;
         for (tx, (fw, fh, ch, buf)) in row.into_iter().enumerate() {
             for y in 0..fh.min(th) {
                 let gy = ty * th + y;
@@ -285,7 +362,11 @@ pub fn decode(path: &Path, max_edge: u32) -> Result<Linear, LinearDngError> {
             p.iter_mut().for_each(|v| *v /= k as f32);
         }
     }
-    Ok(Linear { width: ow as u32, height: oh as u32, rgba: sum })
+    Ok(Linear {
+        width: ow as u32,
+        height: oh as u32,
+        rgba: sum,
+    })
 }
 
 #[cfg(test)]
@@ -300,7 +381,14 @@ mod tests {
         d.extend(42u16.to_le_bytes());
         d.extend(8u32.to_le_bytes());
         // IFD0 at 8: NewSubfileType 1, Orientation 6, SubIFDs → 200, AsShotNeutral → 300, CalibrationIlluminant1 21, ColorMatrix1 → 330.
-        let entries: Vec<(u16, u16, u32, u32)> = vec![(254, 4, 1, 1), (274, 3, 1, 6), (330, 4, 1, 200), (50721, 10, 9, 330), (50728, 5, 3, 300), (50778, 3, 1, 21)];
+        let entries: Vec<(u16, u16, u32, u32)> = vec![
+            (254, 4, 1, 1),
+            (274, 3, 1, 6),
+            (330, 4, 1, 200),
+            (50721, 10, 9, 330),
+            (50728, 5, 3, 300),
+            (50778, 3, 1, 21),
+        ];
         d.extend((entries.len() as u16).to_le_bytes());
         for (tag, typ, count, value) in &entries {
             d.extend(tag.to_le_bytes());
@@ -311,7 +399,13 @@ mod tests {
         d.extend(0u32.to_le_bytes());
         d.resize(200, 0);
         // SubIFD at 200: NewSubfileType 0, 1000 × 500, compression 52546, photometric 34892.
-        let sub: Vec<(u16, u16, u32, u32)> = vec![(254, 4, 1, 0), (256, 4, 1, 1000), (257, 4, 1, 500), (259, 4, 1, 52546), (262, 4, 1, 34892)];
+        let sub: Vec<(u16, u16, u32, u32)> = vec![
+            (254, 4, 1, 0),
+            (256, 4, 1, 1000),
+            (257, 4, 1, 500),
+            (259, 4, 1, 52546),
+            (262, 4, 1, 34892),
+        ];
         d.extend((sub.len() as u16).to_le_bytes());
         for (tag, typ, count, value) in &sub {
             d.extend(tag.to_le_bytes());
@@ -334,10 +428,19 @@ mod tests {
         assert_eq!(first(&l.main, 256), Some(1000.0));
         assert_eq!(first(&l.main, 259), Some(52546.0));
         let c = color(&l.ifd0);
-        assert!((c.as_shot_mul[0] - 1.0 / 0.532225).abs() < 1e-6 && (c.as_shot_mul[2] - 1.0 / 0.778116).abs() < 1e-6, "{:?} from {:?}", c.as_shot_mul, l.ifd0.get(&50728));
+        assert!(
+            (c.as_shot_mul[0] - 1.0 / 0.532225).abs() < 1e-6
+                && (c.as_shot_mul[2] - 1.0 / 0.778116).abs() < 1e-6,
+            "{:?} from {:?}",
+            c.as_shot_mul,
+            l.ifd0.get(&50728)
+        );
         assert_eq!(c.calibrations.len(), 1);
         assert_eq!(c.calibrations[0].temperature_k, 6504.0);
         assert!((c.calibrations[0].xyz_to_camera[1][1] - 1.4779).abs() < 1e-9);
-        assert_eq!(crate::decoded::flip_from_orientation(first(&l.ifd0, 274).unwrap() as i64), 6);
+        assert_eq!(
+            crate::decoded::flip_from_orientation(first(&l.ifd0, 274).unwrap() as i64),
+            6
+        );
     }
 }

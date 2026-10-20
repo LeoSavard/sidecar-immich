@@ -9,6 +9,7 @@ use std::path::Path;
 
 pub mod af;
 pub mod decoded;
+pub mod gain_map;
 pub mod heif_aux;
 pub mod lens;
 pub mod lensfun;
@@ -26,12 +27,20 @@ fn check(code: i32) -> Result<(), RawError> {
     if code == 0 {
         Ok(())
     } else {
-        Err(RawError(unsafe { CStr::from_ptr(sys::sc_strerror(code)) }.to_string_lossy().into_owned()))
+        Err(RawError(
+            unsafe { CStr::from_ptr(sys::sc_strerror(code)) }
+                .to_string_lossy()
+                .into_owned(),
+        ))
     }
 }
 
 fn text(buf: &[c_char]) -> String {
-    let bytes: Vec<u8> = buf.iter().take_while(|&&c| c != 0).map(|&c| c as u8).collect();
+    let bytes: Vec<u8> = buf
+        .iter()
+        .take_while(|&&c| c != 0)
+        .map(|&c| c as u8)
+        .collect();
     String::from_utf8_lossy(&bytes).trim().to_string()
 }
 
@@ -75,7 +84,11 @@ pub struct RawInfo {
 impl RawInfo {
     /// Width and height before orientation: the frame the sensor data, and every lens radius, is in.
     pub fn sensor_size(&self) -> [u32; 2] {
-        if self.orientation_flip & 4 != 0 { [self.height, self.width] } else { [self.width, self.height] }
+        if self.orientation_flip & 4 != 0 {
+            [self.height, self.width]
+        } else {
+            [self.width, self.height]
+        }
     }
 }
 
@@ -121,22 +134,40 @@ fn camera_color(i: &sys::sc_info) -> CameraColor {
     for n in 0..2 {
         let m = rows3(&i.dng_colormatrix[n]);
         if let (Some(t), false) = (illuminant_temperature(i.dng_illuminant[n]), is_zero(&m)) {
-            calibrations.push(Calibration { temperature_k: t, xyz_to_camera: m });
+            calibrations.push(Calibration {
+                temperature_k: t,
+                xyz_to_camera: m,
+            });
         }
     }
     if calibrations.is_empty() {
         let m = rows3(&i.cam_xyz);
         let m = if is_zero(&m) {
             // Unknown camera: treat camera RGB as sRGB primaries (XYZ → linear sRGB).
-            [[3.2404542, -1.5371385, -0.4985314], [-0.9692660, 1.8760108, 0.0415560], [0.0556434, -0.2040259, 1.0572252]]
+            [
+                [3.2404542, -1.5371385, -0.4985314],
+                [-0.9692660, 1.8760108, 0.0415560],
+                [0.0556434, -0.2040259, 1.0572252],
+            ]
         } else {
             m
         };
-        calibrations.push(Calibration { temperature_k: 6504.0, xyz_to_camera: m });
+        calibrations.push(Calibration {
+            temperature_k: 6504.0,
+            xyz_to_camera: m,
+        });
     }
-    let pick = |m: [f32; 4]| (m[0] > 0.0 && m[1] > 0.0 && m[2] > 0.0).then(|| [m[0] as f64 / m[1] as f64, 1.0, m[2] as f64 / m[1] as f64]);
-    let as_shot_mul = pick(i.cam_mul).or_else(|| pick(i.pre_mul)).unwrap_or([2.0, 1.0, 1.5]);
-    CameraColor { as_shot_mul, calibrations }
+    let pick = |m: [f32; 4]| {
+        (m[0] > 0.0 && m[1] > 0.0 && m[2] > 0.0)
+            .then(|| [m[0] as f64 / m[1] as f64, 1.0, m[2] as f64 / m[1] as f64])
+    };
+    let as_shot_mul = pick(i.cam_mul)
+        .or_else(|| pick(i.pre_mul))
+        .unwrap_or([2.0, 1.0, 1.5]);
+    CameraColor {
+        as_shot_mul,
+        calibrations,
+    }
 }
 
 /// Linear camera RGB, 16-bit, sensor saturation at 65535, orientation applied.
@@ -166,7 +197,11 @@ impl LinearImage {
 fn saturation_threshold(rgb: &[u16]) -> u16 {
     let max = rgb.iter().copied().max().unwrap_or(0);
     let declared = (65535u32 * 99 / 100) as u16;
-    if max >= 32768 { declared.min((max as u32 * 98 / 100) as u16) } else { declared }
+    if max >= 32768 {
+        declared.min((max as u32 * 98 / 100) as u16)
+    } else {
+        declared
+    }
 }
 
 /// The visible sensor mosaic, before orientation. `color_at(y, x)` is 0 R, 1 G, 2 B, 3 G2.
@@ -201,8 +236,17 @@ unsafe impl Send for RawFile {}
 /// Everything read from ExifTool rather than LibRaw — the AF point, the lens correction the file carries and
 /// what the lens is — in one run of it. Leaves `info` as it was if ExifTool is missing or fails.
 pub fn read_extras(path: &Path, info: &mut RawInfo) {
-    let out = std::process::Command::new("exiftool").arg("-j").args(lens::TAGS).args(af::TAGS).arg(path).output();
-    let Some(tags) = out.ok().and_then(|o| serde_json::from_slice::<serde_json::Value>(&o.stdout).ok()).and_then(|v| v.get(0).cloned()) else {
+    let out = std::process::Command::new("exiftool")
+        .arg("-j")
+        .args(lens::TAGS)
+        .args(af::TAGS)
+        .arg(path)
+        .output();
+    let Some(tags) = out
+        .ok()
+        .and_then(|o| serde_json::from_slice::<serde_json::Value>(&o.stdout).ok())
+        .and_then(|v| v.get(0).cloned())
+    else {
         return;
     };
     info.af_point = af::from_tags(&lens::ungrouped(&tags), info.orientation_flip);
@@ -224,9 +268,13 @@ impl RawFile {
     }
 
     fn open_with(path: &Path, unpack: bool) -> Result<Self, RawError> {
-        let c = CString::new(path.as_os_str().as_encoded_bytes()).map_err(|_| RawError("path contains NUL".into()))?;
+        let c = CString::new(path.as_os_str().as_encoded_bytes())
+            .map_err(|_| RawError("path contains NUL".into()))?;
         let ptr = unsafe { sys::sc_new() };
-        let mut raw = RawFile { ptr, info: unsafe { std::mem::zeroed() } };
+        let mut raw = RawFile {
+            ptr,
+            info: unsafe { std::mem::zeroed() },
+        };
         check(unsafe { sys::sc_open(ptr, c.as_ptr()) })?;
         if unpack {
             check(unsafe { sys::sc_unpack(ptr) })?;
@@ -267,12 +315,21 @@ impl RawFile {
 
     /// Demosaic to linear camera RGB. `half_size` bins 2×2 without interpolation (fast; used for proxies).
     pub fn develop_linear(&mut self, half_size: bool) -> Result<LinearImage, RawError> {
-        let mut img = sys::sc_image { width: 0, height: 0, data: std::ptr::null_mut(), handle: std::ptr::null_mut() };
+        let mut img = sys::sc_image {
+            width: 0,
+            height: 0,
+            data: std::ptr::null_mut(),
+            handle: std::ptr::null_mut(),
+        };
         check(unsafe { sys::sc_develop_linear(self.ptr, half_size as i32, 11, &mut img) })?;
         let n = (img.width * img.height * 3) as usize;
         let rgb = unsafe { std::slice::from_raw_parts(img.data, n) }.to_vec();
         unsafe { sys::sc_image_free(&mut img) };
-        Ok(LinearImage { width: img.width as u32, height: img.height as u32, rgb })
+        Ok(LinearImage {
+            width: img.width as u32,
+            height: img.height as u32,
+            rgb,
+        })
     }
 
     /// The raw mosaic for GPU processing, or an error for files without a single-channel CFA.
@@ -282,7 +339,16 @@ impl RawFile {
         let n = (m.width as usize) * (m.height as usize);
         let data = unsafe { std::slice::from_raw_parts(m.data, n) }.to_vec();
         unsafe { sys::sc_mosaic_free(&mut m) };
-        Ok(Mosaic { width: m.width as u32, height: m.height as u32, data, black: m.black, white: m.white, pattern: m.pattern, period: m.period as u32, flip: self.info.flip })
+        Ok(Mosaic {
+            width: m.width as u32,
+            height: m.height as u32,
+            data,
+            black: m.black,
+            white: m.white,
+            pattern: m.pattern,
+            period: m.period as u32,
+            flip: self.info.flip,
+        })
     }
 }
 
@@ -298,7 +364,11 @@ mod tests {
 
     #[test]
     fn saturated_samples_are_flagged_in_alpha() {
-        let img = LinearImage { width: 2, height: 1, rgb: vec![65535, 0, 0, 32768, 32768, 32768] };
+        let img = LinearImage {
+            width: 2,
+            height: 1,
+            rgb: vec![65535, 0, 0, 32768, 32768, 32768],
+        };
         let rgba = img.rgba();
         assert_eq!(rgba.len(), 8);
         assert_eq!((rgba[0], rgba[3], rgba[7]), (1.0, 1.0, 0.0));
@@ -310,11 +380,19 @@ mod tests {
     #[test]
     fn metadata_without_unpacking_matches_a_full_open() {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/cache");
-        let Ok(entries) = std::fs::read_dir(&dir) else { return };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return;
+        };
         let mut checked = 0;
-        for path in entries.flatten().map(|e| e.path()).filter(|p| sidecar_template::is_raw(p)) {
+        for path in entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| sidecar_template::is_raw(p))
+        {
             // Something LibRaw can't open at all is not what this compares.
-            let Ok(full) = RawFile::open(&path) else { continue };
+            let Ok(full) = RawFile::open(&path) else {
+                continue;
+            };
             let full = serde_json::to_value(full.info()).unwrap();
             let quick = serde_json::to_value(RawFile::metadata(&path).unwrap()).unwrap();
             assert_eq!(full, quick, "{}", path.display());

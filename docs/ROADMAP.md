@@ -3,6 +3,12 @@
 What's known to be missing or wrong, roughly in the order it's worth doing. The specification is
 [`DESIGN.md`](DESIGN.md); its build log records what the code actually does today.
 
+> **New features are paused** (owner's call, 2026-10-16). The current work is maintainability and
+> standardization: see [`V2.md`](V2.md), which reorders what is below. Items here keep their place in the
+> queue; the queue is just not what is being worked through at the moment. Immich stays the library manager
+> (2026-10-20); V2's library seam narrows to what a filesystem *editor* needs, which is a configuration with
+> no Immich in it.
+
 ## Correctness and quality
 
 **Tone curve above middle grey.** The logistic base curve begins shouldering immediately above grey, so
@@ -63,16 +69,96 @@ or an adapted lens leave nothing useful.
 What is left of peaking is in "Subject-aware tools" below: weighting the measure by the subject mask, and
 ranking eyes and faces first. Noise is already handled.
 
-**Highlight reconstruction** leaves faint bluish blotches at the edges of reconstructed areas.
+**Highlight reconstruction — low priority, and it is not what this entry used to claim.** The item said
+"leaves faint bluish blotches at the edges of reconstructed areas", and no such artifact could be reproduced:
+the blotches in the obvious test photo are the sky and the trees beyond a window, confirmed by the owner and
+by switching reconstruction off. What the pass *is* for is narrower and worth stating correctly, because it
+is not detail recovery.
 
-**X-Trans at full resolution** still runs LibRaw's Markesteijn on the CPU; only Bayer has a GPU demosaic for
-loupe and export. Porting LibRaw's algorithm to WGSL (CDDL-1.0, so the port keeps that header) is the
-remaining piece of milestone 5. `DSCF7611.RAF` is the test case.
+A raw file clips per channel, and not at the same scene luminance: a neutral white puts its largest raw
+response in green, which is exactly why green's white-balance multiplier is 1 and red's is above it, so green
+pins first and red keeps recording for roughly log₂(red multiplier) — about a stop — afterwards. Measured on
+this repository's own fixtures: on `_D5N3075.NEF` green clips on 12.5 % of samples, blue on 10.0 % and **red
+on only 2.3 %**, so about a tenth of that frame has green pinned while red is still a live measurement; on
+`DSC01899.ARW` green clips on 0.14 % of samples and **red and blue on none at all**. In that band
+reconstruction is solving for the pinned channel from two measured ones, not inventing. Above it — every
+channel pinned, which is the core of a blown window — there is nothing left and anything drawn is inpainting
+from the neighbours.
+
+**So the value is avoiding false colour, not recovering texture**, and it matters most to exactly the
+workflow that pulls highlights down with the curve: in the transition band green is frozen while red and blue
+climb, the white-balance gains turn that into a magenta drift, and a tone curve lifts the tinted near-white
+into visible range where it reads as a pink patch. Left clipped to white it would never be seen. The develop
+pass's `highlight_blend` is a second net for the hopeless case.
+
+The measurements below stand, and `sidecar-dev hilite <raw> <dir> [--crop]` is how to repeat them: it buckets
+the proxy by its alpha — the fraction of source samples that clipped under each output pixel, so 0 is
+untouched picture and 1 the heart of a blown area — and prints the mean chromaticity `r/(r+g+b)`, `b/(r+g+b)` of each bucket in white-balanced
+camera RGB, where a neutral reads 0.333. It also counts, on the mosaic itself, how often each colour actually
+reaches saturation, which is what decides whether a blown area still holds an honest measurement.
+
+On `_D5N3075.NEF` (Nikon D5, a blown window, as shot 4,640 K; R clips on 2.3 % of samples, G 12.5 %, B 10.0 %)
+the picture outside blown areas sits at r 0.344, b 0.337, and the fully-clipped core at **r 0.279, b 0.396**.
+Turning reconstruction off (`SIDECAR_NO_HILITE=1`, the diagnostic switch in `ingest.rs`) puts that same core at
+**r 0.353, b 0.400** — so reconstruction lifts green, which is its job, but takes red down with it, and that
+red deficit is the cast. On `DSC01899.ARW` (Sony ZV-1, only green clipping, 0.14 % of samples) it behaves:
+green comes back and red and blue fall proportionally.
+
+*Ruled out, by experiment rather than by reading:*
+
+- **The `wgt == 0` fallback in `hilite_reduce.wgsl`** (every tap in a 5×5 clipped, so the level has no colour
+  to average and falls back to "white"). It is a real latent bug — raw `(1, 1, 1)` is not neutral, since white
+  balance still multiplies it, so it paints lilac, and neutral would be `1/wb`, the convention the
+  desaturation target four lines above already uses. But painting the fallback pure green leaves the picture
+  visually identical and moves the core's chromaticity by 0.002: the path is reached, then diluted to nothing
+  as `assemble` renormalizes each finer level against real data. Worth fixing for tidiness, not for this.
+- **The desaturation in the same pass** (`P.desat`, 0.3). Setting it to 0 changes nothing visible.
+- **The `scale` that rescales the coarse estimate**, in `hilite_doub.wgsl`. A clipped channel's ratio
+  `sample / estimate` is an underestimate — the sample stopped at saturation — so averaging it in drags the
+  scale down and steals from channels that did not clip. That reasoning is sound and dropping clipped channels
+  from the average is probably right on its own merits, but **it cannot be this artifact**: `doub` replaces the
+  pixel with `upsm * scale`, and chromaticity is scale-invariant, so `scale` sets brightness and the *hue comes
+  entirely from the pyramid estimate*. Measured: no chromaticity change at all.
+- **The blotches in the obvious test crop.** `--crop` picks the densest patch of partly-clipped pixels, and on
+  this photo it lands on soft lilac and grey blobs in the window that look exactly like the artifact — and
+  they are still there with reconstruction switched off. They are the scene (glare and whatever is outside the
+  glass), not the pass. Anyone chasing this should run that A/B before trusting their eyes, as should have
+  happened here first.
+
+*Where to look next, if anyone returns to this.* The hue of a reconstructed pixel is the pyramid estimate's
+hue, so that is the only place a shift can come from. In a fully-blown core there are no unclipped taps
+nearby, so the estimate is carried in from coarse levels — the surroundings — and a window's surroundings are
+the room, which is far from the window's own colour. That fits the measured red deficit; the next experiment
+is to dump each pyramid level as an image and find the level where the hue departs, rather than guess again.
+But note what the per-channel census above implies: the fully-blown core is the case with no data in it, and
+the band that *does* carry data is the one where the pass already measures correctly. So this is a small
+refinement to a stage that is working, which is why the entry now sits low rather than at the top.
+
+**X-Trans at full resolution — parked, and out of milestone 5** (owner's call, 2026-10-16: the Fuji body is
+gone, and nobody else has asked). It still runs LibRaw's Markesteijn on the CPU; only Bayer has a GPU demosaic
+for loupe and export, so an X-Trans file is slower, not broken. Porting LibRaw's algorithm to WGSL (CDDL-1.0,
+so the port keeps that header) is what it would take, and `DSCF7611.RAF` is the test case if demand ever
+appears. Milestone 5 is otherwise complete; this is no longer what is holding it open.
 
 **iPhone parity is unverified.** The ΔE2000 harness compares Chromium against the server; Safari on Metal has
 never been in the loop. It needs a way to run the browser side on a phone and post results back.
 
 ## Reach
+
+**Someone else's folder structure.** The storage template is tuned to one library — this one. `render_dir`
+understands date tokens only (`{{yyyy}}`, `{{yy}}`, `{{y}}`, `{{MMMM}}`, `{{MMM}}`, `{{MM}}`, `{{M}}`,
+`{{dd}}`, `{{d}}`) with month names in English or French, and a `Root` carries an `immich_prefix` and a
+`per_user` flag shaped by Immich's own internal layout. Note what this does *not* affect: the sidecar is
+written beside the original, so **writing is already layout-independent**. What the template constrains is
+*finding* the original from a share — hash, name and capture date — which is the step that fails on a
+library laid out any other way, leaving only Immich's own search and the picker.
+
+Worth doing, in order of value: fall back to the name walk (`sidecar_template::find_by_name`) when the date
+path misses, which makes an unrecognised layout degrade instead of failing; more tokens and more month
+locales; a configured layout that need not be Immich's, including the plain case of "everything in one
+folder" and the common `{{yyyy}}/{{event}}/` shape where a folder name is not a date at all. The measure of
+success is that someone whose photos sit in `2019/Holidays/` rather than `2019/05.May/2019-05-02/` can point
+Sidecar at them and have sidecars land correctly. See [`V2.md`](V2.md), Workstream B.
 
 **Browsers without WebGPU (Firefox, older Safari) — done.** `POST /api/assets/{key}/preview` develops the
 cached proxy with the same shaders and parameters the browser would have used and returns a JPEG, so the
@@ -87,27 +173,74 @@ histogram alongside the JPEG and drawing the overlays into it.
 
 **Wide gamut and HDR.** These are separate: Rec.2020 is a gamut, HDR is a transfer function plus headroom.
 
-- *Rec.2020 SDR export* is close — the 16-bit TIFF path exists and needs the matrix and an ICC profile.
-- *True HDR* needs an HDR canvas (WebGPU `toneMapping: { mode: 'extended' }`, not something to count on in
-  Safari yet) and an HDR container: 10-bit AVIF with PQ or HLG (rav1e is BSD-2, so licence-compatible), or an
-  ISO 21496-1 gain map as Apple writes. Settle the encoder question before the UI.
+- *Rec.2020 SDR export* is close — the 16-bit TIFF path exists and needs the matrix and an ICC profile. The
+  profile need not be shipped as a third-party binary: it can be synthesised from primaries plus transfer
+  function with lcms2 (MIT) or moxcms (Apache-2.0 OR BSD-3, pure Rust).
+- *True HDR.* **The container question is settled; the display question moved to the desktop.** ISO 21496-1
+  was published in July 2025, and both Apple's Adaptive HDR and Google's Ultra HDR build on it; Android 15
+  writes the Ultra HDR XMP in APP1 *and* the ISO metadata in APP2 by default, so a file carries both and
+  legacy readers still work — **write both rather than choosing**. Ranking: gain-map JPEG first (displayed as
+  HDR on Apple, Android and Chrome, degrades to a correct SDR JPEG everywhere, and libultrahdr is Apache-2.0),
+  AVIF with PQ or HLG second (libavif, dav1d and rav1e are permissive, but Chrome gates AVIF *gain maps*
+  behind a flag), JPEG XL third (the format supports gain maps; no browser decodes them). Firefox is the
+  consistent hole on desktop and Android.
+  *This entry used to gate HDR display on "an HDR-capable WebGPU canvas in Safari". That framing was wrong
+  for a desktop build and was corrected on 2026-10-17:* the browser HDR canvas is Chrome-led and partly
+  proposal, while **native wgpu is the right target**. One internal representation serves every platform —
+  linear float plus BT.2100, which is what both WebGPU's `rgba16float` + `rec2100-display-linear` and
+  Wayland's `windows_scrgb`/`windows_bt2100` descriptions amount to. Whether wgpu actually exposes HDR
+  swapchain formats is unverified and is on the measurement list in [`V2.md`](V2.md).
 
 **HDR originals keep their gain map.** An iPhone HEIC is an SDR picture plus a gain map — a small auxiliary
 image telling an HDR screen how far past SDR white to lift each area — and Photos shows it HDR. Sidecar reads
 only the SDR picture (ImageMagick and `heif-convert` decode the primary image and drop the auxiliary one) and
 exports SDR, so an edit looks flat beside its original. In order:
 
-1. *Read the gain map* at decode, with its metadata (headroom, min/max boost, gamma). `heif-convert` can write
-   auxiliary images out; check which it names the gain map, and whether Apple's pre-21496 maps (HEIC
-   `urn:com:apple:photo:2020:aux:hdrgainmap`) need their own handling. Cache it beside the proxy.
+1. *Read the gain map* at decode, with its metadata — **done**, in `sidecar_raw::gain_map`, through a shared
+   `sidecar_raw::heif_aux` module: one `heif-convert --with-aux` run per photo, every auxiliary image written
+   out, each reader picking the one it wants, so adding a second reader costs no second decode —
+   `portrait_depth` is exactly such a reader and shares this module unchanged. Checked against a real
+   iPhone 17 Pro HEIC rather than assumed: the aux image (`urn:com:apple:photo:2020:aux:hdrgainmap`) is named
+   `<stem>-urn_com_apple_photo_2020_aux_hdrgainmap.png`, 8-bit grey at exactly half the main image's linear
+   size — the same resolution convention `portrait_depth` already found for the Portrait Effects Matte.
+   `exiftool` carries two tags in the gain map's own group, `HDRGainMapVersion`/`HDRGainMapHeadroom`, plus two
+   MakerNotes scalars that sound related (`Apple:HDRHeadroom`, `Apple:HDRGain`) but aren't confirmed to mean
+   what their names suggest; all four are read and carried, unapplied.
+
+   **No reconstruction formula is implemented, and that's deliberate, not an oversight.** Apple hasn't
+   published one, and the independent reverse-engineering attempts that exist
+   ([heif-hdrgainmap-decode](https://github.com/m13253/heif-hdrgainmap-decode),
+   [AppleJPEGGainMap](https://github.com/grapeot/AppleJPEGGainMap)) call their own results "known to be
+   incorrect" or "unverified" — one guesses `hdr = sdr × 8^gain` "because it looks good," the other doesn't
+   claim a formula at all. A community decode (not verified here) gives a linear form instead:
+   `hdr = sdr × (1 + (headroom − 1) × gain)`. Even Photos on iPhone and on Mac are reported to render the same
+   file differently. A wrong formula looks plausible and is silently wrong — worse than not rendering HDR —
+   so stage 2 needs an actual HDR display to check against, not another guess from documentation that doesn't
+   exist. (Both reverse-engineering projects are GPL-licensed or unlicensed; nothing from either is usable
+   here regardless — CLAUDE.md — this was read for background, not ported.)
+
+   `dev/hdr-gainmap-probe` builds that check: real, controlled Ultra HDR JPEGs (ISO 21496-1, via Google's
+   `libultrahdr` — MIT/Apache-2.0) at known gain and headroom values, to view on an iPhone and measure with a
+   colorimeter against that format's own documented formula (`HDR = SDR × headroom^gain`, the grounded form
+   of the guesses above). Measuring tells us whether Safari actually renders the open standard faithfully,
+   and if Apple's own `HDRGainMapHeadroom` behaves the way this format's `maxContentBoost` does — the best
+   starting point available for stage 2's formula, once measured rather than assumed.
+
+   **A second, newer mechanism exists and isn't read yet either.** Some files also carry an ICC profile
+   (`Display P3 Primaries; PQ (Adaptive Gain Curve …)`) with a binary `HD Gain Map Info` tag — Apple's iOS
+   18+ "Adaptive HDR", introduced alongside ISO 21496-1 at WWDC24 and still not interchangeable with
+   Adobe/Google's ISO files in practice. Whether this is the mechanism actually driving HDR display for a
+   given photo, with the auxiliary-image gain map as a compatibility fallback, or something else, is open.
 2. *Carry it through the edit.* Edit the SDR picture as now and reapply the original map to the result, as
    the gain-map standard intends; exposure changes the base, so the map's headroom may need scaling with it.
-   Geometry (crop, straighten, orientation) must transform the map exactly as it does the picture.
+   Geometry (crop, straighten, orientation) must transform the map exactly as it does the picture. Blocked on
+   deciding stage 1's open formula question first — there's nothing to carry through correctly otherwise.
 3. *Export with it*: an Ultra HDR JPEG (ISO 21496-1 with the Adobe/Google XMP fallback) is what iOS and
    Android both display as HDR. Google's `libultrahdr` is Apache-2.0 — check it through `cargo deny`
    (or its C build) and add it to NOTICE before depending on it. HEIC output stays off the table (HEVC).
-4. *Show it in the editor* — last, and least certain: it needs an HDR-capable WebGPU canvas in Safari. Until
-   then the editor stays SDR and says the export will be HDR.
+4. *Show it in the editor* — last, and least certain. On the desktop this is a native wgpu HDR swapchain
+   rather than a Safari canvas (see "Wide gamut and HDR" above); until it works, the editor stays SDR and
+   says the export will be HDR.
 
 **Portrait depth maps (background blur, background replacement).** An iPhone Portrait-mode HEIC carries a
 depth-correlated auxiliary image too, read by `sidecar_raw::portrait_depth` through the same external-decoder
@@ -316,16 +449,145 @@ isn't also on that card. Worth testing on real AMD and Intel hardware before doc
 Mesa's compute-shader support has historically lagged NVIDIA's on some corner cases the ingest and develop
 passes might hit, and that needs checking with pictures, not assumed from the driver's feature flags.
 
+## Image processing: primitives first
+
+Surveyed on 2026-10-17 (see [`research/desktop-port-survey.md`](research/desktop-port-survey.md) for the
+sources behind every claim here). The organising insight is that **a small number of primitives unlock many
+features, so build the primitives rather than the features.** One Gaussian/Laplacian pyramid with coefficient
+remapping buys clarity, texture, local contrast, shadow/highlight recovery and tone mapping at once; one
+guided filter buys dehaze refinement, mask feathering and better depth upsampling. Everything below is
+implementable from published papers — none of it requires reading GPL code.
+
+**The guided filter** (He, Sun and Tang, ECCV 2010 / TPAMI 2013) is the highest-leverage single item in the
+survey: four box filters over I, p, I·p and I², then per-pixel algebra, in linear time regardless of kernel
+size, which is an ideal WGSL shape. It is edge-preserving with better behaviour near edges than the
+bilateral, and the fast subsampled variant reports better than 10× with almost no visible degradation. It
+would also **supersede the joint-bilateral depth upsampling already shipped** — which §7 "Depth" already
+notes is one pass that leaves some edge error behind — with something cheaper and more standard.
+
+**ACES Reference Gamut Compression** is the best cost/benefit item: a closed-form, invertible function of
+each pixel's RGB ratios to the achromatic axis with seven scalar parameters, no LUTs and no iteration, on the
+order of thirty lines of WGSL. It was introduced in ACES 1.3 as a technical correction rather than a look,
+and ACES 2.0's display gamut compression reuses the same curve. It fixes the blue and magenta breakdown of
+saturated LED and neon that neither white balance nor the mixer can reach. OpenColorIO (BSD-3-Clause) is an
+allowed reference. Two things to settle first: no licence statement was found for the RGC CTL code itself,
+and the transform ID differs between ACES documents.
+
+**Hue-preserving tone mapping.** Applying a curve per channel distorts hue; the fix is to apply it to a
+luminance norm and handle chroma separately. Sidecar's base curve is already a logistic, so this is a change
+to an existing stage rather than a new one — and it is half of what ROADMAP's "Tone curve above middle grey"
+is really asking for, the other half being the gamut compression above.
+
+**A variance-stabilising transform around the existing wavelet noise reduction.** Raw noise is
+Poisson-Gaussian per CFA plane, and the wavelet stage implicitly assumes uniform-variance Gaussian — which is
+exactly why it is habitually too strong in shadows and too weak in highlights. Foi's pipeline (generalised
+Anscombe transform → Gaussian-assumption denoiser → *exact unbiased inverse*, where the choice of inverse is
+what controls bias) is two per-pixel scalar functions plus a small LUT wrapped around a stage that already
+exists. Caveats worth carrying: the transform is inaccurate below about one count per pixel, and vkdt's own
+noise-profile fitting has had integer-overflow failures, so guard rails are required.
+
+**A highlight-aware demosaic.** Standard interpolators mix clipped and unclipped neighbours, which makes
+magenta and green fringes at highlight edges *before* highlight reconstruction ever runs. The fix is a
+per-channel clip mask and a renormalised weight sum inside the existing RCD kernel — cheap, and no new
+algorithm. Note the related finding: **no measured benchmark showing anything beats RCD is in circulation**,
+so the useful demosaic work is not a new interpolator but noise-aware switching, since colour overshoot on
+noisy files is what a fitted noise profile predicts.
+
+Then, in rough order of cost: **local Laplacian filters** (Paris, Hasinoff and Kautz, SIGGRAPH 2011) for
+halo-free clarity and texture at large radius, taking the fast variant's fixed-remap-level discretisation
+because it is the GPU-friendly shape; **single-image exposure fusion** (Mertens et al.) over synthetic
+exposures from one RAW, reusing the same pyramid; **blind dehaze** by dark channel prior with guided-filter
+refinement, for which the 2024 IPOL article is a peer-reviewed implementation target — noting that Sidecar's
+existing depth-based haze is the *better-conditioned* problem, since a depth map gives transmission directly
+and skips the fragile estimation step, so the gap is only haze without depth; and **lens-aware
+Richardson-Lucy deconvolution**, which is unusually GPU-friendly (two separable convolutions and two
+elementwise passes per iteration) and is a genuine differentiator here because lens correction already means
+the lens is identified, so the PSF can come from a radius-and-aperture table rather than a guess. Use TV
+regularisation with automatically estimated strength; bilateral-RL is patent-encumbered.
+
+**Multi-frame is where the remaining quality lives, and it forces a decision during the port.** Handheld
+multi-frame super-resolution (Wronski et al., SIGGRAPH 2019) runs at about 100 ms per 12 MP frame on a phone,
+and its structure is gather-only and GPU-native. Pixel-shift sensor modes are the easier first increment,
+since the sub-pixel offsets are known by design and only the merge is needed. The same alignment-and-merge
+infrastructure serves HDR merge, averaging denoise and focus stacking. **The architectural point outranks any
+one feature: multi-frame needs several full-resolution raw frames resident on the GPU at once, and a
+single-image memory model may not accommodate that — decide it during the desktop port rather than
+retrofitting it.**
+
 ## Features after V1
 
 Lens correction, crop and straighten (with keystone and turns), and mask layers — model masks, brush strokes,
 and every light and colour control per layer — have all shipped, in the order
-[§15 of the design](DESIGN.md#15-after-v1-lens-correction-crop-local-masks) gives. What §15 still lists and
-hasn't been built:
+[§15 of the design](DESIGN.md#15-after-v1-lens-correction-crop-local-masks) gives.
+
+**What the category expects and Sidecar does not have** (surveyed 2026-10-17 against Lightroom Classic,
+Capture One, DxO PhotoLab, ON1, darktable and RawTherapee; sources in
+[`research/desktop-port-survey.md`](research/desktop-port-survey.md)). Sidecar is ahead on the unusual —
+nothing else renders film spectrally from manufacturer data sheets — and behind on the boring. In priority
+order:
+
+- **Heal, clone and spot removal — the one universal gap, and the only one that is architecturally
+  different in kind.** All six have it; it is the first thing anyone reaches for on a dust spot; and it is
+  not another WGSL stage with a scalar parameter set, because it needs **per-patch records in the XMP
+  history** rather than sliders. Build exactly one non-destructive parametric heal/clone — source offset,
+  feathered edge, wavelet or Poisson blend — and stop there. Sidecar already has the hardest prerequisite
+  for portrait work, since the skin, hair and face masks can constrain a source region automatically. Red-eye
+  is a small adjacent tool. *Generative* fill is a trap for a self-hosted Apache-2.0 project: every
+  commercial one is a paid cloud service needing an internet connection.
+- **Clarity, texture and local contrast.** Front-panel sliders everywhere; their absence is immediately
+  visible. Falls out of the local Laplacian or guided filter above, which is why those come first.
+- **Dehaze.** Present in all of Lightroom, darktable and RawTherapee.
+- **A scene-to-display tone transform.** This is becoming the consensus default rather than an option:
+  darktable made `sigmoid` the default for new installs in 5.2 and added AgX in 5.4; RawTherapee added a
+  sigmoid tone mapper in 5.12. An editor shipping only exposure, contrast and a curve clips highlights in a
+  way that reads as broken to anyone arriving from those. This is the same question as "Tone curve above
+  middle grey" at the top of this file — worth noting that the field has converged while that decision waits.
+- **Camera profile selection — a correctness issue, not a feature.** Everyone exposes an input-profile
+  choice; without one, Sidecar's colours differ from every other tool on the same file and users read that
+  as a bug. The incremental piece is DCP's forward matrix plus HueSatMap/LookTable — data plumbing and a
+  small 3D-LUT sampler, not an algorithm, since camera matrices are already interpolated by illuminant.
+- **Colour grading wheels.** The OKLCh mixer does *not* substitute: wheels act on tonal ranges, the mixer on
+  hue bands, and they are orthogonal. A shadows/midtones/highlights lift-gamma-gain operator is a handful of
+  lines of WGSL on top of what is already computed — the best cost/benefit of any "pro" feature surveyed.
+- **Presets and styles, copy-paste, and sync across a selection.** Presets are not a feature so much as a
+  distribution channel, and the spectral film simulation is exactly the kind of thing that wants a style
+  container. The gap most likely to bite in practice is **"apply this to the other 200 frames"** —
+  settings-subset copy/paste, sync across a selection, auto-sync. Unglamorous, and the difference between a
+  developer tool and something usable after a shoot.
+- **Snapshots and virtual copies.** The category splits versions into two primitives and users expect both:
+  virtual copies (a second entry sharing one RAW, for two deliverable looks) and snapshots (named states
+  inside one entry, for A/B while editing). The XMP already carries history and versions, so this is mostly
+  UI plus a side-by-side compare.
+- **Soft proofing with a gamut check** — see the desktop section of [`V2.md`](V2.md); it is nearly pure
+  rendering-path work and sits next to the Rec.2020 export already listed above. Note it needs no knowledge
+  of the viewer's own display: the image is transformed to the proof profile and back, and the result is
+  shown in whatever space the editor already renders. Compose the whole chain into one 3D LUT and compute
+  the gamut warning from that same chain, since a parallel path is how gamut warnings end up disagreeing
+  with the preview. *Display calibration is not part of this and is not Sidecar's job* — editors consume a
+  profile, they do not measure one.
+- **3D LUT loading**, **defringe** as a post-demosaic tool distinct from raw CA correction, and
+  **film-negative inversion** for scans.
+- **HDR merge and focus stacking.** These sit with panorama below: not table stakes for a RAW *developer*
+  (darktable and RawTherapee have none of the three) but expected of anything calling itself all-in-one. All
+  three ride on the multi-frame alignment infrastructure above, and focus stacking is cheap given that focus
+  peaking already computes a focus measure — the hard part is that focal breathing changes the field of view
+  between slices, so sharpness cannot be compared at fixed coordinates.
+
+One completion bar worth adopting from Adobe: Lens Blur was not considered finished until it worked in
+presets and in batch. For Sidecar that means **ML and depth masks must re-derive deterministically per
+image** to survive batch application — a design constraint on features already shipped, not a UI task.
+
+What §15 still lists and hasn't been built:
 
 - **Gradients.** Linear and radial masks, analytic in the shader: a third kind of layer beside model masks and
-  brushes, with handles drawn over the photo like the crop's.
-- **Sky.** A sky model, to join the subject, skin and hair ones.
+  brushes, with handles drawn over the photo like the crop's. Universal across the category — treat as table
+  stakes rather than an enhancement.
+- **Sky — and it should not be a model.** The obvious route is closed: SegFormer's code is Apache-2.0 but its
+  **weights are restricted to non-commercial research or evaluation**, and mmsegmentation's zoo inherits each
+  method's own licence, so the trap re-enters there. The better route uses infrastructure already shipped:
+  **sky is the far plane of the existing Depth Anything V2 map**, combined with a low-texture and
+  chromaticity prior, the BiRefNet subject mask as a negative constraint, and a guided filter to finish the
+  edge. Zero licence risk, no new model to download, no extra inference pass.
 - **Depth, beyond what shipped.** Range layers, lens blur and haze by distance have shipped, and the map's
   edges are now the photo's: `client/depth_refine.wgsl` upsamples the model's 518² map against the photo
   (joint bilateral upsampling, §7 "Depth"), so a blur's edge follows hair or a thin branch instead of drifting
@@ -345,21 +607,59 @@ Licences below were checked against the projects' own LICENSE files, not recalle
 adopting, since licences change. The pattern to watch: for anything model-based, the **weights** carry their
 own licence, separate from the code's, and are often the more restrictive of the two.
 
-**AI upscaling — viable.** Real-ESRGAN is BSD-3-Clause for both code and pretrained weights; its
-`Real-ESRGAN-ncnn-vulkan` port is MIT, and NCNN itself is BSD-3-Clause throughout. The ncnn/Vulkan route
-needs no PyTorch runtime, which suits the image — and the worker already has a Vulkan device. The two tools
-most people reach for first, chaiNNer (GPL-3.0) and Upscayl (AGPL-3.0), are both hard excludes.
+**AI upscaling — the code is viable, the weights are not cleared.** *This entry used to say "Real-ESRGAN is
+BSD-3-Clause for both code and pretrained weights". The second half of that is wrong and was corrected on
+2026-10-17.* The code is BSD-3-Clause, its `Real-ESRGAN-ncnn-vulkan` port is MIT and NCNN itself is
+BSD-3-Clause throughout, all verified from the projects' own LICENSE files — and the ncnn/Vulkan route still
+needs no PyTorch runtime, which suits the image. But **the distributed weight files carry no licence
+statement at all**, and a weights file with no licence grants nothing; it is in practice worse than a stated
+non-commercial licence, because there is no permission to point at. The checkpoints are named for their
+training sets (`ESRGAN_SRx4_DF2KOST_official` = DIV2K + Flickr2K + OST), whose terms are unverified and are
+in the NTIRE tradition of research-only. Three ways out: an explicit grant from the author, a checkpoint
+whose card states a permissive licence, or retraining on BasicSR (Apache-2.0) over imagery Sidecar may use.
+chaiNNer (GPL-3.0) and Upscayl (AGPL-3.0) remain hard excludes.
+
+This is the general pattern and it is worth stating once: **weights are a dependency with their own licence,
+and "the code is Apache-2.0" is never sufficient.** Track them in `NOTICE` and `THIRD_PARTY_NOTICES.md` like
+source, with three acceptable statuses — an explicit permissive licence in the weights' own repository or
+model card, trained in-house, or not shipped. The dataset underneath is the least examined layer of all.
 
 **Panorama stitching — viable, with a patent caveat.** OpenCV has been Apache-2.0 since 4.5, `stitching`
 module included. Hugin and Enblend/Enfuse — the traditional open-source stitching stack — are GPL, excluded.
 The caveat is patents, not copyright: OpenCV's SURF feature finder sits behind `OPENCV_ENABLE_NONFREE`; use
 ORB or AKAZE instead. No mature pure-Rust stitching crate exists, so this means an OpenCV dependency.
 
-**Context-aware auto-edit — thin.** OpenCV's `xphoto` auto white balance (gray-world, simple, learning-based)
-is Apache-2.0 and genuinely shippable. Beyond that it's mostly dead-but-permissive research code (Google's
-HDRNet is Apache-2.0 but archived and TensorFlow-1.x) or non-commercial licences (Zero-DCE is CC BY-NC 4.0,
-which blocks redistribution just as firmly as copyleft does, for a different reason). Realistic split:
-auto-WB off the shelf, auto-tone built here — published methods are always fair game, their code isn't.
+**Raw denoise — the one big ML feature where the licensing solves itself, and the most wanted by revealed
+preference** (DxO built a product line on denoise alone; Adobe put it in the Detail panel). There is no
+permissive raw denoiser with permissive weights to pick up off the shelf. But the ingredients for owning one
+outright are all verified permissive: MIT noise-synthesis code (Sony Research's CVPR 2025 work, which needs
+only dark-frame capture and cuts preparation from days to hours; and the ICCV 2021 repository), Apache-2.0 or
+MIT architectures (NAFNet, SCUNet, SwinIR, Restormer — the last is MIT, contrary to a widespread belief that
+it is academic-only), and BasicSR (Apache-2.0) for training. Add Sidecar's own measured sensor noise profiles
+— which it needs anyway — and the result is **Apache-2.0 weights the project owns**. Raw-domain, before
+demosaic, is the published consensus, and the VST above matters here too: networks trained on synthetic
+Gaussian noise do well on real data once the variance is stabilised. Shape it as an explicit, progress-barred,
+tiled export-time operation rather than a live pipeline stage. **No published runtime figure exists for any
+open raw denoiser at full resolution on a consumer or integrated GPU — measure, don't assume.** Intel's OIDN
+is a useful precedent (Apache-2.0 *including its weights repository*) but is trained for render noise, needs
+auxiliary buffers and has no Vulkan backend, so it does not transfer.
+
+**Context-aware auto-edit — thin, and implement the papers rather than the repos.** OpenCV's `xphoto` auto
+white balance (gray-world, simple, learning-based) is Apache-2.0 and genuinely shippable, and grey-world,
+white-patch and grey-edge are textbook. The obvious learned route is closed: Afifi and Brown's Deep White-
+Balance Editing says it is for research purposes and cannot be used commercially, and has no LICENSE file at
+all, while WB_sRGB restricts the *dataset* too — so retraining on it is blocked as well. Beyond that it's
+mostly dead-but-permissive research code (Google's HDRNet is Apache-2.0 but archived and TensorFlow-1.x) or
+non-commercial licences (Zero-DCE is CC BY-NC 4.0, which blocks redistribution just as firmly as copyleft
+does, for a different reason). **No permissively licensed learned auto-tone model surfaced at all**, so
+auto-tone is better framed as a parametric fit — percentile anchoring into Sidecar's own tone operator, plus
+face-aware exposure from the YuNet detections already present — than as a learned regressor.
+
+*On runtimes:* burn (Apache-2.0), candle, tract, ONNX Runtime (MIT) and ncnn (BSD-3) are all permissive, so
+the choice is engineering, not licensing. Stay on burn-wgpu — one GPU abstraction, no shipped native blob —
+and reach for ncnn's hand-tuned Vulkan kernels only if a specific model's throughput proves unacceptable.
+Note that nearly every published inference benchmark assumes CUDA and says nothing about Vulkan on an
+integrated GPU.
 
 **Subject-aware tools: skin, colour ranges, subject masks and sharper peaking.** One model family, three
 uses, built together because they share the hard part — knowing what in the frame is a person, a face, skin,
@@ -389,6 +689,39 @@ sky, the subject.
   for uncorrelated per-pixel noise scales with the noise's own amplitude, so high-ISO grain does not light up
   without needing the detail module's estimated σ.
 
+## What not to build
+
+Negative evidence is worth as much as the positive kind, and it is rarer. The most useful artifact the 2026
+survey turned up is **darktable's list of thirteen formally deprecated modules** — a mature project publicly
+declaring which tool concepts turned out to be dead ends: basic adjustments, channel mixer, contrast
+brightness saturation, crop and rotate, defringe, fill light, global tonemap, invert, levels, spot removal,
+tone mapping, vibrance, zone system. So: no `global tonemap`, no `fill light`, no `levels`, no
+`contrast brightness saturation`, no `zone system`, no legacy channel mixer. The replacements are a
+scene-referred display transform, a zonal tone control, grading wheels and proper colour calibration — all
+listed above. **Read that list carefully, though:** `defringe` and `spot removal` were superseded by better
+implementations, not abandoned as capabilities, which is why both appear above as things to build.
+
+Beyond a single heal/clone, **frequency separation, liquify, layer compositing and content-aware or
+generative fill are not table stakes for a RAW developer.** The counter-evidence is direct: darktable and
+RawTherapee, the two tools with the deepest processing, have essentially none of them and are not criticised
+for it — the criticism they get is about asset management. The honest nice-to-have tail nobody will miss:
+liquify, watermarking, time-lapse, sky replacement, double exposure, texture and border packs, posterize,
+bloom.
+
+Three technical dead ends, so nobody spends a week finding out: **BM3D in WGSL** (block matching plus a 3D
+collaborative transform with scatter-add aggregation and real divergence — possible, but a project rather
+than a feature; non-local means with a VST gets most of the way with none of the pain); **the domain
+transform**, whose recursive 1D sweeps are the worst GPU fit surveyed and whose authors warn that robust
+derivative estimates are the real problem on noisy images — use the guided filter instead; and **moving the
+editing controls from OKLCh to Jzazbz**, where the gain is modest, the PQ-like nonlinearity costs
+transcendentals per pixel, and perfectly hue-preserving compression is probably not achievable anyway, since
+holding hue constant in a perceptual approximation does not hold perceived hue constant.
+
+One strategic note: darktable crossed into ML in June 2026 with an optional AI subsystem, an AI object mask
+and a `neural restore` module covering raw denoise and upscale. **"Open source has no AI" is no longer a
+differentiator** — ML masks are matched in kind, though not in breadth. What is still differentiating is that
+Sidecar runs models *locally*, against Adobe's cloud approach.
+
 ## Interface
 
 **Hide the editing tools — done.** A circled-i toggle in the canvas's top-left corner (or `H`) puts the tools
@@ -402,7 +735,11 @@ for the new `DisplaySpace` and saves it as the setting, so `/settings` and the n
 
 ## Housekeeping
 
-- The Rust sources are hand-wrapped well past rustfmt's comfort at any `max_width`; either adopt a formatter
-  and take the one-time diff, or leave it deliberately and say so.
+- **Adopt rustfmt — now a priority**, not housekeeping (owner's call, 2026-10-16: maintainability over new
+  features). The sources are hand-wrapped past what rustfmt will reproduce, so the diff never reaches zero and
+  the only question is how large a one-time reflow to accept: measured at **20,365** diff lines at
+  `max_width = 100`, **12,583** at 140, **9,688** at 160 and **7,012** at 200, against ~41,000 lines of Rust.
+  It goes in one commit that changes nothing else, whose SHA is then added to `.git-blame-ignore-revs` so
+  `git blame` steps over it, and a `cargo fmt --check` gate joins clippy in CI. See [`V2.md`](V2.md).
 - `deploy/remote-proxy/` is a worked example of one setup: a reverse proxy on another host reaching this one
   over a VPN. A real deployment's copy lives in the git-ignored `deploy/local/`.

@@ -72,13 +72,20 @@ pub const REC2020_TO_P3: M3 = [
     [0.0028217873, -0.0195984945, 1.0167767073],
 ];
 
-const BRADFORD: M3 = [[0.8951, 0.2664, -0.1614], [-0.7502, 1.7135, 0.0367], [0.0389, -0.0685, 1.0296]];
+const BRADFORD: M3 = [
+    [0.8951, 0.2664, -0.1614],
+    [-0.7502, 1.7135, 0.0367],
+    [0.0389, -0.0685, 1.0296],
+];
 
 /// Bradford chromatic adaptation from `src` white to `dst` white (both chromaticities).
 pub fn bradford(src: [f64; 2], dst: [f64; 2]) -> M3 {
     let s = apply(&BRADFORD, &xy_to_xyz(src));
     let d = apply(&BRADFORD, &xy_to_xyz(dst));
-    mul(&inverse(&BRADFORD), &mul(&diag([d[0] / s[0], d[1] / s[1], d[2] / s[2]]), &BRADFORD))
+    mul(
+        &inverse(&BRADFORD),
+        &mul(&diag([d[0] / s[0], d[1] / s[1], d[2] / s[2]]), &BRADFORD),
+    )
 }
 
 #[cfg(test)]

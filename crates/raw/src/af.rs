@@ -21,7 +21,12 @@ pub struct AfPoint {
 }
 
 /// The ExifTool tags the AF point is read from, for a caller already running ExifTool to ask for as well.
-pub const TAGS: [&str; 4] = ["-FocusLocation", "-FocusPixel", "-ExifImageWidth", "-ExifImageHeight"];
+pub const TAGS: [&str; 4] = [
+    "-FocusLocation",
+    "-FocusPixel",
+    "-ExifImageWidth",
+    "-ExifImageHeight",
+];
 
 /// The AF point from one file's ExifTool JSON object, `-n` or not (checked: these tags print the same). `None`
 /// for manual focus, focus-and-recompose, an adapted lens, or a maker/tag this doesn't cover. Read by
@@ -32,7 +37,9 @@ pub fn from_tags(tags: &Value, orientation_flip: i32) -> Option<AfPoint> {
 }
 
 fn nums(s: &str) -> Vec<f64> {
-    s.split_whitespace().filter_map(|t| t.parse().ok()).collect()
+    s.split_whitespace()
+        .filter_map(|t| t.parse().ok())
+        .collect()
 }
 
 /// "refWidth refHeight x y" — the tag carries its own reference frame, e.g. `9504 6336 3267 2930`.

@@ -59,8 +59,18 @@ impl Distortion {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Tca {
-    Linear { kr: f64, kb: f64 },
-    Poly3 { vr: f64, cr: f64, br: f64, vb: f64, cb: f64, bb: f64 },
+    Linear {
+        kr: f64,
+        kb: f64,
+    },
+    Poly3 {
+        vr: f64,
+        cr: f64,
+        br: f64,
+        vb: f64,
+        cb: f64,
+        bb: f64,
+    },
 }
 
 impl Tca {
@@ -68,7 +78,14 @@ impl Tca {
     pub fn scale(self, r: f64) -> (f64, f64) {
         match self {
             Self::Linear { kr, kb } => (kr, kb),
-            Self::Poly3 { vr, cr, br, vb, cb, bb } => (br * r * r + cr * r + vr, bb * r * r + cb * r + vb),
+            Self::Poly3 {
+                vr,
+                cr,
+                br,
+                vb,
+                cb,
+                bb,
+            } => (br * r * r + cr * r + vr, bb * r * r + cb * r + vb),
         }
     }
 }
@@ -107,7 +124,12 @@ fn attr(n: &roxmltree::Node, name: &str) -> Option<f64> {
 }
 
 fn child_texts(n: &roxmltree::Node, tag: &str) -> Vec<String> {
-    n.children().filter(|c| c.has_tag_name(tag)).filter_map(|c| c.text()).map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect()
+    n.children()
+        .filter(|c| c.has_tag_name(tag))
+        .filter_map(|c| c.text())
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .collect()
 }
 
 fn aspect(s: &str) -> Option<f64> {
@@ -122,10 +144,19 @@ impl Database {
     /// take the other 58 with it.
     pub fn load(dir: &Path) -> Self {
         let mut db = Self::default();
-        let mut files: Vec<_> = std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "xml")).collect();
+        let mut files: Vec<_> = std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e == "xml"))
+            .collect();
         files.sort();
         for f in files {
-            match std::fs::read_to_string(&f).map_err(|e| e.to_string()).and_then(|xml| db.add(&xml)) {
+            match std::fs::read_to_string(&f)
+                .map_err(|e| e.to_string())
+                .and_then(|xml| db.add(&xml))
+            {
                 Ok(()) => {}
                 Err(e) => tracing::warn!("lensfun: skipping {}: {e}", f.display()),
             }
@@ -135,44 +166,109 @@ impl Database {
 
     pub fn add(&mut self, xml: &str) -> Result<(), String> {
         // The repository's files name a DTD; roxmltree never fetches one, so allowing it is safe.
-        let opts = roxmltree::ParsingOptions { allow_dtd: true, ..Default::default() };
+        let opts = roxmltree::ParsingOptions {
+            allow_dtd: true,
+            ..Default::default()
+        };
         let doc = roxmltree::Document::parse_with_options(xml, opts).map_err(|e| e.to_string())?;
         for n in doc.root_element().children().filter(|n| n.is_element()) {
             match n.tag_name().name() {
                 "mount" => {
                     if let Some(name) = child_texts(&n, "name").into_iter().next() {
-                        self.compat.entry(name).or_default().extend(child_texts(&n, "compat"));
+                        self.compat
+                            .entry(name)
+                            .or_default()
+                            .extend(child_texts(&n, "compat"));
                     }
                 }
                 "camera" => {
-                    let (Some(maker), Some(mount)) = (child_texts(&n, "maker").into_iter().next(), child_texts(&n, "mount").into_iter().next()) else { continue };
-                    let crop = child_texts(&n, "cropfactor").first().and_then(|c| c.parse().ok()).unwrap_or(1.0);
-                    self.cameras.push(Camera { maker, models: child_texts(&n, "model"), mount, crop });
+                    let (Some(maker), Some(mount)) = (
+                        child_texts(&n, "maker").into_iter().next(),
+                        child_texts(&n, "mount").into_iter().next(),
+                    ) else {
+                        continue;
+                    };
+                    let crop = child_texts(&n, "cropfactor")
+                        .first()
+                        .and_then(|c| c.parse().ok())
+                        .unwrap_or(1.0);
+                    self.cameras.push(Camera {
+                        maker,
+                        models: child_texts(&n, "model"),
+                        mount,
+                        crop,
+                    });
                 }
                 "lens" => {
-                    let Some(maker) = child_texts(&n, "maker").into_iter().next() else { continue };
+                    let Some(maker) = child_texts(&n, "maker").into_iter().next() else {
+                        continue;
+                    };
                     let mut lens = Lens {
                         maker,
                         models: child_texts(&n, "model"),
                         mounts: child_texts(&n, "mount"),
-                        crop: child_texts(&n, "cropfactor").first().and_then(|c| c.parse().ok()).unwrap_or(1.0),
-                        aspect: child_texts(&n, "aspect-ratio").first().and_then(|a| aspect(a)).unwrap_or(1.5),
+                        crop: child_texts(&n, "cropfactor")
+                            .first()
+                            .and_then(|c| c.parse().ok())
+                            .unwrap_or(1.0),
+                        aspect: child_texts(&n, "aspect-ratio")
+                            .first()
+                            .and_then(|a| aspect(a))
+                            .unwrap_or(1.5),
                         distortion: Vec::new(),
                         tca: Vec::new(),
                         vignetting: Vec::new(),
                     };
                     for cal in n.children().filter(|c| c.has_tag_name("calibration")) {
                         for e in cal.children().filter(|c| c.is_element()) {
-                            let Some(focal) = attr(&e, "focal") else { continue };
+                            let Some(focal) = attr(&e, "focal") else {
+                                continue;
+                            };
                             let model = e.attribute("model").unwrap_or_default();
                             let z = |k: &str| attr(&e, k).unwrap_or(0.0);
                             match (e.tag_name().name(), model) {
-                                ("distortion", "ptlens") => lens.distortion.push((focal, Distortion::PtLens { a: z("a"), b: z("b"), c: z("c") })),
-                                ("distortion", "poly3") => lens.distortion.push((focal, Distortion::Poly3 { k1: z("k1") })),
-                                ("distortion", "poly5") => lens.distortion.push((focal, Distortion::Poly5 { k1: z("k1"), k2: z("k2") })),
-                                ("tca", "poly3") => lens.tca.push((focal, Tca::Poly3 { vr: attr(&e, "vr").unwrap_or(1.0), cr: z("cr"), br: z("br"), vb: attr(&e, "vb").unwrap_or(1.0), cb: z("cb"), bb: z("bb") })),
-                                ("tca", "linear") => lens.tca.push((focal, Tca::Linear { kr: attr(&e, "kr").unwrap_or(1.0), kb: attr(&e, "kb").unwrap_or(1.0) })),
-                                ("vignetting", "pa") => lens.vignetting.push(Vignetting { focal, aperture: z("aperture"), distance: attr(&e, "distance").unwrap_or(1000.0), k: [z("k1"), z("k2"), z("k3")] }),
+                                ("distortion", "ptlens") => lens.distortion.push((
+                                    focal,
+                                    Distortion::PtLens {
+                                        a: z("a"),
+                                        b: z("b"),
+                                        c: z("c"),
+                                    },
+                                )),
+                                ("distortion", "poly3") => lens
+                                    .distortion
+                                    .push((focal, Distortion::Poly3 { k1: z("k1") })),
+                                ("distortion", "poly5") => lens.distortion.push((
+                                    focal,
+                                    Distortion::Poly5 {
+                                        k1: z("k1"),
+                                        k2: z("k2"),
+                                    },
+                                )),
+                                ("tca", "poly3") => lens.tca.push((
+                                    focal,
+                                    Tca::Poly3 {
+                                        vr: attr(&e, "vr").unwrap_or(1.0),
+                                        cr: z("cr"),
+                                        br: z("br"),
+                                        vb: attr(&e, "vb").unwrap_or(1.0),
+                                        cb: z("cb"),
+                                        bb: z("bb"),
+                                    },
+                                )),
+                                ("tca", "linear") => lens.tca.push((
+                                    focal,
+                                    Tca::Linear {
+                                        kr: attr(&e, "kr").unwrap_or(1.0),
+                                        kb: attr(&e, "kb").unwrap_or(1.0),
+                                    },
+                                )),
+                                ("vignetting", "pa") => lens.vignetting.push(Vignetting {
+                                    focal,
+                                    aperture: z("aperture"),
+                                    distance: attr(&e, "distance").unwrap_or(1000.0),
+                                    k: [z("k1"), z("k2"), z("k3")],
+                                }),
                                 // The Adobe camera model measures in focal lengths, not frames; not read.
                                 _ => {}
                             }
@@ -192,18 +288,33 @@ impl Database {
     /// and models with or without the maker (`Nikon D3200`, `D3200`), so both are compared loosely.
     pub fn camera(&self, make: &str, model: &str) -> Option<&Camera> {
         let make = norm(make);
-        let first = make.split_whitespace().next().unwrap_or_default().to_string();
+        let first = make
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .to_string();
         let model = norm(model);
         let bare = |m: &str| {
             let m = norm(m);
-            m.strip_prefix(&format!("{first} ")).map(str::to_string).unwrap_or(m)
+            m.strip_prefix(&format!("{first} "))
+                .map(str::to_string)
+                .unwrap_or(m)
         };
-        self.cameras.iter().find(|c| norm(&c.maker).split_whitespace().next() == Some(first.as_str()) && c.models.iter().any(|m| bare(m) == bare(&model)))
+        self.cameras.iter().find(|c| {
+            norm(&c.maker).split_whitespace().next() == Some(first.as_str())
+                && c.models.iter().any(|m| bare(m) == bare(&model))
+        })
     }
 
     fn mounts_for<'a>(&'a self, camera: &'a Camera) -> Vec<&'a str> {
         let mut out = vec![camera.mount.as_str()];
-        out.extend(self.compat.get(&camera.mount).into_iter().flatten().map(String::as_str));
+        out.extend(
+            self.compat
+                .get(&camera.mount)
+                .into_iter()
+                .flatten()
+                .map(String::as_str),
+        );
         out
     }
 
@@ -211,18 +322,34 @@ impl Database {
     /// one is matched on the name ExifTool gives it, requiring the same focal range and maximum aperture and
     /// scoring the other words, among lenses that fit the camera's mount.
     pub fn lens(&self, camera: Option<&Camera>, id: &LensIdentity) -> Option<&Lens> {
-        let fits = |l: &Lens| camera.is_none_or(|c| self.mounts_for(c).iter().any(|m| l.mounts.iter().any(|lm| lm == m)));
+        let fits = |l: &Lens| {
+            camera.is_none_or(|c| {
+                self.mounts_for(c)
+                    .iter()
+                    .any(|m| l.mounts.iter().any(|lm| lm == m))
+            })
+        };
         if let Some(c) = camera {
-            let own: Vec<&Lens> = self.lenses.iter().filter(|l| l.mounts.contains(&c.mount)).collect();
+            let own: Vec<&Lens> = self
+                .lenses
+                .iter()
+                .filter(|l| l.mounts.contains(&c.mount))
+                .collect();
             let fixed = !self.compat.contains_key(&c.mount) && own.len() == 1;
             if fixed {
                 return own.into_iter().next();
             }
         }
-        let names: Vec<&str> = [id.lens_id.as_deref(), id.lens_model.as_deref()].into_iter().flatten().collect();
+        let names: Vec<&str> = [id.lens_id.as_deref(), id.lens_model.as_deref()]
+            .into_iter()
+            .flatten()
+            .collect();
         let mut best: Option<(f64, &Lens)> = None;
         for l in self.lenses.iter().filter(|l| fits(l)) {
-            let score = names.iter().flat_map(|n| l.models.iter().map(move |m| name_score(n, m))).fold(0.0, f64::max);
+            let score = names
+                .iter()
+                .flat_map(|n| l.models.iter().map(move |m| name_score(n, m)))
+                .fold(0.0, f64::max);
             if score > best.map_or(0.0, |b| b.0) {
                 best = Some((score, l));
             }
@@ -239,13 +366,24 @@ impl Database {
         // camera writes, which can be a rounded marketing figure — a ZV-1 says 24 mm at 9.4 mm, a crop of 2.55 where
         // the sensor's is 2.7, and that 6 % showed as the profile's radius being off by as much against the
         // camera's own JPEG.
-        let crop = camera.map(|c| c.crop).or(id.crop_factor).unwrap_or(lens.crop);
-        lens.profile(crop, info.focal_length_mm as f64, info.aperture as f64, id.focus_distance_m.unwrap_or(1000.0))
+        let crop = camera
+            .map(|c| c.crop)
+            .or(id.crop_factor)
+            .unwrap_or(lens.crop);
+        lens.profile(
+            crop,
+            info.focal_length_mm as f64,
+            info.aperture as f64,
+            id.focus_distance_m.unwrap_or(1000.0),
+        )
     }
 }
 
 fn norm(s: &str) -> String {
-    s.to_lowercase().split_whitespace().collect::<Vec<_>>().join(" ")
+    s.to_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Words of a lens name, with the focal range and maximum aperture pulled out: `(focal, aperture, words)`.
@@ -253,15 +391,39 @@ fn lens_tokens(name: &str) -> (Option<String>, Option<String>, Vec<String>) {
     let s = name.to_lowercase().replace(['(', ')', ',', '|'], " ");
     let (mut focal, mut aperture, mut words) = (None, None, Vec::new());
     for t in s.split_whitespace() {
-        if let Some(f) = t.strip_suffix("mm").filter(|f| f.chars().all(|c| c.is_ascii_digit() || c == '.' || c == '-') && !f.is_empty()) {
-            focal = Some(f.split('-').map(|v| v.trim_end_matches(".0").to_string()).collect::<Vec<_>>().join("-"));
+        if let Some(f) = t.strip_suffix("mm").filter(|f| {
+            f.chars()
+                .all(|c| c.is_ascii_digit() || c == '.' || c == '-')
+                && !f.is_empty()
+        }) {
+            focal = Some(
+                f.split('-')
+                    .map(|v| v.trim_end_matches(".0").to_string())
+                    .collect::<Vec<_>>()
+                    .join("-"),
+            );
             continue;
         }
-        let ap = t.strip_prefix("f/").or_else(|| t.strip_prefix("1:")).or_else(|| t.strip_prefix('f').filter(|r| r.starts_with(|c: char| c.is_ascii_digit())));
+        let ap = t
+            .strip_prefix("f/")
+            .or_else(|| t.strip_prefix("1:"))
+            .or_else(|| {
+                t.strip_prefix('f')
+                    .filter(|r| r.starts_with(|c: char| c.is_ascii_digit()))
+            });
         if let Some(ap) = ap {
-            let digits: String = ap.chars().take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '-').collect();
+            let digits: String = ap
+                .chars()
+                .take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '-')
+                .collect();
             if !digits.is_empty() {
-                aperture = Some(digits.split('-').map(|v| v.trim_end_matches(".0").to_string()).collect::<Vec<_>>().join("-"));
+                aperture = Some(
+                    digits
+                        .split('-')
+                        .map(|v| v.trim_end_matches(".0").to_string())
+                        .collect::<Vec<_>>()
+                        .join("-"),
+                );
                 let rest = &ap[digits.len()..];
                 if !rest.is_empty() {
                     words.push(rest.to_string());
@@ -282,8 +444,26 @@ pub fn name_score(a: &str, b: &str) -> f64 {
     if fa.is_none() || fa != fb || aa != ab {
         return 0.0;
     }
-    const MAKERS: [&str; 12] = ["nikon", "canon", "sony", "fujifilm", "fujinon", "olympus", "panasonic", "lumix", "leica", "sigma", "tamron", "tokina"];
-    let set = |w: &[String]| -> std::collections::BTreeSet<String> { w.iter().filter(|w| !MAKERS.contains(&w.as_str())).cloned().collect() };
+    const MAKERS: [&str; 12] = [
+        "nikon",
+        "canon",
+        "sony",
+        "fujifilm",
+        "fujinon",
+        "olympus",
+        "panasonic",
+        "lumix",
+        "leica",
+        "sigma",
+        "tamron",
+        "tokina",
+    ];
+    let set = |w: &[String]| -> std::collections::BTreeSet<String> {
+        w.iter()
+            .filter(|w| !MAKERS.contains(&w.as_str()))
+            .cloned()
+            .collect()
+    };
     let (sa, sb) = (set(&wa), set(&wb));
     let union = sa.union(&sb).count();
     if union == 0 {
@@ -314,12 +494,19 @@ impl Lens {
 
     /// The correction at this focal length, aperture and distance, for a camera of crop factor `crop`, in
     /// `sidecar_color::lens` units (radius 1 = the photo's half-diagonal).
-    pub fn profile(&self, crop: f64, focal: f64, aperture: f64, distance: f64) -> Option<LensProfile> {
+    pub fn profile(
+        &self,
+        crop: f64,
+        focal: f64,
+        aperture: f64,
+        distance: f64,
+    ) -> Option<LensProfile> {
         const N: usize = 97;
         let to_photo = self.crop / crop;
         // The photo's half-diagonal on lensfun's distortion scale (half the calibration frame's shorter side).
         let dist_unit = to_photo * (1.0 + self.aspect * self.aspect).sqrt();
-        let distortion = between(&self.distortion, focal).map(|(a, b, t)| move |r: f64| (1.0 - t) * a.scale(r) + t * b.scale(r));
+        let distortion = between(&self.distortion, focal)
+            .map(|(a, b, t)| move |r: f64| (1.0 - t) * a.scale(r) + t * b.scale(r));
         let green = |r: f64| distortion.map_or(1.0, |d| d(r * dist_unit));
         let tca = between(&self.tca, focal).map(|(a, b, t)| {
             move |r: f64| {
@@ -328,7 +515,9 @@ impl Lens {
                 ((1.0 - t) * ra + t * rb, (1.0 - t) * ba + t * bb)
             }
         });
-        let vignetting = (aperture > 0.0).then(|| self.vignetting_at(focal, aperture, distance)).flatten();
+        let vignetting = (aperture > 0.0)
+            .then(|| self.vignetting_at(focal, aperture, distance))
+            .flatten();
         if distortion.is_none() && tca.is_none() && vignetting.is_none() {
             return None;
         }
@@ -361,13 +550,24 @@ impl Lens {
         focals.dedup();
         let at_focal = |f: f64| -> Option<[f64; 3]> {
             let here: Vec<&Vignetting> = self.vignetting.iter().filter(|v| v.focal == f).collect();
-            let d = here.iter().map(|v| v.distance).min_by(|a, b| (a.ln() - distance.max(0.01).ln()).abs().total_cmp(&(b.ln() - distance.max(0.01).ln()).abs()))?;
-            let mut pts: Vec<(f64, [f64; 3])> = here.iter().filter(|v| v.distance == d).map(|v| (v.aperture.max(0.1).log2(), v.k)).collect();
+            let d = here.iter().map(|v| v.distance).min_by(|a, b| {
+                (a.ln() - distance.max(0.01).ln())
+                    .abs()
+                    .total_cmp(&(b.ln() - distance.max(0.01).ln()).abs())
+            })?;
+            let mut pts: Vec<(f64, [f64; 3])> = here
+                .iter()
+                .filter(|v| v.distance == d)
+                .map(|v| (v.aperture.max(0.1).log2(), v.k))
+                .collect();
             pts.sort_by(|a, b| a.0.total_cmp(&b.0));
             let (a, b, t) = between(&pts, aperture.log2())?;
             Some([0, 1, 2].map(|i| (1.0 - t) * a[i] + t * b[i]))
         };
-        let pts: Vec<(f64, [f64; 3])> = focals.iter().filter_map(|&f| Some((f, at_focal(f)?))).collect();
+        let pts: Vec<(f64, [f64; 3])> = focals
+            .iter()
+            .filter_map(|&f| Some((f, at_focal(f)?)))
+            .collect();
         let (a, b, t) = between(&pts, focal)?;
         Some([0, 1, 2].map(|i| (1.0 - t) * a[i] + t * b[i]))
     }
@@ -422,21 +622,58 @@ mod tests {
     fn matches_the_lens_exiftool_names() {
         let db = db();
         let cam = db.camera("Nikon", "D3200").expect("camera");
-        let id = |s: &str| LensIdentity { lens_id: Some(s.into()), ..Default::default() };
-        assert_eq!(db.lens(Some(cam), &id("AF-S DX VR Zoom-Nikkor 18-55mm f/3.5-5.6G")).unwrap().name(), "Nikon AF-S DX Zoom-Nikkor 18-55mm f/3.5-5.6G VR");
-        assert_eq!(db.lens(Some(cam), &id("AF-P DX Nikkor 18-55mm f/3.5-5.6G")).unwrap().name(), "Nikon AF-P DX Nikkor 18-55mm f/3.5-5.6G VR");
-        assert!(db.lens(Some(cam), &id("AF-S Nikkor 85mm f/1.8G")).is_none(), "a lens the database lacks matches nothing");
+        let id = |s: &str| LensIdentity {
+            lens_id: Some(s.into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            db.lens(Some(cam), &id("AF-S DX VR Zoom-Nikkor 18-55mm f/3.5-5.6G"))
+                .unwrap()
+                .name(),
+            "Nikon AF-S DX Zoom-Nikkor 18-55mm f/3.5-5.6G VR"
+        );
+        assert_eq!(
+            db.lens(Some(cam), &id("AF-P DX Nikkor 18-55mm f/3.5-5.6G"))
+                .unwrap()
+                .name(),
+            "Nikon AF-P DX Nikkor 18-55mm f/3.5-5.6G VR"
+        );
+        assert!(
+            db.lens(Some(cam), &id("AF-S Nikkor 85mm f/1.8G")).is_none(),
+            "a lens the database lacks matches nothing"
+        );
         // A fixed-lens camera's mount holds its one lens; no name needed.
         let x100 = db.camera("Fujifilm", "X100F").unwrap();
-        assert_eq!(db.lens(Some(x100), &LensIdentity::default()).unwrap().name(), "X100 & compatibles (Standard)");
+        assert_eq!(
+            db.lens(Some(x100), &LensIdentity::default())
+                .unwrap()
+                .name(),
+            "X100 & compatibles (Standard)"
+        );
     }
 
     #[test]
     fn names_need_the_same_focal_range_and_aperture() {
-        assert_eq!(name_score("AF-S Nikkor 50mm f/1.8G", "Nikon AF-S Nikkor 50mm f/1.4G"), 0.0);
-        assert_eq!(name_score("AF-S Nikkor 50mm f/1.8G", "Nikon AF-S Nikkor 35mm f/1.8G"), 0.0);
-        assert!(name_score("AF-S DX Nikkor 18-140mm f/3.5-5.6G ED VR", "Nikon AF-S DX Nikkor 18-140mm f/3.5-5.6G ED VR") > 0.95);
-        assert!(name_score("Canon EF-M 18-55mm f/3.5-5.6 IS STM", "Canon EF-M 18-55mm f/3.5-5.6 IS STM") > 0.95);
+        assert_eq!(
+            name_score("AF-S Nikkor 50mm f/1.8G", "Nikon AF-S Nikkor 50mm f/1.4G"),
+            0.0
+        );
+        assert_eq!(
+            name_score("AF-S Nikkor 50mm f/1.8G", "Nikon AF-S Nikkor 35mm f/1.8G"),
+            0.0
+        );
+        assert!(
+            name_score(
+                "AF-S DX Nikkor 18-140mm f/3.5-5.6G ED VR",
+                "Nikon AF-S DX Nikkor 18-140mm f/3.5-5.6G ED VR"
+            ) > 0.95
+        );
+        assert!(
+            name_score(
+                "Canon EF-M 18-55mm f/3.5-5.6 IS STM",
+                "Canon EF-M 18-55mm f/3.5-5.6 IS STM"
+            ) > 0.95
+        );
     }
 
     #[test]
@@ -449,16 +686,45 @@ mod tests {
         let d = |p: &LensProfile, r: f64| p.distortion.as_ref().unwrap().eval(r);
         assert!((d(&mid, 0.8) - (d(&at18, 0.8) + d(&at55, 0.8)) / 2.0).abs() < 1e-3);
         // On the half-diagonal, r = 1 is 1.803 half-heights of a 3:2 frame.
-        let direct = Distortion::PtLens { a: 0.0195, b: -0.0591, c: 0.0105 }.scale(1.0 * (1.0f64 + 2.25).sqrt());
+        let direct = Distortion::PtLens {
+            a: 0.0195,
+            b: -0.0591,
+            c: 0.0105,
+        }
+        .scale(1.0 * (1.0f64 + 2.25).sqrt());
         assert!((d(&at18, 1.0) - direct).abs() < 1e-6);
         // On a full-frame body the photo reaches 1.523× further out of the DX calibration frame.
         let ff = lens.profile(1.0, 18.0, 0.0, 10.0).unwrap();
-        let expect = Distortion::PtLens { a: 0.0195, b: -0.0591, c: 0.0105 }.scale(1.523 * 3.25f64.sqrt());
+        let expect = Distortion::PtLens {
+            a: 0.0195,
+            b: -0.0591,
+            c: 0.0105,
+        }
+        .scale(1.523 * 3.25f64.sqrt());
         assert!((d(&ff, 1.0) - expect).abs() < 1e-6);
         // No aperture, no vignetting; with one, interpolated between f/3.5 and f/8 in stops.
         assert!(at18.vignetting.is_none());
-        let v = lens.profile(1.523, 18.0, 5.6, 10.0).unwrap().vignetting.unwrap();
-        let (open, closed) = (lens.profile(1.523, 18.0, 3.5, 10.0).unwrap().vignetting.unwrap(), lens.profile(1.523, 18.0, 8.0, 10.0).unwrap().vignetting.unwrap());
-        assert!(v.eval(1.0) < open.eval(1.0) && v.eval(1.0) > closed.eval(1.0), "{} between {} and {}", v.eval(1.0), open.eval(1.0), closed.eval(1.0));
+        let v = lens
+            .profile(1.523, 18.0, 5.6, 10.0)
+            .unwrap()
+            .vignetting
+            .unwrap();
+        let (open, closed) = (
+            lens.profile(1.523, 18.0, 3.5, 10.0)
+                .unwrap()
+                .vignetting
+                .unwrap(),
+            lens.profile(1.523, 18.0, 8.0, 10.0)
+                .unwrap()
+                .vignetting
+                .unwrap(),
+        );
+        assert!(
+            v.eval(1.0) < open.eval(1.0) && v.eval(1.0) > closed.eval(1.0),
+            "{} between {} and {}",
+            v.eval(1.0),
+            open.eval(1.0),
+            closed.eval(1.0)
+        );
     }
 }

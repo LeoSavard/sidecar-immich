@@ -42,14 +42,19 @@ pub struct User {
 impl User {
     /// This user's folder inside Immich's internal library.
     pub fn library_folder(&self) -> &str {
-        self.storage_label.as_deref().filter(|l| !l.is_empty()).unwrap_or(&self.id)
+        self.storage_label
+            .as_deref()
+            .filter(|l| !l.is_empty())
+            .unwrap_or(&self.id)
     }
 }
 
 pub fn load_secret(state_dir: &std::path::Path) -> Result<[u8; 32]> {
     let path = state_dir.join("secret.key");
     if let Ok(bytes) = std::fs::read(&path) {
-        return bytes.try_into().map_err(|_| anyhow!("{} is not 32 bytes", path.display()));
+        return bytes
+            .try_into()
+            .map_err(|_| anyhow!("{} is not 32 bytes", path.display()));
     }
     let mut key = [0u8; 32];
     getrandom::fill(&mut key).map_err(|e| anyhow!("{e}"))?;
@@ -67,7 +72,9 @@ fn seal(secret: &[u8; 32], plain: &str) -> String {
     let mut nonce = [0u8; 12];
     getrandom::fill(&mut nonce).expect("system randomness");
     let mut buf = plain.as_bytes().to_vec();
-    cipher.encrypt_in_place(&nonce.into(), b"sidecar-api-key", &mut buf).expect("encryption");
+    cipher
+        .encrypt_in_place(&nonce.into(), b"sidecar-api-key", &mut buf)
+        .expect("encryption");
     let mut out = nonce.to_vec();
     out.extend(buf);
     B64.encode(out)
@@ -78,24 +85,44 @@ fn open(secret: &[u8; 32], sealed: &str) -> Option<String> {
     let (nonce, ct) = bytes.split_at_checked(12)?;
     let cipher = ChaCha20Poly1305::new(secret.into());
     let mut buf = ct.to_vec();
-    cipher.decrypt_in_place(nonce.into(), b"sidecar-api-key", &mut buf).ok()?;
+    cipher
+        .decrypt_in_place(nonce.into(), b"sidecar-api-key", &mut buf)
+        .ok()?;
     String::from_utf8(buf).ok()
 }
 
 fn cookie_value<'a>(parts: &'a Parts, name: &str) -> Option<&'a str> {
-    parts.headers.get_all(header::COOKIE).iter().filter_map(|v| v.to_str().ok()).flat_map(|v| v.split(';')).find_map(|kv| {
-        let (k, v) = kv.trim().split_once('=')?;
-        (k == name).then_some(v)
-    })
+    parts
+        .headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(';'))
+        .find_map(|kv| {
+            let (k, v) = kv.trim().split_once('=')?;
+            (k == name).then_some(v)
+        })
 }
 
 async fn user_from(parts: &Parts, app: &App) -> Option<User> {
     if !app.immich.enabled() {
-        return Some(User { id: "dev".into(), name: "Developer".into(), email: String::new(), api_key: String::new(), storage_label: None });
+        return Some(User {
+            id: "dev".into(),
+            name: "Developer".into(),
+            email: String::new(),
+            api_key: String::new(),
+            storage_label: None,
+        });
     }
     let sid = cookie_value(parts, COOKIE)?;
     let rec: SessionRecord = app.store.get("sessions", sid).await?;
-    Some(User { id: rec.user_id, name: rec.name, email: rec.email, api_key: open(&app.secret, &rec.api_key_sealed)?, storage_label: rec.storage_label })
+    Some(User {
+        id: rec.user_id,
+        name: rec.name,
+        email: rec.email,
+        api_key: open(&app.secret, &rec.api_key_sealed)?,
+        storage_label: rec.storage_label,
+    })
 }
 
 /// For `/api/*`: 401 when signed out.
@@ -104,7 +131,10 @@ pub struct ApiUser(pub User);
 impl FromRequestParts<Arc<App>> for ApiUser {
     type Rejection = Response;
     async fn from_request_parts(parts: &mut Parts, app: &Arc<App>) -> Result<Self, Response> {
-        user_from(parts, app).await.map(ApiUser).ok_or_else(|| (StatusCode::UNAUTHORIZED, "Sign in to Sidecar first.").into_response())
+        user_from(parts, app)
+            .await
+            .map(ApiUser)
+            .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Sign in to Sidecar first.").into_response())
     }
 }
 
@@ -117,8 +147,21 @@ impl FromRequestParts<Arc<App>> for PageUser {
         match user_from(parts, app).await {
             Some(u) => Ok(PageUser(u)),
             None => {
-                let next = parts.uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
-                let encoded: String = next.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-_.~/".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect();
+                let next = parts
+                    .uri
+                    .path_and_query()
+                    .map(|p| p.as_str())
+                    .unwrap_or("/");
+                let encoded: String = next
+                    .bytes()
+                    .map(|b| {
+                        if b.is_ascii_alphanumeric() || b"-_.~/".contains(&b) {
+                            (b as char).to_string()
+                        } else {
+                            format!("%{b:02X}")
+                        }
+                    })
+                    .collect();
                 Err(Redirect::to(&format!("/signin?next={encoded}")).into_response())
             }
         }
@@ -162,13 +205,35 @@ pub async fn sign_in(State(app): State<Arc<App>>, Json(body): Json<SignIn>) -> R
     if let Err(e) = app.store.put("sessions", &sid, &rec).await {
         return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")).into_response();
     }
-    let cookie = format!("{COOKIE}={sid}; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000{}", if app.config.server.secure_cookies { "; Secure" } else { "" });
-    ([(header::SET_COOKIE, cookie)], Json(SessionInfo { name: me.name, email: me.email, auth_required: true, immich: app.immich.enabled() })).into_response()
+    let cookie = format!(
+        "{COOKIE}={sid}; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000{}",
+        if app.config.server.secure_cookies {
+            "; Secure"
+        } else {
+            ""
+        }
+    );
+    (
+        [(header::SET_COOKIE, cookie)],
+        Json(SessionInfo {
+            name: me.name,
+            email: me.email,
+            auth_required: true,
+            immich: app.immich.enabled(),
+        }),
+    )
+        .into_response()
 }
 
 pub async fn session(State(app): State<Arc<App>>, parts: Parts) -> Response {
     match user_from(&parts, &app).await {
-        Some(u) => Json(SessionInfo { name: u.name, email: u.email, auth_required: app.immich.enabled(), immich: app.immich.enabled() }).into_response(),
+        Some(u) => Json(SessionInfo {
+            name: u.name,
+            email: u.email,
+            auth_required: app.immich.enabled(),
+            immich: app.immich.enabled(),
+        })
+        .into_response(),
         None => StatusCode::UNAUTHORIZED.into_response(),
     }
 }
@@ -177,7 +242,14 @@ pub async fn sign_out(State(app): State<Arc<App>>, parts: Parts) -> Response {
     if let Some(sid) = cookie_value(&parts, COOKIE) {
         app.store.delete("sessions", sid).await;
     }
-    ([(header::SET_COOKIE, format!("{COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"))], StatusCode::NO_CONTENT).into_response()
+    (
+        [(
+            header::SET_COOKIE,
+            format!("{COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"),
+        )],
+        StatusCode::NO_CONTENT,
+    )
+        .into_response()
 }
 
 #[cfg(test)]

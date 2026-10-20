@@ -19,7 +19,11 @@ pub fn pivot_for(black_ev: f64, white_ev: f64, k: f64) -> f64 {
     let (mut lo, mut hi) = (-2.0, 3.0);
     for _ in 0..100 {
         let mid = (lo + hi) / 2.0;
-        if normalized(g, k, mid) > GREY_ENCODED { lo = mid } else { hi = mid }
+        if normalized(g, k, mid) > GREY_ENCODED {
+            lo = mid
+        } else {
+            hi = mid
+        }
     }
     (lo + hi) / 2.0
 }

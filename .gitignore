@@ -6,6 +6,7 @@ node_modules
 /web/src/lib/gpu/wgsl/*.wgsl
 /testdata/cache
 /testdata/parity-out
+/dev/hdr-gainmap-probe/out
 /web/src/lib/color/sidecar_color.wasm
 # A machine's own deployment files (real hosts, volumes, keys): copy deploy/remote-proxy/ here and edit.
 /deploy/local/
