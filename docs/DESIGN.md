@@ -7,6 +7,19 @@ Source: the architecture plan (PWA entry, XMP sidecars, server-side demosaic, We
 
 Where the code differs from the text below, the code and these notes win.
 
+- **A version is the edit, wherever its files go** (§9): exporting to this device and then to Immich used to
+  answer "already exported" and upload nothing — the device-only record matched on settings and was read as
+  proof the file was in the library. An entry now counts as *in Immich* only when it names an asset there, and
+  an export that finds its own record without one renders again under that version and uploads it, filling the
+  entry in instead of making a second one. What tells two renders apart is the edit and the settings, which is
+  also what the file name says: `-2048px`, `-p3`, `-q80` as they differ from a full-size sRGB JPEG at 92, so
+  one version's files sit side by side instead of overwriting each other (quality is dropped for a TIFF, which
+  has none, before it can split one file in two). Checked: the sheet driven in Chromium against a stub Immich —
+  to the device, then *Also save to Immich* (one upload, one entry, `immichAssetId` filled in, the render time
+  kept), then the same request again (answered from the record, nothing rendered or uploaded), then quality 80
+  (a second file, `IMG_1768-v1-q80.jpg`, still version 1); unit tests for the version rule, the naming and the
+  "in the library" test, and a sidecar round trip for recording one render twice.
+
 - **Colour film, spectrally** (§7, "Colour film, spectrally"): FUJICHROME PROVIA 100F renders through its own
   data sheet — layer sensitivities, characteristic curves, dyes, light table — in the browser and on the
   server, from two tables the develop pass reads (`develop/slide.wgsl`). The licensed half of the chain is
@@ -927,7 +940,7 @@ Every export is kept. Each distinct edit that gets exported becomes a numbered v
 
 1. **Commit** — `PUT /api/assets/{key}/edit` with `If-Match` → XMP written → new ETag.
 2. **Create job** — `POST /api/exports` with `Idempotency-Key` (one UUID per Export tap) and `{ assetKey, editEtag, format, colorSpace, quality, longEdge, destination }`.
-   - If `sc:Exports` already holds this ETag with these settings, the answer is `200 { version, immichAssetId }` — nothing renders twice. Unless the file is wanted on this device: that copy was uploaded and deleted, so there are no bytes left to hand back, and it renders again under its existing version number without uploading or recording a second time.
+   - If `sc:Exports` already holds this ETag with these settings *and that entry names an Immich asset*, the answer is `200 { version, immichAssetId }` — nothing renders twice. Two things make it render anyway, both under the existing version number and the recorded file name: the file being wanted on this device (the copy that was uploaded is deleted, so there are no bytes left to hand back), and the entry having no `immichAssetId` — an export that only ever went to the device, for which this is the upload it never had. What the entry already covers is not done twice: the upload is skipped when it is in the library, and the record is written only to add what this export did.
    - Otherwise the api assigns the version under a per-photo lock and answers `202 { jobId, version }`. The job is pinned to that ETag; later edits don't touch it. Retrying with the same key returns the same job.
 3. **Stream** — `new EventSource('/api/exports/' + jobId + '/events')`.
 4. **Render** — worker, full resolution, tiled.
@@ -939,15 +952,26 @@ rendered file in the worker's outbox and put a download link in the `done` event
 the editing is a destination in its own right rather than only a remote control for the library. The browser
 hands it to the share sheet where there is one — that's the path that ends in *Save Image* on a phone — and
 falls back to an ordinary download. Kept files are swept after 24 hours; the destination is not part of what
-makes two exports the same version, so asking for the same render twice, once for each place, is one version.
+makes two exports the same version, so asking for the same render twice, once for each place, is one version —
+one `sc:Exports` entry, which a later upload fills in with its `immichAssetId` rather than duplicating. The
+sheet offers the other place as soon as a render finishes: *Also save to Immich* under a file that went to the
+device, *Save to this device* under one that is already in the library (that one renders again, since its
+bytes are gone, and hands the result straight to the share sheet).
 
-**Versions and file names.** A new edit ETag takes the next version number; the same edit exported in another format or size reuses its number.
+**Versions and file names.** A version is the *edit*: a new edit ETag takes the next number, and the same edit
+exported again — another format, size, quality, colour space or destination — reuses it. The file name carries
+the rest, so two renders of one version never claim one name. The full-size sRGB JPEG at the default quality
+is the plain name; anything else adds its shorthand, in the order size, space, quality. A render recorded
+before this rule keeps the name it was recorded under: those are the bytes in Immich.
 
 | Export | File name |
 |---|---|
 | First exported edit, JPEG | `DSC_1234-v1.jpg` |
 | Same edit, 16-bit TIFF | `DSC_1234-v1.tif` |
 | Same edit, JPEG at 2,048 px | `DSC_1234-v1-2048px.jpg` |
+| Same edit, JPEG in Display P3 | `DSC_1234-v1-p3.jpg` |
+| Same edit, JPEG at quality 80 | `DSC_1234-v1-q80.jpg` |
+| Same edit, 1,024 px, P3, quality 100 | `DSC_1234-v1-1024px-p3-q100.jpg` |
 | Changed edit, JPEG | `DSC_1234-v2.jpg` |
 
 Immich stores uploads in the internal library under the storage template. With `fileCreatedAt` set to the RAW's capture time, `DSC_1234-v2.jpg` lands in `2026/09.September/2026-09-14/` — the same folder path the RAW has in the external library.
@@ -1007,7 +1031,8 @@ Full-resolution render, in 4,096² tiles with overlap ≥ the largest filter sup
    | Stacked | `[export, currentPrimary]` | `[currentPrimary, export]` |
 
    Every merge creates a new stack ID, so Sidecar never stores one. No separate call to change the primary is needed.
-4. Append the version to `sc:Exports` in the RAW's sidecar.
+4. Record the version in `sc:Exports` in the RAW's sidecar — as a new entry, or by filling in the one this
+   render already has (the same edit and the same settings, so the same file) with where it has now reached.
 5. Delete the outbox entry, unless the device asked for the file too. On restart the api retries leftover outbox entries with backoff, so an Immich outage never loses a finished render.
 
 Step 4 is the one failure that doesn't sink the export. A render that reached Immich is not lost because the

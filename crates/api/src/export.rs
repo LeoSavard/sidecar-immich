@@ -123,18 +123,54 @@ fn file_stem(name: &str) -> &str {
     name.rsplit_once('.').map_or(name, |(s, _)| s)
 }
 
-fn same_settings(entry: &Value, req: &ExportRequest) -> bool {
-    entry["editEtag"] == req.edit_etag
-        && entry["format"] == req.format
-        && entry["colorSpace"] == serde_json::to_value(req.color_space).unwrap()
-        && entry["quality"].as_u64() == Some(req.quality as u64)
-        && entry["longEdge"].as_u64() == req.long_edge.map(u64::from)
+/// The render a request asks for, in the shape `sc:Exports` records it, so one definition of "the same
+/// render" (`sidecar_xmp::same_render`) serves both looking an export up and recording it.
+fn render_of(req: &ExportRequest) -> Value {
+    json!({
+        "editEtag": req.edit_etag, "format": req.format, "colorSpace": req.color_space,
+        "quality": req.quality, "longEdge": req.long_edge,
+    })
 }
 
-pub async fn create(State(app): State<Arc<App>>, ApiUser(user): ApiUser, headers: HeaderMap, Json(req): Json<ExportRequest>) -> Response {
+/// Did this export reach the library? An entry without an Immich id is a render that only ever went to the
+/// device, which is the whole reason a later export to Immich has to go ahead and upload it.
+fn in_immich(entry: &Value) -> bool {
+    entry["immichAssetId"].as_str().is_some_and(|id| !id.is_empty())
+}
+
+/// The version number an edit's exports share. A version is the **edit**, not the file: the same edit
+/// exported again — another format, another size, another destination — keeps its number, and only an edit
+/// that has never been exported takes the next one.
+fn version_for(exports: &[Value], edit_etag: &str) -> u64 {
+    exports.iter().find(|e| e["editEtag"] == edit_etag).and_then(|e| e["version"].as_u64()).unwrap_or_else(|| exports.iter().filter_map(|e| e["version"].as_u64()).max().unwrap_or(0) + 1)
+}
+
+/// What a file name says beyond its version. The plain name is the full-size sRGB JPEG at the default
+/// quality; anything else names how it differs, so one version's files sit side by side — in a folder and in
+/// Immich — instead of two renders claiming the same name.
+fn settings_suffix(req: &ExportRequest) -> String {
+    let mut s = String::new();
+    if let Some(edge) = req.long_edge {
+        s += &format!("-{edge}px");
+    }
+    if req.color_space == DisplaySpace::DisplayP3 {
+        s += "-p3";
+    }
+    if req.format == "jpeg" && req.quality != quality() {
+        s += &format!("-q{}", req.quality);
+    }
+    s
+}
+
+pub async fn create(State(app): State<Arc<App>>, ApiUser(user): ApiUser, headers: HeaderMap, Json(mut req): Json<ExportRequest>) -> Response {
     let Some(rec) = crate::asset_for(&app, &user, &req.asset_key).await else { return StatusCode::NOT_FOUND.into_response() };
     if !matches!(req.format.as_str(), "jpeg" | "tiff") {
         return (StatusCode::BAD_REQUEST, "format must be jpeg or tiff").into_response();
+    }
+    // A 16-bit TIFF has no quality, but the sheet keeps whatever the last JPEG used and sends it anyway. Left
+    // alone it would make two identical TIFFs two different renders under one file name.
+    if req.format == "tiff" {
+        req.quality = quality();
     }
     let idem = headers.get("idempotency-key").and_then(|v| v.to_str().ok()).map(|v| format!("{}:{v}", user.id));
     if let Some(k) = &idem
@@ -152,14 +188,17 @@ pub async fn create(State(app): State<Arc<App>>, ApiUser(user): ApiUser, headers
     if doc.etag() != req.edit_etag {
         return (StatusCode::CONFLICT, "Save your edit before exporting; the sidecar has changed.").into_response();
     }
-    // An identical export already in `sc:Exports` normally answers the request on its own — nothing renders
-    // twice. It can't when the file is wanted on this device, though: that copy was uploaded and deleted, so
-    // there are no bytes left to hand back. Render it again under its existing version number, and let `run`
-    // know not to upload or record a second time.
+    // An identical export already in `sc:Exports` answers the request on its own — nothing renders twice —
+    // but only where that file already is. Wanted on this device, it has to be rendered again: the copy that
+    // was uploaded is deleted, so there are no bytes left to hand back. Wanted in Immich when it only ever
+    // went to the device, it has to be rendered again too, and then uploaded. Either way it keeps its version
+    // number and its name, and `run` is told what the record already covers.
     let exports = doc.exports();
-    let already = exports.iter().find(|e| same_settings(e, &req)).cloned();
+    let render = render_of(&req);
+    let already = exports.iter().find(|e| sidecar_xmp::same_render(e, &render)).cloned();
     if let Some(existing) = &already
         && !req.destination.to_device()
+        && in_immich(existing)
     {
         return (StatusCode::OK, Json(json!({ "existing": existing }))).into_response();
     }
@@ -167,10 +206,14 @@ pub async fn create(State(app): State<Arc<App>>, ApiUser(user): ApiUser, headers
     if !app.jobs.numbering.lock().unwrap().insert(req.asset_key.clone()) {
         return (StatusCode::CONFLICT, "An export of this photo is being prepared; try again in a moment.").into_response();
     }
-    let version = exports.iter().find(|e| e["editEtag"] == req.edit_etag).and_then(|e| e["version"].as_u64()).unwrap_or_else(|| exports.iter().filter_map(|e| e["version"].as_u64()).max().unwrap_or(0) + 1);
+    let version = version_for(&exports, &req.edit_etag);
     let ext = if req.format == "tiff" { "tif" } else { "jpg" };
-    let size_suffix = req.long_edge.map(|e| format!("-{e}px")).unwrap_or_default();
-    let file_name = format!("{}-v{version}{size_suffix}.{ext}", file_stem(&rec.file_name));
+    // A render that was recorded before keeps the name it was recorded under, whatever the naming rule was
+    // then: those are the bytes in Immich, and the entry about to be filled in is that file's.
+    let file_name = already
+        .as_ref()
+        .and_then(|e| e["file"].as_str().map(String::from))
+        .unwrap_or_else(|| format!("{}-v{version}{}.{ext}", file_stem(&rec.file_name), settings_suffix(&req)));
 
     let job = Arc::new(Job { id: random_hex(16), user_id: user.id.clone(), created: std::time::Instant::now(), events: Mutex::new(Vec::new()), notify: tokio::sync::Notify::new() });
     app.jobs.by_id.lock().unwrap().insert(job.id.clone(), job.clone());
@@ -227,11 +270,13 @@ async fn run(app: &Arc<App>, job: &Job, user: &crate::session::User, rec: &Asset
     }
     let done = done.context("the worker stopped before finishing")?;
 
-    // `recorded` means this exact render is already in Immich under this version number: it is being made
-    // again only so the browser can download it, so uploading it a second time would ask Immich to dedupe
-    // something it has no reason to see twice.
+    // A `recorded` entry that names an Immich asset means this exact render is already in the library under
+    // this version number: it is being made again only so the browser can download it, and uploading it a
+    // second time would ask Immich to dedupe something it has no reason to see twice. A record without one is
+    // an export that only ever went to the device, and this is the upload it never had.
     let mut immich_asset_id: Option<String> = None;
-    if app.immich.enabled() && req.destination != Destination::Device && recorded.is_none() {
+    let in_library = recorded.as_ref().is_some_and(in_immich);
+    if app.immich.enabled() && req.destination != Destination::Device && !in_library {
         job.push("progress", json!({ "stage": "upload", "overall": 0.88 }));
         let file = app.http.get(app.worker(&format!("/v1/outbox/{}/{}", job.id, file_name))).send().await?.error_for_status()?.bytes().await?;
         let meta: Value = app.http.get(app.worker(&format!("/v1/assets/{}/meta", req.asset_key))).send().await?.json().await?;
@@ -248,11 +293,15 @@ async fn run(app: &Arc<App>, job: &Job, user: &crate::session::User, rec: &Asset
         immich_asset_id = Some(id);
     }
 
-    if recorded.is_none() {
+    // Nothing to record when the entry already says everything this export did; an upload that has just
+    // given an earlier device-only render its place in the library fills that entry in.
+    if recorded.is_none() || immich_asset_id.is_some() {
         let entry = json!({
             "version": version, "editEtag": req.edit_etag, "file": file_name, "format": req.format,
             "colorSpace": req.color_space, "quality": req.quality, "longEdge": req.long_edge,
-            "fileSha1": done["sha1"], "exported": sidecar_xmp::utc_now(), "immichAssetId": immich_asset_id,
+            // The file was rendered when it was first recorded; reaching Immich later doesn't remake it.
+            "fileSha1": done["sha1"], "immichAssetId": immich_asset_id,
+            "exported": recorded.as_ref().map_or_else(|| Value::from(sidecar_xmp::utc_now()), |e| e["exported"].clone()),
         });
         let roots = app.config.canonical_mounts();
         let path = rec.path.clone();
@@ -260,7 +309,7 @@ async fn run(app: &Arc<App>, job: &Job, user: &crate::session::User, rec: &Asset
         // is reported and stepped over rather than failing the job: the photo's version history misses an
         // entry, and the file the person asked for still arrives.
         let saved = tokio::task::spawn_blocking(move || sidecar_xmp::update(&path, &roots, |d| {
-            d.append_export(entry.clone());
+            d.record_export(entry.clone());
             Ok(())
         }))
         .await?;
@@ -393,14 +442,61 @@ mod tests {
         }
     }
 
-    /// `same_settings` decides whether a render is skipped entirely, so it must not start matching on the
-    /// destination: the same file asked for twice, once for Immich and once for this phone, is one version.
+    fn request(json: &str) -> ExportRequest {
+        serde_json::from_str(json).unwrap()
+    }
+
+    /// What makes two renders the same must not include the destination: the same file asked for twice, once
+    /// for Immich and once for this phone, is one version of one file.
     #[test]
     fn destination_is_not_part_of_what_makes_two_exports_the_same() {
         let entry = json!({ "editEtag": "b", "format": "jpeg", "colorSpace": "srgb", "quality": 92, "longEdge": null });
-        let to_immich: ExportRequest = serde_json::from_str(r#"{"assetKey":"a","editEtag":"b"}"#).unwrap();
-        let to_device: ExportRequest = serde_json::from_str(r#"{"assetKey":"a","editEtag":"b","destination":"device"}"#).unwrap();
-        assert!(same_settings(&entry, &to_immich));
-        assert!(same_settings(&entry, &to_device));
+        for json in [r#"{"assetKey":"a","editEtag":"b"}"#, r#"{"assetKey":"a","editEtag":"b","destination":"device"}"#, r#"{"assetKey":"a","editEtag":"b","destination":"both"}"#] {
+            assert!(sidecar_xmp::same_render(&entry, &render_of(&request(json))), "{json}");
+        }
+    }
+
+    /// The bug this guards: an export saved to the device records an entry with no Immich id, and the next
+    /// export of the same render to Immich used to match that entry and answer "already exported" — nothing
+    /// was uploaded, and the photo never reached the library.
+    #[test]
+    fn an_export_that_only_reached_the_device_is_not_in_the_library() {
+        let to_device = json!({ "editEtag": "b", "file": "a-v1.jpg", "immichAssetId": null });
+        assert!(!in_immich(&to_device));
+        assert!(!in_immich(&json!({ "editEtag": "b", "file": "a-v1.jpg" })), "an entry written without the field reads the same way");
+        assert!(in_immich(&json!({ "editEtag": "b", "immichAssetId": "im-1" })));
+    }
+
+    /// A version is the edit. Exporting the same edit again — another size, another format, another place —
+    /// reuses its number; only an edit that has never been exported takes the next one.
+    #[test]
+    fn a_version_numbers_the_edit_not_the_export() {
+        let exports = vec![
+            json!({ "version": 1, "editEtag": "aaa", "format": "jpeg" }),
+            json!({ "version": 1, "editEtag": "aaa", "format": "tiff" }),
+            json!({ "version": 2, "editEtag": "bbb", "format": "jpeg" }),
+        ];
+        assert_eq!(version_for(&exports, "aaa"), 1);
+        assert_eq!(version_for(&exports, "bbb"), 2, "an edit gone back to keeps the number it had");
+        assert_eq!(version_for(&exports, "ccc"), 3);
+        assert_eq!(version_for(&[], "aaa"), 1);
+    }
+
+    /// Two renders of one version must not claim one name: everything that changes the bytes and isn't the
+    /// version or the extension says so in the file name.
+    #[test]
+    fn settings_that_change_the_file_change_its_name() {
+        let name = |json: &str| {
+            let req = request(json);
+            format!("DSC_1234-v1{}.{}", settings_suffix(&req), if req.format == "tiff" { "tif" } else { "jpg" })
+        };
+        assert_eq!(name(r#"{"assetKey":"a","editEtag":"b"}"#), "DSC_1234-v1.jpg");
+        assert_eq!(name(r#"{"assetKey":"a","editEtag":"b","format":"tiff"}"#), "DSC_1234-v1.tif");
+        assert_eq!(name(r#"{"assetKey":"a","editEtag":"b","longEdge":2048}"#), "DSC_1234-v1-2048px.jpg");
+        assert_eq!(name(r#"{"assetKey":"a","editEtag":"b","colorSpace":"display-p3"}"#), "DSC_1234-v1-p3.jpg");
+        assert_eq!(name(r#"{"assetKey":"a","editEtag":"b","quality":80}"#), "DSC_1234-v1-q80.jpg");
+        assert_eq!(name(r#"{"assetKey":"a","editEtag":"b","longEdge":1024,"colorSpace":"display-p3","quality":100}"#), "DSC_1234-v1-1024px-p3-q100.jpg");
+        // A 16-bit TIFF has no quality to put in its name; `create` drops the one the sheet sends with it.
+        assert_eq!(name(r#"{"assetKey":"a","editEtag":"b","format":"tiff","quality":80}"#), "DSC_1234-v1.tif");
     }
 }
