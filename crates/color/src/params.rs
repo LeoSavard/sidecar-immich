@@ -12,7 +12,7 @@ use crate::tone;
 /// `migrate_highlight_shadow_anchors`) — an edit saved under version 1 needs its curve read differently, not
 /// just a field that defaults to off, so this is a real bump rather than an additive field. See
 /// docs/ROADMAP.md, "Curve editor: Highlights and Shadows stop sharing points with the manual curve".
-pub const PROCESS_VERSION: u32 = 3;
+pub const PROCESS_VERSION: u32 = 4;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
@@ -123,6 +123,11 @@ impl EditParams {
         if self.process_version < 2 {
             self.migrate_highlight_shadow_anchors();
         }
+        if self.process_version < 4 {
+            // Its Whites was set against the old white point, and a developed file's Whites *is* that
+            // difference: without this every existing edit of a JPEG would jump to Whites −43.
+            self.tone.white_zero_ev = LEGACY_WHITE_EV;
+        }
         if self.process_version < 3 {
             // Rendered before there was a baseline, and its picture is the one the person approved: it keeps
             // the exposure it was rendered at. Only a new edit starts from the measured placement.
@@ -230,6 +235,11 @@ impl Default for Exposure {
 pub struct Tone {
     pub black_ev: f64,
     pub white_ev: f64,
+    /// The `whiteEv` this edit calls Whites 0 — the default white point it was made against, stored per edit
+    /// so that moving that default never moves anybody's slider. A RAW reads `white_ev` absolutely, as the
+    /// stops over grey that render white; a developed file has no white point to place, so its Whites is
+    /// `white_zero_ev − white_ev` (`display_tone`), and the editor's slider reads it the same way.
+    pub white_zero_ev: f64,
     pub contrast: f64,
     /// Control points over display-encoded values, `[x, y]` in 0…1. Manually drawn only, as of
     /// `PROCESS_VERSION` 2 — Highlights and Shadows are `highlights`/`shadows` below, not points in here.
@@ -247,13 +257,23 @@ pub struct Tone {
 /// Where the default tone curve puts black and white, in stops from middle grey. The Blacks and Whites sliders
 /// are offsets from these (the web app's `view.blacks` / `view.whites` mirror them).
 pub const DEFAULT_BLACK_EV: f64 = -8.0;
-pub const DEFAULT_WHITE_EV: f64 = 4.5;
+/// What `whiteEv` a new edit starts at: the stops above middle grey that render as display white. Sensor
+/// saturation sits **3.63 stops** over the grey `BASELINE_EV` places it at (IQR 3.48…3.81 across the
+/// 196-file survey), so this is where a blown highlight renders as white instead of as light grey. It was
+/// 4.5 — `0.18 × 2^4.5`, four times saturation — and the measured consequence was that **nothing in a render
+/// reached white at all**: 0 of 196 frames held a single pixel there (`docs/ROADMAP.md`).
+pub const DEFAULT_WHITE_EV: f64 = 3.63;
+
+/// The `whiteEv` an edit made before `PROCESS_VERSION` 4 calls "Whites 0". Kept because an edit's Whites is
+/// read against the default it was made under, never against today's (`Tone::white_zero_ev`).
+pub const LEGACY_WHITE_EV: f64 = 4.5;
 
 impl Default for Tone {
     fn default() -> Self {
         Self {
             black_ev: DEFAULT_BLACK_EV,
             white_ev: DEFAULT_WHITE_EV,
+            white_zero_ev: DEFAULT_WHITE_EV,
             contrast: 1.0,
             curve: vec![[0.0, 0.0], [1.0, 1.0]],
             highlights: 0.0,
@@ -909,7 +929,7 @@ pub const CONTRAST_SCALE: f64 = 7.0;
 fn display_tone(edit: &EditParams) -> [f32; 4] {
     let t = &edit.tone;
     let blacks = ((DEFAULT_BLACK_EV - t.black_ev) / 3.0).clamp(-1.0, 1.0);
-    let whites = ((DEFAULT_WHITE_EV - t.white_ev) / 2.0).clamp(-1.0, 1.0);
+    let whites = ((t.white_zero_ev - t.white_ev) / 2.0).clamp(-1.0, 1.0);
     let knee = if edit.exposure.ev > 0.0 {
         (1.0 - 0.3 * edit.exposure.ev).clamp(0.4, 1.0)
     } else {
@@ -1250,8 +1270,10 @@ mod tests {
         assert_eq!((params.hl_strength, params.display_referred), (0.0, 1.0));
 
         let mut edit = EditParams::default();
-        edit.tone.white_ev = 2.5;
-        edit.tone.black_ev = -5.0;
+        // Whites at +100 and Blacks at −100, as positions rather than as the EVs they happen to be: the
+        // slider is a difference from this edit's own zero, so these hold wherever the default white point is.
+        edit.tone.white_ev = edit.tone.white_zero_ev - 2.0;
+        edit.tone.black_ev = DEFAULT_BLACK_EV + 3.0;
         edit.exposure.ev = 1.0;
         let p = pack(
             &edit,
@@ -1353,6 +1375,38 @@ mod tests {
             1.0,
             "a developed file was already rendered by whatever wrote it"
         );
+    }
+
+    /// Moving the default white point must not move anybody's Whites. A RAW's edit keeps the white point it
+    /// was rendered at; a developed file's Whites is a difference from the zero its edit was made under, so
+    /// both read 0 after the bump — the slider stays where the person left it either way.
+    #[test]
+    fn moving_the_white_point_leaves_every_existing_whites_where_it_was() {
+        let whites = |e: &EditParams| {
+            let t = display_tone(e);
+            (t[1] * 100.0).round() as i32
+        };
+        let mut old: EditParams =
+            serde_json::from_str(r#"{"processVersion":3,"tone":{"whiteEv":4.5}}"#).unwrap();
+        old.migrate();
+        assert_eq!(old.tone.white_zero_ev, LEGACY_WHITE_EV);
+        assert_eq!(
+            old.tone.white_ev, 4.5,
+            "a RAW's white point is not moved under it"
+        );
+        assert_eq!(whites(&old), 0, "and its Whites still reads 0");
+
+        // One that had Whites set: +50 under the old zero is still +50.
+        let mut set: EditParams =
+            serde_json::from_str(r#"{"processVersion":3,"tone":{"whiteEv":3.5}}"#).unwrap();
+        set.migrate();
+        assert_eq!(whites(&set), 50);
+
+        // A new edit: the zero is today's, so the same slider reading comes from a different EV.
+        let fresh = EditParams::default();
+        assert_eq!(fresh.tone.white_zero_ev, DEFAULT_WHITE_EV);
+        assert_eq!(whites(&fresh), 0);
+        assert!((fresh.tone.white_ev - 3.63).abs() < 1e-9);
     }
 
     /// The baseline is the rendering's, not the person's: it moves the gain a RAW is developed at, leaves a
@@ -1906,7 +1960,11 @@ mod tests {
         let e: EditParams = serde_json::from_str(json).unwrap();
         assert_eq!(e.exposure.ev, 0.65);
         assert_eq!(e.mixer.blue.luminance, -35.0);
-        assert_eq!(e.tone.white_ev, 4.5);
+        assert_eq!(e.tone.white_ev, DEFAULT_WHITE_EV);
+        assert_eq!(
+            e.tone.white_zero_ev, DEFAULT_WHITE_EV,
+            "a fresh edit's zero is today's default"
+        );
         assert_eq!(e.lens, None);
     }
 

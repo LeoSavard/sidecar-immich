@@ -79,7 +79,8 @@ Where the code differs from the text below, the code and these notes win.
 - **First live run (2026-09-15):** share → resolve → develop → sidecar → export → upload → stack, against the real external library. The Immich *admin* key is scoped without `asset.read`, so stacks can't be checked from the CLI — only in the Immich app.
 - **Output space is a user setting** (§11), not a guess from `matchMedia`. It drives the develop uniform, the canvas, the loupe request and the export default together; the export sheet still overrides it for one export. The editor previewing in P3 while exports defaulted to sRGB was a real trap: saturated reds fit on screen and clipped in the file.
 - **Tint direction:** the slider names what happens to the *image*, as every editor does. Positive tint moves the assumed illuminant toward green so the photo goes magenta. It shipped inverted and is fixed; `positive_tint_moves_the_illuminant_toward_green` pins it.
-- **Tone curve, measured:** the logistic base curve starts shouldering immediately above middle grey — log-log slope 0.80 at +1 EV, 0.57 at +2 EV, 0.40 at +2.5 EV. Raising exposure therefore costs upper-midtone texture (0.73× the local contrast of the unedited render in one real case, measured as mean |∇ log Y|). The underlying constraint is headroom: sRGB holds 2.47 stops above grey while the default `whiteEv` asks the curve to fit 4.5. Lowering Whites is the working answer; replacing the curve is on the roadmap, with a candidate patch measured and rejected for regressing shadow contrast.
+- **Where middle grey and white sit** (`PROCESS_VERSION` 3 and 4): `normalize.wgsl` puts sensor saturation at 1.0 linear, and the curve read middle grey at 0.18 of that and white at `0.18 × 2^4.5`. Both were wrong, and measurably: against the cameras' own JPEGs over **196 files, 11 bodies, 14 lenses, four brands**, a correctly exposed capture puts middle grey **1.15 stops lower** (so Sidecar rendered the camera's grey at −1.31 EV), and saturation sits **3.63 stops** over that grey, not 4.5 — so **no render ever reached display white**: 0 of 196 frames held a pixel there, and a blown window came out light grey. `Exposure::baseline_ev` (1.15) and `DEFAULT_WHITE_EV` (3.63) fix them; re-rendering all 196 puts grey at −0.01 EV and the brightest pixel on a clipping frame at 0.965 linear against 0.689. One constant for every camera deliberately — the per-body spread is barely larger than the spread within a body, and does not follow the exposure program. Both references are **stored per edit** (`baseline_ev`, `tone.white_zero_ev`) so an edit made before each bump renders exactly as it did and its sliders read where they were left.
+- **Tone curve, measured:** the logistic base curve starts shouldering immediately above middle grey — log-log slope 0.80 at +1 EV, 0.57 at +2 EV, 0.40 at +2.5 EV. Raising exposure therefore costs upper-midtone texture (0.73× the local contrast of the unedited render in one real case, measured as mean |∇ log Y|). The constraint is headroom: sRGB holds 2.47 stops above grey. *Measured against pictures later: the shoulder is not what made the rendering dark — the candidate curve at order 3 moved overall brightness by 0.02 EV, and the entry above is what did.* With the white point at what the sensor delivers there is less for a shoulder to do; see ROADMAP.
 - **Lens correction (§15), from the file first:** a survey of this library found who writes what. Sony ARW
   (ZV-1, ILCE-7RM4) carries distortion, CA and vignetting tables; Fujifilm RAF (X100F) carries CA and
   vignetting; Lightroom's DNGs carry `WarpRectilinear`/`FixVignetteRadial` opcodes; Nikon DSLRs, Canon, Olympus
@@ -644,6 +645,9 @@ and Whites (±0.2) → a power S-curve through encoded middle grey for Contrast 
 contrast) → the same user-curve LUT → `rgb × Y′ / Y`, with black lifted to neutral grey. The stored fields
 are the RAW ones (`whiteEv`, `blackEv`, `contrast`), read through the slider mapping, so the editor and the
 sidecar format need no second meaning; the editor limits Exposure to ±2 EV and hides Highlight recovery.
+Whites is read as the difference from `tone.whiteZeroEv`, the white point the edit was made against, rather
+than from today's constant — a developed file has no white point to place, so its Whites would otherwise move
+whenever the RAW default did. `baselineEv` is a RAW's alone and is not applied here at all.
 Measured on an iPhone HEIC at default settings: mean difference from the file 0.03/255, none above 0.12/255.
 
 **Film.** A RAW can be rendered the way colour negative film renders light, as an alternative to step 4's
@@ -1066,11 +1070,11 @@ misses an entry, and the file the person asked for still arrives.
 type Band = 'red' | 'orange' | 'yellow' | 'green' | 'aqua' | 'blue' | 'purple' | 'magenta';
 
 interface EditParams {
-  processVersion: 1;
+  processVersion: 4;
   whiteBalance: { mode: 'asShot' | 'custom'; temperatureK: number; tint: number };   // 2,000–50,000 K; −150…+150
-  exposure:     { ev: number; highlightBlend: number };                              // −5…+5 EV; 0…1
-  tone:         { blackEv: number; whiteEv: number; contrast: number;
-                  curve: Array<[x: number, y: number]> };                            // display-encoded 0…1
+  exposure:     { ev: number; baselineEv: number; highlightBlend: number };          // −5…+5 EV; the rendering's own, not a control; 0…1
+  tone:         { blackEv: number; whiteEv: number; whiteZeroEv: number; contrast: number;
+                  curve: Array<[x: number, y: number]> };                            // the whiteEv this edit calls Whites 0
   mixer:        Record<Band, { hue: number; saturation: number; luminance: number }>; // −100…+100
   detail:       { sharpen: { amount: number; radius: number; iterations: number };
                   denoise: { luminance: number; chroma: number } };

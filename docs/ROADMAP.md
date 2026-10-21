@@ -39,7 +39,7 @@ for, and the moment to build it is when evidence from more than one library asks
 meanwhile that Nikon's Active D-Lighting is baked into the previews this was measured against, the likeliest
 reason the D5 is the outlier. **The white point** — next.
 
-**Nothing reaches display white.** Saturation sits 2.47 stops over the curve's grey while the default
+**Nothing reached display white — fixed, `PROCESS_VERSION` 4.** Saturation sits 2.47 stops over the curve's grey while the default
 `whiteEv` puts display white at 4.5 — `0.18 × 2^4.5`, four times saturation — so the top two stops of the
 curve's range describe light the sensor cannot produce. Measured: **0 of 196 frames had a single pixel at
 white**, brightest pixel median 0.611 linear; on the 66 frames where the camera itself clips, 0.689. A blown
@@ -47,12 +47,22 @@ window renders as light grey, which is also why highlight-reconstruction artifac
 camera's rendering clips them to white and they vanish. The measurement says `whiteEv` should default to
 **3.63** (IQR 3.48…3.81), which with the baseline put the brightest pixel at 0.965 linear on clipping frames.
 
-Not done with the baseline because it collides with something: for a *developed* file `white_ev` is not a
-white point but the Whites slider, read against `DEFAULT_WHITE_EV` in `display_tone`, and `EditParams` cannot
-tell a RAW's edit from a JPEG's — so moving the constant would silently move Whites to −43 on every existing
-edit of a developed file. That needs its own design (a separate zero for the developed path, or a stored one)
-and its own migration. `Whites` at +100 already subtracts 2.0 stops, landing on 2.5 — within 0.03 of the
-headroom figure — which is why lowering Whites has been the working answer.
+`DEFAULT_WHITE_EV` is now 3.63, and on the clipping frames the brightest pixel went from 0.689 linear to
+**0.965** against the camera's 1.000. Grey stayed where the baseline put it, −0.01 EV, so the two changes do
+not disturb each other.
+
+The collision it had to get past, since the shape of it will recur: for a *developed* file `white_ev` is not
+a white point but the Whites slider, read against the default in `display_tone`, and `EditParams` cannot tell
+a RAW's edit from a JPEG's — so moving the constant would have put Whites at −43 on every existing edit of a
+developed file, and the editor hardcoded `4.5` in two more places. The answer is the one the baseline
+established: **store the reference with the edit**. `tone.white_zero_ev` is the `whiteEv` an edit calls
+Whites 0; a RAW reads `white_ev` absolutely, a developed file reads the difference, and the editor reads the
+same difference. An edit from before the bump keeps 4.5 and so keeps both its rendering and its slider.
+A look pasted between photos now carries slider positions rather than references, for the same reason.
+
+What this does not reach: the magenta cast on clipped highlights is less exposed than it was, but
+`highlight_blend`'s default (0.5) was chosen when nothing reached white, and wants re-measuring against a
+rendering that does.
 
 **Tone curve above middle grey.** *Read this against the two entries above: the shoulder is not where the
 darkness was.* The candidate curve at order 3 moved the median brightness by 0.02 EV. The logistic base

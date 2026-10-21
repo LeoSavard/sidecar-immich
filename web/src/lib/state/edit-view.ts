@@ -69,7 +69,9 @@ export function project(m: number[][], [x, y]: [number, number]): [number, numbe
 /** Slider positions, from the stored parameters. */
 export const view = {
 	contrast: (e: EditParams) => clean((e.tone.contrast - 1) * 100),
-	whites: (e: EditParams) => clean(((4.5 - e.tone.whiteEv) / 2) * 100),
+	// Against the edit's own zero, never a literal: an edit made before the white point moved reads 0 here,
+	// as it did when it was made (`Tone::white_zero_ev`).
+	whites: (e: EditParams) => clean(((e.tone.whiteZeroEv - e.tone.whiteEv) / 2) * 100),
 	blacks: (e: EditParams) => clean(((-8 - e.tone.blackEv) / 3) * 100),
 	highlightRecovery: (e: EditParams) => clean(e.exposure.highlightBlend * 100)
 };
@@ -237,9 +239,13 @@ export const PICKS: { id: string; label: string; take: (into: EditParams, from: 
 		id: 'light',
 		label: 'Light',
 		take: (e, f) => {
-			e.exposure = structuredClone(f.exposure);
+			// A look is what the person set, not the rendering references the other edit was made against:
+			// `baselineEv` and `whiteZeroEv` stay this photo's, and Whites travels as the slider position it
+			// shows rather than as an absolute EV. Carrying them would paste an old edit's darkness onto a
+			// new photo, and its Whites would land 43 points off.
+			e.exposure = { ...structuredClone(f.exposure), baselineEv: e.exposure.baselineEv };
 			e.tone.contrast = f.tone.contrast;
-			e.tone.whiteEv = f.tone.whiteEv;
+			e.tone.whiteEv = e.tone.whiteZeroEv - (f.tone.whiteZeroEv - f.tone.whiteEv);
 			e.tone.blackEv = f.tone.blackEv;
 			e.tone.highlights = f.tone.highlights ?? 0;
 			e.tone.shadows = f.tone.shadows ?? 0;
