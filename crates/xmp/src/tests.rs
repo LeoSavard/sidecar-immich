@@ -298,6 +298,35 @@ fn recording_the_same_render_twice_fills_one_entry_in() {
     );
 }
 
+/// A photo nobody has edited has no `sc:Edit`, and must read back as today's defaults — not as an edit
+/// migrated from version 1. The baseline exposure made this visible: a migrated default carries no baseline,
+/// so every untouched photo would have rendered a stop darker than an edited one and picked up a stray
+/// `Imported` node in its history for an edit it never had.
+#[test]
+fn a_sidecar_with_no_edit_reads_back_as_the_current_defaults() {
+    let tmp = tempfile::tempdir().unwrap();
+    let roots = [tmp.path().canonicalize().unwrap()];
+    let original = fixture(tmp.path(), "fresh.NEF");
+    assert_eq!(
+        SidecarDoc::load(&original).unwrap().edit(),
+        EditParams::default(),
+        "no sidecar at all"
+    );
+    update(&original, &roots, |d| {
+        d.sidecar["sourceSha1"] = serde_json::json!("abc");
+        Ok(())
+    })
+    .unwrap();
+    let doc = SidecarDoc::load(&original).unwrap();
+    assert!(doc.sidecar.get("edit").is_none(), "nothing stored an edit");
+    assert_eq!(doc.edit(), EditParams::default());
+    assert_eq!(
+        doc.history().nodes.len(),
+        1,
+        "the original alone: no edit means no imported node"
+    );
+}
+
 #[test]
 fn newer_process_version_is_read_only() {
     let tmp = tempfile::tempdir().unwrap();
