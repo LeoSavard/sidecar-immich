@@ -28,12 +28,16 @@ own Exposure and not at all to a developed file, which its own maker already ren
 puts grey at **−0.01 EV** (IQR −0.21…+0.15). An edit from before the bump keeps the picture it had: `migrate`
 gives it no baseline.
 
-*Two things this leaves.* **A per-model baseline.** One constant leaves a residual per body, from −0.45 EV
-(Nikon D5) to +0.32 EV (Sony ZV-1); the medians measured here are D3 1.20, X100F 1.19, D7000 1.13, D5 1.52,
-EOS M3 1.10, ZV-1 0.86, D3200 1.32, D3000 0.91, A7RM4 1.14. This is what the DNG spec's `BaselineExposure`
-exists for. Worth doing from more than one library, and worth knowing that Nikon's Active D-Lighting is baked
-into the previews this was measured against, the likeliest reason the D5 is the outlier. **The white point**
-— next.
+*One number for every camera, decided rather than defaulted to* (owner's call, 2026-10-20). A table looks
+tempting: the per-body medians are D3 1.20, X100F 1.19, D7000 1.13, D5 1.52, EOS M3 1.10, ZV-1 0.86, D3200
+1.32, D3000 0.91, A7RM4 1.14, so one constant leaves −0.45 EV (D5) to +0.32 EV (ZV-1). But the spread
+*within* a body is 0.17…0.45 EV — nearly the size of the spread between them — and it does not follow the
+exposure program: pooled, manual 0.39, aperture-priority 0.35, program AE 0.44, so a camera shot by hand is
+no more variable than one left to decide. A per-model number would therefore be fitting one photographer's
+habits as much as a camera's behaviour, from one library. It is what the DNG spec's `BaselineExposure` is
+for, and the moment to build it is when evidence from more than one library asks for it. Worth knowing
+meanwhile that Nikon's Active D-Lighting is baked into the previews this was measured against, the likeliest
+reason the D5 is the outlier. **The white point** — next.
 
 **Nothing reaches display white.** Saturation sits 2.47 stops over the curve's grey while the default
 `whiteEv` puts display white at 4.5 — `0.18 × 2^4.5`, four times saturation — so the top two stops of the

@@ -204,8 +204,14 @@ pub struct Exposure {
 /// Where a correctly exposed capture puts middle grey, in stops below sensor saturation, against the `0.18`
 /// the tone curve assumes. Measured against the cameras' own JPEGs: median 1.15 stops over 196 files, 11
 /// bodies, 14 lenses, four brands, and flat across scene brightness (`docs/ROADMAP.md`, "Middle grey sat a
-/// stop below where the curve assumes"). Per body the median ran from 0.86 (Sony ZV-1) to 1.52 (Nikon D5),
-/// so a per-model table is the refinement this constant stands in for.
+/// stop below where the curve assumes").
+///
+/// One number for every camera, deliberately. Per body the median ran from 0.86 (Sony ZV-1) to 1.52 (Nikon
+/// D5), which looks like an argument for a table — but the spread *within* a body is 0.17…0.45, nearly the
+/// same size, and it does not follow the exposure program either (manual 0.39, aperture-priority 0.35,
+/// program AE 0.44). So a per-model number would be fitting one photographer's habits as much as a camera's
+/// behaviour. A table is what DNG's `BaselineExposure` is for, and is worth building when evidence from more
+/// than one library asks for it.
 pub const BASELINE_EV: f64 = 1.15;
 
 impl Default for Exposure {
