@@ -58,8 +58,12 @@ fn main() -> Result<()> {
             .oriented(info.orientation_flip);
             let gpu = sidecar_engine::Gpu::new_headless()?;
             let pass = sidecar_engine::DevelopPass::new(&gpu)?;
+            let edit: sidecar_color::EditParams = match std::env::var("SIDECAR_EDIT") {
+                Ok(json) => serde_json::from_str(&json)?,
+                Err(_) => Default::default(),
+            };
             let packed = sidecar_color::pack(
-                &Default::default(),
+                &edit,
                 &info.color,
                 info.source_kind,
                 sidecar_color::DisplaySpace::Srgb,
