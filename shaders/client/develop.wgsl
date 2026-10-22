@@ -103,7 +103,7 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     e = tone_display_curve_in(c, local.tone);                  // 4
   } else {
     c = gamut_compress(c);
-    e = tone_map_curve_in(c, local.tone);                      // 4
+    e = tone_map_curve_in(c, local.tone, P.tone_shape);                      // 4
     if (film) { ef = film_curve_in(c, local.tone, P.film.y); }
   }
   e = layer_curves(lut_sample(tone_lut, e), layer_curves_tex, local.curves, M.count);

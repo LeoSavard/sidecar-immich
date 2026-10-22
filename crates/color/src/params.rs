@@ -12,7 +12,7 @@ use crate::tone;
 /// `migrate_highlight_shadow_anchors`) — an edit saved under version 1 needs its curve read differently, not
 /// just a field that defaults to off, so this is a real bump rather than an additive field. See
 /// docs/ROADMAP.md, "Curve editor: Highlights and Shadows stop sharing points with the manual curve".
-pub const PROCESS_VERSION: u32 = 5;
+pub const PROCESS_VERSION: u32 = 6;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
@@ -122,6 +122,11 @@ impl EditParams {
     pub fn migrate(&mut self) {
         if self.process_version < 2 {
             self.migrate_highlight_shadow_anchors();
+        }
+        if self.process_version < 6 {
+            // Its highlights were rendered by the logistic all the way up, and that is the picture the
+            // person approved: the straight segment is for edits made since.
+            self.tone.shoulder_order = 0.0;
         }
         if self.process_version < 5 {
             // Its highlights are the ones the person accepted, cast and all: they keep the colour they had
@@ -245,6 +250,14 @@ pub struct Tone {
     /// stops over grey that render white; a developed file has no white point to place, so its Whites is
     /// `white_zero_ev − white_ev` (`display_tone`), and the editor's slider reads it the same way.
     pub white_zero_ev: f64,
+    /// The shoulder's order above middle grey, or 0 for the logistic the curve used before
+    /// `PROCESS_VERSION` 6. Above grey the curve is a straight segment in log-log — a stop of scene light
+    /// for a stop of picture — meeting a shoulder `1 − (1 − t)ⁿ` that reaches white at `white_ev` with no
+    /// slope left over. Requiring them to meet without a kink fixes the knee at `(nH − W)/(n − 1)`, so the
+    /// order is the whole choice: **3** holds the straight segment to +1.5 EV and pays for it above +2.5.
+    /// Measured at the shipped white point: local contrast in the band it changes is 8–17% higher than the
+    /// logistic's across four frames (`docs/ROADMAP.md`). Shadows are the logistic's throughout.
+    pub shoulder_order: f64,
     /// 0…1: how completely colour fades to neutral as a rendered value approaches display white. A detector's
     /// receptors saturate one after another, so a bright colour loses its cast before it gets there; the
     /// ratio-preserving scale in `tone_apply` would otherwise hold chromaticity at full strength until the
@@ -278,6 +291,11 @@ pub const DEFAULT_BLACK_EV: f64 = -8.0;
 /// reached white at all**: 0 of 196 frames held a single pixel there (`docs/ROADMAP.md`).
 pub const DEFAULT_WHITE_EV: f64 = 3.63;
 
+/// The shoulder a new edit renders with above middle grey, chosen from pictures against orders 2 and 4
+/// (`docs/ROADMAP.md`, "Tone curve above middle grey"): 2 gives most of the straight segment away, 4 buys
+/// another half stop of it and flattens the last stops almost completely.
+pub const DEFAULT_SHOULDER_ORDER: f64 = 3.0;
+
 /// The `whiteEv` an edit made before `PROCESS_VERSION` 4 calls "Whites 0". Kept because an edit's Whites is
 /// read against the default it was made under, never against today's (`Tone::white_zero_ev`).
 pub const LEGACY_WHITE_EV: f64 = 4.5;
@@ -288,6 +306,7 @@ impl Default for Tone {
             black_ev: DEFAULT_BLACK_EV,
             white_ev: DEFAULT_WHITE_EV,
             white_zero_ev: DEFAULT_WHITE_EV,
+            shoulder_order: DEFAULT_SHOULDER_ORDER,
             highlight_bleach: 1.0,
             contrast: 1.0,
             curve: vec![[0.0, 0.0], [1.0, 1.0]],
@@ -934,6 +953,10 @@ pub struct DevelopParams {
     /// raised; here Exposure has already moved the film along its own characteristic curve, whose shoulder is
     /// the sheet's, and a second one would be counted twice.
     pub slide_tone: [f32; 4],
+    /// The base curve's shape above middle grey: x the shoulder's order (0 = the logistic, as before
+    /// `PROCESS_VERSION` 6), y Contrast as an exponent for the S-curve that grades the straight segment,
+    /// since a fixed segment has no steepness of its own for Contrast to set. z, w unused.
+    pub tone_shape: [f32; 4],
 }
 
 /// Contrast slider value → logistic steepness.
@@ -1183,6 +1206,17 @@ fn pack_inner(
             Some((_, p)) => [p.offsets[0], p.offsets[1], p.offsets[2], p.scale],
             None => [0.0; 4],
         },
+        // A developed file's tones are its own; the straight segment is for rendering a RAW.
+        tone_shape: [
+            if developed {
+                0.0
+            } else {
+                edit.tone.shoulder_order.clamp(0.0, 8.0) as f32
+            },
+            edit.tone.contrast.max(0.1) as f32,
+            0.0,
+            0.0,
+        ],
         slide_tone: match &slide {
             Some(_) => {
                 let mut t = display_tone(edit);
@@ -1325,7 +1359,7 @@ mod tests {
             panic!("not a struct")
         };
         assert_eq!(*span as usize, std::mem::size_of::<DevelopParams>());
-        assert_eq!(layouter[handle].size as usize, 416);
+        assert_eq!(layouter[handle].size as usize, 432);
         let rust = [
             ("wb_mul", std::mem::offset_of!(DevelopParams, wb_mul)),
             ("exposure", std::mem::offset_of!(DevelopParams, exposure)),
@@ -1366,6 +1400,10 @@ mod tests {
                 "slide_tone",
                 std::mem::offset_of!(DevelopParams, slide_tone),
             ),
+            (
+                "tone_shape",
+                std::mem::offset_of!(DevelopParams, tone_shape),
+            ),
         ];
         for (name, off) in rust {
             let m = members
@@ -1380,7 +1418,7 @@ mod tests {
             SourceKind::Raw,
             DisplaySpace::Srgb,
         );
-        assert_eq!(p.uniform.len(), 416);
+        assert_eq!(p.uniform.len(), 432);
         assert_eq!(p.lut.len(), LUT_SIZE);
         // exposure sits at byte 12, and for a RAW at default it is the baseline, not 1.0
         let gain = |p: &Packed| f32::from_le_bytes(p.uniform[12..16].try_into().unwrap());
