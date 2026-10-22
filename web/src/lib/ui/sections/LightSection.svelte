@@ -15,7 +15,7 @@ Light: exposure and the tone map's controls (DESIGN.md §7, modules 2 and 4). --
 	<Slider id="contrast" label="Contrast" value={sliders.contrast(edit)} min={-70} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => onchange((e) => { e.tone.contrast = 1 + v / 100; })} {oncommit} />
 	<Slider id="highlights" label="Highlights" value={edit.tone.highlights ?? 0} min={-100} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => onchange((e) => { e.tone.highlights = v; })} {oncommit} />
 	<Slider id="shadows" label="Shadows" value={edit.tone.shadows ?? 0} min={-100} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => onchange((e) => { e.tone.shadows = v; })} {oncommit} />
-	<Slider id="whites" label="Whites" value={sliders.whites(edit)} min={-100} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => onchange((e) => { e.tone.whiteEv = 4.5 - (v / 100) * 2; })} {oncommit} />
+	<Slider id="whites" label="Whites" value={sliders.whites(edit)} min={-100} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => onchange((e) => { e.tone.whiteEv = e.tone.whiteZeroEv - (v / 100) * 2; })} {oncommit} />
 	<Slider id="blacks" label="Blacks" value={sliders.blacks(edit)} min={-100} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => onchange((e) => { e.tone.blackEv = -8 - (v / 100) * 3; })} {oncommit} />
 	<!-- Highlight recovery reconstructs clipped sensor channels; an already-developed file has none to
 	     reconstruct, so the control would sit there doing nothing. -->

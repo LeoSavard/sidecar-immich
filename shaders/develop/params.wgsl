@@ -11,7 +11,7 @@ struct DevelopParams {
   hl_strength: f32,          // highlight blend strength
   display_referred: f32,     // 0 RAW (scene-referred), 1 JPEG/HEIC/PNG/TIFF (display-referred)
   saturation: f32,           // global chroma gain - 1 (OKLCh), the mask-saturation baseline every layer adds to
-  _pad1: f32,
+  highlight_bleach: f32,   // how completely colour fades to neutral as a value approaches display white
   mixer: array<vec4f, 8>,    // per band: hue shift (radians), chroma gain - 1, lightness shift, unused
   film: vec4f,               // film rendering: amount 0-1 (0 = neutral), interlayer spread in log exposure, unused x2
   mono: vec4f,               // black and white: x 1 when on, y the side of the mono table's cube, z 1 to output the adjacency map's log exposure, unused

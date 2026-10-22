@@ -39,7 +39,7 @@ for, and the moment to build it is when evidence from more than one library asks
 meanwhile that Nikon's Active D-Lighting is baked into the previews this was measured against, the likeliest
 reason the D5 is the outlier. **The white point** — next.
 
-**Nothing reaches display white.** Saturation sits 2.47 stops over the curve's grey while the default
+**Nothing reached display white — fixed, `PROCESS_VERSION` 4.** Saturation sits 2.47 stops over the curve's grey while the default
 `whiteEv` puts display white at 4.5 — `0.18 × 2^4.5`, four times saturation — so the top two stops of the
 curve's range describe light the sensor cannot produce. Measured: **0 of 196 frames had a single pixel at
 white**, brightest pixel median 0.611 linear; on the 66 frames where the camera itself clips, 0.689. A blown
@@ -47,12 +47,51 @@ window renders as light grey, which is also why highlight-reconstruction artifac
 camera's rendering clips them to white and they vanish. The measurement says `whiteEv` should default to
 **3.63** (IQR 3.48…3.81), which with the baseline put the brightest pixel at 0.965 linear on clipping frames.
 
-Not done with the baseline because it collides with something: for a *developed* file `white_ev` is not a
-white point but the Whites slider, read against `DEFAULT_WHITE_EV` in `display_tone`, and `EditParams` cannot
-tell a RAW's edit from a JPEG's — so moving the constant would silently move Whites to −43 on every existing
-edit of a developed file. That needs its own design (a separate zero for the developed path, or a stored one)
-and its own migration. `Whites` at +100 already subtracts 2.0 stops, landing on 2.5 — within 0.03 of the
-headroom figure — which is why lowering Whites has been the working answer.
+`DEFAULT_WHITE_EV` is now 3.63, and on the clipping frames the brightest pixel went from 0.689 linear to
+**0.965** against the camera's 1.000. Grey stayed where the baseline put it, −0.01 EV, so the two changes do
+not disturb each other.
+
+The collision it had to get past, since the shape of it will recur: for a *developed* file `white_ev` is not
+a white point but the Whites slider, read against the default in `display_tone`, and `EditParams` cannot tell
+a RAW's edit from a JPEG's — so moving the constant would have put Whites at −43 on every existing edit of a
+developed file, and the editor hardcoded `4.5` in two more places. The answer is the one the baseline
+established: **store the reference with the edit**. `tone.white_zero_ev` is the `whiteEv` an edit calls
+Whites 0; a RAW reads `white_ev` absolutely, a developed file reads the difference, and the editor reads the
+same difference. An edit from before the bump keeps 4.5 and so keeps both its rendering and its slider.
+A look pasted between photos now carries slider positions rather than references, for the same reason.
+
+**What a blown highlight does — `PROCESS_VERSION` 5.** Two faults sat on top of each other. The output
+transform rolled the top tenth off with a tanh shoulder that *never reached white*: display white came out at
+252 of 255, and a channel had to reach 1.2 — twenty per cent over white — to encode as 255. And
+`highlight_blend` neutralised a clipped pixel toward the **mean** of its three channels, which dims a blown
+area while it corrects it, pulling it further from white still.
+
+The owner's call, 2026-10-21: a detector saturates, so clipping should hit a wall. `soft_clip1` is now a
+plain clamp — which also bleaches a bright colour toward white the way film does, one channel reaching the
+ceiling before the next.
+
+The magenta and the seam turned out to be one question with one answer. A detector's receptors saturate one
+after another, so a bright colour loses its cast *before* it reaches white; `tone_apply` scales RGB by the
+luminance ratio, which holds chromaticity at full strength right up to the ceiling instead. So colour now
+fades to a neutral of the same luminance over the last stop (`Tone::highlight_bleach`, `BLEACH_FROM` = 0.5
+display-linear, complete at white). Measured: the window goes from no white at all to **12.2%** pure white
+with its bright-but-coloured pixels falling 34.7% → 23.4%, while **midtone saturation does not move at all**
+on any frame tested (0.209, 0.321, 0.079 before and after) — it touches only the top stop.
+
+*A control was built first and withdrawn.* Neutralising a fully *clipped* pixel toward its brightest channel —
+"Neutral highlights", driven by clip coverage — works, but once the white point is right such a pixel renders
+at white, where the bleach takes it to neutral anyway: with the bleach on it moved pure white by 0.3 points
+and the cast not at all. One mechanism, driven by how close a value is to being unmeasurable, does both jobs
+and is the easier thing to explain. The two diverge only when a blown area is deliberately brought *down* in
+tone — at −2 EV the coverage-driven version still cut the cast 39.1 → 12.6 — so if a photographer ever wants
+colour fixed in highlights they have darkened, that is the case to build it for.
+
+**The seam around a blown area was never a reconstruction artifact**, which is why three candidate causes were
+ruled out and nothing was found. Measured on the window: the band beside the white is 12.5% of the bright
+pixels at luma 215 and b/(r+g+b) 0.370 — *unclipped* bright daylight, rendered at its true colour half a stop
+below white, next to a region that reached it. The camera has no band because its curve clips that whole zone
+to white, colour and all. The bleach above is what closes it. `highlight_blend`'s own default (0.5, toward the
+mean, which dims a blown area as it neutralises) is now the odd one out and wants re-measuring beside it.
 
 **Tone curve above middle grey.** *Read this against the two entries above: the shoulder is not where the
 darkness was.* The candidate curve at order 3 moved the median brightness by 0.02 EV. The logistic base
