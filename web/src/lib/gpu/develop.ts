@@ -402,6 +402,46 @@ export class DevelopPass {
 		return n ? [sum[0] / n, sum[1] / n, sum[2] / n] : null;
 	}
 
+	/**
+	 * What the developed picture holds around a point of it (0…1), averaged over a square `radius` pixels out
+	 * from it: display-linear RGB, and the greatest single channel, which is what "at white" counts. Read from
+	 * developedTex, so it is the picture as the screen shows it before the view's overlays — the same numbers
+	 * the histogram bins. Null when the point is outside the picture.
+	 */
+	async sampleDeveloped(at: [number, number], radius: number): Promise<{ rgb: [number, number, number]; max: number } | null> {
+		const t = this.target!;
+		if (at.some((v) => v < 0 || v > 1)) return null;
+		const cx = Math.round(at[0] * (t.width - 1));
+		const cy = Math.round(at[1] * (t.height - 1));
+		const x0 = Math.max(0, Math.min(t.width - 1, cx - radius));
+		const y0 = Math.max(0, Math.min(t.height - 1, cy - radius));
+		const w = Math.min(t.width, cx + radius + 1) - x0;
+		const h = Math.min(t.height, cy + radius + 1) - y0;
+		if (w <= 0 || h <= 0) return null;
+		const bytesPerRow = 256 * Math.ceil((w * 8) / 256);
+		const buf = this.device.createBuffer({ size: bytesPerRow * h, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+		const encoder = this.device.createCommandEncoder();
+		encoder.copyTextureToBuffer({ texture: t, origin: [x0, y0] }, { buffer: buf, bytesPerRow }, [w, h]);
+		this.device.queue.submit([encoder.finish()]);
+		await buf.mapAsync(GPUMapMode.READ);
+		const sum = [0, 0, 0];
+		let max = 0;
+		for (let row = 0; row < h; row++) {
+			const bits = new Uint16Array(buf.getMappedRange(row * bytesPerRow, bytesPerRow), 0, w * 4);
+			const px = Array.from(bits, half);
+			for (let i = 0; i < w * 4; i += 4) {
+				sum[0] += px[i];
+				sum[1] += px[i + 1];
+				sum[2] += px[i + 2];
+				max = Math.max(max, px[i], px[i + 1], px[i + 2]);
+			}
+		}
+		buf.unmap();
+		buf.destroy();
+		const n = w * h;
+		return { rgb: [sum[0] / n, sum[1] / n, sum[2] / n], max };
+	}
+
 	/** Read developedTex back as RGBA16F bytes (tests and parity only — the editor never reads pixels back). */
 	async readback(): Promise<Uint8Array> {
 		const t = this.target!;
