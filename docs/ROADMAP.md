@@ -101,22 +101,35 @@ below white, next to a region that reached it. The camera has no band because it
 to white, colour and all. The bleach above is what closes it. `highlight_blend`'s own default (0.5, toward the
 mean, which dims a blown area as it neutralises) is now the odd one out and wants re-measuring beside it.
 
-**Tone curve above middle grey.** *Read this against the two entries above: the shoulder is not where the
-darkness was.* The candidate curve at order 3 moved the median brightness by 0.02 EV. The logistic base
-curve begins shouldering immediately above grey, so
-raising exposure flattens upper-midtone texture — measured log-log slope 0.80 at +1 EV, 0.57 at +2 EV, 0.40
-at +2.5 EV. The real constraint is headroom (sRGB holds 2.47 stops above grey; the default `whiteEv` asks for
-4.5), so the shape can only decide *where* the compression is spent, not avoid it. A straight segment in
-encoded space was built and measured: it raises +2 EV to 0.63 but pushes shadow contrast from 1.29 to 2.37 at
-−2 EV, which is worse. A straight segment in *log-log* space holds ~0.98 at +1 EV with neutral shadows and
-costs highlights above +2 EV (built on #21, `tone::straight_stops`). Either is a `ProcessVersion` bump.
-Decide with pictures, not slopes.
+**Tone curve above middle grey — done, `PROCESS_VERSION` 6.** The logistic began shouldering immediately
+above grey, so raising exposure cost upper-midtone texture. Above grey the curve is now a straight segment in
+log-log — a stop of scene light for a stop of picture — meeting a shoulder `1 − (1 − t)ⁿ` that reaches white
+at `whiteEv` with no slope left over. Requiring them to meet without a kink fixes the knee at `(nH − W)/(n −
+1)`, so the **order is the whole choice**; the owner chose **3** from pictures. Shadows are the logistic's
+throughout, and an edit from before the bump keeps the logistic above grey too (`Tone::shoulder_order` = 0).
 
-Note what the white point does to this question: `straight_stops` returns the identity whenever `whiteEv` is
-at or under the display's 2.47 stops of headroom, so if the white point comes down to what the sensor
-delivers, a stop of scene light is a stop of picture all the way to white and there is no shoulder to choose.
-The shoulder survives only as the price of headroom deliberately kept above saturation for reconstructed
-highlights — and then the order is exactly the knob for it.
+Re-measured at the shipped white point, which changed the question: moving `whiteEv` from 4.5 to 3.63 had
+already recovered much of what this was for, so what the segment buys is narrower than it was.
+
+| stops over grey | logistic (now) | order 2 | order 3 | order 4 |
+|---|---|---|---|---|
+| knee at | — | +1.32 | +1.90 | +2.09 |
+| +0.5 EV | 1.01 | 1.00 | 1.00 | 1.00 |
+| +1 EV | 0.88 | 1.00 | 1.00 | 1.00 |
+| +1.5 EV | 0.74 | 0.92 | 1.00 | 1.00 |
+| +2 EV | 0.62 | 0.70 | 0.88 | 1.00 |
+| +2.5 EV | 0.50 | 0.49 | 0.42 | 0.39 |
+| +3 EV | 0.40 | 0.27 | 0.13 | 0.07 |
+
+Measured on rendered frames, local contrast in the band the curve changes (+0.7…+2.5 EV), order 3 against the
+logistic: **window +8.7%, waterfall +7.7%, backlit water +17%, indoor +16%**. Deep shadows are bit-identical,
+as the shape only replaces the curve above grey.
+
+*What Contrast means above grey*, the second thing this item waited on: a fixed segment has no steepness of
+its own, so Contrast grades it the way it grades a developed file — a power S-curve through encoded middle
+grey, the identity at exponent 1, which leaves grey exactly where the segment puts it. Below grey it is still
+the logistic's steepness. Checked on the window frame: band contrast 0.0454 at Contrast −50, 0.0561 at 0,
+0.0640 at +50, and the deep shadows move with it too, so the slider acts over the whole range.
 
 **Focus peaking at full resolution — done**, in `sidecar_engine::focus`. It used to run in the view pass over
 the proxy, where downsampling had already averaged the high frequencies away, so it reported edge *contrast*

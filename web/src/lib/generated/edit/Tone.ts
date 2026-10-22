@@ -9,6 +9,16 @@ export type Tone = { blackEv: number, whiteEv: number,
  */
 whiteZeroEv: number, 
 /**
+ * The shoulder's order above middle grey, or 0 for the logistic the curve used before
+ * `PROCESS_VERSION` 6. Above grey the curve is a straight segment in log-log — a stop of scene light
+ * for a stop of picture — meeting a shoulder `1 − (1 − t)ⁿ` that reaches white at `white_ev` with no
+ * slope left over. Requiring them to meet without a kink fixes the knee at `(nH − W)/(n − 1)`, so the
+ * order is the whole choice: **3** holds the straight segment to +1.5 EV and pays for it above +2.5.
+ * Measured at the shipped white point: local contrast in the band it changes is 8–17% higher than the
+ * logistic's across four frames (`docs/ROADMAP.md`). Shadows are the logistic's throughout.
+ */
+shoulderOrder: number, 
+/**
  * 0…1: how completely colour fades to neutral as a rendered value approaches display white. A detector's
  * receptors saturate one after another, so a bright colour loses its cast before it gets there; the
  * ratio-preserving scale in `tone_apply` would otherwise hold chromaticity at full strength until the

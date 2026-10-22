@@ -62,10 +62,45 @@ fn tone_display_curve_in(c: vec3f, tone: vec4f) -> f32 {
   return e;
 }
 
-// Module 4 for a RAW, up to the user's curve: the encoded value the logistic gives this luminance.
-fn tone_map_curve_in(c: vec3f, tone: vec4f) -> f32 {
+/// The display's headroom above middle grey, in stops: sRGB's white is 1.0 and grey 0.18, so `log2(1/0.18)`.
+/// Everything between grey and `whiteEv` has to fit in it, so a shape can only choose where the compression
+/// is spent. Mirrors `sidecar_color::tone::HEADROOM_STOPS`.
+const HEADROOM_STOPS = 2.47393119;
+
+/// The candidate curve above middle grey, in stops: a straight segment in log-log — the identity in linear
+/// light, so a stop of scene light is a stop of picture — meeting a shoulder `1 − (1 − t)ⁿ` that reaches
+/// white at `white_ev` with no slope left over. Requiring them to meet without a kink fixes the knee at
+/// `(nH − W)/(n − 1)`, so the order is the whole choice. Mirrors `sidecar_color::tone::straight_stops`.
+fn straight_stops(u: f32, white_ev: f32, order: f32) -> f32 {
+  let w = max(white_ev, 1e-6);
+  if (w <= HEADROOM_STOPS) { return u; }
+  let n = max(order, 1.000001);
+  let k = clamp((n * HEADROOM_STOPS - w) / (n - 1.0), 0.0, HEADROOM_STOPS);
+  if (u <= k) { return u; }
+  if (u >= w) { return HEADROOM_STOPS; }
+  let t = (u - k) / (w - k);
+  return k + (HEADROOM_STOPS - k) * (1.0 - pow(1.0 - t, n));
+}
+
+/// Contrast above grey. A fixed segment has no steepness of its own for the slider to set, so Contrast
+/// grades it the way it grades a developed file: a power S-curve through encoded middle grey, the identity
+/// at exponent 1, which leaves grey itself exactly where the segment puts it.
+fn contrast_above_grey(e: f32, g: f32) -> f32 {
+  return 1.0 - (1.0 - GREY_ENC) * pow(max(1.0 - e, 0.0) / (1.0 - GREY_ENC), g);
+}
+
+// Module 4 for a RAW, up to the user's curve: the encoded value the base curve gives this luminance.
+// `shape.x` is the shoulder's order above grey, 0 for the logistic an edit from before `PROCESS_VERSION` 6
+// renders with; `shape.y` is Contrast as an exponent. Below grey it is the logistic either way.
+fn tone_map_curve_in(c: vec3f, tone: vec4f, shape: vec4f) -> f32 {
   let y = dot(c, LUMA_2020);
   if (y <= 1e-10) { return 0.0; }
+  if (shape.x > 1.0) {
+    let u = log2(y / 0.18);
+    if (u >= 0.0) {
+      return contrast_above_grey(srgb_encode1(0.18 * exp2(straight_stops(u, tone.y, shape.x))), shape.y);
+    }
+  }
   let x = clamp((log2(y / 0.18) - tone.x) / (tone.y - tone.x), 0.0, 1.0);
   let s0 = logistic(0.0, tone.z, tone.w);
   let s1 = logistic(1.0, tone.z, tone.w);
@@ -110,6 +145,6 @@ fn tone_display(c: vec3f, tone: vec4f, lut: texture_1d<f32>) -> vec3f {
   return tone_apply(c, lut_sample(lut, tone_display_curve_in(c, tone)), true, 0.0);
 }
 
-fn tone_map(c: vec3f, tone: vec4f, lut: texture_1d<f32>) -> vec3f {
-  return tone_apply(c, lut_sample(lut, tone_map_curve_in(c, tone)), false, 0.0);
+fn tone_map(c: vec3f, tone: vec4f, shape: vec4f, lut: texture_1d<f32>) -> vec3f {
+  return tone_apply(c, lut_sample(lut, tone_map_curve_in(c, tone, shape)), false, 0.0);
 }
