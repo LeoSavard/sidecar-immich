@@ -5,7 +5,25 @@ For whoever picks this up next, person or agent. [`ARCHITECTURE.md`](ARCHITECTUR
 checked), [`ROADMAP.md`](ROADMAP.md) what's known to be missing. This page is the state of play; update it when
 you stop.
 
-*Last updated 2026-10-20.*
+*Last updated 2026-10-22.*
+
+## Where it stands, 2026-10-22
+
+`main` holds everything through #37. Two features were asked for and built that day, each on its own branch
+off `main`, neither depending on the other:
+
+| Branch | What | Checked by |
+|---|---|---|
+| `measure-readout` | **Measure** (DESIGN.md §8): a fold under the histogram giving what the rendering holds — at white, at black, and a probed place in 0…255, in display-linear luminance and in stops from middle grey — with a column per side of the flip, so two renderings are read side by side instead of judged by eye. *Copy* writes the table as text. | `web/scripts/measure-smoke.mjs <url> <photo>` |
+| `local-intake` | **The editing folder** (DESIGN.md §3): a root with no `immich_prefix`, which Immich can neither resolve into nor be told about. `POST /api/intake?to=folder` writes an imported photo there, filed by its capture date through the root's template, and the home page offers the choice only where both destinations exist. | unit tests, plus an end-to-end import against a server configured with one |
+
+Neither changes a pixel: no shader, no uniform, no packing. The parity job should be unaffected by both.
+
+`deploy/sidecar.dev.toml` gained an editing folder at `testdata/cache/editing`, so `./dev/serve` exercises
+the folder path out of the box (it has no Immich, so that is the only destination it offers).
+
+**Still owed from 2026-10-20:** the 24 merged *remote* branches are not deleted. That needs
+`git push origin --delete <name> …` run by the owner; it is blocked here.
 
 ## Open pull requests
 
