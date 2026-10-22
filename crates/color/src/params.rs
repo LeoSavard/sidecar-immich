@@ -124,8 +124,9 @@ impl EditParams {
             self.migrate_highlight_shadow_anchors();
         }
         if self.process_version < 5 {
-            // Its blown highlights are the ones the person accepted, cast and all.
-            self.exposure.neutral_highlights = 0.0;
+            // Its highlights are the ones the person accepted, cast and all: they keep the colour they had
+            // right up to white rather than fading into it.
+            self.tone.highlight_bleach = 0.0;
         }
         if self.process_version < 4 {
             // Its Whites was set against the old white point, and a developed file's Whites *is* that
@@ -207,16 +208,6 @@ pub struct Exposure {
     /// Stored per edit rather than applied as a constant so that an edit made before `PROCESS_VERSION` 3
     /// keeps the picture it had: `migrate` sets it to zero for those, and only a new edit gets the baseline.
     pub baseline_ev: f64,
-    /// 0…1: how far a *fully* clipped pixel is taken to neutral — and so, once it clips, to white. Where every sample under a pixel saturated,
-    /// nothing about its colour was measured — each channel only reports "at least this much" — so the
-    /// honest value is neutral at its brightest channel, which the output transform then clips to white.
-    /// Full neutrality is what reads as white; the default takes a quarter of the cast out and leaves the
-    /// rest, since a real detector's blown areas keep some. The control is linear in the cast it removes —
-    /// white is simply where that cast reaches zero, not a second behaviour arriving late.
-    ///
-    /// Distinct from `highlight_blend`, which neutralises toward the *mean* of the three channels and so
-    /// dims a blown area as it corrects it (`docs/ROADMAP.md`, "What a blown highlight does").
-    pub neutral_highlights: f64,
     pub highlight_blend: f64,
 }
 
@@ -238,7 +229,6 @@ impl Default for Exposure {
         Self {
             ev: 0.0,
             baseline_ev: BASELINE_EV,
-            neutral_highlights: 0.25,
             highlight_blend: 0.5,
         }
     }
@@ -255,6 +245,15 @@ pub struct Tone {
     /// stops over grey that render white; a developed file has no white point to place, so its Whites is
     /// `white_zero_ev − white_ev` (`display_tone`), and the editor's slider reads it the same way.
     pub white_zero_ev: f64,
+    /// 0…1: how completely colour fades to neutral as a rendered value approaches display white. A detector's
+    /// receptors saturate one after another, so a bright colour loses its cast before it gets there; the
+    /// ratio-preserving scale in `tone_apply` would otherwise hold chromaticity at full strength until the
+    /// output clips, which leaves a coloured band beside anything that reached white — the seam reported
+    /// around a blown window. Begins a stop below white (`BLEACH_FROM` in `tone.wgsl`) and is complete at it.
+    ///
+    /// It subsumes neutralising a *clipped* pixel: once the white point is right such a pixel renders at
+    /// white, where this takes it to neutral anyway (`docs/ROADMAP.md`, "What a blown highlight does").
+    pub highlight_bleach: f64,
     pub contrast: f64,
     /// Control points over display-encoded values, `[x, y]` in 0…1. Manually drawn only, as of
     /// `PROCESS_VERSION` 2 — Highlights and Shadows are `highlights`/`shadows` below, not points in here.
@@ -289,6 +288,7 @@ impl Default for Tone {
             black_ev: DEFAULT_BLACK_EV,
             white_ev: DEFAULT_WHITE_EV,
             white_zero_ev: DEFAULT_WHITE_EV,
+            highlight_bleach: 1.0,
             contrast: 1.0,
             curve: vec![[0.0, 0.0], [1.0, 1.0]],
             highlights: 0.0,
@@ -902,8 +902,8 @@ pub struct DevelopParams {
     pub display_referred: f32,
     /// Global chroma gain − 1 (OKLCh) — the mask-saturation baseline every layer's own saturation adds to.
     pub saturation: f32,
-    /// How far a fully sensor-clipped pixel is taken to neutral at its brightest channel, and so to white.
-    pub neutral_highlights: f32,
+    /// How completely colour fades to neutral as a rendered value approaches display white.
+    pub highlight_bleach: f32,
     pub mixer: [[f32; 4]; 8],
     /// Film rendering: amount 0…1 (0 is the neutral rendering), interlayer spread in log exposure, unused ×2.
     pub film: [f32; 4],
@@ -1139,11 +1139,11 @@ fn pack_inner(
         },
         display_referred: if developed { 1.0 } else { 0.0 },
         saturation: (edit.saturation.clamp(-100.0, 100.0) / 100.0) as f32,
-        // A developed file has no sensor clipping of its own to answer for.
-        neutral_highlights: if developed {
+        // A developed file is already rendered: how it reached its own white is not ours to redo.
+        highlight_bleach: if developed {
             0.0
         } else {
-            edit.exposure.neutral_highlights.clamp(0.0, 1.0) as f32
+            edit.tone.highlight_bleach.clamp(0.0, 1.0) as f32
         },
         mixer: mixer_params(&edit.mixer),
         film: match (&edit.film, developed || mono || slide.is_some()) {
@@ -1398,35 +1398,31 @@ mod tests {
         );
     }
 
-    /// A pixel whose every sample saturated has no measured colour, so Neutral highlights takes it to neutral
-    /// at its brightest channel — not the mean, which `highlight_blend` uses and which *dims* a blown area
-    /// while it neutralises it. A developed file has no sensor clipping to answer for, and an edit from
-    /// before the control keeps the highlights it was approved with.
+    /// Colour fades to neutral as a value approaches white, so a bright colour loses its cast before it
+    /// gets there rather than holding it until the output clips. A developed file reached its own white
+    /// however its maker chose, so this is a RAW's alone, and an edit from before it keeps the highlights it
+    /// was approved with.
     #[test]
-    fn neutral_highlights_reaches_the_uniform_for_a_raw_only() {
+    fn the_highlight_bleach_reaches_the_uniform_for_a_raw_only() {
         let cam = crate::camera::nikon_d850();
         let field = |e: &EditParams, k| {
             let p = pack(e, &cam, k, DisplaySpace::Srgb);
             let u: &DevelopParams = bytemuck::from_bytes(&p.uniform);
-            u.neutral_highlights
+            u.highlight_bleach
         };
         let d = EditParams::default();
-        assert_eq!(field(&d, SourceKind::Raw), 0.25);
+        assert_eq!(field(&d, SourceKind::Raw), 1.0);
         assert_eq!(field(&d, SourceKind::Developed), 0.0);
-        let mut full = EditParams::default();
-        full.exposure.neutral_highlights = 1.0;
-        assert_eq!(field(&full, SourceKind::Raw), 1.0);
+        let mut half = EditParams::default();
+        half.tone.highlight_bleach = 0.5;
+        assert_eq!(field(&half, SourceKind::Raw), 0.5);
 
         let mut old: EditParams =
             serde_json::from_str(r#"{"processVersion":4,"exposure":{"ev":0.0}}"#).unwrap();
         old.migrate();
         assert_eq!(
-            old.exposure.neutral_highlights, 0.0,
-            "an older edit keeps its blown highlights"
-        );
-        assert_eq!(
-            old.exposure.highlight_blend, 0.5,
-            "and the control it did have"
+            old.tone.highlight_bleach, 0.0,
+            "an older edit keeps its highlights as they were"
         );
         assert_eq!(field(&old, SourceKind::Raw), 0.0);
     }

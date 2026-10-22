@@ -66,27 +66,32 @@ transform rolled the top tenth off with a tanh shoulder that *never reached whit
 `highlight_blend` neutralised a clipped pixel toward the **mean** of its three channels, which dims a blown
 area while it corrects it, pulling it further from white still.
 
-The owner's call, 2026-10-21: a detector saturates, so clipping should hit a wall. `soft_clip1` is now a plain
-clamp — which also bleaches a bright colour toward white the way film does, one channel reaching the ceiling
-before the next. And where every sample under a pixel saturated, no channel measured its colour: each reports
-only "at least this much", so the honest value is neutral at the **brightest** of the three. That is
-`Exposure::neutral_highlights`, its own control (**Neutral highlights**, default 25%), rather than more work
-for a slider named recovery.
+The owner's call, 2026-10-21: a detector saturates, so clipping should hit a wall. `soft_clip1` is now a
+plain clamp — which also bleaches a bright colour toward white the way film does, one channel reaching the
+ceiling before the next.
 
-Measured on the window frame: the cast over near-white pixels falls linearly with the control — 19.0 at 0%,
-16.0 at 25%, 13.5 at 50%, 11.2 at 75%, 9.2 at 100% — against the camera's 4.1. Pure white appears only at
-100%, and that is not a second behaviour lagging behind: white *is* where the cast reaches zero, since a pixel
-reads white only when its three channels are equal. The control is honest in the quantity it moves, which is
-why it is named for neutrality rather than for white. Raising the destination above the brightest channel was
-tried and changes nothing — the tone map scales RGB by the luminance ratio, so the absolute level is
-discarded and only the chromaticity survives (0.86% white at 75% of the control, against 0.02%).
-Frames whose highlights are bright but *not* sensor-clipped are untouched — the waterfall moved 0.00% to
-0.08% — because coverage is what drives it.
+The magenta and the seam turned out to be one question with one answer. A detector's receptors saturate one
+after another, so a bright colour loses its cast *before* it reaches white; `tone_apply` scales RGB by the
+luminance ratio, which holds chromaticity at full strength right up to the ceiling instead. So colour now
+fades to a neutral of the same luminance over the last stop (`Tone::highlight_bleach`, `BLEACH_FROM` = 0.5
+display-linear, complete at white). Measured: the window goes from no white at all to **12.2%** pure white
+with its bright-but-coloured pixels falling 34.7% → 23.4%, while **midtone saturation does not move at all**
+on any frame tested (0.209, 0.321, 0.079 before and after) — it touches only the top stop.
 
-What this still does not reach: the remaining gap to the camera, 9.2 against 4.1 even at full, is in
-*partially* clipped pixels, which this control deliberately leaves alone and which the reconstruction owns.
-That is the same place the hard edge comes from, below. `highlight_blend`'s own default (0.5, toward the mean)
-is now the odd one out and wants re-measuring beside the new control.
+*A control was built first and withdrawn.* Neutralising a fully *clipped* pixel toward its brightest channel —
+"Neutral highlights", driven by clip coverage — works, but once the white point is right such a pixel renders
+at white, where the bleach takes it to neutral anyway: with the bleach on it moved pure white by 0.3 points
+and the cast not at all. One mechanism, driven by how close a value is to being unmeasurable, does both jobs
+and is the easier thing to explain. The two diverge only when a blown area is deliberately brought *down* in
+tone — at −2 EV the coverage-driven version still cut the cast 39.1 → 12.6 — so if a photographer ever wants
+colour fixed in highlights they have darkened, that is the case to build it for.
+
+**The seam around a blown area was never a reconstruction artifact**, which is why three candidate causes were
+ruled out and nothing was found. Measured on the window: the band beside the white is 12.5% of the bright
+pixels at luma 215 and b/(r+g+b) 0.370 — *unclipped* bright daylight, rendered at its true colour half a stop
+below white, next to a region that reached it. The camera has no band because its curve clips that whole zone
+to white, colour and all. The bleach above is what closes it. `highlight_blend`'s own default (0.5, toward the
+mean, which dims a blown area as it neutralises) is now the odd one out and wants re-measuring beside it.
 
 **Tone curve above middle grey.** *Read this against the two entries above: the shoulder is not where the
 darkness was.* The candidate curve at order 3 moved the median brightness by 0.02 EV. The logistic base

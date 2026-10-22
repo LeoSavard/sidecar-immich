@@ -5,6 +5,11 @@
 // logistic curve, then by the user's monotone curve (a 4,096-entry LUT over display-encoded values).
 // RGB is scaled by the luminance ratio, which keeps channel ratios and therefore hue.
 
+/// Where the fade to neutral begins, in display-linear luminance — about a stop under white. Swept against
+/// pictures: starting here clears the coloured band beside a blown area while leaving a bright blue sky and
+/// every midtone alone (0.25 took more of the sky with it, 0.75 left the band showing).
+const BLEACH_FROM = 0.5;
+
 fn lut_sample(lut: texture_1d<f32>, v: f32) -> f32 {
   let last = textureDimensions(lut) - 1u;
   let f = clamp(v, 0.0, 1.0) * f32(last);
@@ -83,7 +88,7 @@ fn film_curve_in(c: vec3f, tone: vec4f, spread: f32) -> vec3f {
 }
 
 // Scale `c` to the luminance the curves settled on, `e` display-encoded.
-fn tone_apply(c: vec3f, e: f32, developed: bool) -> vec3f {
+fn tone_apply(c: vec3f, e: f32, developed: bool, bleach: f32) -> vec3f {
   let y_out = srgb_decode1(e);
   if (developed) {
     let y = max(dot(c, LUMA_2020), 0.0);
@@ -93,13 +98,18 @@ fn tone_apply(c: vec3f, e: f32, developed: bool) -> vec3f {
   }
   let y = dot(c, LUMA_2020);
   if (y <= 1e-10) { return vec3f(0.0); }
-  return c * (y_out / y);
+  // A detector's receptors saturate one after another, so a bright colour loses its cast before it reaches
+  // white. Scaling by the luminance ratio alone holds chromaticity at full strength right up to the ceiling,
+  // which leaves a coloured band wherever the picture gets there — so fade toward a neutral of the same
+  // luminance over the last stop. `vec3f(y_out)` has exactly that luminance: the weights sum to 1.
+  let t = smoothstep(BLEACH_FROM, 1.0, y_out) * bleach;
+  return mix(c * (y_out / y), vec3f(y_out), t);
 }
 
 fn tone_display(c: vec3f, tone: vec4f, lut: texture_1d<f32>) -> vec3f {
-  return tone_apply(c, lut_sample(lut, tone_display_curve_in(c, tone)), true);
+  return tone_apply(c, lut_sample(lut, tone_display_curve_in(c, tone)), true, 0.0);
 }
 
 fn tone_map(c: vec3f, tone: vec4f, lut: texture_1d<f32>) -> vec3f {
-  return tone_apply(c, lut_sample(lut, tone_map_curve_in(c, tone)), false);
+  return tone_apply(c, lut_sample(lut, tone_map_curve_in(c, tone)), false, 0.0);
 }
