@@ -167,6 +167,7 @@ fn camera_color(i: &sys::sc_info) -> CameraColor {
     CameraColor {
         as_shot_mul,
         calibrations,
+        baseline_exposure: None,
     }
 }
 

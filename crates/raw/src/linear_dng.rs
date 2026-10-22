@@ -229,9 +229,15 @@ fn color(ifd0: &Tags) -> CameraColor {
         .map(|f| f.values.clone())
         .filter(|v| v.len() == 3 && v.iter().all(|&x| x > 0.0));
     let as_shot_mul = neutral.map_or([1.0, 1.0, 1.0], |n| [n[1] / n[0], 1.0, n[1] / n[2]]);
+    // `BaselineExposure` (50730), in stops: what the maker says a correct exposure sits at under the
+    // rendering's middle grey. Where a file states it, it is data rather than the measured stand-in
+    // `BASELINE_EV` holds for files that do not — Apple's ProRAW says 4.13, three stops more, and a photo
+    // rendered without it is three stops dark.
+    let baseline_exposure = first(ifd0, 50730).filter(|v| v.is_finite() && v.abs() <= 8.0);
     CameraColor {
         as_shot_mul,
         calibrations,
+        baseline_exposure,
     }
 }
 

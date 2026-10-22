@@ -28,7 +28,15 @@ own Exposure and not at all to a developed file, which its own maker already ren
 puts grey at **−0.01 EV** (IQR −0.21…+0.15). An edit from before the bump keeps the picture it had: `migrate`
 gives it no baseline.
 
-*One number for every camera, decided rather than defaulted to* (owner's call, 2026-10-20). A table looks
+*A file that states its baseline is believed; the constant is for files that do not* (owner's call,
+2026-10-22). `BaselineExposure` (DNG 50730) is the standard's own answer to this question, and where a maker
+wrote it down there is nothing to guess: Apple's ProRAW declares **4.13 stops**, three more than the measured
+stand-in, and a photo rendered without it is three stops dark. `CameraColor::baseline_exposure` carries it
+from `linear_dng` and `pack` prefers it. The distinction is the point — data where the file has it, a measured
+constant only where it does not. Read for DNGs through `linear_dng`; a LibRaw-decoded DNG does not yet expose
+the tag, which is the obvious next piece.
+
+*One number for every camera where the file is silent, decided rather than defaulted to* (owner's call, 2026-10-20). A table looks
 tempting: the per-body medians are D3 1.20, X100F 1.19, D7000 1.13, D5 1.52, EOS M3 1.10, ZV-1 0.86, D3200
 1.32, D3000 0.91, A7RM4 1.14, so one constant leaves −0.45 EV (D5) to +0.32 EV (ZV-1). But the spread
 *within* a body is 0.17…0.45 EV — nearly the size of the spread between them — and it does not follow the
