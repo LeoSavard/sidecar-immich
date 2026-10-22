@@ -34,7 +34,7 @@ fi
 config="${SIDECAR_CONFIG:-deploy/sidecar.dev.toml}"
 port="${SIDECAR_PORT:-$(free_port 8091)}"
 webport="$(free_port $((port + 1)))"
-mkdir -p "$here/testdata/cache/library"
+mkdir -p "$here/testdata/cache/library" "$here/testdata/cache/editing"
 # The config this run uses: this checkout's state directory, and in host-network mode its own ports.
 derived="testdata/cache/sidecar.toml"
 sed "s|^state_dir *=.*|state_dir = \"$SIDECAR_STATE_DIR\"|" "$here/$config" > "$here/$derived"

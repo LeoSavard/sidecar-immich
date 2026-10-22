@@ -28,3 +28,12 @@ mount         = "/mnt/storage/Photography/Library"
 template      = "{{y}}/{{MM}}.{{MMMM}}/{{y}}-{{MM}}-{{dd}}/{{filename}}"
 month_locale  = "en"
 moves_files   = false
+
+# The editing folder: photos imported from the device land here, and Immich is told nothing about it (no
+# immich_prefix). This is what a filesystem import looks like in a deployment that also has a library.
+[[roots]]
+name          = "Editing folder"
+mount         = "/src/testdata/cache/editing"
+template      = "{{y}}/{{MM}}.{{MMMM}}/{{y}}-{{MM}}-{{dd}}/{{filename}}"
+month_locale  = "en"
+intake        = true

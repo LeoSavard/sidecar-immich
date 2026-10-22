@@ -9,7 +9,7 @@ pub mod resolve;
 pub mod session;
 pub mod store;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use axum::{
     Json, Router,
     body::Body,
@@ -286,17 +286,44 @@ const INTAKE_LIMIT: usize = 1 << 30;
 /// either can't see or would open only to have the file move out from under it.
 const INTAKE_SETTLE: Duration = Duration::from_secs(20);
 
+/// Where `POST /api/intake` puts the photo. Absent means the library, which is what it always did.
+#[derive(Deserialize, Default, PartialEq)]
+#[serde(rename_all = "lowercase")]
+enum IntakeTo {
+    #[default]
+    Immich,
+    /// The editing folder: a configured root Immich knows nothing about (DESIGN.md §3).
+    Folder,
+}
+
+#[derive(Deserialize, Default)]
+struct IntakeQuery {
+    #[serde(default)]
+    to: IntakeTo,
+}
+
 /// `POST /api/intake` (multipart) — a photo chosen on the device being edited on, rather than one already in
-/// the library. It goes into Immich first and is then opened exactly like any other asset: the edit belongs
-/// in an XMP beside an original, so the original has to become a file in a library root before there is
-/// anywhere to put it. Nothing about the editor downstream knows the photo arrived this way.
+/// the library. The edit belongs in an XMP beside an original, so the original has to become a file in a root
+/// before there is anywhere to put it; `?to=` says which root. `immich` uploads it to the library and opens
+/// what Immich filed, `folder` writes it into the editing folder and Immich never sees it. Either way nothing
+/// about the editor downstream knows the photo arrived this way.
 async fn intake(
     State(app): State<Arc<App>>,
     ApiUser(user): ApiUser,
+    Query(q): Query<IntakeQuery>,
     mut form: axum::extract::Multipart,
 ) -> Response {
-    if !app.immich.enabled() {
-        return (StatusCode::NOT_IMPLEMENTED, "This Sidecar has no Immich library to put a photo into, so it can only open photos already on the server.").into_response();
+    let folder = app.config.intake_root();
+    if q.to == IntakeTo::Immich && !app.immich.enabled() {
+        let detail = if folder.is_some() {
+            "This Sidecar has no Immich library. Import the photo into the editing folder instead."
+        } else {
+            "This Sidecar has no Immich library to put a photo into, so it can only open photos already on the server."
+        };
+        return (StatusCode::NOT_IMPLEMENTED, detail).into_response();
+    }
+    if q.to == IntakeTo::Folder && folder.is_none() {
+        return (StatusCode::NOT_IMPLEMENTED, "This Sidecar has no editing folder configured, so an imported photo has nowhere to go that isn't the library.").into_response();
     }
     let mut file: Option<(String, Vec<u8>)> = None;
     loop {
@@ -328,6 +355,14 @@ async fn intake(
     // into someone's library by an editor that then refuses to open it.
     if !sidecar_template::is_editable(std::path::Path::new(&file_name)) {
         return (StatusCode::UNPROCESSABLE_ENTITY, cant_open(&file_name)).into_response();
+    }
+
+    if q.to == IntakeTo::Folder {
+        let root = folder.expect("checked above");
+        return match into_folder(&app, &user, root, &file_name, bytes).await {
+            Ok(key) => Json(serde_json::json!({ "assetKey": key })).into_response(),
+            Err(e) => (StatusCode::UNPROCESSABLE_ENTITY, format!("{e:#}")).into_response(),
+        };
     }
 
     let id = match app
@@ -372,6 +407,125 @@ async fn intake(
         )
     };
     (StatusCode::BAD_GATEWAY, format!("{file_name} is in your library, but Sidecar can't open it yet. {detail} Try opening it from Immich in a moment.")).into_response()
+}
+
+/// Where a photo lands while its capture date is being read: inside the root, so the move into place is a
+/// rename on the same filesystem rather than a copy, and hidden so a folder listing doesn't show half-imports.
+const STAGING: &str = ".incoming";
+
+/// A photo chosen on the editing device, written into the editing folder and opened from there — no upload,
+/// no Immich, nothing to wait for a library to file. Immich's own intake is what settles a photo's path, and
+/// there is none here, so the path is settled the same way a library would: by the capture date, through the
+/// root's storage template. That date is in the file, which only the worker can read, so the bytes are
+/// written to a staging name first, ingested to learn the date, and then renamed into place.
+async fn into_folder(
+    app: &Arc<App>,
+    user: &User,
+    root: &config::Root,
+    file_name: &str,
+    bytes: Vec<u8>,
+) -> Result<String> {
+    let staging = root.mount.join(STAGING);
+    tokio::fs::create_dir_all(&staging)
+        .await
+        .with_context(|| format!("making {}", staging.display()))?;
+    let temp = staging.join(format!("{}-{file_name}", random_hex(8)));
+    tokio::fs::write(&temp, &bytes)
+        .await
+        .with_context(|| format!("writing {}", temp.display()))?;
+    // Anything from here on leaves a file in the staging folder if it fails; take it away on the way out.
+    let placed = place(app, root, &temp, file_name, &bytes).await;
+    if placed.is_err() {
+        let _ = tokio::fs::remove_file(&temp).await;
+    }
+    let path = placed?;
+    admit(
+        app,
+        user,
+        Candidate {
+            path,
+            file_name: file_name.to_string(),
+            immich_asset_id: None,
+            taken: None,
+        },
+    )
+    .await
+}
+
+/// The staged file's home: the root's template rendered for the date in the file, and a name nothing else in
+/// that folder has. Returns where it now is.
+async fn place(
+    app: &Arc<App>,
+    root: &config::Root,
+    temp: &std::path::Path,
+    file_name: &str,
+    bytes: &[u8],
+) -> Result<std::path::PathBuf> {
+    let resp = app.ingest(temp).await?;
+    if !resp.status().is_success() {
+        anyhow::bail!("{}", resp.text().await.unwrap_or_default());
+    }
+    let meta: serde_json::Value = resp.json().await?;
+    // 0 is "no DateTimeOriginal"; a photo with no date is filed under the day it was imported, as a library
+    // with nothing else to go on would file it.
+    let captured = meta["info"]["capturedUnix"].as_i64().unwrap_or_default();
+    let date = sidecar_template::Date::from_unix(if captured > 0 {
+        captured
+    } else {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64)
+    });
+    let dir = root.mount.join(sidecar_template::render_dir(
+        &root.template,
+        date,
+        &root.month_locale,
+    ));
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .with_context(|| format!("making {}", dir.display()))?;
+    let dest = free_name(&dir, file_name, bytes).await?;
+    // `free_name` only hands back a path that exists when the file there holds exactly these bytes: the same
+    // photo imported twice is one file, as it would be in a library, and the staged copy goes away.
+    if dest.exists() {
+        tokio::fs::remove_file(temp).await.ok();
+        return Ok(dest);
+    }
+    tokio::fs::rename(temp, &dest)
+        .await
+        .with_context(|| format!("moving the import into {}", dir.display()))?;
+    Ok(dest)
+}
+
+/// `dir/file_name`, or the same name with `-1`, `-2` … before the extension if something is already there.
+/// A file of that name holding exactly these bytes is the same photo: its path comes back as it stands, and
+/// the caller keeps that one instead of writing a second copy.
+async fn free_name(
+    dir: &std::path::Path,
+    file_name: &str,
+    bytes: &[u8],
+) -> Result<std::path::PathBuf> {
+    let stem = sidecar_template::stem_of(file_name);
+    let ext = std::path::Path::new(file_name)
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    for n in 0..1000 {
+        let candidate = dir.join(if n == 0 {
+            file_name.to_string()
+        } else {
+            format!("{stem}-{n}{ext}")
+        });
+        match tokio::fs::read(&candidate).await {
+            Err(_) => return Ok(candidate),
+            Ok(there) if there == bytes => return Ok(candidate),
+            Ok(_) => continue,
+        }
+    }
+    anyhow::bail!(
+        "a thousand files in {} are already called {file_name}",
+        dir.display()
+    )
 }
 
 async fn new_pick(
@@ -1276,6 +1430,51 @@ mod tests {
         assert_eq!(
             EditState::of(&SidecarDoc::load(&other).unwrap(), "bbbb", true, false).saved_for,
             None
+        );
+    }
+
+    /// A name nothing else holds. The import keeps the photographer's file name where it can.
+    #[tokio::test]
+    async fn an_import_keeps_its_name_when_the_folder_is_free() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(
+            free_name(tmp.path(), "IMG_1768.CR2", b"raw").await.unwrap(),
+            tmp.path().join("IMG_1768.CR2")
+        );
+    }
+
+    /// A different photo that happens to share a name doesn't overwrite the one already there.
+    #[tokio::test]
+    async fn a_name_collision_numbers_the_new_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("IMG_1768.CR2"), b"first").unwrap();
+        assert_eq!(
+            free_name(tmp.path(), "IMG_1768.CR2", b"second")
+                .await
+                .unwrap(),
+            tmp.path().join("IMG_1768-1.CR2")
+        );
+        std::fs::write(tmp.path().join("IMG_1768-1.CR2"), b"second").unwrap();
+        // And the one after that steps past both.
+        assert_eq!(
+            free_name(tmp.path(), "IMG_1768.CR2", b"third")
+                .await
+                .unwrap(),
+            tmp.path().join("IMG_1768-2.CR2")
+        );
+    }
+
+    /// The same photo imported twice is one file: the path that already holds those bytes comes back, and
+    /// the caller keeps it rather than writing a copy beside it.
+    #[tokio::test]
+    async fn the_same_photo_twice_is_the_file_already_there() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("IMG_1768.CR2"), b"raw").unwrap();
+        let again = free_name(tmp.path(), "IMG_1768.CR2", b"raw").await.unwrap();
+        assert_eq!(again, tmp.path().join("IMG_1768.CR2"));
+        assert!(
+            again.exists(),
+            "the caller keeps this one instead of writing another"
         );
     }
 }
