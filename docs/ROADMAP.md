@@ -60,9 +60,31 @@ Whites 0; a RAW reads `white_ev` absolutely, a developed file reads the differen
 same difference. An edit from before the bump keeps 4.5 and so keeps both its rendering and its slider.
 A look pasted between photos now carries slider positions rather than references, for the same reason.
 
-What this does not reach: the magenta cast on clipped highlights is less exposed than it was, but
-`highlight_blend`'s default (0.5) was chosen when nothing reached white, and wants re-measuring against a
-rendering that does.
+**What a blown highlight does — `PROCESS_VERSION` 5.** Two faults sat on top of each other. The output
+transform rolled the top tenth off with a tanh shoulder that *never reached white*: display white came out at
+252 of 255, and a channel had to reach 1.2 — twenty per cent over white — to encode as 255. And
+`highlight_blend` neutralised a clipped pixel toward the **mean** of its three channels, which dims a blown
+area while it corrects it, pulling it further from white still.
+
+The owner's call, 2026-10-21: a detector saturates, so clipping should hit a wall. `soft_clip1` is now a plain
+clamp — which also bleaches a bright colour toward white the way film does, one channel reaching the ceiling
+before the next. And where every sample under a pixel saturated, no channel measured its colour: each reports
+only "at least this much", so the honest value is neutral at the **brightest** of the three. That is
+`Exposure::white_highlights`, its own control (**White highlights**, default 25%), rather than more work for a
+slider named recovery.
+
+Measured on the window frame: the cast over near-white pixels falls smoothly with the control — 19.0 at 0%,
+16.0 at 25%, 13.5 at 50%, 11.2 at 75%, 9.2 at 100% — against the camera's 4.1. **Literal white is a cliff at
+100%**, not a ramp: a mix toward the brightest channel leaves the weakest one short until it is taken all the
+way, and all three must reach the ceiling independently to make 255. So the default reduces the cast and does
+not force white, which is what was asked for; a blown window still reads white only at the top of the control.
+Frames whose highlights are bright but *not* sensor-clipped are untouched — the waterfall moved 0.00% to
+0.08% — because coverage is what drives it.
+
+What this still does not reach: the remaining gap to the camera, 9.2 against 4.1 even at full, is in
+*partially* clipped pixels, which this control deliberately leaves alone and which the reconstruction owns.
+That is the same place the hard edge comes from, below. `highlight_blend`'s own default (0.5, toward the mean)
+is now the odd one out and wants re-measuring beside the new control.
 
 **Tone curve above middle grey.** *Read this against the two entries above: the shoulder is not where the
 darkness was.* The candidate curve at order 3 moved the median brightness by 0.02 EV. The logistic base

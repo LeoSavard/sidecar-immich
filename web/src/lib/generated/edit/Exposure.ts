@@ -11,4 +11,15 @@ export type Exposure = { ev: number,
  * Stored per edit rather than applied as a constant so that an edit made before `PROCESS_VERSION` 3
  * keeps the picture it had: `migrate` sets it to zero for those, and only a new edit gets the baseline.
  */
-baselineEv: number, highlightBlend: number, };
+baselineEv: number, 
+/**
+ * 0…1: how far a *fully* clipped pixel goes to white. Where every sample under a pixel saturated,
+ * nothing about its colour was measured — each channel only reports "at least this much" — so the
+ * honest value is neutral at its brightest channel, which the output transform then clips to white.
+ * Left at the brightest channel in full it reads as a cut-out, so the default takes it a quarter of
+ * the way and the scene keeps some of the cast a real detector would show.
+ *
+ * Distinct from `highlight_blend`, which neutralises toward the *mean* of the three channels and so
+ * dims a blown area as it corrects it (`docs/ROADMAP.md`, "What a blown highlight does").
+ */
+whiteHighlights: number, highlightBlend: number, };
