@@ -62,7 +62,7 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   var c = white_balance(src.rgb, P.wb_mul * local.gain);      // 1
   c = exposure(c, P.exposure * exp2(local.ev));                // 2
   c = highlight_blend(c, src.a, P.hl_strength);
-  c = white_highlights(c, src.a, P.white_highlights);
+  c = neutral_highlights(c, src.a, P.neutral_highlights);
   c = P.cam_to_work * c;                                       // 3
   // Where this pixel is in the whole frame — `M.frame` says where a loupe's tile sits in it — so a tile's grain
   // and developer are the export's.

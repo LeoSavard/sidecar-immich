@@ -13,13 +13,14 @@ export type Exposure = { ev: number,
  */
 baselineEv: number, 
 /**
- * 0…1: how far a *fully* clipped pixel goes to white. Where every sample under a pixel saturated,
+ * 0…1: how far a *fully* clipped pixel is taken to neutral — and so, once it clips, to white. Where every sample under a pixel saturated,
  * nothing about its colour was measured — each channel only reports "at least this much" — so the
  * honest value is neutral at its brightest channel, which the output transform then clips to white.
- * Left at the brightest channel in full it reads as a cut-out, so the default takes it a quarter of
- * the way and the scene keeps some of the cast a real detector would show.
+ * Full neutrality is what reads as white; the default takes a quarter of the cast out and leaves the
+ * rest, since a real detector's blown areas keep some. The control is linear in the cast it removes —
+ * white is simply where that cast reaches zero, not a second behaviour arriving late.
  *
  * Distinct from `highlight_blend`, which neutralises toward the *mean* of the three channels and so
  * dims a blown area as it corrects it (`docs/ROADMAP.md`, "What a blown highlight does").
  */
-whiteHighlights: number, highlightBlend: number, };
+neutralHighlights: number, highlightBlend: number, };

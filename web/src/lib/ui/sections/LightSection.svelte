@@ -18,10 +18,10 @@ Light: exposure and the tone map's controls (DESIGN.md §7, modules 2 and 4). --
 	<Slider id="whites" label="Whites" value={sliders.whites(edit)} min={-100} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => onchange((e) => { e.tone.whiteEv = e.tone.whiteZeroEv - (v / 100) * 2; })} {oncommit} />
 	<Slider id="blacks" label="Blacks" value={sliders.blacks(edit)} min={-100} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => onchange((e) => { e.tone.blackEv = -8 - (v / 100) * 3; })} {oncommit} />
 	<!-- Both answer for sensor clipping, which an already-developed file does not have: Highlight recovery
-	     neutralises the cast white balance leaves on clipped pixels, White highlights takes a pixel whose
+	     neutralises the cast white balance leaves on clipped pixels, Neutral highlights takes a pixel whose
 	     every sample saturated to neutral at its brightest channel, and so to white. -->
 	{#if !developed}
 		<Slider id="hl-blend" label="Highlight recovery" value={sliders.highlightRecovery(edit)} min={0} max={100} defaultValue={50} format={(v) => `${decimals(v)} %`} onchange={(v) => onchange((e) => { e.exposure.highlightBlend = v / 100; })} {oncommit} />
-		<Slider id="white-highlights" label="White highlights" value={sliders.whiteHighlights(edit)} min={0} max={100} defaultValue={25} format={(v) => `${decimals(v)} %`} onchange={(v) => onchange((e) => { e.exposure.whiteHighlights = v / 100; })} {oncommit} />
+		<Slider id="neutral-highlights" label="Neutral highlights" value={sliders.neutralHighlights(edit)} min={0} max={100} defaultValue={25} format={(v) => `${decimals(v)} %`} onchange={(v) => onchange((e) => { e.exposure.neutralHighlights = v / 100; })} {oncommit} />
 	{/if}
 </div>

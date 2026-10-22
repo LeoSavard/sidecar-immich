@@ -70,14 +70,16 @@ The owner's call, 2026-10-21: a detector saturates, so clipping should hit a wal
 clamp — which also bleaches a bright colour toward white the way film does, one channel reaching the ceiling
 before the next. And where every sample under a pixel saturated, no channel measured its colour: each reports
 only "at least this much", so the honest value is neutral at the **brightest** of the three. That is
-`Exposure::white_highlights`, its own control (**White highlights**, default 25%), rather than more work for a
-slider named recovery.
+`Exposure::neutral_highlights`, its own control (**Neutral highlights**, default 25%), rather than more work
+for a slider named recovery.
 
-Measured on the window frame: the cast over near-white pixels falls smoothly with the control — 19.0 at 0%,
-16.0 at 25%, 13.5 at 50%, 11.2 at 75%, 9.2 at 100% — against the camera's 4.1. **Literal white is a cliff at
-100%**, not a ramp: a mix toward the brightest channel leaves the weakest one short until it is taken all the
-way, and all three must reach the ceiling independently to make 255. So the default reduces the cast and does
-not force white, which is what was asked for; a blown window still reads white only at the top of the control.
+Measured on the window frame: the cast over near-white pixels falls linearly with the control — 19.0 at 0%,
+16.0 at 25%, 13.5 at 50%, 11.2 at 75%, 9.2 at 100% — against the camera's 4.1. Pure white appears only at
+100%, and that is not a second behaviour lagging behind: white *is* where the cast reaches zero, since a pixel
+reads white only when its three channels are equal. The control is honest in the quantity it moves, which is
+why it is named for neutrality rather than for white. Raising the destination above the brightest channel was
+tried and changes nothing — the tone map scales RGB by the luminance ratio, so the absolute level is
+discarded and only the chromaticity survives (0.86% white at 75% of the control, against 0.02%).
 Frames whose highlights are bright but *not* sensor-clipped are untouched — the waterfall moved 0.00% to
 0.08% — because coverage is what drives it.
 

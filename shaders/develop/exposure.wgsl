@@ -10,9 +10,9 @@ fn exposure(c: vec3f, gain: f32) -> vec3f {
 // same mean level. This suppresses the magenta cast white balance multipliers put on reconstructed highlights.
 // Where every sample under a pixel saturated, each channel reports only "at least this much" and none of
 // them measured its colour: the honest value is neutral at the brightest of the three, which the output
-// transform clips to white. `amount` is how far to take it, since a detector's own blown areas keep a little
-// of their cast and a pixel taken all the way reads as a cut-out.
-fn white_highlights(c: vec3f, clip: f32, amount: f32) -> vec3f {
+// transform clips to white. `amount` is how far to take it: the control is linear in the cast it removes,
+// and white is where that cast reaches zero rather than a separate behaviour that arrives at the end.
+fn neutral_highlights(c: vec3f, clip: f32, amount: f32) -> vec3f {
   let t = clamp(clip, 0.0, 1.0) * clamp(amount, 0.0, 1.0);
   return mix(c, vec3f(max(c.r, max(c.g, c.b))), t);
 }

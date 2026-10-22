@@ -74,7 +74,7 @@ export const view = {
 	whites: (e: EditParams) => clean(((e.tone.whiteZeroEv - e.tone.whiteEv) / 2) * 100),
 	blacks: (e: EditParams) => clean(((-8 - e.tone.blackEv) / 3) * 100),
 	highlightRecovery: (e: EditParams) => clean(e.exposure.highlightBlend * 100),
-	whiteHighlights: (e: EditParams) => clean(e.exposure.whiteHighlights * 100)
+	neutralHighlights: (e: EditParams) => clean(e.exposure.neutralHighlights * 100)
 };
 
 const BANDS = ['red', 'orange', 'yellow', 'green', 'aqua', 'blue', 'purple', 'magenta'] as const;
