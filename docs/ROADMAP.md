@@ -11,40 +11,104 @@ What's known to be missing or wrong, roughly in the order it's worth doing. The 
 
 ## Correctness and quality
 
-**Tone curve above middle grey.** The logistic base curve begins shouldering immediately above grey, so
+**Middle grey sat a stop below where the curve assumes — fixed, `PROCESS_VERSION` 3.** `normalize.wgsl`
+scales sensor saturation to 1.0 and the tone curve reads middle grey at 0.18 of that, i.e. 2.47 stops of
+headroom. A correctly exposed capture does not put grey there: cameras meter lower to keep highlight room.
+**Measured against the cameras' own JPEGs: 1.15 stops lower (median), over 196 files sampled at random from
+the library and stratified by body, lens and exposure — 11 bodies, 14 lenses, four brands.** The consequence
+was this page's old "default rendering is darker than the camera's JPEG": Sidecar rendered the camera's
+middle grey at **−1.31 EV** (IQR −1.53…−1.13). The method is a *ranked* comparison — the rank of middle grey
+in the camera's rendering, read at the same rank in Sidecar's — so crop, scale and orientation cannot
+corrupt it.
+
+What it is not: the deficit is flat across scene brightness (darkest third −1.14, middle −1.19, brightest
+−1.11), so it is not a metering artifact; and every lens group tracks its body, so optics play no part. It is
+a constant, and it is now `Exposure::baseline_ev` (`BASELINE_EV`, 1.15), applied to a RAW before the person's
+own Exposure and not at all to a developed file, which its own maker already rendered. Re-rendering all 196
+puts grey at **−0.01 EV** (IQR −0.21…+0.15). An edit from before the bump keeps the picture it had: `migrate`
+gives it no baseline.
+
+*One number for every camera, decided rather than defaulted to* (owner's call, 2026-10-20). A table looks
+tempting: the per-body medians are D3 1.20, X100F 1.19, D7000 1.13, D5 1.52, EOS M3 1.10, ZV-1 0.86, D3200
+1.32, D3000 0.91, A7RM4 1.14, so one constant leaves −0.45 EV (D5) to +0.32 EV (ZV-1). But the spread
+*within* a body is 0.17…0.45 EV — nearly the size of the spread between them — and it does not follow the
+exposure program: pooled, manual 0.39, aperture-priority 0.35, program AE 0.44, so a camera shot by hand is
+no more variable than one left to decide. A per-model number would therefore be fitting one photographer's
+habits as much as a camera's behaviour, from one library. It is what the DNG spec's `BaselineExposure` is
+for, and the moment to build it is when evidence from more than one library asks for it. Worth knowing
+meanwhile that Nikon's Active D-Lighting is baked into the previews this was measured against, the likeliest
+reason the D5 is the outlier. **The white point** — next.
+
+**Nothing reached display white — fixed, `PROCESS_VERSION` 4.** Saturation sits 2.47 stops over the curve's grey while the default
+`whiteEv` puts display white at 4.5 — `0.18 × 2^4.5`, four times saturation — so the top two stops of the
+curve's range describe light the sensor cannot produce. Measured: **0 of 196 frames had a single pixel at
+white**, brightest pixel median 0.611 linear; on the 66 frames where the camera itself clips, 0.689. A blown
+window renders as light grey, which is also why highlight-reconstruction artifacts are *visible* there — the
+camera's rendering clips them to white and they vanish. The measurement says `whiteEv` should default to
+**3.63** (IQR 3.48…3.81), which with the baseline put the brightest pixel at 0.965 linear on clipping frames.
+
+`DEFAULT_WHITE_EV` is now 3.63, and on the clipping frames the brightest pixel went from 0.689 linear to
+**0.965** against the camera's 1.000. Grey stayed where the baseline put it, −0.01 EV, so the two changes do
+not disturb each other.
+
+The collision it had to get past, since the shape of it will recur: for a *developed* file `white_ev` is not
+a white point but the Whites slider, read against the default in `display_tone`, and `EditParams` cannot tell
+a RAW's edit from a JPEG's — so moving the constant would have put Whites at −43 on every existing edit of a
+developed file, and the editor hardcoded `4.5` in two more places. The answer is the one the baseline
+established: **store the reference with the edit**. `tone.white_zero_ev` is the `whiteEv` an edit calls
+Whites 0; a RAW reads `white_ev` absolutely, a developed file reads the difference, and the editor reads the
+same difference. An edit from before the bump keeps 4.5 and so keeps both its rendering and its slider.
+A look pasted between photos now carries slider positions rather than references, for the same reason.
+
+**What a blown highlight does — `PROCESS_VERSION` 5.** Two faults sat on top of each other. The output
+transform rolled the top tenth off with a tanh shoulder that *never reached white*: display white came out at
+252 of 255, and a channel had to reach 1.2 — twenty per cent over white — to encode as 255. And
+`highlight_blend` neutralised a clipped pixel toward the **mean** of its three channels, which dims a blown
+area while it corrects it, pulling it further from white still.
+
+The owner's call, 2026-10-21: a detector saturates, so clipping should hit a wall. `soft_clip1` is now a
+plain clamp — which also bleaches a bright colour toward white the way film does, one channel reaching the
+ceiling before the next.
+
+The magenta and the seam turned out to be one question with one answer. A detector's receptors saturate one
+after another, so a bright colour loses its cast *before* it reaches white; `tone_apply` scales RGB by the
+luminance ratio, which holds chromaticity at full strength right up to the ceiling instead. So colour now
+fades to a neutral of the same luminance over the last stop (`Tone::highlight_bleach`, `BLEACH_FROM` = 0.5
+display-linear, complete at white). Measured: the window goes from no white at all to **12.2%** pure white
+with its bright-but-coloured pixels falling 34.7% → 23.4%, while **midtone saturation does not move at all**
+on any frame tested (0.209, 0.321, 0.079 before and after) — it touches only the top stop.
+
+*A control was built first and withdrawn.* Neutralising a fully *clipped* pixel toward its brightest channel —
+"Neutral highlights", driven by clip coverage — works, but once the white point is right such a pixel renders
+at white, where the bleach takes it to neutral anyway: with the bleach on it moved pure white by 0.3 points
+and the cast not at all. One mechanism, driven by how close a value is to being unmeasurable, does both jobs
+and is the easier thing to explain. The two diverge only when a blown area is deliberately brought *down* in
+tone — at −2 EV the coverage-driven version still cut the cast 39.1 → 12.6 — so if a photographer ever wants
+colour fixed in highlights they have darkened, that is the case to build it for.
+
+**The seam around a blown area was never a reconstruction artifact**, which is why three candidate causes were
+ruled out and nothing was found. Measured on the window: the band beside the white is 12.5% of the bright
+pixels at luma 215 and b/(r+g+b) 0.370 — *unclipped* bright daylight, rendered at its true colour half a stop
+below white, next to a region that reached it. The camera has no band because its curve clips that whole zone
+to white, colour and all. The bleach above is what closes it. `highlight_blend`'s own default (0.5, toward the
+mean, which dims a blown area as it neutralises) is now the odd one out and wants re-measuring beside it.
+
+**Tone curve above middle grey.** *Read this against the two entries above: the shoulder is not where the
+darkness was.* The candidate curve at order 3 moved the median brightness by 0.02 EV. The logistic base
+curve begins shouldering immediately above grey, so
 raising exposure flattens upper-midtone texture — measured log-log slope 0.80 at +1 EV, 0.57 at +2 EV, 0.40
 at +2.5 EV. The real constraint is headroom (sRGB holds 2.47 stops above grey; the default `whiteEv` asks for
 4.5), so the shape can only decide *where* the compression is spent, not avoid it. A straight segment in
 encoded space was built and measured: it raises +2 EV to 0.63 but pushes shadow contrast from 1.29 to 2.37 at
-−2 EV, which is worse.
+−2 EV, which is worse. A straight segment in *log-log* space holds ~0.98 at +1 EV with neutral shadows and
+costs highlights above +2 EV (built on #21, `tone::straight_stops`). Either is a `ProcessVersion` bump.
+Decide with pictures, not slopes.
 
-The log-log straight segment is now built — `tone::straight_stops`, with
-`tone::tests::the_straight_segment_keeps_the_upper_midtones` printing the table below — and it leaves the
-shadows exactly as they are, because it only replaces the curve above grey. A straight segment through grey
-with slope 1, then a shoulder `1 − (1 − t)ⁿ` reaching white at `whiteEv` with no slope left over; requiring
-the two to meet without a kink fixes the knee at `(nH − W)/(n − 1)`, so the shoulder's **order is the whole
-choice**, and the slope through it is exactly `(1 − t)ⁿ⁻¹`:
-
-| stops over grey | logistic (now) | order 2 | order 3 | order 4 |
-|---|---|---|---|---|
-| knee at | — | +0.45 | +1.46 | +1.80 |
-| +0.5 EV | 0.92 | 0.99 | 1.00 | 1.00 |
-| +1 EV | 0.80 | 0.86 | 1.00 | 1.00 |
-| +1.5 EV | 0.68 | 0.74 | 0.97 | 1.00 |
-| +2 EV | 0.57 | 0.62 | 0.68 | 0.79 |
-| +2.5 EV | 0.47 | 0.49 | 0.43 | 0.41 |
-| +3 EV | 0.38 | 0.37 | 0.24 | 0.17 |
-| +4 EV | 0.24 | 0.12 | 0.03 | 0.01 |
-
-Order 3 is the shape this roadmap used to describe: a stop of scene light for a stop of picture out to
-+1.5 EV, paid for above +2. Shadows are the logistic's throughout. The "logistic (now)" column is measured by
-the same test rather than quoted, and it still reads as above after the curve's endpoints were pinned
-(`Curve: pin the ends`, #23) — that change moved what Highlights and Shadows do to black and white, not the
-base curve's slope through the midtones, so the comparison below is current. **What is left is the owner's call, with
-pictures and the Camera toggle, not slopes:** which order, and what Contrast should mean above grey — today
-it is the logistic's own steepness, and a fixed segment has none, so either Contrast becomes a power S-curve
-through grey there (as it already is for a developed file, `tone_display`) or the segment's slope follows it.
-Then it is a `ProcessVersion` bump, a WGSL mirror and a parity case.
+Note what the white point does to this question: `straight_stops` returns the identity whenever `whiteEv` is
+at or under the display's 2.47 stops of headroom, so if the white point comes down to what the sensor
+delivers, a stop of scene light is a stop of picture all the way to white and there is no shoulder to choose.
+The shoulder survives only as the price of headroom deliberately kept above saturation for reconstructed
+highlights — and then the order is exactly the knob for it.
 
 **Focus peaking at full resolution — done**, in `sidecar_engine::focus`. It used to run in the view pass over
 the proxy, where downsampling had already averaged the high frequencies away, so it reported edge *contrast*

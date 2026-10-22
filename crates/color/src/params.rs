@@ -12,7 +12,7 @@ use crate::tone;
 /// `migrate_highlight_shadow_anchors`) — an edit saved under version 1 needs its curve read differently, not
 /// just a field that defaults to off, so this is a real bump rather than an additive field. See
 /// docs/ROADMAP.md, "Curve editor: Highlights and Shadows stop sharing points with the manual curve".
-pub const PROCESS_VERSION: u32 = 2;
+pub const PROCESS_VERSION: u32 = 5;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
@@ -123,6 +123,21 @@ impl EditParams {
         if self.process_version < 2 {
             self.migrate_highlight_shadow_anchors();
         }
+        if self.process_version < 5 {
+            // Its highlights are the ones the person accepted, cast and all: they keep the colour they had
+            // right up to white rather than fading into it.
+            self.tone.highlight_bleach = 0.0;
+        }
+        if self.process_version < 4 {
+            // Its Whites was set against the old white point, and a developed file's Whites *is* that
+            // difference: without this every existing edit of a JPEG would jump to Whites −43.
+            self.tone.white_zero_ev = LEGACY_WHITE_EV;
+        }
+        if self.process_version < 3 {
+            // Rendered before there was a baseline, and its picture is the one the person approved: it keeps
+            // the exposure it was rendered at. Only a new edit starts from the measured placement.
+            self.exposure.baseline_ev = 0.0;
+        }
         self.process_version = self.process_version.max(PROCESS_VERSION);
     }
 
@@ -184,13 +199,36 @@ impl Default for WhiteBalance {
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "edit/"))]
 pub struct Exposure {
     pub ev: f64,
+    /// The rendering's own reference exposure, in stops, applied to a RAW before anything the person set.
+    /// Not a control: it says where a correctly exposed capture's middle grey sits under the sensor's
+    /// saturation, which is not the `0.18` the curve assumes. Measured at **1.15 stops** across 196 files
+    /// from 11 bodies and 14 lenses (`BASELINE_EV`); without it Sidecar renders 1.3 stops under the camera's
+    /// own JPEG, which was ROADMAP's "default rendering is darker than the camera's".
+    ///
+    /// Stored per edit rather than applied as a constant so that an edit made before `PROCESS_VERSION` 3
+    /// keeps the picture it had: `migrate` sets it to zero for those, and only a new edit gets the baseline.
+    pub baseline_ev: f64,
     pub highlight_blend: f64,
 }
+
+/// Where a correctly exposed capture puts middle grey, in stops below sensor saturation, against the `0.18`
+/// the tone curve assumes. Measured against the cameras' own JPEGs: median 1.15 stops over 196 files, 11
+/// bodies, 14 lenses, four brands, and flat across scene brightness (`docs/ROADMAP.md`, "Middle grey sat a
+/// stop below where the curve assumes").
+///
+/// One number for every camera, deliberately. Per body the median ran from 0.86 (Sony ZV-1) to 1.52 (Nikon
+/// D5), which looks like an argument for a table — but the spread *within* a body is 0.17…0.45, nearly the
+/// same size, and it does not follow the exposure program either (manual 0.39, aperture-priority 0.35,
+/// program AE 0.44). So a per-model number would be fitting one photographer's habits as much as a camera's
+/// behaviour. A table is what DNG's `BaselineExposure` is for, and is worth building when evidence from more
+/// than one library asks for it.
+pub const BASELINE_EV: f64 = 1.15;
 
 impl Default for Exposure {
     fn default() -> Self {
         Self {
             ev: 0.0,
+            baseline_ev: BASELINE_EV,
             highlight_blend: 0.5,
         }
     }
@@ -202,6 +240,20 @@ impl Default for Exposure {
 pub struct Tone {
     pub black_ev: f64,
     pub white_ev: f64,
+    /// The `whiteEv` this edit calls Whites 0 — the default white point it was made against, stored per edit
+    /// so that moving that default never moves anybody's slider. A RAW reads `white_ev` absolutely, as the
+    /// stops over grey that render white; a developed file has no white point to place, so its Whites is
+    /// `white_zero_ev − white_ev` (`display_tone`), and the editor's slider reads it the same way.
+    pub white_zero_ev: f64,
+    /// 0…1: how completely colour fades to neutral as a rendered value approaches display white. A detector's
+    /// receptors saturate one after another, so a bright colour loses its cast before it gets there; the
+    /// ratio-preserving scale in `tone_apply` would otherwise hold chromaticity at full strength until the
+    /// output clips, which leaves a coloured band beside anything that reached white — the seam reported
+    /// around a blown window. Begins a stop below white (`BLEACH_FROM` in `tone.wgsl`) and is complete at it.
+    ///
+    /// It subsumes neutralising a *clipped* pixel: once the white point is right such a pixel renders at
+    /// white, where this takes it to neutral anyway (`docs/ROADMAP.md`, "What a blown highlight does").
+    pub highlight_bleach: f64,
     pub contrast: f64,
     /// Control points over display-encoded values, `[x, y]` in 0…1. Manually drawn only, as of
     /// `PROCESS_VERSION` 2 — Highlights and Shadows are `highlights`/`shadows` below, not points in here.
@@ -219,13 +271,24 @@ pub struct Tone {
 /// Where the default tone curve puts black and white, in stops from middle grey. The Blacks and Whites sliders
 /// are offsets from these (the web app's `view.blacks` / `view.whites` mirror them).
 pub const DEFAULT_BLACK_EV: f64 = -8.0;
-pub const DEFAULT_WHITE_EV: f64 = 4.5;
+/// What `whiteEv` a new edit starts at: the stops above middle grey that render as display white. Sensor
+/// saturation sits **3.63 stops** over the grey `BASELINE_EV` places it at (IQR 3.48…3.81 across the
+/// 196-file survey), so this is where a blown highlight renders as white instead of as light grey. It was
+/// 4.5 — `0.18 × 2^4.5`, four times saturation — and the measured consequence was that **nothing in a render
+/// reached white at all**: 0 of 196 frames held a single pixel there (`docs/ROADMAP.md`).
+pub const DEFAULT_WHITE_EV: f64 = 3.63;
+
+/// The `whiteEv` an edit made before `PROCESS_VERSION` 4 calls "Whites 0". Kept because an edit's Whites is
+/// read against the default it was made under, never against today's (`Tone::white_zero_ev`).
+pub const LEGACY_WHITE_EV: f64 = 4.5;
 
 impl Default for Tone {
     fn default() -> Self {
         Self {
             black_ev: DEFAULT_BLACK_EV,
             white_ev: DEFAULT_WHITE_EV,
+            white_zero_ev: DEFAULT_WHITE_EV,
+            highlight_bleach: 1.0,
             contrast: 1.0,
             curve: vec![[0.0, 0.0], [1.0, 1.0]],
             highlights: 0.0,
@@ -839,7 +902,8 @@ pub struct DevelopParams {
     pub display_referred: f32,
     /// Global chroma gain − 1 (OKLCh) — the mask-saturation baseline every layer's own saturation adds to.
     pub saturation: f32,
-    pub _pad1: f32,
+    /// How completely colour fades to neutral as a rendered value approaches display white.
+    pub highlight_bleach: f32,
     pub mixer: [[f32; 4]; 8],
     /// Film rendering: amount 0…1 (0 is the neutral rendering), interlayer spread in log exposure, unused ×2.
     pub film: [f32; 4],
@@ -881,7 +945,7 @@ pub const CONTRAST_SCALE: f64 = 7.0;
 fn display_tone(edit: &EditParams) -> [f32; 4] {
     let t = &edit.tone;
     let blacks = ((DEFAULT_BLACK_EV - t.black_ev) / 3.0).clamp(-1.0, 1.0);
-    let whites = ((DEFAULT_WHITE_EV - t.white_ev) / 2.0).clamp(-1.0, 1.0);
+    let whites = ((t.white_zero_ev - t.white_ev) / 2.0).clamp(-1.0, 1.0);
     let knee = if edit.exposure.ev > 0.0 {
         (1.0 - 0.3 * edit.exposure.ev).clamp(0.4, 1.0)
     } else {
@@ -1050,7 +1114,16 @@ fn pack_inner(
     let tone = tone_params(edit, developed);
     let mut params = DevelopParams {
         wb_mul: wb.mul.map(|v| v as f32),
-        exposure: 2f64.powf(edit.exposure.ev) as f32,
+        // A developed file is already a picture — its own maker placed its grey — so the baseline is a RAW's
+        // alone. `edit.exposure.ev` is the person's, on top.
+        exposure: 2f64.powf(
+            edit.exposure.ev
+                + if developed {
+                    0.0
+                } else {
+                    edit.exposure.baseline_ev
+                },
+        ) as f32,
         cam_to_work: to_mat3(&wb.cam_to_rec2020),
         work_to_disp: to_mat3(match display {
             DisplaySpace::Srgb => &mat::REC2020_TO_SRGB,
@@ -1066,7 +1139,12 @@ fn pack_inner(
         },
         display_referred: if developed { 1.0 } else { 0.0 },
         saturation: (edit.saturation.clamp(-100.0, 100.0) / 100.0) as f32,
-        _pad1: 0.0,
+        // A developed file is already rendered: how it reached its own white is not ours to redo.
+        highlight_bleach: if developed {
+            0.0
+        } else {
+            edit.tone.highlight_bleach.clamp(0.0, 1.0) as f32
+        },
         mixer: mixer_params(&edit.mixer),
         film: match (&edit.film, developed || mono || slide.is_some()) {
             (Some(f), false) => [
@@ -1213,8 +1291,10 @@ mod tests {
         assert_eq!((params.hl_strength, params.display_referred), (0.0, 1.0));
 
         let mut edit = EditParams::default();
-        edit.tone.white_ev = 2.5;
-        edit.tone.black_ev = -5.0;
+        // Whites at +100 and Blacks at −100, as positions rather than as the EVs they happen to be: the
+        // slider is a difference from this edit's own zero, so these hold wherever the default white point is.
+        edit.tone.white_ev = edit.tone.white_zero_ev - 2.0;
+        edit.tone.black_ev = DEFAULT_BLACK_EV + 3.0;
         edit.exposure.ev = 1.0;
         let p = pack(
             &edit,
@@ -1302,11 +1382,130 @@ mod tests {
         );
         assert_eq!(p.uniform.len(), 416);
         assert_eq!(p.lut.len(), LUT_SIZE);
-        // exposure sits at byte 12
-        assert_eq!(
-            f32::from_le_bytes(p.uniform[12..16].try_into().unwrap()),
-            1.0
+        // exposure sits at byte 12, and for a RAW at default it is the baseline, not 1.0
+        let gain = |p: &Packed| f32::from_le_bytes(p.uniform[12..16].try_into().unwrap());
+        assert_eq!(gain(&p), 2f64.powf(BASELINE_EV) as f32);
+        let dev = pack(
+            &EditParams::default(),
+            &crate::camera::nikon_d850(),
+            SourceKind::Developed,
+            DisplaySpace::Srgb,
         );
+        assert_eq!(
+            gain(&dev),
+            1.0,
+            "a developed file was already rendered by whatever wrote it"
+        );
+    }
+
+    /// Colour fades to neutral as a value approaches white, so a bright colour loses its cast before it
+    /// gets there rather than holding it until the output clips. A developed file reached its own white
+    /// however its maker chose, so this is a RAW's alone, and an edit from before it keeps the highlights it
+    /// was approved with.
+    #[test]
+    fn the_highlight_bleach_reaches_the_uniform_for_a_raw_only() {
+        let cam = crate::camera::nikon_d850();
+        let field = |e: &EditParams, k| {
+            let p = pack(e, &cam, k, DisplaySpace::Srgb);
+            let u: &DevelopParams = bytemuck::from_bytes(&p.uniform);
+            u.highlight_bleach
+        };
+        let d = EditParams::default();
+        assert_eq!(field(&d, SourceKind::Raw), 1.0);
+        assert_eq!(field(&d, SourceKind::Developed), 0.0);
+        let mut half = EditParams::default();
+        half.tone.highlight_bleach = 0.5;
+        assert_eq!(field(&half, SourceKind::Raw), 0.5);
+
+        let mut old: EditParams =
+            serde_json::from_str(r#"{"processVersion":4,"exposure":{"ev":0.0}}"#).unwrap();
+        old.migrate();
+        assert_eq!(
+            old.tone.highlight_bleach, 0.0,
+            "an older edit keeps its highlights as they were"
+        );
+        assert_eq!(field(&old, SourceKind::Raw), 0.0);
+    }
+
+    /// Moving the default white point must not move anybody's Whites. A RAW's edit keeps the white point it
+    /// was rendered at; a developed file's Whites is a difference from the zero its edit was made under, so
+    /// both read 0 after the bump — the slider stays where the person left it either way.
+    #[test]
+    fn moving_the_white_point_leaves_every_existing_whites_where_it_was() {
+        let whites = |e: &EditParams| {
+            let t = display_tone(e);
+            (t[1] * 100.0).round() as i32
+        };
+        let mut old: EditParams =
+            serde_json::from_str(r#"{"processVersion":3,"tone":{"whiteEv":4.5}}"#).unwrap();
+        old.migrate();
+        assert_eq!(old.tone.white_zero_ev, LEGACY_WHITE_EV);
+        assert_eq!(
+            old.tone.white_ev, 4.5,
+            "a RAW's white point is not moved under it"
+        );
+        assert_eq!(whites(&old), 0, "and its Whites still reads 0");
+
+        // One that had Whites set: +50 under the old zero is still +50.
+        let mut set: EditParams =
+            serde_json::from_str(r#"{"processVersion":3,"tone":{"whiteEv":3.5}}"#).unwrap();
+        set.migrate();
+        assert_eq!(whites(&set), 50);
+
+        // A new edit: the zero is today's, so the same slider reading comes from a different EV.
+        let fresh = EditParams::default();
+        assert_eq!(fresh.tone.white_zero_ev, DEFAULT_WHITE_EV);
+        assert_eq!(whites(&fresh), 0);
+        assert!((fresh.tone.white_ev - 3.63).abs() < 1e-9);
+    }
+
+    /// The baseline is the rendering's, not the person's: it moves the gain a RAW is developed at, leaves a
+    /// developed file alone, and adds to whatever Exposure the person set rather than replacing it.
+    #[test]
+    fn the_baseline_exposes_a_raw_and_leaves_a_developed_file_alone() {
+        let cam = crate::camera::nikon_d850();
+        let gain = |e: &EditParams, k| {
+            let p = pack(e, &cam, k, DisplaySpace::Srgb);
+            f32::from_le_bytes(p.uniform[12..16].try_into().unwrap()) as f64
+        };
+        let d = EditParams::default();
+        assert!((gain(&d, SourceKind::Raw) - 2f64.powf(BASELINE_EV)).abs() < 1e-5);
+        assert!((gain(&d, SourceKind::Developed) - 1.0).abs() < 1e-6);
+        let mut plus = EditParams::default();
+        plus.exposure.ev = 1.0;
+        assert!(
+            (gain(&plus, SourceKind::Raw) - 2f64.powf(1.0 + BASELINE_EV)).abs() < 1e-5,
+            "the person's stacks on the baseline"
+        );
+    }
+
+    /// An edit made before `PROCESS_VERSION` 3 was approved as the picture it rendered, so it keeps that
+    /// picture: migration gives it no baseline. A new edit gets the measured one.
+    #[test]
+    fn an_edit_from_before_the_baseline_keeps_the_exposure_it_was_rendered_at() {
+        let mut old: EditParams =
+            serde_json::from_str(r#"{"processVersion":2,"exposure":{"ev":0.5}}"#).unwrap();
+        old.migrate();
+        assert_eq!(old.exposure.baseline_ev, 0.0);
+        assert_eq!(
+            old.exposure.ev, 0.5,
+            "the person's own exposure is untouched"
+        );
+        assert_eq!(old.process_version, PROCESS_VERSION);
+        let p = pack(
+            &old,
+            &crate::camera::nikon_d850(),
+            SourceKind::Raw,
+            DisplaySpace::Srgb,
+        );
+        let gain = f32::from_le_bytes(p.uniform[12..16].try_into().unwrap()) as f64;
+        assert!(
+            (gain - 2f64.powf(0.5)).abs() < 1e-5,
+            "renders exactly as it did before the bump"
+        );
+        let mut fresh = EditParams::default();
+        fresh.migrate();
+        assert_eq!(fresh.exposure.baseline_ev, BASELINE_EV);
     }
 
     #[test]
@@ -1811,7 +2010,11 @@ mod tests {
         let e: EditParams = serde_json::from_str(json).unwrap();
         assert_eq!(e.exposure.ev, 0.65);
         assert_eq!(e.mixer.blue.luminance, -35.0);
-        assert_eq!(e.tone.white_ev, 4.5);
+        assert_eq!(e.tone.white_ev, DEFAULT_WHITE_EV);
+        assert_eq!(
+            e.tone.white_zero_ev, DEFAULT_WHITE_EV,
+            "a fresh edit's zero is today's default"
+        );
         assert_eq!(e.lens, None);
     }
 

@@ -155,6 +155,18 @@ fn layout(d: &[u8]) -> Option<Layout> {
     Some(Layout { ifd0, main })
 }
 
+/// A stored code through the DNG's `LinearizationTable`, interpolated between entries and held at the ends.
+/// An empty table is the identity: most linear DNGs store linear values and have none.
+fn linearize(curve: &[f64], code: f64) -> f64 {
+    if curve.len() < 2 {
+        return code;
+    }
+    let x = code.clamp(0.0, (curve.len() - 1) as f64);
+    let (i, f) = (x.floor() as usize, x.fract());
+    let a = curve[i];
+    a + (curve.get(i + 1).copied().unwrap_or(a) - a) * f
+}
+
 fn first(tags: &Tags, tag: u16) -> Option<f64> {
     tags.get(&tag)?.values.first().copied()
 }
@@ -288,16 +300,21 @@ pub fn decode(path: &Path, max_edge: u32) -> Result<Linear, LinearDngError> {
     }
     let black = first(m, 50714).unwrap_or(0.0);
     let white = first(m, 50717).unwrap_or(65535.0);
-    let bits = first(m, 258).unwrap_or(16.0);
-    let full = (1u64 << bits as u32) as f64 - 1.0;
     let range = (white - black).max(1.0);
+    // `LinearizationTable` (DNG 50712): where it is present the stored codes are *indices* into it rather
+    // than linear values, and black, white and the table's own output all speak the same units. Apple's
+    // ProRAW companded 10-bit codes through a 1,024-entry table reaching 65535; read as linear they are both
+    // six stops dark and the wrong shape, the curve's midpoint being 8,600 rather than 32,768.
+    let curve: &[f64] = m.get(&50712).map(|f| f.values.as_slice()).unwrap_or(&[]);
 
     let factor = w.max(h).div_ceil(max_edge.max(1) as usize).max(1);
     let (ow, oh) = (w.div_ceil(factor), h.div_ceil(factor));
     let mut sum = vec![0f32; ow * oh * 4];
     let mut n = vec![0u32; ow * oh];
     // One tile: its rendered width, height, channel count and samples.
-    let tile = |i: usize| -> Result<(usize, usize, usize, Vec<f32>), LinearDngError> {
+    // A tile's rendered width, height, channel count, samples, and the full-scale value its samples are
+    // normalized against — the *stream's* bit depth, which is not always the DNG's `BitsPerSample`.
+    let tile = |i: usize| -> Result<(usize, usize, usize, Vec<f32>, f64), LinearDngError> {
         let (o, c) = (offsets[i] as usize, counts[i] as usize);
         let bytes = data
             .get(o..o + c)
@@ -323,7 +340,23 @@ pub fn decode(path: &Path, max_edge: u32) -> Result<Linear, LinearDngError> {
         if fb.channels() < 3 {
             return Err(LinearDngError::Tile(format!("{} channels", fb.channels())));
         }
-        Ok((fb.width(), fb.height(), fb.channels(), fb.buf().to_vec()))
+        // jxl-oxide hands samples back as 0…1 over the stream's own range. Apple's ProRAW stores 10-bit
+        // codes in a 16-bit JPEG XL stream, so `BitsPerSample` (10) is the range the *codes* occupy and the
+        // stream's (16) is what they were divided by; using the DNG's would read every sample 64× too small.
+        // Lightroom's panoramas are 16-bit both ways, which is why this only showed up on a phone.
+        let scale = match img.image_header().metadata.bit_depth {
+            jxl_oxide::image::BitDepth::IntegerSample { bits_per_sample } => {
+                ((1u64 << bits_per_sample.min(32)) - 1) as f64
+            }
+            _ => 1.0,
+        };
+        Ok((
+            fb.width(),
+            fb.height(),
+            fb.channels(),
+            fb.buf().to_vec(),
+            scale,
+        ))
     };
     // A row of tiles at a time, decoded in parallel, then folded into the smaller image in order: memory stays
     // at one row of full-resolution tiles.
@@ -333,7 +366,7 @@ pub fn decode(path: &Path, max_edge: u32) -> Result<Linear, LinearDngError> {
             .into_par_iter()
             .map(|tx| tile(ty * across + tx))
             .collect::<Result<_, _>>()?;
-        for (tx, (fw, fh, ch, buf)) in row.into_iter().enumerate() {
+        for (tx, (fw, fh, ch, buf, scale)) in row.into_iter().enumerate() {
             for y in 0..fh.min(th) {
                 let gy = ty * th + y;
                 if gy >= h {
@@ -345,7 +378,8 @@ pub fn decode(path: &Path, max_edge: u32) -> Result<Linear, LinearDngError> {
                         break;
                     }
                     let s = &buf[(y * fw + x) * ch..(y * fw + x) * ch + 3];
-                    let v = [s[0], s[1], s[2]].map(|v| ((v as f64 * full - black) / range) as f32);
+                    let v = [s[0], s[1], s[2]]
+                        .map(|v| ((linearize(curve, v as f64 * scale) - black) / range) as f32);
                     let clip = v.iter().any(|&c| c >= 0.99) as u8 as f32;
                     let d = (gy / factor) * ow + gx / factor;
                     for (k, c) in v.iter().enumerate() {
@@ -372,6 +406,42 @@ pub fn decode(path: &Path, max_edge: u32) -> Result<Linear, LinearDngError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Most linear DNGs store linear values and carry no table; those must pass through untouched, which is
+    /// what keeps Lightroom's panoramas rendering exactly as they did.
+    #[test]
+    fn without_a_table_a_code_is_already_linear() {
+        for code in [0.0, 1.0, 611.4, 65535.0] {
+            assert_eq!(linearize(&[], code), code);
+            assert_eq!(
+                linearize(&[7.0], code),
+                code,
+                "a one-entry table is no table"
+            );
+        }
+    }
+
+    /// Apple's ProRAW shape: 10-bit codes companded through a table that reaches 65535, whose midpoint is far
+    /// below half scale. Reading such a code as linear is both six stops dark and the wrong curve.
+    #[test]
+    fn a_companded_table_maps_codes_to_linear_values() {
+        // A square law over 1,024 entries, as Apple's roughly is: table[512] = 16,383, not 32,768.
+        let curve: Vec<f64> = (0..1024)
+            .map(|i| (i as f64 / 1023.0).powi(2) * 65535.0)
+            .collect();
+        assert_eq!(linearize(&curve, 0.0), 0.0);
+        assert!((linearize(&curve, 1023.0) - 65535.0).abs() < 1e-6);
+        let mid = linearize(&curve, 512.0);
+        assert!((mid - 16_415.0).abs() < 2.0, "midpoint {mid}");
+        // Between entries, and held at the ends rather than running off them.
+        let half = linearize(&curve, 511.5);
+        assert!(
+            half > linearize(&curve, 511.0) && half < mid,
+            "interpolates: {half}"
+        );
+        assert_eq!(linearize(&curve, 5000.0), 65535.0, "clamped at the top");
+        assert_eq!(linearize(&curve, -3.0), 0.0, "clamped at the bottom");
+    }
 
     /// A little-endian DNG skeleton: IFD0 with colour tags and one SubIFD with a JPEG XL linear image.
     #[test]
