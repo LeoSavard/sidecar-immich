@@ -211,6 +211,20 @@ pub struct Exposure {
     pub highlight_blend: f64,
 }
 
+/// The baseline this rendering applies, in stops. A developed file gets none — its maker already placed its
+/// grey. An edit carrying none renders as it always did, which is how an edit from before `PROCESS_VERSION`
+/// 3 keeps its picture. Otherwise the **file's own** `BaselineExposure` is preferred to `BASELINE_EV`,
+/// because one is data the maker wrote down and the other is a measured stand-in for files that did not:
+/// Apple's ProRAW says 4.13 where the stand-in says 1.15, and three stops is the whole picture.
+fn baseline_for(edit: &EditParams, camera: &crate::camera::CameraColor, developed: bool) -> f64 {
+    if developed || edit.exposure.baseline_ev == 0.0 {
+        return 0.0;
+    }
+    camera
+        .baseline_exposure
+        .unwrap_or(edit.exposure.baseline_ev)
+}
+
 /// Where a correctly exposed capture puts middle grey, in stops below sensor saturation, against the `0.18`
 /// the tone curve assumes. Measured against the cameras' own JPEGs: median 1.15 stops over 196 files, 11
 /// bodies, 14 lenses, four brands, and flat across scene brightness (`docs/ROADMAP.md`, "Middle grey sat a
@@ -1116,14 +1130,7 @@ fn pack_inner(
         wb_mul: wb.mul.map(|v| v as f32),
         // A developed file is already a picture — its own maker placed its grey — so the baseline is a RAW's
         // alone. `edit.exposure.ev` is the person's, on top.
-        exposure: 2f64.powf(
-            edit.exposure.ev
-                + if developed {
-                    0.0
-                } else {
-                    edit.exposure.baseline_ev
-                },
-        ) as f32,
+        exposure: 2f64.powf(edit.exposure.ev + baseline_for(edit, camera, developed)) as f32,
         cam_to_work: to_mat3(&wb.cam_to_rec2020),
         work_to_disp: to_mat3(match display {
             DisplaySpace::Srgb => &mat::REC2020_TO_SRGB,
@@ -1395,6 +1402,41 @@ mod tests {
             gain(&dev),
             1.0,
             "a developed file was already rendered by whatever wrote it"
+        );
+    }
+
+    /// A file that states its own `BaselineExposure` is data; `BASELINE_EV` is the measured stand-in for
+    /// files that do not. So the file wins where it speaks — and an edit carrying no baseline at all still
+    /// renders as it did, which is how one from before `PROCESS_VERSION` 3 keeps its picture.
+    #[test]
+    fn a_file_that_states_its_baseline_is_believed_over_the_stand_in() {
+        let plain = crate::camera::nikon_d850();
+        let mut declares = plain.clone();
+        declares.baseline_exposure = Some(4.13); // Apple's ProRAW
+        let gain = |e: &EditParams, cam: &crate::camera::CameraColor, k| {
+            let p = pack(e, cam, k, DisplaySpace::Srgb);
+            (f32::from_le_bytes(p.uniform[12..16].try_into().unwrap()) as f64).log2()
+        };
+        let d = EditParams::default();
+        assert!(
+            (gain(&d, &plain, SourceKind::Raw) - BASELINE_EV).abs() < 1e-5,
+            "no statement: the stand-in"
+        );
+        assert!(
+            (gain(&d, &declares, SourceKind::Raw) - 4.13).abs() < 1e-5,
+            "stated: believed"
+        );
+        assert!(
+            gain(&d, &declares, SourceKind::Developed).abs() < 1e-6,
+            "not a developed file's business"
+        );
+
+        let mut old: EditParams =
+            serde_json::from_str(r#"{"processVersion":2,"exposure":{"ev":0.0}}"#).unwrap();
+        old.migrate();
+        assert!(
+            gain(&old, &declares, SourceKind::Raw).abs() < 1e-6,
+            "an edit from before the baseline keeps its rendering whatever the file says"
         );
     }
 

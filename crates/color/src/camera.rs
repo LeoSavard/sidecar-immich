@@ -23,6 +23,13 @@ pub struct CameraColor {
     pub as_shot_mul: V3,
     /// One or two calibrations. With two, they are interpolated by white balance temperature.
     pub calibrations: Vec<Calibration>,
+    /// `BaselineExposure` (DNG 50730), in stops, where the file states it. This is **data, not a guess**:
+    /// where it is present it says how far under the rendering's middle grey this maker places a correct
+    /// exposure, and it replaces `BASELINE_EV`, which is the measured stand-in for files that say nothing.
+    /// Apple's ProRAW declares 4.13 — three stops more than the stand-in, and a photo rendered without it is
+    /// three stops dark. Absent for anything but a DNG read through `linear_dng`.
+    #[serde(default)]
+    pub baseline_exposure: Option<f64>,
 }
 
 impl CameraColor {
@@ -114,6 +121,7 @@ pub(crate) fn nikon_d850() -> CameraColor {
             temperature_k: 6504.0,
             xyz_to_camera: [[m[0], m[1], m[2]], [m[3], m[4], m[5]], [m[6], m[7], m[8]]],
         }],
+        baseline_exposure: None,
     }
 }
 

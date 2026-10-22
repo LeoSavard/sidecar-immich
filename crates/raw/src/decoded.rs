@@ -83,6 +83,7 @@ impl SourceSpace {
                 temperature_k: 6504.0,
                 xyz_to_camera: self.xyz_to_rgb(),
             }],
+            baseline_exposure: None,
         }
     }
 }
