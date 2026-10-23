@@ -1,0 +1,26 @@
+# Sidecar with no Immich: one folder, which it owns and imports into.
+
+[server]
+listen = "0.0.0.0:8080"
+worker_url = "http://sidecar-worker:8081"
+web_root = "/usr/share/sidecar/web"
+state_dir = "/state"
+# No Immich means no sign-in, so there is no session cookie to mark Secure either way. Leave this on if a
+# proxy terminates HTTPS in front; it costs nothing.
+secure_cookies = true
+# `/open?path=…` is how you open a photo already in the folder, since there is no library to browse yet.
+# Access is still confined to the roots below: a path outside them is refused.
+allow_path_open = true
+
+# No [immich] section at all. With no url configured, nothing is uploaded, nothing is looked up, and the
+# home page stops offering to open Immich links.
+
+[[roots]]
+name          = "Photos"
+# No immich_prefix: this folder is Sidecar's own. That omission is the whole mechanism -- a root with a
+# prefix is a window onto an Immich library, and this one is not.
+mount         = "/photos"
+template      = "{{y}}/{{MM}}.{{MMMM}}/{{y}}-{{MM}}-{{dd}}/{{filename}}"
+month_locale  = "en"
+# Imported photos land here, filed by the capture date in the file.
+intake        = true

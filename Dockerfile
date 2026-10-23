@@ -88,11 +88,15 @@ LABEL org.opencontainers.image.title="Sidecar" \
       org.opencontainers.image.revision="${REVISION}" \
       org.opencontainers.image.version="${VERSION}"
 # libEGL, libXext and libX11 are needed by NVIDIA's Vulkan driver inside containers.
+# `/photos` exists in the image, owned by the user Sidecar runs as, so a deployment with no Immich can mount
+# a named volume there and have the editing folder (DESIGN.md §3) be writable. Docker takes a fresh volume's
+# ownership from the image's directory at that path; a path the image does not have becomes root-owned, which
+# the uid-1000 process could not write to -- the same reason /cache and /state are created here.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       libvulkan1 libegl1 libxext6 libx11-6 libgomp1 libjpeg62-turbo zlib1g libimage-exiftool-perl ca-certificates \
  && rm -rf /var/lib/apt/lists/* \
  && useradd --uid 1000 --create-home sidecar \
- && mkdir -p /cache /state && chown sidecar:sidecar /cache /state
+ && mkdir -p /cache /state /photos && chown sidecar:sidecar /cache /state /photos
 
 # Opt-in HEIC support, off in the published image. Every HEIF decoder worth having is LGPL (libheif), which
 # an Apache-2.0 image can't link, and HEVC carries patent-pool royalties regardless of the decoder's copyright

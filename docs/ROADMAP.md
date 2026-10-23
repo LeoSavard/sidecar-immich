@@ -13,9 +13,14 @@ What's known to be missing or wrong, roughly in the order it's worth doing. The 
 > readout (DESIGN.md §8) and the *editing folder* — a root with no `immich_prefix`, which a photo can be
 > imported into instead of the library (§3). The second is most of "a configuration with no Immich in it":
 > such a root exists, `/api/intake?to=folder` fills it, and the home page stops advertising Immich where
-> there is none. What is still missing for a full filesystem editor is **browsing** one — there is no way to
-> see what is in a folder and pick from it, only to import or to open a known path (#28's closed branch holds
-> `find_by_name` for that).
+> there is none. **A standalone deployment is now a worked example** (`deploy/standalone/`, 2026-10-23),
+> checked end to end: import, edit, sidecar beside the original, export as a download, no Immich anywhere.
+>
+> Two things stand between that and something to hand to anyone else. **Browsing**: there is no view of what
+> is in the folder — import, Recent and a known path are the only ways in (#28's closed branch holds
+> `find_by_name` for that, and it is the single most valuable missing piece). **Sign-in**: authentication
+> *is* the Immich API key, so a deployment without Immich has none at all, and is only safe behind something
+> that does. Neither is hard; both are load-bearing before "standalone" means more than "runs".
 
 ## Correctness and quality
 

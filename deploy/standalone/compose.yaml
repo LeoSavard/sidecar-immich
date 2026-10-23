@@ -1,0 +1,57 @@
+# Worked example: Sidecar on its own, with no Immich anywhere. Photos are imported from the browser into a
+# folder Sidecar owns -- a named volume at /photos -- and edited there; the XMP lands beside each original.
+# To use it, copy this directory to deploy/local/ (git-ignored) and edit it for your machine.
+#
+# Read `Standing on its own` in docs/INSTALL.md before putting this anywhere other people can reach: with no
+# Immich there is no sign-in, so every request is the same user. That is fine on a private network and fine
+# behind a proxy that authenticates; it is not fine on the open internet.
+#
+# If you import HEIC, build the image with a HEIF decoder:
+#   docker build --build-arg HEIF=1 -t sidecar:local .
+
+# Pinned, because the default is the directory's name and the named volumes below are prefixed with it:
+# renaming or moving this directory would otherwise start a second stack on empty volumes -- an empty photo
+# folder, Recent empty, every proxy decoded again -- while the old one kept the port.
+name: sidecar
+services:
+  sidecar-api:
+    image: sidecar:local
+    command: ["api", "--config", "/etc/sidecar.toml"]
+    user: "1000:1000"
+    volumes:
+      - ./sidecar.toml:/etc/sidecar.toml:ro
+      # The editing folder. The api writes here: the imported original, and the XMP beside it.
+      - sidecar-photos:/photos:rw
+      - sidecar-cache:/cache:ro
+      - sidecar-state:/state
+    # Loopback only. Reach it over a VPN, or put an authenticating proxy in front -- see the note above.
+    ports: ["127.0.0.1:8090:8080"]
+    security_opt: ["label=disable"]
+    networks: [sidecar]
+    restart: unless-stopped
+
+  sidecar-worker:
+    image: sidecar:local
+    command: ["worker", "--listen", "0.0.0.0:8081", "--cache", "/cache"]
+    read_only: true
+    cap_drop: [ALL]
+    volumes:
+      # The worker only reads: it hashes the original, reads its metadata and builds proxies from it. It must
+      # see the same path the api wrote to, or an import ingests nothing.
+      - sidecar-photos:/photos:ro
+      - sidecar-cache:/cache
+    tmpfs: [/tmp]
+    security_opt: ["label=disable"]
+    devices: ["nvidia.com/gpu=all"]                     # CDI device from the NVIDIA container toolkit
+    networks: [sidecar]
+    restart: unless-stopped
+
+volumes:
+  # Your photographs. Everything else here is a cache or a session and can be thrown away; this one cannot.
+  # `docker volume inspect sidecar_sidecar-photos` says where it is on the host, for backing it up.
+  sidecar-photos: {}
+  sidecar-cache: {}
+  sidecar-state: {}
+
+networks:
+  sidecar: { internal: true }

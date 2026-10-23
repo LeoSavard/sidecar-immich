@@ -7,6 +7,19 @@ Source: the architecture plan (PWA entry, XMP sidecars, server-side demosaic, We
 
 Where the code differs from the text below, the code and these notes win.
 
+- **Sidecar without Immich, as a deployment rather than a possibility** (§3): the editing folder made a
+  no-Immich configuration expressible; this makes it something you can run. `/photos` is created in the image
+  and owned by the user Sidecar runs as, because Docker takes a fresh named volume's ownership from the
+  image's directory at that path — a path the image does not have becomes root-owned, and the uid-1000
+  process cannot write to it, which would have failed every import on a permission error. Verified with a
+  two-line image: the chowned path writes, a root-owned one is refused. `deploy/standalone/` is the worked
+  example — one root, no `immich_prefix`, no `[immich]` url, the folder a named volume, bound to loopback.
+  Checked end to end on that exact config: session reports no Immich and no sign-in, an import lands at
+  `2019/01.January/2019-01-02/IMG_1768.CR2`, an edit saves its XMP beside the original, `/open?path=` reopens
+  it while a path outside the root is refused, and an export comes back as a 6024×4022 JPEG with
+  `immichAssetId: null` — the upload is skipped and the file is always offered as a download. What is still
+  missing is a way to *browse* the folder: import, Recent and a known path are the only ways in.
+
 - **A photo can be imported without putting it in Immich** (§3): `POST /api/intake` only ever uploaded to the
   library, because an edit needs an original in a root and the library was the only kind of root there was. A
   root declared with no `immich_prefix` is now an *editing folder* — Immich can neither resolve into it nor
