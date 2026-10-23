@@ -7,6 +7,22 @@ Source: the architecture plan (PWA entry, XMP sidecars, server-side demosaic, We
 
 Where the code differs from the text below, the code and these notes win.
 
+- **A photo can be imported without putting it in Immich** (§3): `POST /api/intake` only ever uploaded to the
+  library, because an edit needs an original in a root and the library was the only kind of root there was. A
+  root declared with no `immich_prefix` is now an *editing folder* — Immich can neither resolve into it nor
+  be told about it — and `?to=folder` writes the photo straight there. The capture date still decides where
+  it sits, since that is what makes a folder navigable, so the bytes go to a hidden `.incoming/` name inside
+  the root, get ingested to read `capturedUnix`, and are renamed into the template's folder for that date;
+  the same photo imported twice is one file, a different photo under a taken name gets `-1`. The home page
+  offers the choice only where both exist, and where there is no Immich it no longer talks about sharing from
+  Immich or pasting Immich links. Checked: against a server with an editing folder and no Immich — an import
+  lands at `2019/01.January/2019-01-02/Imported_1768.CR2` (the file's own `DateTimeOriginal`, confirmed with
+  exiftool, not the folder the fixture had been hand-placed in), importing it again returns the same asset
+  key and leaves one file, a different photo of the same name becomes `-1`, nothing is left in `.incoming`,
+  and an edit saved on the import writes its XMP beside the original in the editing folder; unit tests for
+  the naming rule, for a prefix-less root being invisible to `mount_path` and `immich_path`, and for
+  `Date::from_unix`, which is new in `sidecar-template`.
+
 - **The numbers behind a rendering** (§8): the histogram's corner triangles already knew how much of the
   picture was at white, but only as a tooltip on whichever rendering was on screen, which is no way to compare
   two of them. A **Measure** panel under the histogram now states it — at white, at black, and, once a place
@@ -355,7 +371,27 @@ under it. Intake polls the asset until its path maps to a file under a configure
 and otherwise says the photo is safely in the library but not openable from here yet. An exact duplicate is
 already filed and resolves on the first try.
 
-Without an Immich library configured there is nowhere to put the file, and the route answers `501`.
+**`?to=folder`: the editing folder.** The library is one destination, not the only one. A root declared with
+no `immich_prefix` is a folder Immich knows nothing about — an *editing* folder — and marking one `intake =
+true` makes it where imported photos go. `POST /api/intake?to=folder` writes the bytes there itself: no
+upload, no key, nothing to tell Immich, and nothing to wait for a library to file.
+
+What a library does for free then has to be done here. Immich settles a photo's path by its capture date
+through the storage template; this does the same, with the date read from the file — which only the worker
+can do. So the bytes are written to a staging name inside the root (`.incoming/`, hidden, and on the same
+filesystem so what follows is a rename rather than a copy), ingested to learn `capturedUnix`, and renamed
+into the folder the root's template gives for that date. A file with no `DateTimeOriginal` is filed under the
+day it was imported, as a library with nothing else to go on would file it. A failure anywhere after the
+write takes the staged file away again.
+
+A name already taken in that folder is stepped past — `IMG_1768-1.CR2`, `-2` — unless the file already there
+holds *exactly* these bytes, in which case that is the same photo and its path is what comes back: importing
+one twice gives one file and one asset key, as it would in a library. From there it is opened, edited and
+sidecar-written exactly like anything else; the XMP lands beside the original in the editing folder.
+
+`GET /api/session` reports `intakeFolder` (the root's name, or `null`), so the home page offers the choice
+only where there is one. `?to=immich` without an Immich library answers `501`, and so does `?to=folder`
+without an editing folder; with no `?to=` at all the destination is the library, which is what it always was.
 
 ### Library roots
 
@@ -379,7 +415,22 @@ mount         = "/library/internal"
 template      = "{{y}}/{{MM}}.{{MMMM}}/{{y}}-{{MM}}-{{dd}}/{{filename}}"
 month_locale  = "en"
 moves_files   = true                              # storage template applies
+
+[[roots]]
+name          = "Editing folder"                  # shown on the home page
+# No immich_prefix: Immich knows nothing about this folder, so no lookup can resolve into it and no file in
+# it is ever given an originalPath. It is an editor's folder, not a second library.
+mount         = "/library/editing"
+template      = "{{y}}/{{MM}}.{{MMMM}}/{{y}}-{{MM}}-{{dd}}/{{filename}}"
+month_locale  = "en"
+intake        = true                              # photos imported from the device land here
 ```
+
+A root without `immich_prefix` drops out of `mount_path` and `immich_path`, which is the whole of what makes
+it invisible to Immich: the checksum and `originalPath` steps of the cascade below can never name it, and the
+template step skips it whenever Immich is configured. Where Immich is *not* configured, its files resolve by
+date and name like any other root's — which is the filesystem editor's configuration, a deployment with no
+Immich in it at all. At most one root is the intake; the first one marked wins.
 
 ### Resolution cascade
 

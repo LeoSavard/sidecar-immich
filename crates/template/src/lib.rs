@@ -50,6 +50,23 @@ fn days_in_month(y: i32, m: u32) -> u32 {
 }
 
 impl Date {
+    /// The calendar date of a Unix timestamp, read as UTC. `RawInfo::captured_unix` is the EXIF wall clock
+    /// taken as UTC, so this gives back the date the camera wrote — the same convention
+    /// [`parse_capture_date`] follows, which is the date a storage template is keyed on.
+    pub fn from_unix(secs: i64) -> Date {
+        // Howard Hinnant's civil_from_days, with the era starting on 0000-03-01 so a leap day lands last.
+        let days = secs.div_euclid(86_400) + 719_468;
+        let era = days.div_euclid(146_097);
+        let doe = days.rem_euclid(146_097);
+        let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
+        let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+        let year = (yoe + era * 400 + i64::from(month <= 2)) as i32;
+        Date { year, month, day }
+    }
+
     pub fn add_days(self, delta: i32) -> Date {
         let mut d = self;
         for _ in 0..delta.unsigned_abs() {
@@ -358,5 +375,60 @@ mod tests {
             None,
         );
         assert!(c[0].path.ends_with("_D5N9000+1.NEF"));
+    }
+}
+
+#[cfg(test)]
+mod date_from_unix_tests {
+    use super::*;
+
+    /// The same stamps `sidecar_raw`'s `captured_unix` is tested on, read back as dates.
+    #[test]
+    fn a_timestamp_reads_back_as_the_date_the_camera_wrote() {
+        assert_eq!(
+            Date::from_unix(0),
+            Date {
+                year: 1970,
+                month: 1,
+                day: 1
+            }
+        );
+        assert_eq!(
+            Date::from_unix(951_868_800),
+            Date {
+                year: 2000,
+                month: 3,
+                day: 1
+            }
+        );
+        assert_eq!(
+            Date::from_unix(1_785_349_800),
+            Date {
+                year: 2026,
+                month: 7,
+                day: 29
+            }
+        );
+    }
+
+    /// The last second of a day and the first of the next are different days, and a leap day is its own.
+    #[test]
+    fn day_boundaries_and_a_leap_day() {
+        assert_eq!(Date::from_unix(951_868_799).day, 29);
+        assert_eq!(Date::from_unix(951_868_799).month, 2);
+        assert_eq!(Date::from_unix(951_868_800).day, 1);
+    }
+
+    /// Before the epoch, which `div_euclid` handles and a plain division would not.
+    #[test]
+    fn before_the_epoch() {
+        assert_eq!(
+            Date::from_unix(-1),
+            Date {
+                year: 1969,
+                month: 12,
+                day: 31
+            }
+        );
     }
 }

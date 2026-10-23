@@ -8,6 +8,14 @@ What's known to be missing or wrong, roughly in the order it's worth doing. The 
 > queue; the queue is just not what is being worked through at the moment. Immich stays the library manager
 > (2026-10-20); V2's library seam narrows to what a filesystem *editor* needs, which is a configuration with
 > no Immich in it.
+>
+> **Two features were asked for and built on 2026-10-22** (owner's call, unpausing for them): the *Measure*
+> readout (DESIGN.md §8) and the *editing folder* — a root with no `immich_prefix`, which a photo can be
+> imported into instead of the library (§3). The second is most of "a configuration with no Immich in it":
+> such a root exists, `/api/intake?to=folder` fills it, and the home page stops advertising Immich where
+> there is none. What is still missing for a full filesystem editor is **browsing** one — there is no way to
+> see what is in a folder and pick from it, only to import or to open a known path (#28's closed branch holds
+> `find_by_name` for that).
 
 ## Correctness and quality
 

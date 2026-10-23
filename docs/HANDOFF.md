@@ -5,7 +5,31 @@ For whoever picks this up next, person or agent. [`ARCHITECTURE.md`](ARCHITECTUR
 checked), [`ROADMAP.md`](ROADMAP.md) what's known to be missing. This page is the state of play; update it when
 you stop.
 
-*Last updated 2026-10-20.*
+*Last updated 2026-10-22.*
+
+## Where it stands, 2026-10-22
+
+Two features were asked for and built that day (the feature pause was the owner's to lift, and they lifted
+it), each on its own branch off `main`, neither depending on the other. **#38 is merged; #39 is this
+branch.**
+
+| # | What | Checked by |
+|---|---|---|
+| 38 | **Measure** (DESIGN.md §8): a fold under the histogram giving what the rendering holds — at white, at black, and a probed place in 0…255, in display-linear luminance and in stops from middle grey — with a column per side of the flip, so two renderings are read side by side instead of judged by eye. *Copy* writes the table as text. | `web/scripts/measure-smoke.mjs <url> <photo>` |
+| 39 | **The editing folder** (DESIGN.md §3): a root with no `immich_prefix`, which Immich can neither resolve into nor be told about. `POST /api/intake?to=folder` writes an imported photo there, filed by its capture date through the root's template, and the home page offers the choice only where both destinations exist. | unit tests, plus an end-to-end import against a server configured with one |
+
+Neither changes a pixel — no shader, no uniform, no packing — and parity passed on both, which is what says
+so. Both added a build-log entry at the head of `DESIGN.md`, so the second to land conflicted there; the
+resolution was to keep both entries, which is what that conflict always means. Worth expecting from any two
+branches written the same day: the build log is append-at-the-top, so it collides by construction.
+
+`deploy/sidecar.dev.toml` gained an editing folder at `testdata/cache/editing`, so `./dev/serve` exercises
+the folder path out of the box (it has no Immich, so that is the only destination it offers).
+
+**Still owed from 2026-10-20:** the merged *remote* branches are not deleted — 37 of them as of 2026-10-22,
+everything `git branch -r --merged origin/main` lists except `main`. That needs `git push origin --delete`
+run by the owner; it is blocked here. `worktree-depth-spike` and `worktree-lens-correction` are not in that
+list and are kept on purpose.
 
 ## Open pull requests
 

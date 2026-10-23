@@ -75,8 +75,10 @@ pub struct Immich {
 #[derive(Clone, Debug, Deserialize)]
 pub struct Root {
     pub name: String,
-    /// `originalPath` prefix as immich-server sees it.
-    pub immich_prefix: String,
+    /// `originalPath` prefix as immich-server sees it. `None` for a folder Immich knows nothing about: an
+    /// editing folder, which no Immich lookup can ever match and nothing here tries to map an asset into.
+    #[serde(default)]
+    pub immich_prefix: Option<String>,
     /// Where this library is mounted for Sidecar.
     pub mount: PathBuf,
     pub template: String,
@@ -87,6 +89,10 @@ pub struct Root {
     /// Immich's internal library keeps one folder per user (storage label, or user id) before the template.
     #[serde(default)]
     pub per_user: bool,
+    /// Photos chosen on the editing device land here instead of being uploaded to Immich. At most one root
+    /// is the intake; the first one marked wins.
+    #[serde(default)]
+    pub intake: bool,
 }
 
 fn english() -> String {
@@ -112,7 +118,7 @@ impl Config {
     pub fn mount_path(&self, original_path: &str) -> Option<(&Root, PathBuf)> {
         self.roots.iter().find_map(|r| {
             let rest = original_path
-                .strip_prefix(r.immich_prefix.trim_end_matches('/'))?
+                .strip_prefix(r.immich_prefix.as_deref()?.trim_end_matches('/'))?
                 .strip_prefix('/')?;
             Some((r, r.mount.join(rest)))
         })
@@ -130,9 +136,14 @@ impl Config {
             .to_path_buf();
         Some(format!(
             "{}/{}",
-            root.immich_prefix.trim_end_matches('/'),
+            root.immich_prefix.as_deref()?.trim_end_matches('/'),
             rest.to_string_lossy()
         ))
+    }
+
+    /// Where a photo imported from the editing device is written, when the deployment has such a folder.
+    pub fn intake_root(&self) -> Option<&Root> {
+        self.roots.iter().find(|r| r.intake)
     }
 
     /// The root containing `path`, after resolving symlinks and `..`.
@@ -161,12 +172,13 @@ mod tests {
         std::os::unix::fs::symlink(&real, &link).unwrap();
         let root = Root {
             name: "r".into(),
-            immich_prefix: "/data/library/".into(),
+            immich_prefix: Some("/data/library/".into()),
             mount: link.clone(),
             template: String::new(),
             month_locale: english(),
             moves_files: false,
             per_user: false,
+            intake: false,
         };
         let config = Config {
             server: Server::default(),
@@ -186,5 +198,80 @@ mod tests {
                 .as_deref(),
             Some("/data/library/2026/a.NEF")
         );
+    }
+}
+
+#[cfg(test)]
+mod editing_folder_tests {
+    use super::*;
+
+    fn config(toml_text: &str) -> Config {
+        toml::from_str(toml_text).unwrap()
+    }
+
+    /// A root with no `immich_prefix` is the editing folder: Immich can never resolve into it, and nothing
+    /// tries to give one of its files an `originalPath`.
+    #[test]
+    fn a_root_without_a_prefix_is_invisible_to_immich() {
+        let c = config(
+            r#"
+            [[roots]]
+            name = "Editing folder"
+            mount = "/photos/editing"
+            template = "{{y}}/{{filename}}"
+            intake = true
+            "#,
+        );
+        assert!(c.mount_path("/photos/editing/2026/a.NEF").is_none());
+        assert!(
+            c.immich_path(&c.roots[0], Path::new("/photos/editing/2026/a.NEF"))
+                .is_none()
+        );
+        assert_eq!(
+            c.intake_root().map(|r| r.name.as_str()),
+            Some("Editing folder")
+        );
+    }
+
+    /// A library root beside it still works exactly as before, and is not mistaken for the intake.
+    #[test]
+    fn a_library_root_beside_it_is_unchanged() {
+        let c = config(
+            r#"
+            [[roots]]
+            name = "library"
+            immich_prefix = "/data/library"
+            mount = "/photos/library"
+            template = "{{y}}/{{filename}}"
+
+            [[roots]]
+            name = "Editing folder"
+            mount = "/photos/editing"
+            template = "{{y}}/{{filename}}"
+            intake = true
+            "#,
+        );
+        let (root, path) = c.mount_path("/data/library/2026/a.NEF").unwrap();
+        assert_eq!(root.name, "library");
+        assert_eq!(path, Path::new("/photos/library/2026/a.NEF"));
+        assert_eq!(
+            c.intake_root().map(|r| r.name.as_str()),
+            Some("Editing folder")
+        );
+    }
+
+    /// No root marked, no editing folder: the import has nowhere to go but the library, as before.
+    #[test]
+    fn without_a_marked_root_there_is_no_editing_folder() {
+        let c = config(
+            r#"
+            [[roots]]
+            name = "library"
+            immich_prefix = "/data/library"
+            mount = "/photos/library"
+            template = "{{y}}/{{filename}}"
+            "#,
+        );
+        assert!(c.intake_root().is_none());
     }
 }
