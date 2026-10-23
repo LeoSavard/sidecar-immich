@@ -287,6 +287,18 @@ impl History {
     /// change to it), so a version saved before an upgrade migrates and one saved after is left alone. This
     /// is what `GET …/history` lists and what a checkout makes current.
     pub fn version_of(&self, id: &str) -> Result<EditParams> {
+        // The original is the one node nobody approved: it is the absence of an edit, not a picture someone
+        // chose, so there is nothing to preserve and `migrate`'s pinning has no one to answer to. A history
+        // begun under an older version stored *its* defaults here, and handing those back meant "open the
+        // original" gave a rendering no one had ever asked for — and, through `adopt_current_rendering`'s
+        // absence back then, no way out of either. The original means this file as Sidecar renders it today.
+        //
+        // Only what is *handed out* changes. `edit_of` still rebuilds the stored root as written, because
+        // every child's delta was taken against that and replaying one onto a different base would move
+        // versions nobody touched.
+        if id == ORIGINAL {
+            return Ok(EditParams::default());
+        }
         let mut edit = self.edit_of(id)?;
         edit.migrate();
         Ok(edit)

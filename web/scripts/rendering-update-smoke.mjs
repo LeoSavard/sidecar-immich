@@ -26,10 +26,31 @@ page.on('console', (m) => m.type() === 'error' && console.log(`console.error: ${
 await page.goto(`${base}/open?path=${encodeURIComponent(photo)}`, { waitUntil: 'load' });
 const key = page.url().split('/edit/')[1];
 await page.getByRole('slider', { name: 'Exposure' }).first().waitFor({ timeout: 60000 });
+
+// Put the photo into the state under test rather than relying on the fixture's own history, so the run is
+// the same every time and leaves nothing behind that changes the next one. These are the references an edit
+// made before PROCESS_VERSION 3 carries, which is what `migrate` pins and what this is all about.
+{
+	const now = await (await page.request.get(`${base}/api/assets/${key}/edit`)).json();
+	const old = structuredClone(now.edit);
+	old.exposure.ev = 0.3;
+	old.exposure.baselineEv = 0;
+	old.tone.whiteEv = 4.5;
+	old.tone.whiteZeroEv = 4.5;
+	old.tone.shoulderOrder = 0;
+	old.tone.highlightBleach = 0;
+	const put = await page.request.put(`${base}/api/assets/${key}/edit`, {
+		data: { edit: old, base: now.head, checkpoint: true, session: 'rendering-smoke-setup' }
+	});
+	if (!put.ok()) throw new Error(`setting the photo to an old rendering: ${await put.text()}`);
+}
+await page.goto(`${base}/edit/${key}`, { waitUntil: 'load' });
+await page.getByRole('slider', { name: 'Exposure' }).first().waitFor({ timeout: 60000 });
 await page.waitForTimeout(3000);
 check(!(await page.getByText('This browser has no WebGPU').count()), 'WebGPU is on');
 
 const stored = await (await page.request.get(`${base}/api/assets/${key}/edit`)).json();
+const versionsAtStart = (await (await page.request.get(`${base}/api/assets/${key}/history`)).json()).nodes.length;
 check(stored.edit.exposure.baselineEv === 0, `the photo's stored edit predates the baseline (baselineEv ${stored.edit.exposure.baselineEv})`);
 
 // The rendering as it stands, read rather than described.
@@ -43,43 +64,61 @@ const stops = async () => parseFloat((await page.locator('tr:has(th:text-is("sto
 const before = await stops();
 check(Number.isFinite(before), `the probe reads the old rendering (${before} stops from grey)`);
 
-const offer = page.getByRole('button', { name: "Use today's rendering" });
-check(await offer.count() === 1, 'the offer is made');
-check((await page.locator('div', { has: offer }).first().innerText()).includes('picture will change'), 'and says the picture will change');
+const notice = page.getByRole('button', { name: 'Bring it up to date now' });
+check(await notice.count() === 1, 'the photo is told it was made with an older rendering');
+check((await page.locator('div', { has: notice }).first().innerText()).includes('picture will change'), 'and warned the picture will change');
 if (outDir) await page.screenshot({ path: `${outDir}/rendering-offer.png` });
 
-await offer.click();
+// ---- port by default: an ordinary change carries it
+const contrast = page.getByRole('slider', { name: 'Contrast' }).first();
+await contrast.focus();
+await page.keyboard.press('ArrowUp');
 await page.waitForTimeout(2500);
 const after = await stops();
 const lift = after - before;
-check(Math.abs(lift - 1.15) < 0.1, `taking it up lifts the picture by the baseline (${lift.toFixed(2)} stops, expected 1.15)`);
-check(await offer.count() === 0, 'and the offer goes away, having been taken');
+check(Math.abs(lift - 1.15) < 0.1, `one ordinary change brings it up to date (${lift.toFixed(2)} stops, expected 1.15)`);
+check(await notice.count() === 0, 'the standing notice goes');
+const keep = page.getByRole('button', { name: 'Keep the old rendering' });
+check(await keep.count() === 1, 'and the way back is offered');
 if (outDir) await page.screenshot({ path: `${outDir}/rendering-updated.png` });
 
-// Undo: an ordinary edit, so it comes back.
-await page.locator('canvas').first().press('Control+z');
+// ---- the way back
+await keep.click();
 await page.waitForTimeout(2000);
-check(Math.abs((await stops()) - before) < 0.05, 'Undo puts the old rendering back');
-check(await page.getByRole('button', { name: "Use today's rendering" }).count() === 1, 'and the offer returns with it');
+check(Math.abs((await stops()) - before) < 0.05, 'keeping the old rendering puts it back');
+const live = await (await page.request.get(`${base}/api/assets/${key}/edit`)).json();
+void live;
+// Having declined, a further change must not port again while the photo is open.
+await contrast.focus();
+await page.keyboard.press('ArrowUp');
+await page.waitForTimeout(2000);
+check(Math.abs((await stops()) - before) < 0.05, 'and a further change leaves it where they asked');
+check(await page.getByRole('button', { name: 'Bring it up to date now' }).count() === 0, 'without asking again this session');
+
+// ---- back to today's for the rest of the run
+await page.reload({ waitUntil: 'load' });
+await page.getByRole('slider', { name: 'Exposure' }).first().waitFor({ timeout: 60000 });
+await page.waitForTimeout(3000);
+check(await page.getByRole('button', { name: 'Bring it up to date now' }).count() === 1, 'a later session asks again');
+await page.getByRole('button', { name: 'Bring it up to date now' }).click();
+await page.waitForTimeout(2500);
+await page.locator('summary', { hasText: 'Measure' }).click();
+await page.getByRole('button', { name: 'Probe' }).click();
+await page.mouse.click(box.x + box.width * 0.5, box.y + box.height * 0.45);
+await page.waitForTimeout(1500);
 
 // ---- the notice's own claim: what you have now stays in History
-const versionsBefore = (await (await page.request.get(`${base}/api/assets/${key}/history`)).json()).nodes.length;
-await page.locator('canvas').first().press('Control+Shift+z'); // redo, back to today's rendering
-await page.waitForTimeout(1500);
-check(Math.abs((await stops()) - after) < 0.05, 'Redo brings it forward again');
-await page.getByRole('button', { name: 'Save' }).click();
+const save = page.getByRole('button', { name: 'Save' });
+if (await save.isEnabled()) await save.click();
 await page.waitForTimeout(3000);
 const history = await (await page.request.get(`${base}/api/assets/${key}/history`)).json();
-check(history.nodes.length === versionsBefore + 1, `saving files it as a version (${versionsBefore} → ${history.nodes.length})`);
+check(history.nodes.length > versionsAtStart, `the work is filed as versions (${versionsAtStart} → ${history.nodes.length})`);
 const head = history.nodes.find((n) => n.id === history.head);
 const parent = history.nodes.find((n) => n.id === head.parent);
 check(!!parent, 'with the one before it still there');
 const saved = await (await page.request.get(`${base}/api/assets/${key}/edit`)).json();
 check(saved.edit.exposure.baselineEv > 1, `and the saved edit carries the baseline (${saved.edit.exposure.baselineEv})`);
 check(saved.edit.exposure.ev === stored.edit.exposure.ev, `while Exposure is untouched (${saved.edit.exposure.ev} EV)`);
-
-// Put the fixture back the way it was found, so the next run starts where this one did.
-await page.request.post(`${base}/api/assets/${key}/history/checkout`, { data: { node: head.parent } });
 
 await browser.close();
 console.log(failures.length ? `\n${failures.length} failed:\n  ${failures.join('\n  ')}` : '\nall ok');

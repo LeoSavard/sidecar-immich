@@ -24,6 +24,13 @@ What's known to be missing or wrong, roughly in the order it's worth doing. The 
 
 ## Correctness and quality
 
+**Old renderings no longer spread — done, 2026-10-23.** Editing an old edit brings it up to date first, and
+the original means today's rendering. What is still true is that none of the version-specific code can go:
+reading an old ancestor needs `migrate` whatever the policy is. The set of such edits is now closed and
+shrinking, so removal becomes possible eventually — the thing that would make it *soon* is migrating eagerly
+on open and storing the result, which trades that against writing to a sidecar because someone looked at a
+photo. Not obviously worth it; written down so the option is not rediscovered from scratch.
+
 **An old edit can take up today's rendering — done, 2026-10-23.** `EditParams::adopt_current_rendering`
 moves the stored references forward while leaving every setting alone, and the editor offers it on any photo
 it would change. What is *not* offered is doing it to a whole library at once: there is no way to say "bring

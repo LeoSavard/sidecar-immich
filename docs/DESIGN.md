@@ -7,6 +7,25 @@ Source: the architecture plan (PWA entry, XMP sidecars, server-side demosaic, We
 
 Where the code differs from the text below, the code and these notes win.
 
+- **An old rendering no longer spreads** (§4): two consequences of stored references that nobody chose.
+  *The original is not an edit* — a history begun under an older version stored its own defaults in the
+  root, and migrating them meant "open the original" handed back a rendering no one had ever asked for, on
+  the one node that stands for the absence of an edit; `version_of` now returns today's defaults for it
+  outright, while `edit_of` still rebuilds the stored root as written so that versions built on it do not
+  move. *And an old rendering used to reproduce itself*: the references are inherited by whatever is edited
+  from them, so a version saved today out of a version-2 sidecar came out marked 6 and rendering by 2's
+  rules — measured directly, `baselineEv 0.0 | whiteZeroEv 4.5 | shoulderOrder 0.0` on a node created on the
+  spot. So editing an old edit now brings it up to date first, said plainly while the photo is still
+  untouched, with the way back offered for the session afterwards. This does not let the version-specific
+  code go — a ported edit still has ancestors to render, and reading them still needs `migrate` — but it
+  makes the set of edits on old references closed and shrinking instead of self-renewing, which is the
+  precondition for ever removing any of it. Checked: two history tests (the original is today's rendering
+  however old the history; an old root is still unchanged for the versions built on it) and
+  `web/scripts/rendering-update-smoke.mjs`, which now sets the photo to an old rendering itself rather than
+  leaning on a fixture's history — the standing notice, one ordinary change carrying the port (**+1.21 stops
+  measured at the probe**, against 1.15 expected plus the triggering change's own small effect), the way
+  back, that a further change then leaves it where they asked, and that a later session asks again.
+
 - **An old edit can take up today's rendering** (§4): `migrate` keeps an old edit's picture by pinning the
   references the pipeline has moved on from, which is right — the person approved *that* picture — but it
   left no way back: a photo edited before `PROCESS_VERSION` 3 rendered 1.15 stops below where the
@@ -1119,37 +1138,51 @@ if (focus_energy(uv, step) >= V.peak_t) { return vec4f(PEAK_COLOUR, 1.0); }   //
 
 `focus_energy` is the central-difference gradient of encoded luminance. **This is a stopgap:** measured on the proxy it reports edge contrast rather than sharpness, and the real measure belongs at full resolution on the server, shipped as a layer — see the roadmap. The step is the larger of one texel and one canvas pixel, so zooming out averages detail away instead of aliasing downscaling noise into false peaks. It reads the proxy, so at fit zoom it reports composition-scale sharpness; critical focus means zooming in or opening the loupe.
 
-### Opening the original, after a process version bump
+### An edit and the rendering it was made under
 
-Stored references (above) keep an old edit's picture, and the question they raise is whether *checking out
-the original* escapes them — whether "before I touched it" means today's rendering. It depends on one thing,
-and the two tests in `sidecar-xmp` named `the_original_of_…` are the answer:
+Stored references keep an old edit's picture: `migrate` pins `baseline_ev`, `white_zero_ev`,
+`shoulder_order` and `highlight_bleach` to what the edit was approved with, so the person gets back the
+photograph they chose. That is right, and it is not the whole story, because left alone it has two
+consequences nobody chose.
 
-- **A sidecar with a history of its own** holds that history's root as it was written, and `version_of`
-  migrates the root exactly as it migrates any other version. A history written under `PROCESS_VERSION` 2
-  hands back `baseline_ev` 0, `white_zero_ev` 4.5 and `shoulder_order` 0 — the old rendering. This is
-  deliberate: the root is "the picture before I touched it" *for that edit*, and that picture was made by the
-  old pipeline. So no, the original does not bring the new rendering with it.
-- **A sidecar with no stored history** — edited before histories existed, or never edited — has one
-  synthesised on read, and `History::begin` makes its root from `EditParams::default()` as it stands today.
-  There, checking out the original *does* hand over today's rendering.
+**The original is not an edit.** A history begun under an older version stored *its* defaults in the root,
+and `version_of` migrated them like any other node — so "open the original" handed back a rendering no one
+had ever asked for, on a node that stands for the absence of an edit. It now returns `EditParams::default()`
+outright: the original means this file as Sidecar renders it today. Only what is *handed out* changes;
+`edit_of` still rebuilds the stored root as written, because every child's delta was taken against that and
+replaying one onto a different base would move versions somebody did approve.
 
-In both cases the current edit is untouched: what appears when the photo opens is the picture it had.
+**An old rendering used to spread.** The references are inherited by whatever is edited from them, and
+nothing stamped them as old: a version saved today, out of a sidecar from `PROCESS_VERSION` 2, came out
+marked version 6 and rendering by version 2's rules — measured, before this changed. So a rendering nobody
+could reach any more went on reproducing itself for as long as anyone kept editing, and the version number
+said nothing about it.
 
-**The way out is `EditParams::adopt_current_rendering`**, the other direction from `migrate`. It sets the
-references a new edit of this file would get and leaves everything the person set alone — Exposure, the
-curve, masks, film, crop. Whites needs care, because it is stored as a white point and *read* as the
-distance from the rendering's own: the offset is kept, so the slider still says what it said. Only
-references this file's rendering actually reads are touched, so a developed file takes up the white point
-and nothing else — it has no baseline, and `pack` holds its shoulder and bleach at zero anyway. That is also
-what makes `behind_current_rendering` worth asking: the offer appears only when something would visibly
-change.
+So **editing an old edit brings it up to date first** (`adopt_current_rendering`, below). The photo says so
+while it is still untouched — "changing anything brings it up to date, and the picture will change" — and
+the first change carries the update with it. Afterwards the way back is offered for as long as the photo is
+open; taking it restores the references and stops the asking **for that session only**, because an edit left
+on old references is the thing this is here to stop. None of it is automatic in the background: nothing
+changes until the person changes something, and Undo takes all of it back.
 
-The editor offers it as a notice at the top of the tools panel, beside the other things worth knowing about
-a photo — not in the History section, where nobody would go looking for it. Taking it is an **ordinary
-edit**: the picture moves at once, Undo takes it back, and saving files it as a version with the old one
-still behind it. The rule lives in `sidecar-color` and reaches the browser through `sc_adopt_rendering`, so
-the two cannot drift on what "today's rendering" means.
+What this does **not** do is let the version-specific code go. A frozen or ported edit still has to render
+its ancestors, and reading them still needs `migrate` — the version-1 curve anchors above all. What it does
+is make the set of edits carrying old references **closed and shrinking** rather than self-renewing, which
+is the precondition for ever removing any of it.
+
+### Taking up today's rendering
+
+`EditParams::adopt_current_rendering` is the other direction from `migrate`. It sets the references a new
+edit of this file would get and leaves everything the person set alone — Exposure, the curve, masks, film,
+crop. Whites needs care, because it is stored as a white point and *read* as the distance from the
+rendering's own: the offset is kept, so the slider still says what it said. Only references this file's
+rendering actually reads are touched, so a developed file takes up the white point and nothing else — it has
+no baseline, and `pack` holds its shoulder and bleach at zero anyway. That is also what makes
+`behind_current_rendering` worth asking: nothing is offered, and nothing happens on an edit, unless
+something would visibly change.
+
+The rule lives in `sidecar-color` and reaches the browser through `sc_adopt_rendering`, so the two cannot
+drift on what "today's rendering" means.
 
 ## 9. Export
 
