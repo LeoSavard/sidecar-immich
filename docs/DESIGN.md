@@ -7,6 +7,22 @@ Source: the architecture plan (PWA entry, XMP sidecars, server-side demosaic, We
 
 Where the code differs from the text below, the code and these notes win.
 
+- **The editing folder is bounded** (§3): a folder that lives inside the image cannot be allowed to grow
+  until the host fills up, so it holds **four** photographs by default (`intake_limit`). What goes when it is
+  full is the oldest one that has been *exported* — a render of it exists elsewhere, so the folder is no
+  longer the only copy of that work. A photograph nobody has exported is never chosen however old it is, and
+  an import that would need one is refused instead: the alternative is an editor that deletes someone's
+  negative to make room for the next import. The home page asks before the file picker opens rather than
+  after a photo has been uploaded, and names what would go; the server asks again when the bytes arrive, and
+  asks it *after* the duplicate check, so re-opening something already in the folder never costs a
+  photograph. Removing by hand takes two taps. Checked: `web/scripts/folder-limit-smoke.mjs` in Chromium
+  (Playwright's filechooser event is what proves the picker did and did not open) — twenty assertions over
+  both branches of the message; and against the API, four imports fill it, the fifth is refused `422` with
+  nothing deleted and the staging folder clean, exporting one makes it `nextOut`, the next import takes
+  exactly that one and logs it, a delete prunes the template's empty directories back to the root, and an
+  unknown key is a `404`. Unit tests for the eviction order, for an unexported photo never being chosen, and
+  for the default of four.
+
 - **Sidecar without Immich, as a deployment rather than a possibility** (§3): the editing folder made a
   no-Immich configuration expressible; this makes it something you can run. `/photos` is created in the image
   and owned by the user Sidecar runs as, because Docker takes a fresh named volume's ownership from the
@@ -401,6 +417,31 @@ A name already taken in that folder is stepped past — `IMG_1768-1.CR2`, `-2` �
 holds *exactly* these bytes, in which case that is the same photo and its path is what comes back: importing
 one twice gives one file and one asset key, as it would in a library. From there it is opened, edited and
 sidecar-written exactly like anything else; the XMP lands beside the original in the editing folder.
+
+**The folder is bounded, and that is the point.** A library is a disk someone chose; the editing folder is
+usually a volume inside the image, so left alone it grows until the host fills up — one 30 MB original at a
+time, for as long as anyone keeps editing. `intake_limit` (default **4**) is what stops that. It is
+deliberately small: the folder is a workbench, not a shelf, and the components are all here for anyone who
+wants a bigger one.
+
+What goes when the folder is full is **the oldest photograph that has been exported**. A render of it exists
+somewhere else, so the folder is no longer the only copy of that work. A photograph nobody has exported is
+never chosen, however old — losing it to make room would be the editor deleting someone's negative — and an
+import that would need one is **refused**, with the person deciding what to let go of instead.
+
+The question is asked before the file picker opens, not after a photo has been chosen and uploaded: the home
+page reads `GET /api/intake/folder` and, when the folder is full, puts a message between the import button
+and the picker naming exactly what would go. `make_room` asks the same question again when the bytes arrive,
+because a client that skipped the message still meets the rule. A re-import of something already there is a
+duplicate and adds nothing, so the check sits *after* the dedupe — being full never costs you a photograph
+you were only reopening.
+
+`DELETE /api/intake/folder/{key}` takes one out by hand: the original, both spellings of its sidecar, and the
+record it was ever opened, after which the template's now-empty directories are pruned back to the root. This
+is the one place Sidecar deletes a photograph, so it is confined to the intake root, keyed by content hash
+rather than path — a key is not a path, and nothing outside the folder is nameable through it. In the
+interface it takes **two taps**: the first arms the button and says `Remove?`, the second does it, and an
+armed button disarms itself after four seconds.
 
 `GET /api/session` reports `intakeFolder` (the root's name, or `null`), so the home page offers the choice
 only where there is one. `?to=immich` without an Immich library answers `501`, and so does `?to=folder`

@@ -103,7 +103,7 @@ async fn narrow_by_content(list: Vec<Candidate>, sha1: Option<&str>) -> Vec<Cand
     if exact.is_empty() { list } else { exact }
 }
 
-async fn sha1_of(path: PathBuf) -> Option<String> {
+pub(crate) async fn sha1_of(path: PathBuf) -> Option<String> {
     tokio::task::spawn_blocking(move || sidecar_xmp::sha1_file(&path).ok())
         .await
         .ok()?

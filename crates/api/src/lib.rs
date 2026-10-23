@@ -409,6 +409,230 @@ async fn intake(
     (StatusCode::BAD_GATEWAY, format!("{file_name} is in your library, but Sidecar can't open it yet. {detail} Try opening it from Immich in a moment.")).into_response()
 }
 
+/// One photograph in the editing folder, for the list the home page shows and the room check the import
+/// makes. `exported` is what decides the order things are removed in: a render of it exists somewhere else,
+/// so the folder is no longer the only copy of that work.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderItem {
+    asset_key: String,
+    file_name: String,
+    /// Relative to the root, so the list can show where in the folder it sits.
+    at: String,
+    bytes: u64,
+    /// Newest first in the listing; also what breaks a tie between two exported photographs.
+    modified_unix: i64,
+    exported: bool,
+    edited: bool,
+}
+
+/// What the editing folder holds, newest first. Every original under the root, the staging folder aside.
+///
+/// Each file is hashed to get its asset key, which is what the editor opens it by. That is only affordable
+/// because the folder is small by construction — `intake_limit` is the reason this can be a plain walk with
+/// no index behind it.
+async fn folder_items(root: &config::Root) -> Result<Vec<FolderItem>> {
+    let mut found = Vec::new();
+    collect_originals(&root.mount, &root.mount.join(STAGING), &mut found).await?;
+    let mut items = Vec::new();
+    for path in found {
+        let Some(file_name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+            continue;
+        };
+        let meta = tokio::fs::metadata(&path).await?;
+        let modified_unix = meta
+            .modified()
+            .ok()
+            .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_secs() as i64);
+        let sidecar = sidecar_xmp::sidecar_path_for(&path);
+        let (exported, edited) = match SidecarDoc::load(&sidecar) {
+            Ok(doc) => (!doc.exports().is_empty(), doc.source_sha1().is_some()),
+            Err(_) => (false, false),
+        };
+        let Some(asset_key) = resolve::sha1_of(path.clone()).await else {
+            continue;
+        };
+        items.push(FolderItem {
+            asset_key,
+            file_name,
+            at: path
+                .strip_prefix(&root.mount)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .into_owned(),
+            bytes: meta.len(),
+            modified_unix,
+            exported,
+            edited,
+        });
+    }
+    items.sort_by_key(|i| std::cmp::Reverse(i.modified_unix));
+    Ok(items)
+}
+
+/// Every editable original under `dir`, skipping `staging` — a half-written import is not in the folder yet.
+async fn collect_originals(
+    dir: &std::path::Path,
+    staging: &std::path::Path,
+    out: &mut Vec<std::path::PathBuf>,
+) -> Result<()> {
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(at) = stack.pop() {
+        let Ok(mut entries) = tokio::fs::read_dir(&at).await else {
+            continue;
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            if path == staging {
+                continue;
+            }
+            match entry.file_type().await {
+                Ok(t) if t.is_dir() => stack.push(path),
+                Ok(t) if t.is_file() && sidecar_template::is_editable(&path) => out.push(path),
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Which photograph goes when the folder is full: the oldest one that has been exported. A photograph that
+/// has never been rendered anywhere else is never chosen — the folder is the only copy of that work, and
+/// losing it to make room for the next import would be the editor deleting someone's negative. When nothing
+/// has been exported the import is refused instead, and the person decides what to let go of.
+fn evictable(items: &[FolderItem]) -> Option<&FolderItem> {
+    items
+        .iter()
+        .filter(|i| i.exported)
+        .min_by_key(|i| i.modified_unix)
+}
+
+/// `GET /api/intake/folder` — what the editing folder holds and how much room is left.
+async fn folder(State(app): State<Arc<App>>, ApiUser(_): ApiUser) -> Response {
+    let Some(root) = app.config.intake_root() else {
+        return Json(serde_json::json!({ "configured": false })).into_response();
+    };
+    match folder_items(root).await {
+        Ok(items) => {
+            let next_out = evictable(&items).map(|i| i.file_name.clone());
+            Json(serde_json::json!({
+                "configured": true,
+                "name": root.name,
+                "limit": root.intake_limit,
+                "full": items.len() >= root.intake_limit,
+                "nextOut": next_out,
+                "items": items,
+            }))
+            .into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")).into_response(),
+    }
+}
+
+/// `DELETE /api/intake/folder/{key}` — take one photograph out of the editing folder: the original, its
+/// sidecar, and the record that it was ever opened. This is the one place Sidecar deletes a photograph, so
+/// it is confined to the intake root by `remove_original`, and the asset key has to match a file actually
+/// in it — a key is not a path, so nothing outside the folder is nameable here.
+async fn forget(
+    State(app): State<Arc<App>>,
+    ApiUser(user): ApiUser,
+    Path(key): Path<String>,
+) -> Response {
+    let Some(root) = app.config.intake_root() else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            "This Sidecar has no editing folder.",
+        )
+            .into_response();
+    };
+    let items = match folder_items(root).await {
+        Ok(i) => i,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")).into_response(),
+    };
+    let Some(item) = items.iter().find(|i| i.asset_key == key) else {
+        return (
+            StatusCode::NOT_FOUND,
+            "That photo isn't in the editing folder.",
+        )
+            .into_response();
+    };
+    let path = root.mount.join(&item.at);
+    if let Err(e) = remove_original(&app, root, &path).await {
+        return (StatusCode::UNPROCESSABLE_ENTITY, format!("{e:#}")).into_response();
+    }
+    app.store.delete("assets", &key).await;
+    let _ = app
+        .store
+        .update("users", &user.id, |found: Option<UserRecord>| {
+            let mut u = found.unwrap_or_default();
+            u.recent.retain(|r| r.asset_key != key);
+            u
+        })
+        .await;
+    Json(serde_json::json!({ "removed": item.file_name })).into_response()
+}
+
+/// Delete an original and its sidecar, having first proved the file really is inside the editing folder.
+/// Both sidecar spellings go: `DSC_1234.NEF.xmp` and `DSC_1234.xmp` (`sidecar_path_for`).
+async fn remove_original(
+    app: &Arc<App>,
+    root: &config::Root,
+    path: &std::path::Path,
+) -> Result<()> {
+    let mount = root.mount.canonicalize()?;
+    let real = path.canonicalize()?;
+    if !real.starts_with(&mount) || !sidecar_template::is_editable(&real) {
+        anyhow::bail!(
+            "{} is not a photo inside the editing folder",
+            real.display()
+        );
+    }
+    // Not the intake of some other root: only the folder this Sidecar imports into may be deleted from.
+    if !app
+        .config
+        .intake_root()
+        .is_some_and(|r| r.name == root.name)
+    {
+        anyhow::bail!("{} is not the editing folder", root.name);
+    }
+    for sidecar in [
+        std::path::PathBuf::from(format!("{}.xmp", real.display())),
+        real.with_extension("xmp"),
+    ] {
+        if sidecar.is_file() {
+            tokio::fs::remove_file(&sidecar).await.ok();
+        }
+    }
+    tokio::fs::remove_file(&real)
+        .await
+        .with_context(|| format!("removing {}", real.display()))?;
+    prune_empty_dirs(&mount, real.parent()).await;
+    Ok(())
+}
+
+/// Walk back up from a deleted photo's folder, removing directories the template made that now hold
+/// nothing. Stops at the root itself, which stays whether or not it is empty.
+async fn prune_empty_dirs(mount: &std::path::Path, from: Option<&std::path::Path>) {
+    let mut at = from.map(std::path::Path::to_path_buf);
+    while let Some(dir) = at {
+        if dir == mount || !dir.starts_with(mount) {
+            return;
+        }
+        match tokio::fs::read_dir(&dir).await {
+            Ok(mut entries) => match entries.next_entry().await {
+                Ok(None) => {}
+                _ => return,
+            },
+            Err(_) => return,
+        }
+        if tokio::fs::remove_dir(&dir).await.is_err() {
+            return;
+        }
+        at = dir.parent().map(std::path::Path::to_path_buf);
+    }
+}
+
 /// Where a photo lands while its capture date is being read: inside the root, so the move into place is a
 /// rename on the same filesystem rather than a copy, and hidden so a folder listing doesn't show half-imports.
 const STAGING: &str = ".incoming";
@@ -486,11 +710,14 @@ async fn place(
         .with_context(|| format!("making {}", dir.display()))?;
     let dest = free_name(&dir, file_name, bytes).await?;
     // `free_name` only hands back a path that exists when the file there holds exactly these bytes: the same
-    // photo imported twice is one file, as it would be in a library, and the staged copy goes away.
+    // photo imported twice is one file, as it would be in a library, and the staged copy goes away. Nothing
+    // is being added, so the folder's limit doesn't come into it.
     if dest.exists() {
         tokio::fs::remove_file(temp).await.ok();
         return Ok(dest);
     }
+    // Only now, with a genuinely new photograph to file, is room needed.
+    make_room(app, root).await?;
     tokio::fs::rename(temp, &dest)
         .await
         .with_context(|| format!("moving the import into {}", dir.display()))?;
@@ -500,6 +727,32 @@ async fn place(
 /// `dir/file_name`, or the same name with `-1`, `-2` … before the extension if something is already there.
 /// A file of that name holding exactly these bytes is the same photo: its path comes back as it stands, and
 /// the caller keeps that one instead of writing a second copy.
+/// Make room for one more photograph in the editing folder. Removes the oldest exported one if the folder
+/// is at its limit; refuses when everything in it is the only copy of itself. The home page asks the same
+/// question before it opens the file picker, so this is normally a formality — but it is the rule, and a
+/// client that skipped the question still meets it here.
+async fn make_room(app: &Arc<App>, root: &config::Root) -> Result<()> {
+    let items = folder_items(root).await?;
+    if items.len() < root.intake_limit {
+        return Ok(());
+    }
+    let Some(out) = evictable(&items) else {
+        anyhow::bail!(
+            "The editing folder is full ({} of {}), and nothing in it has been exported yet. Export what \
+             you want to keep, or remove a photo from the folder, and then import this one.",
+            items.len(),
+            root.intake_limit
+        );
+    };
+    let (name, at) = (out.file_name.clone(), out.at.clone());
+    let path = root.mount.join(&at);
+    remove_original(app, root, &path).await?;
+    let key = out.asset_key.clone();
+    app.store.delete("assets", &key).await;
+    tracing::info!("editing folder was full: removed {name}, which had been exported");
+    Ok(())
+}
+
 async fn free_name(
     dir: &std::path::Path,
     file_name: &str,
@@ -1330,6 +1583,8 @@ pub fn router(app: Arc<App>) -> Router {
             "/api/intake",
             axum::routing::post(intake).layer(axum::extract::DefaultBodyLimit::max(INTAKE_LIMIT)),
         )
+        .route("/api/intake/folder", get(folder))
+        .route("/api/intake/folder/{key}", axum::routing::delete(forget))
         .route("/api/immich/assets/{id}/thumbnail", get(thumbnail))
         .route("/api/film/stocks", get(film_stocks))
         .route("/api/film/stocks/{id}", get(film_stock))
@@ -1476,5 +1731,69 @@ mod tests {
             again.exists(),
             "the caller keeps this one instead of writing another"
         );
+    }
+
+    fn item(name: &str, modified_unix: i64, exported: bool) -> FolderItem {
+        FolderItem {
+            asset_key: name.to_string(),
+            file_name: name.to_string(),
+            at: name.to_string(),
+            bytes: 1,
+            modified_unix,
+            exported,
+            edited: false,
+        }
+    }
+
+    /// Room is made from what has been rendered somewhere else, oldest first.
+    #[test]
+    fn the_oldest_exported_photo_is_the_one_that_goes() {
+        let items = [
+            item("new-exported.CR2", 300, true),
+            item("old-exported.CR2", 100, true),
+            item("middle.CR2", 200, true),
+        ];
+        assert_eq!(
+            evictable(&items).map(|i| i.file_name.as_str()),
+            Some("old-exported.CR2")
+        );
+    }
+
+    /// A photograph nobody has exported is the only copy of that work: it is never chosen, however old it
+    /// is, and an import that would need it refuses instead.
+    #[test]
+    fn an_unexported_photo_is_never_evicted() {
+        let items = [
+            item("ancient-unexported.CR2", 1, false),
+            item("recent-exported.CR2", 900, true),
+        ];
+        assert_eq!(
+            evictable(&items).map(|i| i.file_name.as_str()),
+            Some("recent-exported.CR2"),
+            "the exported one goes even though it is much newer"
+        );
+    }
+
+    /// Nothing exported at all: there is nothing to take, and the caller has to say so rather than guess.
+    #[test]
+    fn a_folder_of_unexported_photos_offers_nothing() {
+        let items = [item("a.CR2", 1, false), item("b.CR2", 2, false)];
+        assert!(evictable(&items).is_none());
+    }
+
+    /// The limit defaults to four, and it is the editing folder's alone.
+    #[test]
+    fn the_editing_folder_holds_four_by_default() {
+        let c: config::Config = toml::from_str(
+            r#"
+            [[roots]]
+            name = "Editing folder"
+            mount = "/photos"
+            template = "{{y}}/{{filename}}"
+            intake = true
+            "#,
+        )
+        .unwrap();
+        assert_eq!(c.intake_root().unwrap().intake_limit, 4);
     }
 }

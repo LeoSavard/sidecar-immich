@@ -93,6 +93,16 @@ pub struct Root {
     /// is the intake; the first one marked wins.
     #[serde(default)]
     pub intake: bool,
+    /// How many photographs the editing folder may hold. Unlike a library, which is a disk someone chose,
+    /// this folder is usually a volume inside the image — so left alone it grows until the host fills up,
+    /// one original at a time, for as long as anyone keeps editing. The limit is what stops that, and it is
+    /// deliberately small: the folder is a workbench, not a shelf. Only the intake root reads this.
+    #[serde(default = "four")]
+    pub intake_limit: usize,
+}
+
+fn four() -> usize {
+    4
 }
 
 fn english() -> String {
@@ -179,6 +189,7 @@ mod tests {
             moves_files: false,
             per_user: false,
             intake: false,
+            intake_limit: four(),
         };
         let config = Config {
             server: Server::default(),

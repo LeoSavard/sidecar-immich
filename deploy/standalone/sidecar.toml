@@ -24,3 +24,8 @@ template      = "{{y}}/{{MM}}.{{MMMM}}/{{y}}-{{MM}}-{{dd}}/{{filename}}"
 month_locale  = "en"
 # Imported photos land here, filed by the capture date in the file.
 intake        = true
+# How many photographs the folder may hold. This volume lives inside the image, so without a limit it grows
+# until the host fills up. When it is full, the oldest photograph that has already been exported is the one
+# that goes; one that has never been exported is never taken, and the import is refused instead. Raise it if
+# you have the disk -- the mechanism is the same at any number.
+intake_limit  = 4

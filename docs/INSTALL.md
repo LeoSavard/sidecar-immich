@@ -107,6 +107,12 @@ there, so a path the image does not have becomes root-owned and the uid-1000 pro
 `/photos` is created and chowned in the Dockerfile for exactly this reason — if you choose a different path,
 either create it in the image the same way or bind-mount a host directory you have chowned to `1000:1000`.
 
+**The folder is capped at four photographs** (`intake_limit`), because it lives inside the image and would
+otherwise grow until the host filled up. The home page lists what is in it, removes one in two taps, and
+tells you before the file picker opens if there is no room. When it is full the oldest *exported* photograph
+is what goes; one that has never been exported is never taken for you, and the import is refused instead.
+Raise the number if you have the disk — nothing else changes.
+
 **You cannot browse the folder yet.** There is no view of what is in it: you import a photo, or you reopen
 one from Recent, or you open a known path with `allow_path_open = true` (still confined to the configured
 roots — a path outside them is refused). A folder listing is the main thing a standalone version still
