@@ -12,10 +12,12 @@
 	import { ColorPacker, type SlideProfile } from '$lib/color/pack';
 	import { cachedProfile, loadProfile } from '$lib/film';
 	import { api } from '$lib/api';
+	import type { Reading } from '$lib/measure';
 	import { saveSettings, settings, SPACE_LABELS } from '$lib/settings';
 	import { EditSession, type EditState } from '$lib/state/edit-session.svelte';
 	import { copyLook, pasteLook, readLookClipboard, type LookClipboard } from '$lib/state/look-clipboard';
 	import Histogram from '$lib/ui/Histogram.svelte';
+	import Readout from '$lib/ui/Readout.svelte';
 	import ExportSheet from '$lib/ui/ExportSheet.svelte';
 	import HistoryPanel from '$lib/ui/HistoryPanel.svelte';
 	import MasksPanel from '$lib/ui/MasksPanel.svelte';
@@ -60,6 +62,17 @@
 	/** The layers' curves as they render, a 4,096-entry row each: what the selected layer's curve editor draws. */
 	let maskCurves = $state<Float32Array | null>(null);
 	let histogram = $state<HistogramData | null>(null);
+	/**
+	 * What each side of the flip last measured (`$lib/measure`). Kept per side rather than for what is on
+	 * screen, so flipping to the compared version and back leaves both renderings' numbers to read together.
+	 */
+	let measured = $state<{ edit: Reading | null; before: Reading | null }>({ edit: null, before: null });
+	/** Where the probe reads, in the picture's own frame (0…1) — so it holds through a crop, a turn and the flip. */
+	let probePoint = $state<[number, number] | null>(null);
+	/** The probe is waiting for a tap on the photo. */
+	let probing = $state(false);
+	/** Readbacks in flight, per side: a slower one that resolves late must not overwrite a newer reading. */
+	const probeSeq = { edit: 0, before: 0 };
 	let clipHigh = $state(false);
 	let clipLow = $state(false);
 	let peaking = $state(false);
@@ -209,7 +222,7 @@
 	function setToolsHidden(hidden: boolean, open?: Section) {
 		toolsHidden = hidden;
 		localStorage.setItem('sidecar.toolsHidden', hidden ? '1' : '0');
-		if (hidden) pickingWhite = pickingFocus = false;
+		if (hidden) pickingWhite = pickingFocus = probing = false;
 		if (!open) return;
 		section = open;
 		// On the desktop every section is a <details>: open the one asked for and bring it into view.
@@ -271,7 +284,11 @@
 		// Not while the brush is on: the mask is what's being judged then, and the readback costs a phone frames.
 		if (histogramStale && !painting) {
 			const out = outputGeometry(before ? compareEdit().geometry : edit.geometry);
-			hist.run(develop.output, histStride, (h) => (histogram = h), out ? { toPicture: out.toPicture, size: out.size } : undefined);
+			// Which rendering this is: the readback resolves later, by which time the flip may have moved on.
+			const side = before ? 'before' : 'edit';
+			hist.run(develop.output, histStride, (h) => { histogram = h; recordClipping(side, h); }, out ? { toPicture: out.toPicture, size: out.size } : undefined);
+			// The copy is queued here, so it reads the picture as it stands now whatever renders next.
+			if (probePoint) readProbe(side, probePoint);
 			histogramStale = false;
 		}
 		const showing = maskSelected !== null && (maskShown || brush.mode !== 'off') && !before ? edit.masks?.[maskSelected] : undefined;
@@ -708,6 +725,70 @@
 		committed();
 	}
 
+	// ---------- measuring
+
+	/** What the readout calls each side of the flip. */
+	function sideLabel(side: 'edit' | 'before'): string {
+		if (side === 'edit') return 'Edit';
+		return compare?.label ?? (developed ? 'As saved' : 'As shot');
+	}
+
+	/** A canvas pixel → the picture's own frame (0…1), the frame the developed texture is in. */
+	function screenToPicture(point: { x: number; y: number }): [number, number] | null {
+		if (!develop?.output) return null;
+		const r = imageRect();
+		const o: [number, number] = [(point.x - r.x) / r.w, (point.y - r.y) / r.h];
+		if (o.some((v) => v < 0 || v > 1)) return null;
+		return project(displayFrame()?.frame.toPicture ?? [[1, 0, 0], [0, 1, 0], [0, 0, 1]], o);
+	}
+
+	/** The probe reads a square about this far out, in proxy pixels: enough to average a proxy's noise. */
+	const PROBE_RADIUS = 4;
+
+	function recordClipping(side: 'edit' | 'before', h: HistogramData) {
+		const kept = measured[side];
+		measured = {
+			...measured,
+			[side]: {
+				label: sideLabel(side),
+				clipping: { atWhite: h.clippedHigh, atBlack: h.clippedLow, counted: h.total },
+				probe: probePoint ? (kept?.probe ?? null) : null
+			}
+		};
+	}
+
+	async function readProbe(side: 'edit' | 'before', at: [number, number]) {
+		const mine = ++probeSeq[side];
+		const probe = await develop.sampleDeveloped(at, PROBE_RADIUS);
+		if (mine !== probeSeq[side]) return;
+		const kept = measured[side];
+		measured = { ...measured, [side]: { label: sideLabel(side), clipping: kept?.clipping ?? null, probe } };
+	}
+
+	/** The probe: the tapped place becomes the point both renderings are read at. */
+	function pickProbe(e: PointerEvent) {
+		probing = false;
+		const p = screenToPicture(px(e));
+		if (!p) return;
+		probePoint = p;
+		readProbe(before ? 'before' : 'edit', p);
+	}
+
+	function clearProbe() {
+		probePoint = null;
+		probeSeq.edit++;
+		probeSeq.before++;
+		measured = {
+			edit: measured.edit && { ...measured.edit, probe: null },
+			before: measured.before && { ...measured.before, probe: null }
+		};
+	}
+
+	/** The rendering on screen first, then the other side's once it has been seen. */
+	const readings = $derived(
+		[before ? measured.before : measured.edit, before ? measured.edit : measured.before].filter((r): r is Reading => !!r)
+	);
+
 	/** The brush's radius in proxy pixels, and on screen in CSS pixels. */
 	function brushRadius() {
 		const proxy = develop?.proxy;
@@ -937,6 +1018,7 @@
 	$effect(() => {
 		if (!wide && section !== 'wb') pickingWhite = false;
 		if (!wide && section !== 'depth') pickingFocus = false;
+		if (!wide) probing = false;
 	});
 
 	// The history loads when it's first looked at, not with every photo.
@@ -1043,7 +1125,7 @@
 		clearTimeout(holdTimer);
 		// With the brush on, one finger paints; a second one turns it into a pinch.
 		if (painting && pointers.size === 1) startStroke(e);
-		else if (pointers.size === 1 && !pickingWhite && !pickingFocus) holdTimer = setTimeout(() => setBefore(true), 450);
+		else if (pointers.size === 1 && !pickingWhite && !pickingFocus && !probing) holdTimer = setTimeout(() => setBefore(true), 450);
 		if (pointers.size === 2) {
 			cancelStroke();
 			clearTimeout(holdTimer);
@@ -1096,6 +1178,10 @@
 				pickFocus(e);
 				return;
 			}
+			if (probing && !fallback && develop?.output) {
+				pickProbe(e);
+				return;
+			}
 			if (fallback || !develop?.output || cropping || painting) return;
 			const r = imageRect();
 			// What is shown is the edit's output: the loupe is centred in it.
@@ -1116,8 +1202,8 @@
 
 	function keydown(e: KeyboardEvent) {
 		if ((e.target as HTMLElement)?.tagName === 'INPUT') return;
-		if (e.key === 'Escape' && (pickingWhite || pickingFocus)) {
-			pickingWhite = pickingFocus = false;
+		if (e.key === 'Escape' && (pickingWhite || pickingFocus || probing)) {
+			pickingWhite = pickingFocus = probing = false;
 			return;
 		}
 		if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') {
@@ -1316,7 +1402,7 @@
 		     without WebGPU nothing ever draws into it and the server's JPEG sits on top. -->
 		<canvas
 			bind:this={canvas}
-			class="block touch-none {sideBySide ? (wide ? 'h-full w-1/2' : 'h-1/2 w-full') : 'h-full w-full'} {fallback ? 'invisible' : ''} {pickingWhite || pickingFocus ? 'cursor-crosshair' : ''}"
+			class="block touch-none {sideBySide ? (wide ? 'h-full w-1/2' : 'h-1/2 w-full') : 'h-full w-full'} {fallback ? 'invisible' : ''} {pickingWhite || pickingFocus || probing ? 'cursor-crosshair' : ''}"
 			onpointerdown={canvasDown}
 			onpointermove={canvasMove}
 			onpointerup={canvasUp}
@@ -1470,6 +1556,19 @@
 				<div class="transition-opacity {painting ? 'opacity-30' : ''}" title={painting ? 'Paused while painting' : undefined}>
 					<Histogram data={histogram} {clipHigh} {clipLow} ontoggle={(w) => { if (w === 'high') clipHigh = !clipHigh; else clipLow = !clipLow; schedule(); }} />
 				</div>
+				<details class="mt-1">
+					<summary class="cursor-pointer text-[0.6875rem] text-fg-2">Measure</summary>
+					<div class="mt-1">
+						<Readout
+							{readings}
+							{probing}
+							onprobe={(on) => (probing = on)}
+							probed={!!probePoint}
+							onclear={clearProbe}
+							title="{meta?.fileName ?? 'photo'} · {SPACE_LABELS[displaySpace]}"
+						/>
+					</div>
+				</details>
 				{/if}
 				<div class="mt-1 flex items-center justify-between gap-2 text-[0.6875rem]">
 					<div class="flex items-center gap-2">
