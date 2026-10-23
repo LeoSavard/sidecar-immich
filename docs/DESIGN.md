@@ -7,6 +7,22 @@ Source: the architecture plan (PWA entry, XMP sidecars, server-side demosaic, We
 
 Where the code differs from the text below, the code and these notes win.
 
+- **An old edit can take up today's rendering** (§4): `migrate` keeps an old edit's picture by pinning the
+  references the pipeline has moved on from, which is right — the person approved *that* picture — but it
+  left no way back: a photo edited before `PROCESS_VERSION` 3 rendered 1.15 stops below where the
+  measurement puts its middle grey, for as long as it existed, and checking out the original did not escape
+  it (the two `the_original_of_…` tests say why). `adopt_current_rendering` is the other direction. It moves
+  only the references, keeps every setting, and keeps Whites reading what it read by carrying its offset to
+  the new white point; a developed file takes up the white point alone, since it has no baseline, shoulder
+  or bleach of its own. The editor offers it where the other notices about a photo are, since the History
+  section is not somewhere anyone would look for it, and taking it is an ordinary edit — the picture moves
+  at once, Undo takes it back, saving files a version. Checked: four unit tests, including that packing the
+  result lifts the exposure by exactly `BASELINE_EV`; and `web/scripts/rendering-update-smoke.mjs` in
+  Chromium on a fixture whose sidecar really does predate the baseline, which reads the change off the
+  Measure probe rather than describing it — **−0.37 stops from grey before, +1.17 stops after, against the
+  1.15 expected** — then Undo back, Redo forward, and a save that leaves 18 versions as 19 with Exposure
+  still at the +0.30 EV the person set.
+
 - **The home page shows photographs, not grey boxes** (§3, §11): four changes to what it lists. The imported
   photos are their own row — **one thumbnail row high**, scrolling sideways rather than wrapping, with the
   count beside the heading and size, the exported mark and Remove kept behind *More info*; what is in that
@@ -1118,10 +1134,22 @@ and the two tests in `sidecar-xmp` named `the_original_of_…` are the answer:
   synthesised on read, and `History::begin` makes its root from `EditParams::default()` as it stands today.
   There, checking out the original *does* hand over today's rendering.
 
-In both cases the current edit is untouched: what appears when the photo opens is the picture it had. What is
-missing, and worth writing down, is any way to say **"render this photo with today's defaults"** for a photo
-that already has a history. The components exist — a checkout writes an arbitrary `EditParams` — but nothing
-in the interface offers it. See the roadmap.
+In both cases the current edit is untouched: what appears when the photo opens is the picture it had.
+
+**The way out is `EditParams::adopt_current_rendering`**, the other direction from `migrate`. It sets the
+references a new edit of this file would get and leaves everything the person set alone — Exposure, the
+curve, masks, film, crop. Whites needs care, because it is stored as a white point and *read* as the
+distance from the rendering's own: the offset is kept, so the slider still says what it said. Only
+references this file's rendering actually reads are touched, so a developed file takes up the white point
+and nothing else — it has no baseline, and `pack` holds its shoulder and bleach at zero anyway. That is also
+what makes `behind_current_rendering` worth asking: the offer appears only when something would visibly
+change.
+
+The editor offers it as a notice at the top of the tools panel, beside the other things worth knowing about
+a photo — not in the History section, where nobody would go looking for it. Taking it is an **ordinary
+edit**: the picture moves at once, Undo takes it back, and saving files it as a version with the old one
+still behind it. The rule lives in `sidecar-color` and reaches the browser through `sc_adopt_rendering`, so
+the two cannot drift on what "today's rendering" means.
 
 ## 9. Export
 

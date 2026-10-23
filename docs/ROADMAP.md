@@ -24,13 +24,11 @@ What's known to be missing or wrong, roughly in the order it's worth doing. The 
 
 ## Correctness and quality
 
-**No way to re-render an old edit with today's rendering.** Stored references keep an old edit's picture,
-which is right, and checking out the original does not escape them when the sidecar carries a history of its
-own (DESIGN.md §4, "Opening the original, after a process version bump" — the behaviour is tested both ways).
-So a photo edited before `PROCESS_VERSION` 3 has no path to the baseline, the white point or the shoulder
-short of deleting its sidecar. What is wanted is one action — "render with today's defaults" — that commits
-`EditParams::default()` as a new version, leaving the old one in the history to go back to. A checkout
-already writes an arbitrary edit, so this is an interface gap rather than a mechanism one.
+**An old edit can take up today's rendering — done, 2026-10-23.** `EditParams::adopt_current_rendering`
+moves the stored references forward while leaving every setting alone, and the editor offers it on any photo
+it would change. What is *not* offered is doing it to a whole library at once: there is no way to say "bring
+all of these forward", and for a few hundred photographs that matters. The mechanism is per-edit and
+headless-friendly, so a batch is a loop over sidecars rather than new rules.
 
 
 

@@ -188,6 +188,13 @@
 	/** The uniforms the corrected proxy was made with: they also move markers set in sensor geometry. */
 	let lensUniform: Uint8Array | undefined;
 	let packer: ColorPacker;
+	let packerReady = $state(false);
+	/**
+	 * This edit renders by rules the pipeline has moved on from (`adopt_current_rendering`). References only
+	 * change through the action below, so this is worked out when the photo opens and after it is taken,
+	 * never on every keystroke.
+	 */
+	let behindRendering = $state(false);
 	/** What Highlights/Shadows alone would do to an identity curve — the curve editor's "ghost" line, drawn
 	 * behind the real one so a slider's effect stays visible even once a manual curve has its own shape. */
 	const ghostLut = $derived.by(() => (edit ? (packer?.toneCurveLut([], edit.tone.highlights ?? 0, edit.tone.shadows ?? 0) ?? null) : null));
@@ -789,6 +796,35 @@
 		[before ? measured.before : measured.edit, before ? measured.edit : measured.before].filter((r): r is Reading => !!r)
 	);
 
+	// ---------- today's rendering, for an edit made before it
+
+	function checkRendering() {
+		if (!packer || !edit || !meta) return;
+		try {
+			behindRendering = packer.adoptRendering($state.snapshot(edit), developed).changed;
+		} catch {
+			behindRendering = false;
+		}
+	}
+
+	/**
+	 * Take up today's rendering. An ordinary edit, so the picture changes on screen at once, Undo takes it
+	 * back, and saving files it as a version with the old one still behind it in the history.
+	 */
+	function adoptRendering() {
+		if (!packer || !edit || !meta) return;
+		const next = packer.adoptRendering($state.snapshot(edit), developed).edit;
+		update((e) => {
+			e.processVersion = next.processVersion;
+			e.exposure = { ...e.exposure, baselineEv: next.exposure.baselineEv };
+			e.tone = { ...e.tone, whiteEv: next.tone.whiteEv, whiteZeroEv: next.tone.whiteZeroEv, shoulderOrder: next.tone.shoulderOrder, highlightBleach: next.tone.highlightBleach };
+		});
+		committed();
+		behindRendering = false;
+		status = 'Rendering brought up to date. Undo puts it back.';
+		setTimeout(() => (status = ''), 4000);
+	}
+
 	/** The brush's radius in proxy pixels, and on screen in CSS pixels. */
 	function brushRadius() {
 		const proxy = develop?.proxy;
@@ -1026,6 +1062,19 @@
 		if ((section === 'history' || wide) && edit && !session.versions) session.loadVersions();
 	});
 
+	// Whether this edit renders by today's rules. The references below are the whole of what the answer
+	// depends on, so reading them here is what makes this re-run — when the photo opens, when a version is
+	// opened, and after an undo puts an old one back — rather than on every change to anything.
+	$effect(() => {
+		void edit?.processVersion;
+		void edit?.exposure.baselineEv;
+		void edit?.tone.whiteEv;
+		void edit?.tone.whiteZeroEv;
+		void edit?.tone.shoulderOrder;
+		void edit?.tone.highlightBleach;
+		if (packerReady && edit && meta) checkRendering();
+	});
+
 	async function loadProxy(longEdge: number) {
 		const [proxyResp, focusResp] = await Promise.all([api(`/api/assets/${key}/proxy?long_edge=${longEdge}`), api(`/api/assets/${key}/focus?edge=${longEdge}`)]);
 		const w = Number(proxyResp.headers.get('x-width'));
@@ -1053,6 +1102,7 @@
 			]);
 			fallback = device === null;
 			packer = p;
+			packerReady = true;
 			defaults = packer.defaultEdit();
 			const asShot = packer.pack(defaults, meta!.info.color, meta!.info.sourceKind ?? 'raw', display);
 			asShotWb = { temperatureK: asShot.temperatureK, tint: asShot.tint };
@@ -1539,6 +1589,22 @@
 					</p>
 				{/if}
 				{#if readOnly}<p class="rounded bg-raised p-2 text-xs">A newer Sidecar edited this photo. Update Sidecar to change it.</p>{/if}
+				{#if behindRendering && !readOnly}
+					<!-- An edit keeps the rendering it was made under, deliberately: the picture the person
+					     approved is the one they get back. The cost is that it can never see a rendering added
+					     since, and this is the way out. It belongs with the other notices rather than in the
+					     History section, where nobody would go looking for it. -->
+					<div class="rounded bg-raised p-2 text-xs">
+						<p class="text-fg">This edit was made with an older rendering.</p>
+						<p class="mt-1 text-fg-2">
+							Bringing it up to date keeps everything you set and changes only how Sidecar renders
+							underneath — so the picture will change. What you have now stays in History.
+						</p>
+						<button type="button" class="mt-2 h-8 rounded bg-fg px-3 text-ground disabled:opacity-40" disabled={session.saving} onclick={adoptRendering}>
+							Use today's rendering
+						</button>
+					</div>
+				{/if}
 				{#if !readOnly && !session.writable}<p class="rounded bg-raised p-2 text-xs text-warning">Sidecar can't write in this photo's folder, so edits here can't be saved. Give the account Sidecar runs as write access to it.</p>{/if}
 				{#if session.restoredDraft && session.dirty}<p class="rounded bg-raised p-2 text-xs">Restored unsaved changes from this device.</p>{/if}
 				{#if session.savedFor}

@@ -134,6 +134,37 @@ pub unsafe extern "C" fn sc_pack(ptr: *const u8, len: usize) -> *const u8 {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AdoptRequest {
+    edit: EditParams,
+    /// A developed file has no baseline, shoulder or bleach to take up (`adopt_current_rendering`).
+    #[serde(default)]
+    developed: bool,
+}
+
+/// `{ edit, developed }` → `{ edit, changed }`: the edit rendering by today's rules, and whether that is
+/// any different from how it renders now. The rule lives in `sidecar_color` so the browser and the server
+/// cannot drift on what "today's rendering" means.
+///
+/// # Safety
+/// `ptr` must point to `len` readable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sc_adopt_rendering(ptr: *const u8, len: usize) -> *const u8 {
+    let input = unsafe { std::slice::from_raw_parts(ptr, len) };
+    respond(
+        serde_json::from_slice::<AdoptRequest>(input)
+            .map_err(|e| e.to_string())
+            .and_then(|req| {
+                let mut edit = req.edit;
+                let changed = edit.behind_current_rendering(req.developed);
+                edit.adopt_current_rendering(req.developed);
+                serde_json::to_vec(&serde_json::json!({ "edit": edit, "changed": changed }))
+                    .map_err(|e| e.to_string())
+            }),
+    )
+}
+
+#[derive(Deserialize)]
 struct GeometryRequest {
     geometry: sidecar_color::geometry::Geometry,
     /// The picture's size in pixels (its proportions are what matter).
