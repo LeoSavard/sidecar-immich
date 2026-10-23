@@ -1456,9 +1456,19 @@
 		{#if status || error}
 			<p class="absolute inset-x-4 top-[max(1rem,env(safe-area-inset-top))] text-center text-sm {error ? 'text-danger' : 'text-fg-2'}">{error || status}</p>
 		{/if}
+		<!-- The way back. Until this, the only way out of the editor on a phone was the browser's own back
+		     gesture, which a photo opened from a share or a link does not always have. -->
+		<a
+			href="/"
+			class="absolute top-[max(0.75rem,env(safe-area-inset-top))] left-3 grid size-8 place-items-center rounded-full bg-ground/80 text-fg-2"
+			aria-label="Back to Sidecar"
+			title="Back to Sidecar"
+		>
+			<svg viewBox="0 0 16 16" class="size-4" aria-hidden="true"><path d="M9.5 3.5 5 8l4.5 4.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></svg>
+		</a>
 		<button
 			type="button"
-			class="absolute top-[max(0.75rem,env(safe-area-inset-top))] left-3 grid size-8 place-items-center rounded-full {toolsHidden ? 'bg-fg text-ground' : 'bg-ground/80 text-fg-2'}"
+			class="absolute top-[max(0.75rem,env(safe-area-inset-top))] left-[3.25rem] grid size-8 place-items-center rounded-full {toolsHidden ? 'bg-fg text-ground' : 'bg-ground/80 text-fg-2'}"
 			aria-pressed={toolsHidden}
 			aria-label={toolsHidden ? 'Show the editing tools' : 'Hide the editing tools'}
 			title={toolsHidden ? 'Show the editing tools (H)' : 'Hide the editing tools (H)'}
@@ -1473,7 +1483,7 @@
 				{/each}
 			</nav>
 		{/if}
-		{#if before}<span class="absolute top-[max(1rem,env(safe-area-inset-top))] left-14 rounded bg-ground/80 px-2 py-1 text-xs">{compare?.label ?? (developed ? 'As saved' : 'As shot')}</span>{/if}
+		{#if before}<span class="absolute top-[max(1rem,env(safe-area-inset-top))] left-24 rounded bg-ground/80 px-2 py-1 text-xs">{compare?.label ?? (developed ? 'As saved' : 'As shot')}</span>{/if}
 		<div class="absolute top-[max(0.75rem,env(safe-area-inset-top))] right-3 grid justify-items-end gap-1.5">
 			{#if !wide && showPhoneHistogram && !fallback}
 				<div class="transition-opacity {painting ? 'opacity-30' : ''}" title={painting ? 'Paused while painting' : undefined}>

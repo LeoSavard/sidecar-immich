@@ -24,6 +24,16 @@ What's known to be missing or wrong, roughly in the order it's worth doing. The 
 
 ## Correctness and quality
 
+**No way to re-render an old edit with today's rendering.** Stored references keep an old edit's picture,
+which is right, and checking out the original does not escape them when the sidecar carries a history of its
+own (DESIGN.md §4, "Opening the original, after a process version bump" — the behaviour is tested both ways).
+So a photo edited before `PROCESS_VERSION` 3 has no path to the baseline, the white point or the shoulder
+short of deleting its sidecar. What is wanted is one action — "render with today's defaults" — that commits
+`EditParams::default()` as a new version, leaving the old one in the history to go back to. A checkout
+already writes an arbitrary edit, so this is an interface gap rather than a mechanism one.
+
+
+
 **Middle grey sat a stop below where the curve assumes — fixed, `PROCESS_VERSION` 3.** `normalize.wgsl`
 scales sensor saturation to 1.0 and the tone curve reads middle grey at 0.18 of that, i.e. 2.47 stops of
 headroom. A correctly exposed capture does not put grey there: cameras meter lower to keep highlight room.

@@ -56,6 +56,25 @@
 
 	const mb = (n: number) => `${(n / 1e6).toFixed(1)} MB`;
 
+	/** Sidecar's own thumbnail: the photo as the edit renders it, for anything Immich can't or won't show. */
+	const ownThumb = (assetKey: string) => `/api/assets/${assetKey}/thumb`;
+
+	/**
+	 * Immich's thumbnail where there is one, since it is already made; Sidecar's own otherwise. `onerror`
+	 * covers the other half of the problem — a photo Immich holds but has no thumbnail for, an iPhone DNG
+	 * among them — by falling back to the same place rather than leaving a grey box.
+	 */
+	function thumbFallback(e: Event, assetKey: string) {
+		const el = e.currentTarget as HTMLImageElement;
+		if (el.dataset.fell === '1') return;
+		el.dataset.fell = '1';
+		el.src = ownThumb(assetKey);
+	}
+
+	/** What is in the editing folder, so Recent doesn't show the same photo twice. */
+	const importedKeys = $derived(new Set(folder?.items?.map((i) => i.assetKey) ?? []));
+	const recentElsewhere = $derived(recent?.filter((r) => !importedKeys.has(r.assetKey)) ?? null);
+
 	let link = $state('');
 	let linkError = $state('');
 
@@ -129,7 +148,7 @@
 	function choose() {
 		if (noRoom) {
 			blocked = true;
-			folderOpen = true;
+			moreInfo = true;
 			return;
 		}
 		picker?.click();
@@ -146,15 +165,17 @@
 		dragging = false;
 		if (noRoom) {
 			blocked = true;
-			folderOpen = true;
+			moreInfo = true;
 			return;
 		}
 		const file = e.dataTransfer?.files?.[0];
 		if (file) intake(file);
 	}
 
-	/** The folder list is folded away by default; the message opens it, since that is where the answer is. */
-	let folderOpen = $state(false);
+	/** Extra detail under each imported thumbnail: size, whether it has been exported, and Remove. Off by
+	 *  default so the row is one row high; the full-folder message turns it on, since that is where the
+	 *  answer to it is. */
+	let moreInfo = $state(false);
 
 	async function signOut() {
 		await fetch('/api/session', { method: 'DELETE' });
@@ -251,60 +272,75 @@
 	{#if intakeError}<p class="mt-2 text-sm text-danger">{intakeError}</p>{/if}
 
 	{#if folder?.configured}
-		<!-- The first row of this page: what the editing folder holds, folded away until it matters. It is
-		     bounded, so this is also the only place a photo can be taken out of it. -->
-		<details class="mt-3 rounded bg-[#1f1f1f]" bind:open={folderOpen}>
-			<summary class="cursor-pointer px-3 py-2 text-sm text-[#c6c6c6]">
-				{folder.name ?? 'Editing folder'}
-				<span class="text-fg-2">— {folder.items?.length ?? 0} of {folder.limit}{folder.full ? ', full' : ''}</span>
-			</summary>
-			<div class="px-3 pb-3">
+		<!-- The imported photos, one row of thumbnails high. The folder is bounded, so this is also the only
+		     place a photo can be taken out of it — behind More info, which is off by default. -->
+		<section class="mt-6">
+			<div class="mb-3 flex items-baseline gap-2">
+				<h2 class="text-sm font-medium text-[#c6c6c6]">Imported</h2>
+				<span class="text-xs text-fg-2">{folder.items?.length ?? 0} of {folder.limit}{folder.full ? ', full' : ''}</span>
 				{#if folder.items?.length}
-					<ul class="grid gap-1">
-						{#each folder.items as f (f.assetKey)}
-							<li class="flex items-center gap-2 rounded bg-[#262626] px-2 py-1.5 text-sm">
-								<a href="/edit/{f.assetKey}" class="min-w-0 flex-1 truncate underline underline-offset-4" title={f.at}>{f.fileName}</a>
-								<span class="shrink-0 text-xs text-fg-2">{mb(f.bytes)}</span>
-								{#if f.exported}
-									<span class="shrink-0 rounded-full bg-[#393939] px-2 py-0.5 text-[0.6875rem] text-fg-2" title="A render of this photo exists elsewhere, so this is the first one removed when room is needed">exported</span>
-								{/if}
-								<button
-									type="button"
-									class="shrink-0 rounded-full px-2 py-0.5 text-[0.6875rem] {armed === f.assetKey ? 'bg-danger text-ground' : 'bg-[#393939] text-fg-2'}"
-									disabled={folderBusy === f.assetKey}
-									aria-label={armed === f.assetKey ? `Confirm removing ${f.fileName} from the folder` : `Remove ${f.fileName} from the folder`}
-									onclick={() => (armed === f.assetKey ? remove(f) : arm(f.assetKey))}
-								>{folderBusy === f.assetKey ? 'Removing…' : armed === f.assetKey ? 'Remove?' : 'Remove'}</button>
-							</li>
-						{/each}
-					</ul>
+					<button type="button" aria-pressed={moreInfo} class="ml-auto text-xs text-fg-2 underline underline-offset-4" onclick={() => (moreInfo = !moreInfo)}>
+						{moreInfo ? 'Less' : 'More'} info
+					</button>
+				{/if}
+			</div>
+			{#if folder.items?.length}
+				<ul class="flex gap-3 overflow-x-auto pb-1">
+					{#each folder.items as f (f.assetKey)}
+						<li class="w-40 shrink-0 overflow-hidden rounded bg-[#262626] sm:w-[calc((100%-2.25rem)/4)]">
+							<a href="/edit/{f.assetKey}" class="block hover:bg-[#393939]">
+								<img src={ownThumb(f.assetKey)} alt="" class="aspect-[3/2] w-full bg-[#1f1f1f] object-cover" loading="lazy" />
+								<span class="block truncate p-2 text-sm">{f.fileName}</span>
+							</a>
+							{#if moreInfo}
+								<div class="flex items-center gap-2 px-2 pb-2 text-[0.6875rem]">
+									<span class="text-fg-2">{mb(f.bytes)}</span>
+									{#if f.exported}
+										<span class="rounded-full bg-[#393939] px-1.5 py-0.5 text-fg-2" title="A render of this photo exists elsewhere, so it is the first one removed when room is needed">exported</span>
+									{/if}
+									<button
+										type="button"
+										class="ml-auto rounded-full px-2 py-0.5 {armed === f.assetKey ? 'bg-danger text-ground' : 'bg-[#393939] text-fg-2'}"
+										disabled={folderBusy === f.assetKey}
+										aria-label={armed === f.assetKey ? `Confirm removing ${f.fileName} from the folder` : `Remove ${f.fileName} from the folder`}
+										onclick={() => (armed === f.assetKey ? remove(f) : arm(f.assetKey))}
+									>{folderBusy === f.assetKey ? 'Removing…' : armed === f.assetKey ? 'Remove?' : 'Remove'}</button>
+								</div>
+							{/if}
+						</li>
+					{/each}
+				</ul>
+				{#if moreInfo}
 					<p class="mt-2 text-xs text-fg-2">
 						Removing takes two taps and deletes the original and its edits from this folder. Anything you have
 						exported is already elsewhere and is not touched.
 					</p>
-				{:else}
-					<p class="text-sm text-fg-2">Nothing in it yet. A photo imported into this folder appears here.</p>
 				{/if}
-			</div>
-		</details>
+			{:else}
+				<p class="text-sm text-[#8d8d8d]">A photo imported into this folder appears here.</p>
+			{/if}
+		</section>
 	{/if}
-	<div class="mt-3 flex flex-wrap gap-4 text-sm text-fg-2">
-		<a href="/setup" class="underline underline-offset-4">Set up the iPhone shortcut</a>
-		<a href="/settings" class="underline underline-offset-4">Settings</a>
-	</div>
+
 	<h2 class="mt-8 mb-3 text-sm font-medium text-[#c6c6c6]">Recent</h2>
-	{#if recent?.length}
+	{#if recentElsewhere?.length}
 		<ul class="grid grid-cols-2 gap-3 sm:grid-cols-4">
-			{#each recent as r (r.assetKey)}
+			{#each recentElsewhere as r (r.assetKey)}
 				<li>
 					<a href="/edit/{r.assetKey}" class="block overflow-hidden rounded bg-[#262626] hover:bg-[#393939]">
-						{#if r.immichAssetId}<img src={thumbnailUrl(r.immichAssetId)} alt="" class="aspect-[3/2] w-full object-cover" loading="lazy" />{:else}<div class="aspect-[3/2] w-full bg-[#1f1f1f]"></div>{/if}
+						<img
+							src={r.immichAssetId ? thumbnailUrl(r.immichAssetId) : ownThumb(r.assetKey)}
+							alt=""
+							class="aspect-[3/2] w-full bg-[#1f1f1f] object-cover"
+							loading="lazy"
+							onerror={(e) => thumbFallback(e, r.assetKey)}
+						/>
 						<span class="block truncate p-2 text-sm">{r.fileName}</span>
 					</a>
 				</li>
 			{/each}
 		</ul>
 	{:else if recent}
-		<p class="text-sm text-[#8d8d8d]">Photos you open appear here.</p>
+		<p class="text-sm text-[#8d8d8d]">{folder?.items?.length ? 'Photos you open from elsewhere appear here.' : 'Photos you open appear here.'}</p>
 	{/if}
 </main>

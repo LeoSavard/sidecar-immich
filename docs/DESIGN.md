@@ -7,6 +7,22 @@ Source: the architecture plan (PWA entry, XMP sidecars, server-side demosaic, We
 
 Where the code differs from the text below, the code and these notes win.
 
+- **The home page shows photographs, not grey boxes** (§3, §11): four changes to what it lists. The imported
+  photos are their own row — **one thumbnail row high**, scrolling sideways rather than wrapping, with the
+  count beside the heading and size, the exported mark and Remove kept behind *More info*; what is in that
+  folder is left out of Recent, so no photograph appears twice. Recent itself keeps **40**
+  (`RECENT_KEPT`): it is a way back to what you were working on, not a library view, and every row costs a
+  thumbnail. Thumbnails now have a second source — `GET /api/assets/{key}/thumb` renders the photo as the
+  edit currently renders it, small, from the cached proxy, so it costs a develop pass over a 480-pixel image
+  rather than a decode. Immich's own thumbnail stays the fast path where there is one; Sidecar's answers both
+  halves of the gap, a photo Immich has never seen *and* one it holds but will not thumbnail, the iPhone DNGs
+  among them, through an `onerror` that falls through to the same place. And the editor has **a way back**:
+  until now the only way out on a phone was the browser's own back gesture, which a photo opened from a share
+  or a pasted link does not always have. Checked: `web/scripts/folder-limit-smoke.mjs` (25 assertions,
+  including that the row is one tile tall at both widths and that every imported photo's thumbnail actually
+  decoded), the thumb endpoint returning a 480×321 JPEG, and the back button at phone size — present, clear
+  of the tools toggle, and landing on `/`.
+
 - **The editing folder is bounded** (§3): a folder that lives inside the image cannot be allowed to grow
   until the host fills up, so it holds **four** photographs by default (`intake_limit`). What goes when it is
   full is the oldest one that has been *exported* — a render of it exists elsewhere, so the folder is no
@@ -1086,6 +1102,26 @@ if (focus_energy(uv, step) >= V.peak_t) { return vec4f(PEAK_COLOUR, 1.0); }   //
 ```
 
 `focus_energy` is the central-difference gradient of encoded luminance. **This is a stopgap:** measured on the proxy it reports edge contrast rather than sharpness, and the real measure belongs at full resolution on the server, shipped as a layer — see the roadmap. The step is the larger of one texel and one canvas pixel, so zooming out averages detail away instead of aliasing downscaling noise into false peaks. It reads the proxy, so at fit zoom it reports composition-scale sharpness; critical focus means zooming in or opening the loupe.
+
+### Opening the original, after a process version bump
+
+Stored references (above) keep an old edit's picture, and the question they raise is whether *checking out
+the original* escapes them — whether "before I touched it" means today's rendering. It depends on one thing,
+and the two tests in `sidecar-xmp` named `the_original_of_…` are the answer:
+
+- **A sidecar with a history of its own** holds that history's root as it was written, and `version_of`
+  migrates the root exactly as it migrates any other version. A history written under `PROCESS_VERSION` 2
+  hands back `baseline_ev` 0, `white_zero_ev` 4.5 and `shoulder_order` 0 — the old rendering. This is
+  deliberate: the root is "the picture before I touched it" *for that edit*, and that picture was made by the
+  old pipeline. So no, the original does not bring the new rendering with it.
+- **A sidecar with no stored history** — edited before histories existed, or never edited — has one
+  synthesised on read, and `History::begin` makes its root from `EditParams::default()` as it stands today.
+  There, checking out the original *does* hand over today's rendering.
+
+In both cases the current edit is untouched: what appears when the photo opens is the picture it had. What is
+missing, and worth writing down, is any way to say **"render this photo with today's defaults"** for a photo
+that already has a history. The components exist — a checkout writes an arbitrary `EditParams` — but nothing
+in the interface offers it. See the roadmap.
 
 ## 9. Export
 

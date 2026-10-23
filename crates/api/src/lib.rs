@@ -269,12 +269,16 @@ async fn admit(app: &Arc<App>, user: &User, c: Candidate) -> Result<String> {
             let mut u = found.unwrap_or_default();
             u.recent.retain(|r| r.asset_key != key);
             u.recent.insert(0, item);
-            u.recent.truncate(50);
+            u.recent.truncate(RECENT_KEPT);
             u
         })
         .await?;
     Ok(key)
 }
+
+/// How many photographs stay in Recent. It is a way back to what you were working on, not a library view:
+/// past this the list is scrolling rather than remembering, and every row costs a thumbnail to render.
+const RECENT_KEPT: usize = 40;
 
 /// The largest photo `POST /api/intake` will take. A 100-megapixel 16-bit TIFF is around 600 MB; this leaves
 /// room for one and refuses a video someone dropped on the page by mistake before it is read into memory.
@@ -1100,6 +1104,57 @@ async fn proxy(
     .await
 }
 
+/// How wide a thumbnail is rendered. Twice the grid's cell, so it still looks right on a dense screen.
+const THUMB_EDGE: u32 = 480;
+
+/// `GET /api/assets/{key}/thumb` — the photo as the edit currently renders it, small, as JPEG.
+///
+/// Immich serves thumbnails for everything it holds, and that stays the fast path; this is for the photos it
+/// cannot — one imported into the editing folder, which Immich has never seen, and any file whose thumbnail
+/// Immich declines to make. It costs a develop pass over the cached proxy at this size, not a decode, so the
+/// expensive part (reading the RAW) is paid once by whatever opened the photo first. Cached for an hour by
+/// the browser, keyed on the edit's etag so a re-edit shows through.
+async fn thumb(
+    State(app): State<Arc<App>>,
+    ApiUser(user): ApiUser,
+    Path(key): Path<String>,
+) -> Response {
+    let Some(rec) = asset_for(&app, &user, &key).await else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let path = rec.path.clone();
+    let Ok(edit) = tokio::task::spawn_blocking(move || {
+        SidecarDoc::load(&path)
+            .map(|d| d.edit())
+            .unwrap_or_default()
+    })
+    .await
+    else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    let req = serde_json::json!({
+        "key": key,
+        "path": rec.path,
+        "edit": edit,
+        "longEdge": THUMB_EDGE,
+    });
+    let mut out = relay(
+        app.http
+            .post(app.worker("/v1/preview"))
+            .json(&req)
+            .send()
+            .await,
+    )
+    .await;
+    if out.status().is_success() {
+        out.headers_mut().insert(
+            header::CACHE_CONTROL,
+            header::HeaderValue::from_static("private, max-age=3600"),
+        );
+    }
+    out
+}
+
 #[derive(Deserialize)]
 struct FocusQuery {
     edge: Option<u32>,
@@ -1590,6 +1645,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/film/stocks/{id}", get(film_stock))
         .route("/api/assets/{key}/meta", get(meta))
         .route("/api/assets/{key}/proxy", get(proxy))
+        .route("/api/assets/{key}/thumb", get(thumb))
         .route("/api/assets/{key}/focus", get(focus))
         .route("/api/assets/{key}/masks", get(masks))
         .route("/api/assets/{key}/masks/{name}", get(mask))
