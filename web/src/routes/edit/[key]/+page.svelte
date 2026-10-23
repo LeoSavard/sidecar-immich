@@ -188,6 +188,23 @@
 	/** The uniforms the corrected proxy was made with: they also move markers set in sensor geometry. */
 	let lensUniform: Uint8Array | undefined;
 	let packer: ColorPacker;
+	let packerReady = $state(false);
+	/**
+	 * This edit renders by rules the pipeline has moved on from (`adopt_current_rendering`). References only
+	 * change through the action below, so this is worked out when the photo opens and after it is taken,
+	 * never on every keystroke.
+	 */
+	let behindRendering = $state(false);
+	/**
+	 * The references this edit had before it was brought up to date, so "keep the old rendering" can put
+	 * them back. Set only when the port happened on its own, under the person's first change.
+	 */
+	let oldRendering = $state<{ processVersion: number; baselineEv: number; whiteEv: number; whiteZeroEv: number; shoulderOrder: number; highlightBleach: number } | null>(null);
+	/**
+	 * They asked to keep the old rendering on this photo. Held for as long as it is open and no longer: an
+	 * edit that keeps old references is the thing this is trying to stop, so the next session asks again.
+	 */
+	let keepOldRendering = $state(false);
 	/** What Highlights/Shadows alone would do to an identity curve — the curve editor's "ghost" line, drawn
 	 * behind the real one so a slider's effect stays visible even once a manual curve has its own shape. */
 	const ghostLut = $derived.by(() => (edit ? (packer?.toneCurveLut([], edit.tone.highlights ?? 0, edit.tone.shadows ?? 0) ?? null) : null));
@@ -789,6 +806,76 @@
 		[before ? measured.before : measured.edit, before ? measured.edit : measured.before].filter((r): r is Reading => !!r)
 	);
 
+	// ---------- today's rendering, for an edit made before it
+
+	function checkRendering() {
+		if (!packer || !edit || !meta) return;
+		// Having asked to keep the old rendering, they are not asked again while the photo is open — the
+		// references are back where they were, so the question would otherwise return the moment it was
+		// answered.
+		if (keepOldRendering) {
+			behindRendering = false;
+			return;
+		}
+		try {
+			behindRendering = packer.adoptRendering($state.snapshot(edit), developed).changed;
+		} catch {
+			behindRendering = false;
+		}
+	}
+
+	/** The references as they stand, for putting back. */
+	function referencesOf(e: EditParams) {
+		return { processVersion: e.processVersion, baselineEv: e.exposure.baselineEv, whiteEv: e.tone.whiteEv, whiteZeroEv: e.tone.whiteZeroEv, shoulderOrder: e.tone.shoulderOrder, highlightBleach: e.tone.highlightBleach };
+	}
+
+	function setReferences(e: EditParams, r: ReturnType<typeof referencesOf>) {
+		e.processVersion = r.processVersion;
+		e.exposure = { ...e.exposure, baselineEv: r.baselineEv };
+		e.tone = { ...e.tone, whiteEv: r.whiteEv, whiteZeroEv: r.whiteZeroEv, shoulderOrder: r.shoulderOrder, highlightBleach: r.highlightBleach };
+	}
+
+	/**
+	 * Take up today's rendering, in the same change as whatever the person is doing. An ordinary edit, so
+	 * the picture moves at once, Undo takes it back, and saving files it as a version with the old one
+	 * still behind it.
+	 */
+	function adoptRendering() {
+		if (!packer || !edit || !meta) return;
+		const next = packer.adoptRendering($state.snapshot(edit), developed).edit;
+		update((e) => setReferences(e, referencesOf(next)));
+		committed();
+		behindRendering = false;
+		oldRendering = null;
+		status = 'Rendering brought up to date. Undo puts it back.';
+		setTimeout(() => (status = ''), 4000);
+	}
+
+	/**
+	 * Editing an old edit brings it up to date first, unless the person has said to keep the old rendering.
+	 * Letting it stay behind is what lets a rendering nobody can reach any more spread into versions saved
+	 * today — the edit inherits the references it was opened with, so one saved this morning can still be
+	 * rendering by rules from three versions ago. The port is offered back for as long as the photo is open.
+	 */
+	function portBeforeEditing() {
+		if (!behindRendering || readOnly || keepOldRendering || !packer || !edit || !meta) return;
+		const had = referencesOf($state.snapshot(edit));
+		const next = packer.adoptRendering($state.snapshot(edit), developed).edit;
+		setReferences(edit, referencesOf(next));
+		behindRendering = false;
+		oldRendering = had;
+	}
+
+	/** Put the references back and stop offering: this photo keeps the rendering it had, for this session. */
+	function keepOld() {
+		if (!edit || !oldRendering) return;
+		update((e) => setReferences(e, oldRendering!));
+		committed();
+		keepOldRendering = true;
+		behindRendering = false;
+		oldRendering = null;
+	}
+
 	/** The brush's radius in proxy pixels, and on screen in CSS pixels. */
 	function brushRadius() {
 		const proxy = develop?.proxy;
@@ -1026,6 +1113,19 @@
 		if ((section === 'history' || wide) && edit && !session.versions) session.loadVersions();
 	});
 
+	// Whether this edit renders by today's rules. The references below are the whole of what the answer
+	// depends on, so reading them here is what makes this re-run — when the photo opens, when a version is
+	// opened, and after an undo puts an old one back — rather than on every change to anything.
+	$effect(() => {
+		void edit?.processVersion;
+		void edit?.exposure.baselineEv;
+		void edit?.tone.whiteEv;
+		void edit?.tone.whiteZeroEv;
+		void edit?.tone.shoulderOrder;
+		void edit?.tone.highlightBleach;
+		if (packerReady && edit && meta) checkRendering();
+	});
+
 	async function loadProxy(longEdge: number) {
 		const [proxyResp, focusResp] = await Promise.all([api(`/api/assets/${key}/proxy?long_edge=${longEdge}`), api(`/api/assets/${key}/focus?edge=${longEdge}`)]);
 		const w = Number(proxyResp.headers.get('x-width'));
@@ -1053,6 +1153,7 @@
 			]);
 			fallback = device === null;
 			packer = p;
+			packerReady = true;
 			defaults = packer.defaultEdit();
 			const asShot = packer.pack(defaults, meta!.info.color, meta!.info.sourceKind ?? 'raw', display);
 			asShotWb = { temperatureK: asShot.temperatureK, tint: asShot.tint };
@@ -1260,6 +1361,7 @@
 	/** What sections call to change the edit (`$lib/ui/sections`): apply it, then redraw and mark it unsaved. */
 	function update(mutate: (e: EditParams) => void) {
 		if (!edit) return;
+		portBeforeEditing();
 		mutate(edit);
 		changed();
 	}
@@ -1456,9 +1558,19 @@
 		{#if status || error}
 			<p class="absolute inset-x-4 top-[max(1rem,env(safe-area-inset-top))] text-center text-sm {error ? 'text-danger' : 'text-fg-2'}">{error || status}</p>
 		{/if}
+		<!-- The way back. Until this, the only way out of the editor on a phone was the browser's own back
+		     gesture, which a photo opened from a share or a link does not always have. -->
+		<a
+			href="/"
+			class="absolute top-[max(0.75rem,env(safe-area-inset-top))] left-3 grid size-8 place-items-center rounded-full bg-ground/80 text-fg-2"
+			aria-label="Back to Sidecar"
+			title="Back to Sidecar"
+		>
+			<svg viewBox="0 0 16 16" class="size-4" aria-hidden="true"><path d="M9.5 3.5 5 8l4.5 4.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></svg>
+		</a>
 		<button
 			type="button"
-			class="absolute top-[max(0.75rem,env(safe-area-inset-top))] left-3 grid size-8 place-items-center rounded-full {toolsHidden ? 'bg-fg text-ground' : 'bg-ground/80 text-fg-2'}"
+			class="absolute top-[max(0.75rem,env(safe-area-inset-top))] left-[3.25rem] grid size-8 place-items-center rounded-full {toolsHidden ? 'bg-fg text-ground' : 'bg-ground/80 text-fg-2'}"
 			aria-pressed={toolsHidden}
 			aria-label={toolsHidden ? 'Show the editing tools' : 'Hide the editing tools'}
 			title={toolsHidden ? 'Show the editing tools (H)' : 'Hide the editing tools (H)'}
@@ -1473,7 +1585,7 @@
 				{/each}
 			</nav>
 		{/if}
-		{#if before}<span class="absolute top-[max(1rem,env(safe-area-inset-top))] left-14 rounded bg-ground/80 px-2 py-1 text-xs">{compare?.label ?? (developed ? 'As saved' : 'As shot')}</span>{/if}
+		{#if before}<span class="absolute top-[max(1rem,env(safe-area-inset-top))] left-24 rounded bg-ground/80 px-2 py-1 text-xs">{compare?.label ?? (developed ? 'As saved' : 'As shot')}</span>{/if}
 		<div class="absolute top-[max(0.75rem,env(safe-area-inset-top))] right-3 grid justify-items-end gap-1.5">
 			{#if !wide && showPhoneHistogram && !fallback}
 				<div class="transition-opacity {painting ? 'opacity-30' : ''}" title={painting ? 'Paused while painting' : undefined}>
@@ -1529,6 +1641,32 @@
 					</p>
 				{/if}
 				{#if readOnly}<p class="rounded bg-raised p-2 text-xs">A newer Sidecar edited this photo. Update Sidecar to change it.</p>{/if}
+				{#if behindRendering && !readOnly}
+					<!-- Still untouched: the picture is as it was made, and editing it will bring it up to date.
+					     Said now rather than at the moment of the first change, so it is never a surprise. -->
+					<div class="rounded bg-raised p-2 text-xs">
+						<p class="text-fg">This edit was made with an older rendering.</p>
+						<p class="mt-1 text-fg-2">
+							Changing anything brings it up to date first, which keeps everything you set and changes
+							only how Sidecar renders underneath — so the picture will change. What you have now stays
+							in History.
+						</p>
+						<button type="button" class="mt-2 h-8 rounded bg-fg px-3 text-ground disabled:opacity-40" disabled={session.saving} onclick={adoptRendering}>
+							Bring it up to date now
+						</button>
+					</div>
+				{:else if oldRendering}
+					<!-- It has just happened, under their own change. The way back is here for as long as the
+					     photo is open; a later session asks again, because an edit left on old references is
+					     exactly what spreads a rendering nobody can reach any more. -->
+					<div class="rounded bg-raised p-2 text-xs">
+						<p class="text-fg">Brought up to today's rendering.</p>
+						<p class="mt-1 text-fg-2">Everything you set was kept; only the rendering underneath moved.</p>
+						<button type="button" class="mt-2 h-8 rounded bg-raised px-3 text-fg-2 underline underline-offset-4" onclick={keepOld}>
+							Keep the old rendering
+						</button>
+					</div>
+				{/if}
 				{#if !readOnly && !session.writable}<p class="rounded bg-raised p-2 text-xs text-warning">Sidecar can't write in this photo's folder, so edits here can't be saved. Give the account Sidecar runs as write access to it.</p>{/if}
 				{#if session.restoredDraft && session.dirty}<p class="rounded bg-raised p-2 text-xs">Restored unsaved changes from this device.</p>{/if}
 				{#if session.savedFor}

@@ -146,6 +146,47 @@ impl EditParams {
         self.process_version = self.process_version.max(PROCESS_VERSION);
     }
 
+    /// The other direction from [`migrate`](Self::migrate): take up today's rendering, keeping the
+    /// adjustments the person made.
+    ///
+    /// `migrate` exists so an old edit keeps the picture it had — it pins the references the rendering has
+    /// since moved on from, and that is right, because the person approved *that* picture. The cost is that
+    /// an edit made before a reference existed can never see it: a photo edited before `PROCESS_VERSION` 3
+    /// renders 1.15 stops below where the measurement says its middle grey belongs, for as long as it
+    /// exists. This is the way out, and it is a deliberate act rather than something that happens quietly
+    /// on open: **the picture changes**, which is the whole point of asking for it.
+    ///
+    /// What it does not change is anything the person set. Exposure, the curve, masks, film, crop — all of
+    /// it stays. Whites needs care, because it is stored as a white point and *read* as the distance from
+    /// the rendering's own: moving the reference without moving the setting would leave the slider reading
+    /// something nobody chose (`migrate` pins `white_zero_ev` for exactly this reason). The offset is kept,
+    /// so Whites still says what it said.
+    ///
+    /// Only references this file's rendering actually reads are touched, so that offering the action means
+    /// something will visibly change: a developed file is tone-mapped by whatever wrote it, so it has no
+    /// baseline, no shoulder and no bleach to take up — `pack` holds the last two at zero for one — and the
+    /// white point is all there is.
+    pub fn adopt_current_rendering(&mut self, developed: bool) {
+        let whites = self.tone.white_ev - self.tone.white_zero_ev;
+        self.tone.white_zero_ev = DEFAULT_WHITE_EV;
+        self.tone.white_ev = DEFAULT_WHITE_EV + whites;
+        if !developed {
+            self.exposure.baseline_ev = BASELINE_EV;
+            self.tone.shoulder_order = DEFAULT_SHOULDER_ORDER;
+            self.tone.highlight_bleach = Tone::default().highlight_bleach;
+        }
+        self.process_version = PROCESS_VERSION;
+    }
+
+    /// Would [`adopt_current_rendering`](Self::adopt_current_rendering) change anything? The editor asks
+    /// before offering it, so the offer never appears on an edit that already renders by today's rules —
+    /// and never on a reference this file's rendering would ignore.
+    pub fn behind_current_rendering(&self, developed: bool) -> bool {
+        let mut taken_up = self.clone();
+        taken_up.adopt_current_rendering(developed);
+        taken_up != *self
+    }
+
     /// An edit saved under `PROCESS_VERSION` 1 stored Highlights/Shadows as curve points at x≈0.25/0.75
     /// (`CURVE_ANCHORS` in the web app, before this version): pulls those two points' offsets out into
     /// `tone.highlights`/`shadows` and removes them from `tone.curve`, so a slider that was at, say, +20 keeps
@@ -2261,6 +2302,106 @@ mod tests {
             "before={}, after={}",
             before[i],
             after[i]
+        );
+    }
+
+    /// An old edit taking up today's rendering: the references move, and nothing the person set does.
+    #[test]
+    fn taking_up_todays_rendering_keeps_the_persons_settings() {
+        let mut old: EditParams = serde_json::from_str(
+            r#"{"processVersion":2,"exposure":{"ev":0.75},"tone":{"contrast":1.3,"highlights":-40.0,"whiteEv":4.1},"saturation":12.0}"#,
+        )
+        .unwrap();
+        old.migrate();
+        // What migrate pinned, which is the old rendering.
+        assert_eq!(old.exposure.baseline_ev, 0.0);
+        assert_eq!(old.tone.white_zero_ev, LEGACY_WHITE_EV);
+        assert_eq!(old.tone.shoulder_order, 0.0);
+
+        let mut taken_up = old.clone();
+        assert!(taken_up.behind_current_rendering(false));
+        taken_up.adopt_current_rendering(false);
+
+        assert_eq!(taken_up.exposure.baseline_ev, BASELINE_EV);
+        assert_eq!(taken_up.tone.white_zero_ev, DEFAULT_WHITE_EV);
+        assert_eq!(taken_up.tone.shoulder_order, DEFAULT_SHOULDER_ORDER);
+        // Untouched: all of it is the person's.
+        assert_eq!(taken_up.exposure.ev, 0.75);
+        assert_eq!(taken_up.tone.contrast, 1.3);
+        assert_eq!(taken_up.tone.highlights, -40.0);
+        assert_eq!(taken_up.saturation, 12.0);
+        // And it is done: asking again changes nothing.
+        assert!(!taken_up.behind_current_rendering(false));
+    }
+
+    /// Whites is read as the distance from the rendering's own white point, so moving the reference has to
+    /// move the setting with it or the slider jumps to a number nobody chose.
+    #[test]
+    fn whites_still_reads_what_it_read_before() {
+        let whites = |e: &EditParams| (e.tone.white_zero_ev - e.tone.white_ev) / 2.0 * 100.0;
+        let mut old: EditParams =
+            serde_json::from_str(r#"{"processVersion":2,"tone":{"whiteEv":4.1}}"#).unwrap();
+        old.migrate();
+        let before = whites(&old);
+        assert!(
+            (before - 20.0).abs() < 1e-9,
+            "Whites +20 against the old point"
+        );
+
+        let mut taken_up = old.clone();
+        taken_up.adopt_current_rendering(false);
+        assert!(
+            (whites(&taken_up) - before).abs() < 1e-9,
+            "still +20, now against today's: {} vs {before}",
+            whites(&taken_up)
+        );
+        assert_ne!(
+            taken_up.tone.white_ev, old.tone.white_ev,
+            "by moving with it"
+        );
+    }
+
+    /// A developed file is tone-mapped by whatever wrote it: it has no baseline, shoulder or bleach to take
+    /// up, so the offer is about its white point or it is not made at all.
+    #[test]
+    fn a_developed_file_takes_up_only_what_it_renders_with() {
+        let mut old: EditParams =
+            serde_json::from_str(r#"{"processVersion":2,"tone":{"whiteEv":4.5}}"#).unwrap();
+        old.migrate();
+        let mut taken_up = old.clone();
+        taken_up.adopt_current_rendering(true);
+        assert_eq!(taken_up.tone.white_zero_ev, DEFAULT_WHITE_EV);
+        assert_eq!(
+            taken_up.exposure.baseline_ev, 0.0,
+            "a developed file's grey was placed by its maker"
+        );
+        assert_eq!(taken_up.tone.shoulder_order, 0.0);
+        assert_eq!(taken_up.tone.highlight_bleach, 0.0);
+
+        // One already on today's white point has nothing to take up, and is not offered it.
+        let current = EditParams::default();
+        assert!(!current.behind_current_rendering(true));
+        assert!(!current.behind_current_rendering(false));
+    }
+
+    /// The point of the whole thing: the rendering really does change, and in the direction the measurement
+    /// said it should — an old edit was a stop and a bit dark, and taking up the baseline lifts it.
+    #[test]
+    fn taking_it_up_lifts_the_old_edits_grey() {
+        let cam = crate::camera::nikon_d850();
+        let gain = |e: &EditParams| {
+            let p = pack(e, &cam, SourceKind::Raw, DisplaySpace::Srgb);
+            let u: &DevelopParams = bytemuck::from_bytes(&p.uniform);
+            u.exposure
+        };
+        let mut old: EditParams = serde_json::from_str(r#"{"processVersion":2}"#).unwrap();
+        old.migrate();
+        let mut taken_up = old.clone();
+        taken_up.adopt_current_rendering(false);
+        let lift = (gain(&taken_up) / gain(&old)).log2();
+        assert!(
+            (lift - BASELINE_EV as f32).abs() < 1e-3,
+            "expected the baseline back, got {lift} stops"
         );
     }
 }

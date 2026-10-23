@@ -14,6 +14,7 @@ type Exports = {
 	sc_pack_lens(ptr: number, len: number): number;
 	sc_tone_curve_lut(ptr: number, len: number): number;
 	sc_geometry(ptr: number, len: number): number;
+	sc_adopt_rendering(ptr: number, len: number): number;
 	sc_geometry_fit(ptr: number, len: number): number;
 	sc_default_edit(): number;
 	sc_last_error(): number;
@@ -92,6 +93,16 @@ export class ColorPacker {
 		this.x.sc_free(ptr, input.length);
 		if (out.length === 0) throw new Error(new TextDecoder().decode(this.framed(this.x.sc_last_error())));
 		return out;
+	}
+
+	/**
+	 * The edit as today's rendering would make it, and whether that differs from how it renders now
+	 * (`sidecar_color::params::EditParams::adopt_current_rendering`). An edit made before a reference
+	 * existed keeps its own picture for ever otherwise; this is the deliberate way out of that, and the
+	 * picture changes when it is taken.
+	 */
+	adoptRendering(edit: EditParams, developed: boolean): { edit: EditParams; changed: boolean } {
+		return JSON.parse(new TextDecoder().decode(this.call(this.x.sc_adopt_rendering, { edit, developed })));
 	}
 
 	/** The geometry's map and outline over a picture of `size` pixels (`sidecar_color::geometry::frame`). */

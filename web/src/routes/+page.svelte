@@ -10,8 +10,70 @@
 		(async () => {
 			who = await (await api('/api/session')).json();
 			recent = await (await api('/api/recent')).json();
+			await loadFolder();
 		})().catch(() => {});
 	});
+
+	// ---------- the editing folder, which is bounded on purpose
+	type FolderItem = { assetKey: string; fileName: string; at: string; bytes: number; modifiedUnix: number; exported: boolean; edited: boolean };
+	type Folder = { configured: boolean; name?: string; limit?: number; full?: boolean; nextOut?: string | null; items?: FolderItem[] };
+	let folder = $state<Folder | null>(null);
+	/** The photo whose Remove button is armed: removing takes two taps, and the first one only says so. */
+	let armed = $state<string | null>(null);
+	let armedTimer: ReturnType<typeof setTimeout> | undefined;
+	/** The full-folder message stands between the import button and the file picker. */
+	let blocked = $state(false);
+	let folderBusy = $state('');
+
+	async function loadFolder() {
+		try {
+			folder = await (await api('/api/intake/folder')).json();
+		} catch {
+			folder = null;
+		}
+	}
+
+	function arm(key: string) {
+		clearTimeout(armedTimer);
+		armed = key;
+		// A tap that was meant for something else shouldn't leave a loaded button behind.
+		armedTimer = setTimeout(() => (armed = null), 4000);
+	}
+
+	async function remove(item: FolderItem) {
+		clearTimeout(armedTimer);
+		armed = null;
+		folderBusy = item.assetKey;
+		try {
+			await api(`/api/intake/folder/${item.assetKey}`, { method: 'DELETE' });
+			await Promise.all([loadFolder(), (async () => (recent = await (await api('/api/recent')).json()))()]);
+			blocked = false;
+		} catch (e) {
+			intakeError = e instanceof Error ? e.message : String(e);
+		}
+		folderBusy = '';
+	}
+
+	const mb = (n: number) => `${(n / 1e6).toFixed(1)} MB`;
+
+	/** Sidecar's own thumbnail: the photo as the edit renders it, for anything Immich can't or won't show. */
+	const ownThumb = (assetKey: string) => `/api/assets/${assetKey}/thumb`;
+
+	/**
+	 * Immich's thumbnail where there is one, since it is already made; Sidecar's own otherwise. `onerror`
+	 * covers the other half of the problem — a photo Immich holds but has no thumbnail for, an iPhone DNG
+	 * among them — by falling back to the same place rather than leaving a grey box.
+	 */
+	function thumbFallback(e: Event, assetKey: string) {
+		const el = e.currentTarget as HTMLImageElement;
+		if (el.dataset.fell === '1') return;
+		el.dataset.fell = '1';
+		el.src = ownThumb(assetKey);
+	}
+
+	/** What is in the editing folder, so Recent doesn't show the same photo twice. */
+	const importedKeys = $derived(new Set(folder?.items?.map((i) => i.assetKey) ?? []));
+	const recentElsewhere = $derived(recent?.filter((r) => !importedKeys.has(r.assetKey)) ?? null);
 
 	let link = $state('');
 	let linkError = $state('');
@@ -73,12 +135,47 @@
 		if (file) intake(file);
 	}
 
+	let picker = $state<HTMLInputElement | null>(null);
+
+	/**
+	 * Is there room for one more? Only the editing folder is bounded, so a library import is never stopped.
+	 * The server asks the same question when the bytes arrive; this is so the answer comes before the file
+	 * picker rather than after a photo has been chosen and uploaded.
+	 */
+	const noRoom = $derived(destination === 'folder' && !!folder?.full);
+
+	/** The import button: the message first when the folder is full, the picker only once it is dismissed. */
+	function choose() {
+		if (noRoom) {
+			blocked = true;
+			moreInfo = true;
+			return;
+		}
+		picker?.click();
+	}
+
+	/** Dismissing the message is the consent: what goes is named in it, and the import takes it. */
+	function proceedAnyway() {
+		blocked = false;
+		picker?.click();
+	}
+
 	function dropped(e: DragEvent) {
 		e.preventDefault();
 		dragging = false;
+		if (noRoom) {
+			blocked = true;
+			moreInfo = true;
+			return;
+		}
 		const file = e.dataTransfer?.files?.[0];
 		if (file) intake(file);
 	}
+
+	/** Extra detail under each imported thumbnail: size, whether it has been exported, and Remove. Off by
+	 *  default so the row is one row high; the full-folder message turns it on, since that is where the
+	 *  answer to it is. */
+	let moreInfo = $state(false);
 
 	async function signOut() {
 		await fetch('/api/session', { method: 'DELETE' });
@@ -123,10 +220,8 @@
 				to {destination === 'folder' ? (who?.intakeFolder ?? 'the editing folder') : 'your library'}…
 			</p>
 		{:else}
-			<label class="cursor-pointer">
-				<input type="file" class="sr-only" accept="image/*,.arw,.nef,.cr2,.cr3,.raf,.rw2,.orf,.dng,.pef,.srw" onchange={chosen} />
-				<span class="underline underline-offset-4">Choose a photo on this device</span>
-			</label>
+			<input bind:this={picker} type="file" class="sr-only" accept="image/*,.arw,.nef,.cr2,.cr3,.raf,.rw2,.orf,.dng,.pef,.srw" onchange={chosen} />
+			<button type="button" class="underline underline-offset-4" onclick={choose}>Choose a photo on this device</button>
 			{#if canChoose}
 				<fieldset class="mt-2 flex items-center justify-center gap-1 text-xs">
 					<legend class="sr-only">Where the photo goes</legend>
@@ -148,25 +243,104 @@
 			{/if}
 		{/if}
 	</div>
+	{#if blocked && folder?.configured}
+		<!-- The folder is full. Nothing is chosen, uploaded or deleted until this is answered: the point of
+		     saying it here is that the photo hasn't been picked yet, so backing out costs nothing. -->
+		<div role="alertdialog" aria-labelledby="full-title" class="mt-2 rounded border border-[#8d8d8d] bg-panel p-3 text-sm">
+			<p id="full-title" class="font-medium">{folder.name ?? 'The editing folder'} is full — {folder.items?.length ?? 0} of {folder.limit}.</p>
+			{#if folder.nextOut}
+				<p class="mt-1 text-fg-2">
+					Importing another photo will remove <span class="font-mono">{folder.nextOut}</span>, the oldest one
+					you have already exported. The exported file is unaffected; what goes is the original in this folder,
+					and its edits with it.
+				</p>
+				<div class="mt-2 flex flex-wrap gap-2">
+					<button type="button" class="h-9 rounded bg-raised px-3" onclick={proceedAnyway}>Remove it and import</button>
+					<button type="button" class="h-9 rounded px-3 text-fg-2 underline underline-offset-4" onclick={() => (blocked = false)}>Cancel</button>
+				</div>
+			{:else}
+				<p class="mt-1 text-fg-2">
+					Nothing in it has been exported yet, so there is no photo Sidecar is willing to remove for you —
+					each one is the only copy of its own work. Export what you want to keep, or remove one below.
+				</p>
+				<div class="mt-2">
+					<button type="button" class="h-9 rounded px-3 text-fg-2 underline underline-offset-4" onclick={() => (blocked = false)}>Close</button>
+				</div>
+			{/if}
+		</div>
+	{/if}
 	{#if intakeError}<p class="mt-2 text-sm text-danger">{intakeError}</p>{/if}
 
-	<div class="mt-3 flex flex-wrap gap-4 text-sm text-fg-2">
-		<a href="/setup" class="underline underline-offset-4">Set up the iPhone shortcut</a>
-		<a href="/settings" class="underline underline-offset-4">Settings</a>
-	</div>
+	{#if folder?.configured}
+		<!-- The imported photos, one row of thumbnails high. The folder is bounded, so this is also the only
+		     place a photo can be taken out of it — behind More info, which is off by default. -->
+		<section class="mt-6">
+			<div class="mb-3 flex items-baseline gap-2">
+				<h2 class="text-sm font-medium text-[#c6c6c6]">Imported</h2>
+				<span class="text-xs text-fg-2">{folder.items?.length ?? 0} of {folder.limit}{folder.full ? ', full' : ''}</span>
+				{#if folder.items?.length}
+					<button type="button" aria-pressed={moreInfo} class="ml-auto text-xs text-fg-2 underline underline-offset-4" onclick={() => (moreInfo = !moreInfo)}>
+						{moreInfo ? 'Less' : 'More'} info
+					</button>
+				{/if}
+			</div>
+			{#if folder.items?.length}
+				<ul class="flex gap-3 overflow-x-auto pb-1">
+					{#each folder.items as f (f.assetKey)}
+						<li class="w-40 shrink-0 overflow-hidden rounded bg-[#262626] sm:w-[calc((100%-2.25rem)/4)]">
+							<a href="/edit/{f.assetKey}" class="block hover:bg-[#393939]">
+								<img src={ownThumb(f.assetKey)} alt="" class="aspect-[3/2] w-full bg-[#1f1f1f] object-cover" loading="lazy" />
+								<span class="block truncate p-2 text-sm">{f.fileName}</span>
+							</a>
+							{#if moreInfo}
+								<div class="flex items-center gap-2 px-2 pb-2 text-[0.6875rem]">
+									<span class="text-fg-2">{mb(f.bytes)}</span>
+									{#if f.exported}
+										<span class="rounded-full bg-[#393939] px-1.5 py-0.5 text-fg-2" title="A render of this photo exists elsewhere, so it is the first one removed when room is needed">exported</span>
+									{/if}
+									<button
+										type="button"
+										class="ml-auto rounded-full px-2 py-0.5 {armed === f.assetKey ? 'bg-danger text-ground' : 'bg-[#393939] text-fg-2'}"
+										disabled={folderBusy === f.assetKey}
+										aria-label={armed === f.assetKey ? `Confirm removing ${f.fileName} from the folder` : `Remove ${f.fileName} from the folder`}
+										onclick={() => (armed === f.assetKey ? remove(f) : arm(f.assetKey))}
+									>{folderBusy === f.assetKey ? 'Removing…' : armed === f.assetKey ? 'Remove?' : 'Remove'}</button>
+								</div>
+							{/if}
+						</li>
+					{/each}
+				</ul>
+				{#if moreInfo}
+					<p class="mt-2 text-xs text-fg-2">
+						Removing takes two taps and deletes the original and its edits from this folder. Anything you have
+						exported is already elsewhere and is not touched.
+					</p>
+				{/if}
+			{:else}
+				<p class="text-sm text-[#8d8d8d]">A photo imported into this folder appears here.</p>
+			{/if}
+		</section>
+	{/if}
+
 	<h2 class="mt-8 mb-3 text-sm font-medium text-[#c6c6c6]">Recent</h2>
-	{#if recent?.length}
+	{#if recentElsewhere?.length}
 		<ul class="grid grid-cols-2 gap-3 sm:grid-cols-4">
-			{#each recent as r (r.assetKey)}
+			{#each recentElsewhere as r (r.assetKey)}
 				<li>
 					<a href="/edit/{r.assetKey}" class="block overflow-hidden rounded bg-[#262626] hover:bg-[#393939]">
-						{#if r.immichAssetId}<img src={thumbnailUrl(r.immichAssetId)} alt="" class="aspect-[3/2] w-full object-cover" loading="lazy" />{:else}<div class="aspect-[3/2] w-full bg-[#1f1f1f]"></div>{/if}
+						<img
+							src={r.immichAssetId ? thumbnailUrl(r.immichAssetId) : ownThumb(r.assetKey)}
+							alt=""
+							class="aspect-[3/2] w-full bg-[#1f1f1f] object-cover"
+							loading="lazy"
+							onerror={(e) => thumbFallback(e, r.assetKey)}
+						/>
 						<span class="block truncate p-2 text-sm">{r.fileName}</span>
 					</a>
 				</li>
 			{/each}
 		</ul>
 	{:else if recent}
-		<p class="text-sm text-[#8d8d8d]">Photos you open appear here.</p>
+		<p class="text-sm text-[#8d8d8d]">{folder?.items?.length ? 'Photos you open from elsewhere appear here.' : 'Photos you open appear here.'}</p>
 	{/if}
 </main>

@@ -7,6 +7,86 @@ Source: the architecture plan (PWA entry, XMP sidecars, server-side demosaic, We
 
 Where the code differs from the text below, the code and these notes win.
 
+- **An old rendering no longer spreads** (§4): two consequences of stored references that nobody chose.
+  *The original is not an edit* — a history begun under an older version stored its own defaults in the
+  root, and migrating them meant "open the original" handed back a rendering no one had ever asked for, on
+  the one node that stands for the absence of an edit; `version_of` now returns today's defaults for it
+  outright, while `edit_of` still rebuilds the stored root as written so that versions built on it do not
+  move. *And an old rendering used to reproduce itself*: the references are inherited by whatever is edited
+  from them, so a version saved today out of a version-2 sidecar came out marked 6 and rendering by 2's
+  rules — measured directly, `baselineEv 0.0 | whiteZeroEv 4.5 | shoulderOrder 0.0` on a node created on the
+  spot. So editing an old edit now brings it up to date first, said plainly while the photo is still
+  untouched, with the way back offered for the session afterwards. This does not let the version-specific
+  code go — a ported edit still has ancestors to render, and reading them still needs `migrate` — but it
+  makes the set of edits on old references closed and shrinking instead of self-renewing, which is the
+  precondition for ever removing any of it. Checked: two history tests (the original is today's rendering
+  however old the history; an old root is still unchanged for the versions built on it) and
+  `web/scripts/rendering-update-smoke.mjs`, which now sets the photo to an old rendering itself rather than
+  leaning on a fixture's history — the standing notice, one ordinary change carrying the port (**+1.21 stops
+  measured at the probe**, against 1.15 expected plus the triggering change's own small effect), the way
+  back, that a further change then leaves it where they asked, and that a later session asks again.
+
+- **An old edit can take up today's rendering** (§4): `migrate` keeps an old edit's picture by pinning the
+  references the pipeline has moved on from, which is right — the person approved *that* picture — but it
+  left no way back: a photo edited before `PROCESS_VERSION` 3 rendered 1.15 stops below where the
+  measurement puts its middle grey, for as long as it existed, and checking out the original did not escape
+  it (the two `the_original_of_…` tests say why). `adopt_current_rendering` is the other direction. It moves
+  only the references, keeps every setting, and keeps Whites reading what it read by carrying its offset to
+  the new white point; a developed file takes up the white point alone, since it has no baseline, shoulder
+  or bleach of its own. The editor offers it where the other notices about a photo are, since the History
+  section is not somewhere anyone would look for it, and taking it is an ordinary edit — the picture moves
+  at once, Undo takes it back, saving files a version. Checked: four unit tests, including that packing the
+  result lifts the exposure by exactly `BASELINE_EV`; and `web/scripts/rendering-update-smoke.mjs` in
+  Chromium on a fixture whose sidecar really does predate the baseline, which reads the change off the
+  Measure probe rather than describing it — **−0.37 stops from grey before, +1.17 stops after, against the
+  1.15 expected** — then Undo back, Redo forward, and a save that leaves 18 versions as 19 with Exposure
+  still at the +0.30 EV the person set.
+
+- **The home page shows photographs, not grey boxes** (§3, §11): four changes to what it lists. The imported
+  photos are their own row — **one thumbnail row high**, scrolling sideways rather than wrapping, with the
+  count beside the heading and size, the exported mark and Remove kept behind *More info*; what is in that
+  folder is left out of Recent, so no photograph appears twice. Recent itself keeps **40**
+  (`RECENT_KEPT`): it is a way back to what you were working on, not a library view, and every row costs a
+  thumbnail. Thumbnails now have a second source — `GET /api/assets/{key}/thumb` renders the photo as the
+  edit currently renders it, small, from the cached proxy, so it costs a develop pass over a 480-pixel image
+  rather than a decode. Immich's own thumbnail stays the fast path where there is one; Sidecar's answers both
+  halves of the gap, a photo Immich has never seen *and* one it holds but will not thumbnail, the iPhone DNGs
+  among them, through an `onerror` that falls through to the same place. And the editor has **a way back**:
+  until now the only way out on a phone was the browser's own back gesture, which a photo opened from a share
+  or a pasted link does not always have. Checked: `web/scripts/folder-limit-smoke.mjs` (25 assertions,
+  including that the row is one tile tall at both widths and that every imported photo's thumbnail actually
+  decoded), the thumb endpoint returning a 480×321 JPEG, and the back button at phone size — present, clear
+  of the tools toggle, and landing on `/`.
+
+- **The editing folder is bounded** (§3): a folder that lives inside the image cannot be allowed to grow
+  until the host fills up, so it holds **four** photographs by default (`intake_limit`). What goes when it is
+  full is the oldest one that has been *exported* — a render of it exists elsewhere, so the folder is no
+  longer the only copy of that work. A photograph nobody has exported is never chosen however old it is, and
+  an import that would need one is refused instead: the alternative is an editor that deletes someone's
+  negative to make room for the next import. The home page asks before the file picker opens rather than
+  after a photo has been uploaded, and names what would go; the server asks again when the bytes arrive, and
+  asks it *after* the duplicate check, so re-opening something already in the folder never costs a
+  photograph. Removing by hand takes two taps. Checked: `web/scripts/folder-limit-smoke.mjs` in Chromium
+  (Playwright's filechooser event is what proves the picker did and did not open) — twenty assertions over
+  both branches of the message; and against the API, four imports fill it, the fifth is refused `422` with
+  nothing deleted and the staging folder clean, exporting one makes it `nextOut`, the next import takes
+  exactly that one and logs it, a delete prunes the template's empty directories back to the root, and an
+  unknown key is a `404`. Unit tests for the eviction order, for an unexported photo never being chosen, and
+  for the default of four.
+
+- **Sidecar without Immich, as a deployment rather than a possibility** (§3): the editing folder made a
+  no-Immich configuration expressible; this makes it something you can run. `/photos` is created in the image
+  and owned by the user Sidecar runs as, because Docker takes a fresh named volume's ownership from the
+  image's directory at that path — a path the image does not have becomes root-owned, and the uid-1000
+  process cannot write to it, which would have failed every import on a permission error. Verified with a
+  two-line image: the chowned path writes, a root-owned one is refused. `deploy/standalone/` is the worked
+  example — one root, no `immich_prefix`, no `[immich]` url, the folder a named volume, bound to loopback.
+  Checked end to end on that exact config: session reports no Immich and no sign-in, an import lands at
+  `2019/01.January/2019-01-02/IMG_1768.CR2`, an edit saves its XMP beside the original, `/open?path=` reopens
+  it while a path outside the root is refused, and an export comes back as a 6024×4022 JPEG with
+  `immichAssetId: null` — the upload is skipped and the file is always offered as a download. What is still
+  missing is a way to *browse* the folder: import, Recent and a known path are the only ways in.
+
 - **A photo can be imported without putting it in Immich** (§3): `POST /api/intake` only ever uploaded to the
   library, because an edit needs an original in a root and the library was the only kind of root there was. A
   root declared with no `immich_prefix` is now an *editing folder* — Immich can neither resolve into it nor
@@ -388,6 +468,31 @@ A name already taken in that folder is stepped past — `IMG_1768-1.CR2`, `-2` �
 holds *exactly* these bytes, in which case that is the same photo and its path is what comes back: importing
 one twice gives one file and one asset key, as it would in a library. From there it is opened, edited and
 sidecar-written exactly like anything else; the XMP lands beside the original in the editing folder.
+
+**The folder is bounded, and that is the point.** A library is a disk someone chose; the editing folder is
+usually a volume inside the image, so left alone it grows until the host fills up — one 30 MB original at a
+time, for as long as anyone keeps editing. `intake_limit` (default **4**) is what stops that. It is
+deliberately small: the folder is a workbench, not a shelf, and the components are all here for anyone who
+wants a bigger one.
+
+What goes when the folder is full is **the oldest photograph that has been exported**. A render of it exists
+somewhere else, so the folder is no longer the only copy of that work. A photograph nobody has exported is
+never chosen, however old — losing it to make room would be the editor deleting someone's negative — and an
+import that would need one is **refused**, with the person deciding what to let go of instead.
+
+The question is asked before the file picker opens, not after a photo has been chosen and uploaded: the home
+page reads `GET /api/intake/folder` and, when the folder is full, puts a message between the import button
+and the picker naming exactly what would go. `make_room` asks the same question again when the bytes arrive,
+because a client that skipped the message still meets the rule. A re-import of something already there is a
+duplicate and adds nothing, so the check sits *after* the dedupe — being full never costs you a photograph
+you were only reopening.
+
+`DELETE /api/intake/folder/{key}` takes one out by hand: the original, both spellings of its sidecar, and the
+record it was ever opened, after which the template's now-empty directories are pruned back to the root. This
+is the one place Sidecar deletes a photograph, so it is confined to the intake root, keyed by content hash
+rather than path — a key is not a path, and nothing outside the folder is nameable through it. In the
+interface it takes **two taps**: the first arms the button and says `Remove?`, the second does it, and an
+armed button disarms itself after four seconds.
 
 `GET /api/session` reports `intakeFolder` (the root's name, or `null`), so the home page offers the choice
 only where there is one. `?to=immich` without an Immich library answers `501`, and so does `?to=folder`
@@ -1032,6 +1137,52 @@ if (focus_energy(uv, step) >= V.peak_t) { return vec4f(PEAK_COLOUR, 1.0); }   //
 ```
 
 `focus_energy` is the central-difference gradient of encoded luminance. **This is a stopgap:** measured on the proxy it reports edge contrast rather than sharpness, and the real measure belongs at full resolution on the server, shipped as a layer — see the roadmap. The step is the larger of one texel and one canvas pixel, so zooming out averages detail away instead of aliasing downscaling noise into false peaks. It reads the proxy, so at fit zoom it reports composition-scale sharpness; critical focus means zooming in or opening the loupe.
+
+### An edit and the rendering it was made under
+
+Stored references keep an old edit's picture: `migrate` pins `baseline_ev`, `white_zero_ev`,
+`shoulder_order` and `highlight_bleach` to what the edit was approved with, so the person gets back the
+photograph they chose. That is right, and it is not the whole story, because left alone it has two
+consequences nobody chose.
+
+**The original is not an edit.** A history begun under an older version stored *its* defaults in the root,
+and `version_of` migrated them like any other node — so "open the original" handed back a rendering no one
+had ever asked for, on a node that stands for the absence of an edit. It now returns `EditParams::default()`
+outright: the original means this file as Sidecar renders it today. Only what is *handed out* changes;
+`edit_of` still rebuilds the stored root as written, because every child's delta was taken against that and
+replaying one onto a different base would move versions somebody did approve.
+
+**An old rendering used to spread.** The references are inherited by whatever is edited from them, and
+nothing stamped them as old: a version saved today, out of a sidecar from `PROCESS_VERSION` 2, came out
+marked version 6 and rendering by version 2's rules — measured, before this changed. So a rendering nobody
+could reach any more went on reproducing itself for as long as anyone kept editing, and the version number
+said nothing about it.
+
+So **editing an old edit brings it up to date first** (`adopt_current_rendering`, below). The photo says so
+while it is still untouched — "changing anything brings it up to date, and the picture will change" — and
+the first change carries the update with it. Afterwards the way back is offered for as long as the photo is
+open; taking it restores the references and stops the asking **for that session only**, because an edit left
+on old references is the thing this is here to stop. None of it is automatic in the background: nothing
+changes until the person changes something, and Undo takes all of it back.
+
+What this does **not** do is let the version-specific code go. A frozen or ported edit still has to render
+its ancestors, and reading them still needs `migrate` — the version-1 curve anchors above all. What it does
+is make the set of edits carrying old references **closed and shrinking** rather than self-renewing, which
+is the precondition for ever removing any of it.
+
+### Taking up today's rendering
+
+`EditParams::adopt_current_rendering` is the other direction from `migrate`. It sets the references a new
+edit of this file would get and leaves everything the person set alone — Exposure, the curve, masks, film,
+crop. Whites needs care, because it is stored as a white point and *read* as the distance from the
+rendering's own: the offset is kept, so the slider still says what it said. Only references this file's
+rendering actually reads are touched, so a developed file takes up the white point and nothing else — it has
+no baseline, and `pack` holds its shoulder and bleach at zero anyway. That is also what makes
+`behind_current_rendering` worth asking: nothing is offered, and nothing happens on an edit, unless
+something would visibly change.
+
+The rule lives in `sidecar-color` and reaches the browser through `sc_adopt_rendering`, so the two cannot
+drift on what "today's rendering" means.
 
 ## 9. Export
 

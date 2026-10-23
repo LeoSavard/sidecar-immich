@@ -1194,3 +1194,117 @@ fn depth_effects_turned_off_are_off_in_the_file_and_the_history() {
         EditParams::default()
     );
 }
+
+use crate::history::ORIGINAL;
+use sidecar_color::params::{BASELINE_EV, LEGACY_WHITE_EV};
+
+/// **Does opening the original let an old edit use features added since?** Yes — the original is the one
+/// node nobody approved. It is the absence of an edit, so there is no picture to preserve, and a history
+/// begun under an older version must not hand back *its* defaults as though someone had chosen them.
+#[test]
+fn the_original_is_todays_rendering_however_old_the_history_is() {
+    let mut as_json = serde_json::to_value(History::begin(&EditParams::default())).unwrap();
+    // The root as a Sidecar from before any of it would have written it: version 2, and none of the
+    // references that version had no concept of.
+    let root = &mut as_json["nodes"][0]["delta"];
+    root["processVersion"] = serde_json::json!(2);
+    root["exposure"]
+        .as_object_mut()
+        .unwrap()
+        .remove("baselineEv");
+    for gone in ["whiteZeroEv", "shoulderOrder", "highlightBleach"] {
+        root["tone"].as_object_mut().unwrap().remove(gone);
+    }
+    // The old white point, which this version did write — the trap in reading the root as an edit: left
+    // alone beside today's reference it would put Whites at −43 without anybody moving it.
+    root["tone"]["whiteEv"] = serde_json::json!(LEGACY_WHITE_EV);
+    let old: History = serde_json::from_value(as_json).unwrap();
+
+    assert_eq!(
+        old.version_of(ORIGINAL).unwrap(),
+        EditParams::default(),
+        "the original is this file as Sidecar renders it today, whatever the history was begun under"
+    );
+}
+
+/// The root is still rebuilt *as stored* for anything that takes a delta against it, or every version
+/// descended from an old root would move when the rendering did — versions someone did approve.
+#[test]
+fn an_old_root_is_unchanged_for_the_versions_built_on_it() {
+    let mut lifted = EditParams::default();
+    lifted.exposure.ev = 0.6;
+    let mut h = History::begin(&EditParams::default());
+    let child = h
+        .commit(
+            &Commit {
+                edit: &lifted,
+                base: ORIGINAL,
+                checkpoint: false,
+                session: Some("tab"),
+                user: None,
+            },
+            &[],
+        )
+        .unwrap()
+        .head;
+
+    let mut as_json = serde_json::to_value(&h).unwrap();
+    let root = &mut as_json["nodes"][0]["delta"];
+    root["processVersion"] = serde_json::json!(2);
+    root["exposure"]
+        .as_object_mut()
+        .unwrap()
+        .remove("baselineEv");
+    let old: History = serde_json::from_value(as_json).unwrap();
+
+    assert_eq!(
+        old.edit_of(ORIGINAL).unwrap().process_version,
+        2,
+        "stored as written, which is what the child's delta was taken against"
+    );
+    let from_child = old.version_of(&child).unwrap();
+    assert_eq!(from_child.exposure.ev, 0.6, "the child is still the child");
+    assert_eq!(
+        from_child.exposure.baseline_ev, 0.0,
+        "and still renders the way it was approved: migrate pins what it inherited"
+    );
+}
+
+/// The other case, and the one that surprises:/// The other case, and the one that surprises: a sidecar with **no** stored history — an edit written before
+/// histories existed, or by a Sidecar older than this one — has its history synthesised on read, and the
+/// root of a synthesised history is `EditParams::default()` as it stands *today*. Checking out the original
+/// there does hand over the new rendering. So the answer to "does opening the original get me the new
+/// features" is: only for a photo whose sidecar never recorded a history of its own.
+#[test]
+fn the_original_of_a_synthesised_history_is_todays_rendering() {
+    let tmp = tempfile::tempdir().unwrap();
+    let original = fixture(tmp.path(), "DSC_9100.NEF");
+    // An old edit, stored the way a sidecar without a history stores one.
+    let mut old = EditParams {
+        process_version: 2,
+        ..Default::default()
+    };
+    old.exposure.ev = 0.4;
+    old.exposure.baseline_ev = 0.0;
+    old.tone.white_zero_ev = LEGACY_WHITE_EV;
+    old.tone.shoulder_order = 0.0;
+    let mut doc = SidecarDoc::load(&original).unwrap();
+    doc.set_edit(&old, "abcd").unwrap();
+    doc.save(&original, &[tmp.path().to_path_buf()]).unwrap();
+
+    let doc = SidecarDoc::load(&original).unwrap();
+    assert!(
+        doc.sidecar.get("history").is_none(),
+        "the fixture is the no-history case"
+    );
+    let synthesised = doc.history().version_of(ORIGINAL).unwrap();
+    assert_eq!(
+        synthesised.exposure.baseline_ev, BASELINE_EV,
+        "a synthesised root is today's defaults, so the original does carry the new rendering"
+    );
+    assert!(synthesised.tone.shoulder_order > 0.0);
+
+    // The edit itself is untouched by that: what is on screen when the photo opens is still the old picture.
+    assert_eq!(doc.edit().exposure.baseline_ev, 0.0);
+    assert_eq!(doc.edit().tone.shoulder_order, 0.0);
+}

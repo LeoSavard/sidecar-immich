@@ -13,11 +13,31 @@ What's known to be missing or wrong, roughly in the order it's worth doing. The 
 > readout (DESIGN.md §8) and the *editing folder* — a root with no `immich_prefix`, which a photo can be
 > imported into instead of the library (§3). The second is most of "a configuration with no Immich in it":
 > such a root exists, `/api/intake?to=folder` fills it, and the home page stops advertising Immich where
-> there is none. What is still missing for a full filesystem editor is **browsing** one — there is no way to
-> see what is in a folder and pick from it, only to import or to open a known path (#28's closed branch holds
-> `find_by_name` for that).
+> there is none. **A standalone deployment is now a worked example** (`deploy/standalone/`, 2026-10-23),
+> checked end to end: import, edit, sidecar beside the original, export as a download, no Immich anywhere.
+>
+> Two things stand between that and something to hand to anyone else. **Browsing**: there is no view of what
+> is in the folder — import, Recent and a known path are the only ways in (#28's closed branch holds
+> `find_by_name` for that, and it is the single most valuable missing piece). **Sign-in**: authentication
+> *is* the Immich API key, so a deployment without Immich has none at all, and is only safe behind something
+> that does. Neither is hard; both are load-bearing before "standalone" means more than "runs".
 
 ## Correctness and quality
+
+**Old renderings no longer spread — done, 2026-10-23.** Editing an old edit brings it up to date first, and
+the original means today's rendering. What is still true is that none of the version-specific code can go:
+reading an old ancestor needs `migrate` whatever the policy is. The set of such edits is now closed and
+shrinking, so removal becomes possible eventually — the thing that would make it *soon* is migrating eagerly
+on open and storing the result, which trades that against writing to a sidecar because someone looked at a
+photo. Not obviously worth it; written down so the option is not rediscovered from scratch.
+
+**An old edit can take up today's rendering — done, 2026-10-23.** `EditParams::adopt_current_rendering`
+moves the stored references forward while leaving every setting alone, and the editor offers it on any photo
+it would change. What is *not* offered is doing it to a whole library at once: there is no way to say "bring
+all of these forward", and for a few hundred photographs that matters. The mechanism is per-edit and
+headless-friendly, so a batch is a loop over sidecars rather than new rules.
+
+
 
 **Middle grey sat a stop below where the curve assumes — fixed, `PROCESS_VERSION` 3.** `normalize.wgsl`
 scales sensor saturation to 1.0 and the tone curve reads middle grey at 0.18 of that, i.e. 2.47 stops of

@@ -81,6 +81,47 @@ Once you do, HEIC files decode and edit like any other photo — white balance a
 adjustments around the file's own colour, since a HEIC has already been developed by whatever wrote it and
 there's no sensor data left to recover a blown highlight from.
 
+## Standing on its own: no Immich
+
+Sidecar normally sits beside an Immich library, but it does not need one. A deployment with no `[immich]`
+url and a root that has **no `immich_prefix`** is a photo editor on a folder of its own: photos are imported
+through the browser, filed by the capture date in the file, edited, and exported back to the browser.
+Nothing is uploaded anywhere and nothing is looked up.
+
+[`deploy/standalone/`](../deploy/standalone/) is a worked example. The folder is a named Docker volume at
+`/photos`, so the photographs live inside Docker rather than on a path you keep track of; `docker volume
+inspect sidecar_sidecar-photos` says where that is on the host, which is what you back up.
+
+Three things to know before you rely on it.
+
+**There is no sign-in.** Authentication *is* the Immich API key, so with no Immich every request is the same
+anonymous user. That is fine on a private network, over a VPN, or behind a proxy that authenticates. It is
+not fine on the open internet. The example binds to `127.0.0.1` for that reason — move it only once
+something in front is checking who is asking.
+
+**The folder is write-once from the api, read-only from the worker.** The api writes the imported original
+and the XMP beside it; the worker only hashes, reads metadata and builds proxies. Both containers must see
+the same path, or an import writes a file the worker cannot ingest. A named volume at a path the *image*
+creates is what makes this work at all: Docker takes a fresh volume's ownership from the image's directory
+there, so a path the image does not have becomes root-owned and the uid-1000 process cannot write to it.
+`/photos` is created and chowned in the Dockerfile for exactly this reason — if you choose a different path,
+either create it in the image the same way or bind-mount a host directory you have chowned to `1000:1000`.
+
+**The folder is capped at four photographs** (`intake_limit`), because it lives inside the image and would
+otherwise grow until the host filled up. The home page lists what is in it, removes one in two taps, and
+tells you before the file picker opens if there is no room. When it is full the oldest *exported* photograph
+is what goes; one that has never been exported is never taken for you, and the import is refused instead.
+Raise the number if you have the disk — nothing else changes.
+
+**You cannot browse the folder yet.** There is no view of what is in it: you import a photo, or you reopen
+one from Recent, or you open a known path with `allow_path_open = true` (still confined to the configured
+roots — a path outside them is refused). A folder listing is the main thing a standalone version still
+wants; see the roadmap.
+
+What does work today, end to end: import → the photo is filed under the template by its own
+`DateTimeOriginal` → edit → the XMP lands beside the original → export → the rendered JPEG comes back to the
+browser as a download, with no Immich anywhere in it.
+
 ## Everything else
 
 [`docs/DESIGN.md`](DESIGN.md) is the specification. [`docs/ROADMAP.md`](ROADMAP.md) is what's missing or
