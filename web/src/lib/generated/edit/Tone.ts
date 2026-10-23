@@ -28,7 +28,18 @@ shoulderOrder: number,
  * It subsumes neutralising a *clipped* pixel: once the white point is right such a pixel renders at
  * white, where this takes it to neutral anyway (`docs/ROADMAP.md`, "What a blown highlight does").
  */
-highlightBleach: number, contrast: number, 
+highlightBleach: number, 
+/**
+ * How far Highlights at −100 pulls the white point up, in stops (`HIGHLIGHT_REACH_EV`).
+ *
+ * Without it Highlights cannot reach a blown highlight *at all*. The curve maps everything at or above
+ * `white_ev` to display white before the LUT sees it, and the LUT's ends are pinned, so `LUT(1) = 1`:
+ * a control that only bends the curve below white is powerless over anything already there. Recovery
+ * has to act on where white *is*, which is what this does — negative Highlights brings more of the
+ * scene's top end into the picture, and the shoulder compresses it. Stored per edit, so an edit from
+ * before `PROCESS_VERSION` 7 keeps the Highlights it was approved with.
+ */
+highlightReachEv: number, contrast: number, 
 /**
  * Control points over display-encoded values, `[x, y]` in 0…1. Manually drawn only, as of
  * `PROCESS_VERSION` 2 — Highlights and Shadows are `highlights`/`shadows` below, not points in here.

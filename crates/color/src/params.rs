@@ -12,7 +12,7 @@ use crate::tone;
 /// `migrate_highlight_shadow_anchors`) — an edit saved under version 1 needs its curve read differently, not
 /// just a field that defaults to off, so this is a real bump rather than an additive field. See
 /// docs/ROADMAP.md, "Curve editor: Highlights and Shadows stop sharing points with the manual curve".
-pub const PROCESS_VERSION: u32 = 6;
+pub const PROCESS_VERSION: u32 = 7;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
@@ -123,6 +123,12 @@ impl EditParams {
         if self.process_version < 2 {
             self.migrate_highlight_shadow_anchors();
         }
+        if self.process_version < 7 {
+            // Its Highlights bent the curve below white and left anything past it alone, and that is the
+            // picture the person approved — a slider that suddenly reaches two stops further would re-grade
+            // every edit that ever used it.
+            self.tone.highlight_reach_ev = 0.0;
+        }
         if self.process_version < 6 {
             // Its highlights were rendered by the logistic all the way up, and that is the picture the
             // person approved: the straight segment is for edits made since.
@@ -174,6 +180,7 @@ impl EditParams {
             self.exposure.baseline_ev = BASELINE_EV;
             self.tone.shoulder_order = DEFAULT_SHOULDER_ORDER;
             self.tone.highlight_bleach = Tone::default().highlight_bleach;
+            self.tone.highlight_reach_ev = HIGHLIGHT_REACH_EV;
         }
         self.process_version = PROCESS_VERSION;
     }
@@ -322,6 +329,15 @@ pub struct Tone {
     /// It subsumes neutralising a *clipped* pixel: once the white point is right such a pixel renders at
     /// white, where this takes it to neutral anyway (`docs/ROADMAP.md`, "What a blown highlight does").
     pub highlight_bleach: f64,
+    /// How far Highlights at −100 pulls the white point up, in stops (`HIGHLIGHT_REACH_EV`).
+    ///
+    /// Without it Highlights cannot reach a blown highlight *at all*. The curve maps everything at or above
+    /// `white_ev` to display white before the LUT sees it, and the LUT's ends are pinned, so `LUT(1) = 1`:
+    /// a control that only bends the curve below white is powerless over anything already there. Recovery
+    /// has to act on where white *is*, which is what this does — negative Highlights brings more of the
+    /// scene's top end into the picture, and the shoulder compresses it. Stored per edit, so an edit from
+    /// before `PROCESS_VERSION` 7 keeps the Highlights it was approved with.
+    pub highlight_reach_ev: f64,
     pub contrast: f64,
     /// Control points over display-encoded values, `[x, y]` in 0…1. Manually drawn only, as of
     /// `PROCESS_VERSION` 2 — Highlights and Shadows are `highlights`/`shadows` below, not points in here.
@@ -355,6 +371,12 @@ pub const DEFAULT_SHOULDER_ORDER: f64 = 3.0;
 /// read against the default it was made under, never against today's (`Tone::white_zero_ev`).
 pub const LEGACY_WHITE_EV: f64 = 4.5;
 
+/// How far Highlights at −100 pulls the white point up. Two stops, because that is what it takes to undo
+/// what the rendering's own defaults put past white: clipping begins at `white_ev − baseline_ev` scene stops
+/// above grey, which the baseline (1.15) and the white point (4.5 → 3.63) together moved from +4.50 to
+/// +2.48. At full travel Highlights can now reach all of it, and Whites still moves the point itself.
+pub const HIGHLIGHT_REACH_EV: f64 = 2.0;
+
 impl Default for Tone {
     fn default() -> Self {
         Self {
@@ -363,6 +385,7 @@ impl Default for Tone {
             white_zero_ev: DEFAULT_WHITE_EV,
             shoulder_order: DEFAULT_SHOULDER_ORDER,
             highlight_bleach: 1.0,
+            highlight_reach_ev: HIGHLIGHT_REACH_EV,
             contrast: 1.0,
             curve: vec![[0.0, 0.0], [1.0, 1.0]],
             highlights: 0.0,
@@ -1061,11 +1084,21 @@ fn to_mat3(m: &M3) -> [[f32; 4]; 3] {
 }
 
 /// The tone map's parameters for these tone settings and exposure — the global edit's, or a layer's.
+/// What Highlights adds to the white point, in stops: nothing until it goes negative, `highlight_reach_ev`
+/// at −100. This is the half of Highlights that can reach a blown highlight; the LUT's bend is the half that
+/// grades everything below white, and the two are meant to be felt as one control.
+fn highlight_reach(t: &Tone) -> f64 {
+    -t.highlights.clamp(-100.0, 0.0) / 100.0 * t.highlight_reach_ev.max(0.0)
+}
+
 fn tone_params(edit: &EditParams, developed: bool) -> [f32; 4] {
     let t = &edit.tone;
     if developed {
+        // A developed file has no scene above its own white to recover: whatever wrote it already chose
+        // where white went, and `display_tone` grades what is there.
         return display_tone(edit);
     }
+    let white_ev = t.white_ev + highlight_reach(t);
     let mut k = (t.contrast * CONTRAST_SCALE).max(0.5);
     let mut black = t.black_ev;
     // A named stock's print puts its fog just above paper black, half a stop under the floor its toe flattens the
@@ -1073,14 +1106,14 @@ fn tone_params(edit: &EditParams, developed: bool) -> [f32; 4] {
     // steepness follows the narrower range, so Contrast means the same midtone contrast it does in colour.
     if let Some(curve) = stock_curve(edit, developed) {
         let moved = black - DEFAULT_BLACK_EV + curve.floor() - 0.5;
-        black = moved.min(t.white_ev - 1.0);
-        k *= (t.white_ev - black) / (t.white_ev - t.black_ev);
+        black = moved.min(white_ev - 1.0);
+        k *= (white_ev - black) / (white_ev - t.black_ev);
     }
     [
         black as f32,
-        t.white_ev as f32,
+        white_ev as f32,
         k as f32,
-        tone::pivot_for(black, t.white_ev, k) as f32,
+        tone::pivot_for(black, white_ev, k) as f32,
     ]
 }
 
@@ -2403,5 +2436,118 @@ mod tests {
             (lift - BASELINE_EV as f32).abs() < 1e-3,
             "expected the baseline back, got {lift} stops"
         );
+    }
+
+    /// The defect this fixes: everything at or above `white_ev` becomes display white before the LUT sees
+    /// it, and the LUT's ends are pinned, so Highlights could bend the curve below white and reach nothing
+    /// that was already at it. Negative Highlights now moves the white point itself, which is the only place
+    /// a blown highlight can be reached from.
+    #[test]
+    fn highlights_can_reach_past_white_now() {
+        let cam = crate::camera::nikon_d850();
+        let white_of = |e: &EditParams| {
+            let p = pack(e, &cam, SourceKind::Raw, DisplaySpace::Srgb);
+            let u: &DevelopParams = bytemuck::from_bytes(&p.uniform);
+            u.tone[1]
+        };
+        let mut e = EditParams::default();
+        let at_rest = white_of(&e);
+        assert!((at_rest - DEFAULT_WHITE_EV as f32).abs() < 1e-6);
+
+        e.tone.highlights = -100.0;
+        assert!(
+            (white_of(&e) - (DEFAULT_WHITE_EV + HIGHLIGHT_REACH_EV) as f32).abs() < 1e-6,
+            "Highlights −100 brings two stops of scene back in"
+        );
+        e.tone.highlights = -50.0;
+        assert!(
+            (white_of(&e) - (DEFAULT_WHITE_EV + 1.0) as f32).abs() < 1e-6,
+            "and half of it at −50"
+        );
+
+        // Positive Highlights is not a white-point control: it grades what is below white, as it always did.
+        e.tone.highlights = 100.0;
+        assert!((white_of(&e) - at_rest).abs() < 1e-6);
+    }
+
+    /// The scene level that renders as white, which is the number the complaint was really about. Recovery
+    /// at full travel undoes what the baseline and the lower white point put past it.
+    #[test]
+    fn recovery_undoes_what_the_defaults_put_past_white() {
+        let clips_at = |e: &EditParams| {
+            // Both curve shapes reach display white exactly at `white_ev`, and the baseline is applied
+            // before the curve, so this is the scene level in stops above middle grey.
+            e.tone.white_ev
+                + -e.tone.highlights.clamp(-100.0, 0.0) / 100.0 * e.tone.highlight_reach_ev
+                - e.exposure.baseline_ev
+        };
+        // As a version-2 sidecar really held it: that version wrote its own white point into the file, and
+        // `migrate` pins the *reference* beside it so Whites keeps reading 0.
+        let mut old: EditParams =
+            serde_json::from_str(r#"{"processVersion":2,"tone":{"whiteEv":4.5}}"#).unwrap();
+        old.migrate();
+        assert!(
+            (clips_at(&old) - LEGACY_WHITE_EV).abs() < 1e-9,
+            "the old rendering: +4.50 stops"
+        );
+
+        let fresh = EditParams::default();
+        assert!(
+            (clips_at(&fresh) - (DEFAULT_WHITE_EV - BASELINE_EV)).abs() < 1e-9,
+            "today's: +2.48 stops, which is the 2.02 the complaint was about"
+        );
+
+        let mut recovered = EditParams::default();
+        recovered.tone.highlights = -100.0;
+        let reached = clips_at(&recovered) - clips_at(&fresh);
+        assert!(
+            (reached - HIGHLIGHT_REACH_EV).abs() < 1e-9,
+            "Highlights at its limit brings back two stops, got {reached}"
+        );
+        // Two stops against the 2.02 the defaults put past white: a hundredth of a stop short of reaching
+        // exactly where the old rendering clipped, and a round number that matches Whites' own travel.
+        assert!(
+            (clips_at(&recovered) - clips_at(&old)).abs() < 0.05,
+            "which is within a rounding of where the old rendering clipped: {} vs {}",
+            clips_at(&recovered),
+            clips_at(&old)
+        );
+    }
+
+    /// An edit from before this keeps the Highlights it was approved with: the slider grades below white and
+    /// the white point does not move, however far it is pulled.
+    #[test]
+    fn an_older_edits_highlights_still_only_grade_below_white() {
+        let cam = crate::camera::nikon_d850();
+        let white_of = |e: &EditParams| {
+            let p = pack(e, &cam, SourceKind::Raw, DisplaySpace::Srgb);
+            let u: &DevelopParams = bytemuck::from_bytes(&p.uniform);
+            u.tone[1]
+        };
+        let mut old: EditParams = serde_json::from_str(r#"{"processVersion":6}"#).unwrap();
+        old.migrate();
+        assert_eq!(old.tone.highlight_reach_ev, 0.0);
+        let at_rest = white_of(&old);
+        old.tone.highlights = -100.0;
+        assert!(
+            (white_of(&old) - at_rest).abs() < 1e-6,
+            "its white point stays where it was"
+        );
+    }
+
+    /// A developed file has no scene above its own white: whatever wrote it chose where white went, so
+    /// Highlights grades what is there and nothing is pulled.
+    #[test]
+    fn a_developed_file_has_nothing_to_reach_for() {
+        let cam = crate::camera::nikon_d850();
+        let tone_of = |e: &EditParams| {
+            let p = pack(e, &cam, SourceKind::Developed, DisplaySpace::Srgb);
+            let u: &DevelopParams = bytemuck::from_bytes(&p.uniform);
+            u.tone
+        };
+        let mut e = EditParams::default();
+        let at_rest = tone_of(&e);
+        e.tone.highlights = -100.0;
+        assert_eq!(tone_of(&e), at_rest, "its tone parameters do not move");
     }
 }

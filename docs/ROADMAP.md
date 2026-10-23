@@ -24,6 +24,21 @@ What's known to be missing or wrong, roughly in the order it's worth doing. The 
 
 ## Correctness and quality
 
+**Is `DEFAULT_WHITE_EV` still right, now that the baseline is under it?** The white point was lowered from
+4.5 to 3.63 so that white could be reached, and the baseline (+1.15) was decided separately, one version
+earlier. Together they moved the scene level that renders as flat white from **+4.50 to +2.48 stops above
+middle grey** — on a frame with a blown window, 0.03 % of it clipping became 15.4 %. Highlights can now
+recover two stops of that (§7), so the control is no longer powerless, but the *default* may still be
+placing white too low. Had the point been chosen after the baseline it would sit near 4.78, close to where
+it started.
+
+This wants the treatment the baseline got: the clipped fraction measured across a few hundred files of the
+owner's library under both white points, stratified by how much dynamic range each frame actually has — a
+low-range photograph clips under neither, so an average over everything would hide it. Two photographs are
+not enough to move a default that every RAW renders through.
+
+
+
 **Old renderings no longer spread — done, 2026-10-23.** Editing an old edit brings it up to date first, and
 the original means today's rendering. What is still true is that none of the version-specific code can go:
 reading an old ancestor needs `migrate` whatever the policy is. The set of such edits is now closed and
