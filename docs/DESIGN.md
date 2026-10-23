@@ -7,6 +7,24 @@ Source: the architecture plan (PWA entry, XMP sidecars, server-side demosaic, We
 
 Where the code differs from the text below, the code and these notes win.
 
+- **The numbers behind a rendering** (§8): the histogram's corner triangles already knew how much of the
+  picture was at white, but only as a tooltip on whichever rendering was on screen, which is no way to compare
+  two of them. A **Measure** panel under the histogram now states it — at white, at black, and, once a place
+  is probed, what that place holds in 0…255, in display-linear luminance and in stops from middle grey. The
+  probe is kept in the picture's own frame, so a crop, a turn and the flip all read the same spot, and each
+  side of the flip keeps its own reading: flipping to the compared version and back leaves **both columns on
+  screen together**. *Copy* puts the table on the clipboard as text, which is how a measurement leaves the
+  editor and reaches a bug report or a conversation. Nothing new is computed for the clipping figures — they
+  are the counts the histogram pass already reads back — and the probe is one small `copyTextureToBuffer` on
+  developedTex, queued at the histogram's own gate so it reads the picture as it then stood and costs nothing
+  per frame. Checked: `web/scripts/measure-smoke.mjs` in Chromium — the probe reads a triplet and a stop
+  figure, lifting the exposure raises both the probe and "at white", the flip brings a named second column
+  that differs at the same place, and *Copy* yields the whole table. The first run of it also explained
+  itself: the fixture's stored edit is an *old* one (`baselineEv 0`, `whiteEv 4.5`, `shoulderOrder 0`, kept
+  renderable by the stored references of §7), so "As shot" — which uses today's defaults — sits 1.15 EV
+  brighter and clips 14.5 % of the frame against the edit's 1.0 %. That difference was always there; this is
+  the first time it could be read off rather than guessed at.
+
 - **A version is the edit, wherever its files go** (§9): exporting to this device and then to Immich used to
   answer "already exported" and upload nothing — the device-only record matched on settings and was read as
   proof the file was in the library. An entry now counts as *in Immich* only when it names an asset there, and
@@ -929,6 +947,31 @@ if ((V.flags & CLIP_LOWS)  != 0u && m <= V.loT) { return vec4f(0.0, 0.0, 1.0, 1.
 ```
 
 The test runs after tone mapping, so red means *the output file will clip here*, not "an intermediate value exceeded 1.0". Corner triangles on the histogram show the clipped percentage and toggle each overlay (`J` with a keyboard).
+
+### Measure
+
+The same counts, read rather than hovered. **Measure**, a fold under the histogram on the wide layout, states
+what the rendering on screen holds:
+
+| | |
+|---|---|
+| `at white` / `at black` | the clipped counts the histogram pass already returns, as a percentage of the pixels it counted |
+| `probe, 0…255` | the probed place in the output's own encoding — what the exported file would carry there |
+| `probe, linear` | its display-linear luminance (Rec. 709 weights) |
+| `stops from grey` | `log2(Y / 0.18)`, which is how an exposure reads |
+| `highest channel` | the greatest single channel there, which is what "at white" tests |
+
+The probe reads a square about four proxy pixels out from the tapped place, averaged — a single pixel of a
+proxy is noise. Its point is stored in the **picture's own frame**, the frame developedTex is in, so a crop, a
+straighten, a turn or the flip all read the same place in the photograph. The readback is a
+`copyTextureToBuffer` queued at the same gate as the histogram's, so it sees the picture as it stood when the
+frame was drawn, whatever renders next, and no readback happens on a frame that would not already have run
+one.
+
+Each side of the flip (`\`, or hold on a touchscreen) keeps **its own** reading, named for the version it is:
+flip to the compared version and back, and both columns stay on screen, which is the whole point — two
+renderings of one photograph, read side by side instead of judged by eye. *Copy* writes the table as plain
+text, so a measurement can leave the editor.
 
 **Focus peaking** shares the pass and the same principle — judge what the pixels actually hold:
 
