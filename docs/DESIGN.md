@@ -7,6 +7,24 @@ Source: the architecture plan (PWA entry, XMP sidecars, server-side demosaic, We
 
 Where the code differs from the text below, the code and these notes win.
 
+- **Highlights could not reach a highlight** (§7): reported from the editor — bringing Exposure down
+  recovered a blown sky, so the data was plainly there, but Highlights at −100 left it exactly as it was.
+  It was structural. The tone map sends everything at or above `white_ev` to display white before the LUT
+  sees it, and the LUT's ends are pinned, so a control that only bends the curve below white can reach
+  nothing already at it. Measured on a frame with a blown window: **15.4 % of it at white, and Highlights
+  −100 changed that by 0.0** — while Whites −100 and Exposure −2 each took it to 0 %, because they act on
+  where white is. The same photo under the old rendering clipped **0.03 %**: clipping begins at
+  `white_ev − baseline_ev` scene stops above grey, and the baseline (1.15) with the lower white point (0.87)
+  moved that from +4.50 to +2.48 stops, so the flaw had been there all along and only now had 2.02 stops of
+  picture to show it with. Negative Highlights now adds up to `highlight_reach_ev` (2 stops, `PROCESS_VERSION`
+  7) to the white point the curve is built on. Checked: four unit tests (the white point moves with the
+  slider and only downward from 0; the scene level that clips; an older edit's white point does not move; a
+  developed file's tone parameters do not move at all), and `web/scripts/highlight-recovery-smoke.mjs` on the
+  real render — **15.4 % → 7.7 % → 0 %** across Highlights 0, −50, −100, with an edit from before the bump
+  unchanged. The uniform did not change size; this is all in `pack`, which the browser and the server share.
+  *Still open:* whether `DEFAULT_WHITE_EV` should move back up is a question for a survey, not for two
+  photographs — see the roadmap.
+
 - **An old rendering no longer spreads** (§4): two consequences of stored references that nobody chose.
   *The original is not an edit* — a history begun under an older version stored its own defaults in the
   root, and migrating them meant "open the original" handed back a rendering no one had ever asked for, on
@@ -806,6 +824,31 @@ Module functions take their values as arguments and never read the uniform buffe
 2. **Exposure.** `2^EV`, computed on the CPU. Values above 1.0 pass through untouched.
    **Highlight blend.** Where alpha > 0, blend toward the pixel's luminance-preserving neutral by `alpha × strength`, suppressing the magenta cast WB multipliers put on reconstructed highlights.
 3. **Color space.** Camera → XYZ (inverse of the interpolated XYZ → camera matrix, normalized so camera white lands on D65) then XYZ → Rec.2020, recomputed whenever WB changes. Gamut compression (distance-based, in the style of the ACES reference gamut compression) keeps saturated lights from producing negative channels.
+#### Highlights, and what it can reach
+
+Highlights has two halves, and before `PROCESS_VERSION` 7 it only had the first.
+
+The **LUT's bend** grades what is below white: `tone_curve_lut` lifts or lowers the curve weighted toward
+the top, with its ends pinned so nothing walks off the histogram because a slider moved
+(`the_ends_are_pinned_whatever_the_sliders_do`). That is right for a grade and useless for a recovery,
+because the tone map maps everything at or above `white_ev` to display white *before* the LUT sees it — so
+anything blown arrives as exactly 1.0, and `LUT(1) = 1`. Highlights could not move a blown highlight at all.
+
+The **white point's reach** is the other half: negative Highlights adds up to `highlight_reach_ev` (2 stops
+at −100) to the `white_ev` the curve is built on, bringing more of the scene's top end into the picture for
+the shoulder to compress. Recovery has to act on where white *is*; there is nowhere else to act from.
+
+Two stops because that is what the rendering's own defaults put past white. Clipping begins at
+`white_ev − baseline_ev` scene stops above middle grey, and the baseline (1.15) with the lower white point
+(4.5 → 3.63) moved that from **+4.50 to +2.48** — 2.02 stops, which on a frame with a blown window is the
+difference between **0.03 % and 15.4 %** of it rendering as flat white. At full travel Highlights now reaches
+all but a hundredth of a stop of it, and Whites still moves the point itself (±2 EV), so the two compose.
+
+A developed file has none of this: whatever wrote it chose where its white went, there is no scene above it
+to recover, and `display_tone` grades what is there. And an edit from before version 7 keeps the Highlights
+it was approved with — `migrate` sets its reach to zero, so the slider bends the curve and leaves the white
+point alone, exactly as it did.
+
 4. **Tone map.** Luminance Y (Rec.2020 weights) → `log2(Y / 0.18)` mapped from [BlackEV, WhiteEV] to [0, 1] → sigmoid (contrast, pivot) → user curve LUT → decode to Y′ → `rgb × Y′ / Y`, which keeps channel ratios and therefore hue. The curve is Fritsch–Carlson monotone cubic over display-encoded values, baked into 4,096 entries in an `r32float` 1D texture and interpolated manually (`r32float` isn't filterable without an optional feature). Shadows / Midtones / Highlights sliders in the UI move curve control points — the same spline.
 5. **Color mixer.** Linear → OKLab → LCh. Bands: red, orange, yellow, green, aqua, blue, purple, magenta. Raised-cosine weights span neighbouring band centres and sum to 1. `h += Σ wᵢ·hueᵢ`, `C ×= 1 + Σ wᵢ·satᵢ`, `L += Σ wᵢ·lumᵢ · smoothstep(0.02, 0.08, C)` so neutrals stay put. Back to linear.
 
