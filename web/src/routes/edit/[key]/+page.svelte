@@ -93,6 +93,24 @@
 	let before = $state(false);
 	let section = $state<Section>('light');
 	let showPhoneHistogram = $state(true);
+	/** The keyboard shortcuts, listed over the editor (`?`). */
+	let showShortcuts = $state(false);
+	const SHORTCUTS: [string, string][] = [
+		['\\', 'Before and after: see it as shot (or as the version chosen in History), and back'],
+		['Press and hold the photo', 'The same, while held'],
+		['⌘Z / Ctrl+Z', 'Undo'],
+		['⇧⌘Z / Ctrl+Shift+Z', 'Redo'],
+		['E', 'Export'],
+		['Z', 'Open or close Detail, with the loupe'],
+		['R', 'Crop and straighten'],
+		['J', 'Show clipped highlights and shadows'],
+		['H', 'Hide or show the editing tools'],
+		['Double click or double tap', 'Zoom to 100 % and back; in the loupe, 100 → 150 → 200 %'],
+		['Esc', 'Stop picking (white balance, focus, measure)'],
+		['?', 'This list']
+	];
+	/** What the worker can do (`GET /api/capabilities`); null until it says. */
+	let capabilities = $state<{ models: boolean; gpu: boolean } | null>(null);
 	/** The editing tools put away so the photo has the screen: only the section tabs stay. Kept per device. */
 	let toolsHidden = $state(typeof localStorage !== 'undefined' && localStorage.getItem('sidecar.toolsHidden') === '1');
 	let wide = $state(false);
@@ -139,7 +157,33 @@
 	const edit = $derived(session.edit);
 	const readOnly = $derived(session.readOnly);
 	const compare = $derived(session.compare);
-	const changed = () => session.changed();
+	const changed = () => {
+		session.changed();
+		offerBeforeHint();
+	};
+
+	// ---------- the before/after hint: how to compare, said once and quietly (owner's call: no button for it)
+	const BEFORE_HINT_KEY = 'sidecar.beforeHintSeen';
+	let beforeHint = $state(false);
+	let beforeHintDone = (() => {
+		try {
+			return localStorage.getItem(BEFORE_HINT_KEY) === '1';
+		} catch {
+			return true;
+		}
+	})();
+	/** After the first change on this device, for a few seconds; never again once seen or once compared. */
+	function offerBeforeHint() {
+		if (beforeHintDone) return;
+		beforeHintDone = true;
+		beforeHint = true;
+		setTimeout(() => (beforeHint = false), 5000);
+		try {
+			localStorage.setItem(BEFORE_HINT_KEY, '1');
+		} catch {
+			// Shown again next time; that is all.
+		}
+	}
 	const committed = () => session.committed();
 	/** The crop tool is in use: the canvas shows the whole straightened picture, with the crop's frame over it. */
 	const cropping = $derived(!readOnly && !toolsHidden && (wide ? cropOpen : section === 'crop'));
@@ -1230,6 +1274,14 @@
 	}
 
 	async function start() {
+		api('/api/capabilities')
+			.then((r) => r.json())
+			.then((c) => {
+				capabilities = c;
+				// A section the server can't run, left open from another photo, gives way to Light.
+				if (!offered(section)) section = 'light';
+			})
+			.catch(() => {});
 		try {
 			const [metaResp, stateResp] = await Promise.all([api(`/api/assets/${key}/meta`), api(`/api/assets/${key}/edit`)]);
 			meta = await metaResp.json();
@@ -1287,6 +1339,77 @@
 		}
 	}
 
+	// ---------- the phone's panel: its height, set by holding its handle and then dragging
+	const SHEET_KEY = 'sidecar.sheetVh';
+	const SHEET_MIN = 22;
+	const SHEET_MAX = 85;
+	let sheet = $state<{ vh: number | null; armed: boolean }>({ vh: null, armed: false });
+	try {
+		const v = Number(localStorage.getItem(SHEET_KEY));
+		if (v >= SHEET_MIN && v <= SHEET_MAX) sheet.vh = v;
+	} catch {
+		// No storage: the panel keeps its usual height.
+	}
+	let sheetHold: ReturnType<typeof setTimeout> | undefined;
+
+	// ---------- the desktop sidebar: which sections are open, as each person last left them
+	const OPEN_KEY = 'sidecar.openSections';
+	const openSections = (() => {
+		try {
+			const v = JSON.parse(localStorage.getItem(OPEN_KEY) ?? 'null');
+			if (Array.isArray(v)) return new Set<Section>(v);
+		} catch {
+			// Nothing remembered: the defaults.
+		}
+		return new Set<Section>(['wb', 'light']);
+	})();
+	function rememberOpen(id: Section, open: boolean) {
+		// Crop and Detail open themselves from shortcuts and taps; only a person's own choice is remembered.
+		if (id === 'crop') return;
+		if (open) openSections.add(id);
+		else openSections.delete(id);
+		try {
+			localStorage.setItem(OPEN_KEY, JSON.stringify([...openSections]));
+		} catch {
+			// Remembered for this page only.
+		}
+	}
+	let sheetFrom = { y: 0, id: -1 };
+
+	function sheetDown(e: PointerEvent) {
+		(e.currentTarget as Element).setPointerCapture(e.pointerId);
+		sheetFrom = { y: e.clientY, id: e.pointerId };
+		clearTimeout(sheetHold);
+		sheetHold = setTimeout(() => {
+			sheet.armed = true;
+			navigator.vibrate?.(10);
+		}, 350);
+	}
+
+	function sheetMove(e: PointerEvent) {
+		if (e.pointerId !== sheetFrom.id) return;
+		// Moving before the hold has armed it is a swipe, not a resize: let it go.
+		if (!sheet.armed) {
+			if (Math.abs(e.clientY - sheetFrom.y) > 8) clearTimeout(sheetHold);
+			return;
+		}
+		const vh = ((innerHeight - e.clientY) / innerHeight) * 100;
+		sheet.vh = Math.round(Math.min(SHEET_MAX, Math.max(SHEET_MIN, vh)));
+	}
+
+	function sheetUp(e: PointerEvent) {
+		if (e.pointerId !== sheetFrom.id) return;
+		clearTimeout(sheetHold);
+		sheetFrom.id = -1;
+		if (!sheet.armed) return;
+		sheet.armed = false;
+		try {
+			if (sheet.vh) localStorage.setItem(SHEET_KEY, String(sheet.vh));
+		} catch {
+			// The height lasts as long as the page.
+		}
+	}
+
 	// ---------- gestures on the photo: pinch zoom, pan, double-tap 100 %, press-and-hold for as shot
 	const pointers = new Map<number, { x: number; y: number }>();
 	let pinch: { dist: number; zoom: number; mid: { x: number; y: number }; panX: number; panY: number } | null = null;
@@ -1317,6 +1440,9 @@
 
 	function setBefore(on: boolean) {
 		if (before === on) return;
+		// Comparing is the hint learnt: it isn't needed again.
+		beforeHint = false;
+		beforeHintDone = true;
 		before = on;
 		schedule(true);
 		if (fallback) renderPreview();
@@ -1406,6 +1532,14 @@
 
 	function keydown(e: KeyboardEvent) {
 		if ((e.target as HTMLElement)?.tagName === 'INPUT') return;
+		if (e.key === '?') {
+			showShortcuts = !showShortcuts;
+			return;
+		}
+		if (e.key === 'Escape' && showShortcuts) {
+			showShortcuts = false;
+			return;
+		}
 		if (e.key === 'Escape' && (pickingWhite || pickingFocus || probing)) {
 			pickingWhite = pickingFocus = probing = false;
 			return;
@@ -1476,10 +1610,11 @@
 		]
 			.filter(Boolean)
 			.join(' · ');
-	const sections: { id: Section; label: string; short: string }[] = [
+	const allSections: { id: Section; label: string; short: string }[] = [
 		{ id: 'wb', label: 'White balance', short: 'WB' },
 		{ id: 'film', label: 'Film', short: 'Film' },
-		{ id: 'color', label: 'Color', short: 'Color' },
+		// Not "Colour": that is the group it sits in, and a section named after its group reads as the same thing.
+		{ id: 'color', label: 'Mixer', short: 'Mixer' },
 		{ id: 'light', label: 'Light', short: 'Light' },
 		{ id: 'curve', label: 'Curve', short: 'Curve' },
 		{ id: 'crop', label: 'Crop and straighten', short: 'Crop' },
@@ -1489,16 +1624,24 @@
 		{ id: 'lens', label: 'Lens', short: 'Lens' },
 		{ id: 'history', label: 'History', short: 'History' }
 	];
-	const sectionById = (id: Section) => sections.find((x) => x.id === id)!;
+	const sectionById = (id: Section) => allSections.find((x) => x.id === id)!;
 	/** The tools as the panel groups them: a group with one section is that section. */
-	const groups: { id: string; label: string; short: string; children: Section[] }[] = [
+	const allGroups: { id: string; label: string; short: string; children: Section[] }[] = [
 		{ id: 'colour', label: 'Colour', short: 'Colour', children: ['wb', 'film', 'color'] },
 		{ id: 'light', label: 'Light', short: 'Light', children: ['light', 'curve'] },
 		{ id: 'crop', label: 'Crop and straighten', short: 'Crop', children: ['crop'] },
 		{ id: 'processing', label: 'Processing', short: 'Processing', children: ['depth', 'masks', 'detail', 'lens'] },
 		{ id: 'history', label: 'History', short: 'History', children: ['history'] }
 	];
-	const groupOf = (id: Section) => groups.find((g) => g.children.includes(id))!;
+	/**
+	 * A tool this server can't run is left out rather than shown with a sentence saying so (owner's call,
+	 * 2026-10-26): Depth without the models, Detail's loupe without a GPU on the worker. Until the worker has said
+	 * (`GET /api/capabilities`), everything is shown.
+	 */
+	const offered = (id: Section) => !capabilities || ((id !== 'depth' || capabilities.models) && (id !== 'detail' || capabilities.gpu));
+	const sections = $derived(allSections.filter((x) => offered(x.id)));
+	const groups = $derived(allGroups.map((g) => ({ ...g, children: g.children.filter(offered) })).filter((g) => g.children.length > 0));
+	const groupOf = (id: Section) => groups.find((g) => g.children.includes(id)) ?? groups[0];
 </script>
 
 <svelte:head><title>{meta?.fileName ?? 'Sidecar'}</title></svelte:head>
@@ -1578,11 +1721,12 @@
 	<details
 		id="section-{s.id}"
 		class="{top ? 'border-t border-line' : 'border-t border-line/50'} py-2"
-		open={s.id === 'wb' || s.id === 'light' || (s.id === 'crop' && cropOpen)}
+		open={openSections.has(s.id) || (s.id === 'crop' && cropOpen)}
 		ontoggle={(e) => {
 			const open = (e.currentTarget as HTMLDetailsElement).open;
 			if (s.id === 'detail') detailOpen = open;
 			if (s.id === 'crop') cropOpen = open;
+			rememberOpen(s.id, open);
 		}}
 	>
 		<summary class="cursor-pointer py-1 text-xs font-medium">{s.label}</summary>
@@ -1603,6 +1747,7 @@
 		<canvas
 			bind:this={canvas}
 			data-view
+			title={wide ? 'Hold, or press \\, to see it as shot · double click for 100 %' : undefined}
 			class="block touch-none {sideBySide ? (wide ? 'h-full w-1/2' : 'h-1/2 w-full') : 'h-full w-full'} {fallback ? 'invisible' : ''} {pickingWhite || pickingFocus || probing ? 'cursor-crosshair' : ''}"
 			onpointerdown={canvasDown}
 			onpointermove={canvasMove}
@@ -1678,6 +1823,11 @@
 				onclick={jumpToAfPoint}
 			></button>
 		{/if}
+		{#if beforeHint && !status && !error}
+			<p class="pointer-events-none absolute inset-x-4 top-[max(3.25rem,calc(env(safe-area-inset-top)+2.5rem))] mx-auto w-fit rounded bg-ground/80 px-3 py-1.5 text-center text-xs text-fg-2" role="status">
+				{wide ? 'Press \\ or hold the photo to see it as shot' : 'Press and hold the photo to see it as shot'}
+			</p>
+		{/if}
 		{#if status || error}
 			<p class="absolute inset-x-4 top-[max(1rem,env(safe-area-inset-top))] text-center text-sm {error ? 'text-danger' : 'text-fg-2'}">{error || status}</p>
 		{:else if onDevice && !onDeviceNoticeDismissed}
@@ -1724,6 +1874,8 @@
 				</div>
 			{/if}
 			{#if !wide && !fallback}
+				<!-- With the photo's other toggles, above them: in the tool row it was pushed off a 390-pixel screen. -->
+				<button type="button" aria-pressed={showPhoneHistogram} class="rounded-full px-2.5 py-1 text-[0.6875rem] {showPhoneHistogram ? 'bg-fg text-ground' : 'bg-ground/80 text-fg-2'}" onclick={() => (showPhoneHistogram = !showPhoneHistogram)}>Histogram</button>
 				<button type="button" aria-pressed={peaking} class="rounded-full px-2.5 py-1 text-[0.6875rem] {peaking ? 'bg-fg text-ground' : 'bg-ground/80 text-fg-2'}" onclick={() => { peaking = !peaking; schedule(); }}>Focus</button>
 				{#if cameraOffered}
 					<button type="button" aria-pressed={showCamera} class="rounded-full px-2.5 py-1 text-[0.6875rem] {showCamera ? 'bg-fg text-ground' : 'bg-ground/80 text-fg-2'}" onclick={() => (showCamera = !showCamera)}>Camera</button>
@@ -1743,7 +1895,26 @@
 	{#if edit && meta && !(wide && toolsHidden)}
 		<!-- Phone: one tool at a time in a bottom sheet. Desktop: all sections in pipeline order. Tools hidden:
 		     the phone keeps its tab row, the desktop a strip of tabs over the photo. -->
-		<aside class="flex max-h-[48dvh] shrink-0 flex-col bg-panel pb-[max(0.75rem,env(safe-area-inset-bottom))] lg:max-h-none lg:w-80 lg:pb-3">
+		<aside
+			class="flex max-h-[48dvh] shrink-0 flex-col bg-panel pb-[max(0.75rem,env(safe-area-inset-bottom))] lg:max-h-none lg:w-80 lg:pb-3"
+			style={!wide && sheet.vh ? `height: ${sheet.vh}dvh; max-height: ${sheet.vh}dvh` : undefined}
+		>
+			{#if !wide && !toolsHidden}
+				<!-- Hold, then drag: a press on the handle arms it (it lights up), and only then does moving resize the
+				     panel, so a swipe that starts here by accident changes nothing (owner's call). -->
+				<div
+					class="flex h-5 shrink-0 touch-none items-center justify-center"
+					role="separator"
+					aria-orientation="horizontal"
+					aria-label="Panel height: press and hold, then drag"
+					onpointerdown={sheetDown}
+					onpointermove={sheetMove}
+					onpointerup={sheetUp}
+					onpointercancel={sheetUp}
+				>
+					<span class="h-1 w-10 rounded-full transition-colors {sheet.armed ? 'bg-fg' : 'bg-line'}"></span>
+				</div>
+			{/if}
 			{#if !toolsHidden}
 			<header class="flex items-center justify-between gap-3 px-6 pt-3 pb-2 lg:flex-col lg:items-stretch lg:gap-2 lg:px-4">
 				<div class="min-w-0 text-xs text-fg-2">
@@ -1751,13 +1922,13 @@
 					<p class="truncate">{cameraLine(meta.info)}</p>
 				</div>
 				<div class="flex shrink-0 gap-2">
-					<button type="button" class="grid size-9 place-items-center rounded bg-raised text-fg-2 disabled:opacity-40" aria-label="Undo" disabled={!session.canUndo || readOnly} onclick={() => session.undo()}>
+					<button type="button" class="grid size-9 place-items-center rounded bg-raised text-fg-2 disabled:opacity-40" aria-label="Undo" title="Undo (⌘Z)" disabled={!session.canUndo || readOnly} onclick={() => session.undo()}>
 						<svg viewBox="0 0 16 16" class="size-4" aria-hidden="true"><path d="M6 3 2 7l4 4M2.5 7H10a4 4 0 0 1 0 8H8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></svg>
 					</button>
-					<button type="button" class="grid size-9 place-items-center rounded bg-raised text-fg-2 disabled:opacity-40" aria-label="Redo" disabled={!session.canRedo || readOnly} onclick={() => session.redo()}>
+					<button type="button" class="grid size-9 place-items-center rounded bg-raised text-fg-2 disabled:opacity-40" aria-label="Redo" title="Redo (⇧⌘Z)" disabled={!session.canRedo || readOnly} onclick={() => session.redo()}>
 						<svg viewBox="0 0 16 16" class="size-4 -scale-x-100" aria-hidden="true"><path d="M6 3 2 7l4 4M2.5 7H10a4 4 0 0 1 0 8H8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></svg>
 					</button>
-					<button type="button" class="h-9 rounded bg-raised px-3 text-sm" onclick={() => (exporting = true)}>Export</button>
+					<button type="button" class="h-9 rounded bg-raised px-3 text-sm" title="Export (E)" onclick={() => (exporting = true)}>Export</button>
 					<button type="button" class="h-9 rounded bg-fg px-4 text-sm font-medium text-ground disabled:bg-raised disabled:text-muted" disabled={!session.dirty || session.saving || readOnly} onclick={() => session.commit()}>
 						{session.saving ? 'Saving…' : session.dirty ? 'Save' : 'Saved'}
 					</button>
@@ -1851,7 +2022,9 @@
 						{/if}
 						{/if}
 					</div>
-					<div class="flex items-center gap-1" role="radiogroup" aria-label="Viewing and exporting in">
+					<!-- "Output", not "Display": the space decides the export as well as the screen. -->
+					<div class="flex items-center gap-1" role="radiogroup" aria-label="Viewing and exporting in" title="The colour space the photo is shown and exported in">
+						<span class="pr-0.5 text-muted">Output</span>
 						{#each SPACES as sp (sp)}
 							<button type="button" role="radio" aria-checked={displaySpace === sp} title="View and export in {SPACE_LABELS[sp]}" class="rounded-full px-2 py-0.5 {displaySpace === sp ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" onclick={() => setOutputSpace(sp)}>{sp === 'srgb' ? 'sRGB' : 'P3'}</button>
 						{/each}
@@ -1865,9 +2038,6 @@
 					{@const on = groupOf(section).id === g.id && !toolsHidden}
 					<button type="button" aria-pressed={on} class="h-8 shrink-0 rounded-full px-3 text-xs {on ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" aria-label={g.label} onclick={() => setToolsHidden(false, groupOf(section).id === g.id ? section : g.children[0])}>{g.short}</button>
 				{/each}
-				<button type="button" aria-pressed={showPhoneHistogram} aria-label="Show histogram" class="ml-auto grid size-8 shrink-0 place-items-center rounded-full {showPhoneHistogram ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" onclick={() => (showPhoneHistogram = !showPhoneHistogram)}>
-					<svg viewBox="0 0 16 16" class="size-4" aria-hidden="true"><path d="M1 14 L4 8 L7 10 L10 3 L13 9 L15 6 L15 14 Z" fill="currentColor" /></svg>
-				</button>
 			</nav>
 
 			{#if !toolsHidden && groupOf(section).children.length > 1}
@@ -1890,18 +2060,33 @@
 					{#if g.children.length === 1}
 						{@render sectionDetails(sectionById(g.children[0]), true)}
 					{:else}
-						<details class="border-t border-line py-2" open={g.id === 'colour' || g.id === 'light'}>
-							<summary class="cursor-pointer py-1 text-[11px] font-semibold tracking-wide text-fg-2 uppercase">{g.label}</summary>
-							<div class="pl-2">
-								{#each g.children as id (id)}{@render sectionDetails(sectionById(id), false)}{/each}
-							</div>
-						</details>
+						<!-- One level of folding (owner's call): the group is a heading, its sections fold. -->
+						<section class="border-t border-line pt-3 pb-1">
+							<h2 class="py-1 text-[11px] font-semibold tracking-wide text-fg-2 uppercase">{g.label}</h2>
+							{#each g.children as id (id)}{@render sectionDetails(sectionById(id), false)}{/each}
+						</section>
 					{/if}
 				{/each}
+				<button type="button" class="mt-3 mb-1 text-[0.6875rem] text-muted underline underline-offset-2" onclick={() => (showShortcuts = true)}>Keyboard shortcuts (?)</button>
 			</div>
 			{/if}
 		</aside>
 	{/if}
 </div>
+
+{#if showShortcuts}
+	<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+	<div class="fixed inset-0 z-50 grid place-items-center bg-ground/70 p-4" onclick={() => (showShortcuts = false)}>
+		<div role="dialog" aria-modal="true" aria-label="Keyboard shortcuts" tabindex="-1" class="w-full max-w-md rounded bg-panel p-4 text-sm" onclick={(e) => e.stopPropagation()}>
+			<div class="mb-3 flex items-baseline justify-between">
+				<h2 class="font-medium">Keyboard shortcuts</h2>
+				<button type="button" class="text-fg-2" aria-label="Close" onclick={() => (showShortcuts = false)}>×</button>
+			</div>
+			<dl class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-xs">
+				{#each SHORTCUTS as [k, what] (k)}<dt class="font-mono whitespace-nowrap text-fg">{k}</dt><dd class="text-fg-2">{what}</dd>{/each}
+			</dl>
+		</div>
+	</div>
+{/if}
 
 {#if exporting}<ExportSheet assetKey={key} colorSpace={displaySpace} prepare={() => session.prepareExport()} onclose={() => (exporting = false)} />{/if}

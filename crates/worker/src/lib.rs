@@ -1095,6 +1095,7 @@ pub fn router(worker: Arc<Worker>) -> Router {
     sweep_outbox(worker.cache.clone());
     Router::new()
         .route("/v1/health", get(|| async { "ok" }))
+        .route("/v1/capabilities", get(capabilities))
         .route("/v1/render", post(render))
         .route("/v1/loupe", post(loupe))
         .route("/v1/preview", post(preview))
@@ -1113,6 +1114,13 @@ pub fn router(worker: Arc<Worker>) -> Router {
         .route("/v1/lensfun/done", post(lensfun_done))
         .route("/v1/lensfun/{name}", axum::routing::put(lensfun_put))
         .with_state(worker)
+}
+
+/// What this worker can do beyond decoding, so the editor shows only the tools that will work: the models'
+/// masks and depth (`sidecar-ml`, in the `-ml` image, and a GPU), and the loupe and full-resolution renders (a GPU).
+async fn capabilities(State(w): State<Arc<Worker>>) -> Response {
+    let gpu = w.gpu.is_some();
+    Json(serde_json::json!({ "models": gpu && w.ml.is_some(), "gpu": gpu })).into_response()
 }
 
 /// The spectral colour stocks this deployment can render: empty unless the operator's two standards are there

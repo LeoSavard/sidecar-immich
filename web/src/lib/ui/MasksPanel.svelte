@@ -96,10 +96,9 @@ added on top of it where the mask is. "Show" greys out what the selected mask le
 				<button type="button" {disabled} class="rounded-full bg-raised px-2.5 py-1 text-fg disabled:opacity-40" onclick={() => onadd(name)}>{MASK_LABELS[name] ?? name}</button>
 			{/each}
 		</div>
+		<!-- Without the models only the brush is offered, with nothing said about what isn't (owner's call). -->
 		{#if set === null}
 			<p class="text-xs text-fg-2">Finding the subject, skin, hair and depth in this photo… The first time on a new server takes a few minutes while the models tune themselves to its GPU.</p>
-		{:else if !set.available}
-			<p class="text-xs text-fg-2">Subject, skin, hair and depth masks need the Sidecar image with the machine-learning models (the <code>-ml</code> tag). Brush masks work everywhere.</p>
 		{/if}
 	{/if}
 	{#if !canPaint}<p class="text-xs text-fg-2">Painting needs WebGPU (Safari 26 or a current Chromium); masks already painted still render here.</p>{/if}

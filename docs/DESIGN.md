@@ -7,6 +7,16 @@ Source: the architecture plan (PWA entry, XMP sidecars, server-side demosaic, We
 
 Where the code differs from the text below, the code and these notes win.
 
+- **The interface, after the owner's answers to the UI review** (docs/research/ui-review-2026-10.md has the table).
+  "Color" is **Mixer**; the phone's Histogram toggle sits with the photo's toggles; tools the worker can't run are
+  hidden (`GET /api/capabilities`: no Depth without the models, no Detail without a GPU, no model-mask sentence);
+  the phone's panel is resized by holding its handle, then dragging, and remembers its height; a before/after hint
+  shows once, after the first change; the home page is the phone's way in (the editing folder by default there, a
+  RAW's preview while it uploads) and `/m` only sends the installed app to it, under a manifest whose scope is the
+  whole app; on a desktop the sidebar folds one level and remembers each section, sRGB / P3 is labelled Output, and
+  `?` lists the shortcuts. Checked in Chromium at phone and desktop sizes against a real server, every item by a
+  scripted check; not yet on a phone.
+
 - **Zoom, on the page and on the photo** (docs/research/ui-review-2026-10.md has the rest of that review). The page
   itself no longer zooms on a phone — `touch-action: pan-x pan-y`, Safari's gesture events cancelled, and
   `maximum-scale=1` against iOS zooming a focused field (`$lib/page-zoom.ts`) — so a pinch on the panels or a

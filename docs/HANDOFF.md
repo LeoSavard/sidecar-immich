@@ -76,7 +76,8 @@ tint −158 on a daylight frame and now reads 6,880 K +32. Neither has run on a 
 **And then the interface:** the page no longer zooms itself on a phone, the camera's rendering follows the edit's
 zoom and position (and drives it), and the loupe reaches 150 % and 200 %. A wider look at the interface, with
 seventeen suggestions in order of how often they are met, is
-[`research/ui-review-2026-10.md`](research/ui-review-2026-10.md); none of those are built.
+[`research/ui-review-2026-10.md`](research/ui-review-2026-10.md). The owner answered nine of them and those are
+built (the table at its top); the rest are open.
 
 **Before those, on the owner's word, three more on the same branch** (DESIGN.md's build log has each):
 - **D11:** a camera's Adobe RGB JPEG, marked only in EXIF, decodes in Adobe RGB on the server and on the phone

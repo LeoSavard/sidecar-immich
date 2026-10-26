@@ -10,12 +10,13 @@ Sidecar on the phone, as an optional part of the image. It lives in `mobile/`, i
 and White balance only — is gone: the split between phone and server is no longer made before the editor, so
 there is one editor to keep, and it is the full one.
 
-- **Choose a photo** on `/m` from the phone's Photos (`accept="image/*"`) or its files (every RAW extension
-  Sidecar knows, from `web/src/lib/formats.ts`).
-- **It is imported** the way the home page imports one (`importPhoto`, `POST /api/intake`): into the **editing
-  folder**, which Immich never sees, or into the library where there is no folder. A RAW shows **the camera's own
-  preview** from inside the file while it uploads (stage 1, `$lib/local/preview.ts`), labelled as the camera's
-  rendering.
+- **The way in is the home page**, on a phone as on a desktop (owner's call). `/m` only sends the installed app
+  there; the iPhone's *Edit in Sidecar* shortcut still goes straight to the photo it was shared from.
+- **Choose a photo** on the home page, from the phone's Photos or its files (every RAW extension Sidecar knows,
+  from `web/src/lib/formats.ts`).
+- **It is imported** (`importPhoto`, `POST /api/intake`): on a phone into the **editing folder** by default, which
+  Immich never sees, or into the library where there is no folder. A RAW shows **the camera's own preview** from
+  inside the file while it uploads (stage 1, `$lib/local/preview.ts`), labelled as the camera's rendering.
 - **It opens in the editor at `/edit/<key>`**, the same page a desktop uses, with every section it has.
 - **The editor develops it on the phone** where it can: an import made on a phone keeps the original on the phone
   (`$lib/local/originals.ts`, Cache Storage, keyed by the asset key, which is the file's SHA-1), and the editor,
@@ -43,7 +44,7 @@ its own SvelteKit app (base path `/m`), and its `$lib` *is* the main app's `web/
 
 | File | What |
 |---|---|
-| `mobile/src/routes/+page.svelte` | Choose, preview, import, open the editor |
+| `mobile/src/routes/+page.svelte` | The installed app's start page: it sends it to the home page |
 | `mobile/libraw/build.sh`, `libraw/wasm_api.cpp` | LibRaw and the server's shim built for the browser, into `mobile/static/libraw/`, served at `/m/libraw/`; JSON out, so no struct is mirrored |
 | `web/src/lib/local/develop.ts` | A proxy made on the device: the RAW path and the developed-photo path, and why not where it can't |
 | `web/src/lib/local/originals.ts` | The phone's copy of what it imported, by asset key |

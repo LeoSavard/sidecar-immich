@@ -2,7 +2,7 @@
 // A RAW decoded on the phone against the same RAW decoded by the server (docs/MOBILE.md, stage 2): the colour
 // model the phone's LibRaw reads must be the one the worker gives the file, and the proxy — LibRaw in wasm, the
 // ingest shaders in WebGPU — the server's proxy at the same size, sample for sample, within what two GPUs' float
-// arithmetic allows. The phone's way in is the real one: chosen on /m, imported, and developed by the editor.
+// arithmetic allows. The phone's way in is the real one: chosen on the home page, imported, and developed by the editor.
 //
 // Usage: node scripts/raw-parity.mjs <sidecar url> <RAW file>… [--swiftshader] [--dump <dir>]   (CHROMIUM_PATH to pick a browser)
 // --dump writes both proxies as raw RGBA16F, <name>.phone.f16 and <name>.server.f16, for a closer look.
@@ -56,15 +56,15 @@ function close(a, b, path = '') {
 let failed = 0;
 for (const file of files) {
 	const name = basename(file);
-	// The phone's decode: chosen on /m, imported, and developed on the phone by the editor.
+	// The phone's decode: chosen on the home page, imported, and developed on the phone by the editor.
 	const page = await context.newPage();
 	const errors = [];
 	const notHere = [];
 	page.on('pageerror', (e) => errors.push(String(e)));
 	page.on('console', (m) => /Not developed on this device/.test(m.text()) && notHere.push(m.text()));
-	await page.goto(`${url}/m/?inspect`);
+	await page.goto(`${url}/?inspect`);
 	const started = Date.now();
-	await page.locator('input[accept^="image/*,"]').setInputFiles(file);
+	await page.locator('input[type=file]').setInputFiles(file);
 	await page.waitForURL('**/edit/**', { timeout: 600_000 });
 	const assetKey = page.url().split('/edit/')[1].split('?')[0];
 	await page.waitForFunction(() => window.__sidecarInspect, null, { timeout: 600_000 }).catch(() => {});

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-// The mobile module end to end, at a phone's size and with touch: choose a JPEG, see it imported into the editing
-// folder and opened in Sidecar's one editor, developed on the phone from its own copy (the notice says so), with
+// The phone's way in end to end, at a phone's size and with touch: choose a JPEG on the home page, see it imported
+// into the editing folder and opened in Sidecar's one editor, developed on the phone from its own copy (the notice says so), with
 // the full editor's sections; move Exposure and check the server stores the edit. With --raw, also choose a RAW:
 // its embedded preview is shown while it uploads, then the editor develops the RAW on the phone.
 //
@@ -53,12 +53,13 @@ const check = (ok, what) => {
 	if (!ok) failed++;
 };
 
-/** Choose `file` on the phone page through `input`, and follow it into the editor; `meanwhile` looks at the page
- *  while the photo uploads. */
-async function open(file, input, meanwhile = async () => {}) {
+/** Choose `file` on the home page, and follow it into the editor; `meanwhile` looks at the page while the photo
+ *  uploads. The module's own page, /m, sends the installed app there. */
+async function open(file, meanwhile = async () => {}) {
 	await page.goto(`${url}/m/?inspect`);
+	await page.waitForURL((u) => u.pathname === '/', { timeout: 30_000 });
 	const started = Date.now();
-	await page.locator(input).setInputFiles(file);
+	await page.locator('input[type=file]').setInputFiles(file);
 	await meanwhile(started);
 	await page.waitForURL('**/edit/**', { timeout: 300_000 });
 	const developed = await page
@@ -70,7 +71,7 @@ async function open(file, input, meanwhile = async () => {}) {
 }
 
 try {
-	const jpeg = await open(photo, 'input[accept="image/*"]');
+	const jpeg = await open(photo);
 	const sha1 = createHash('sha1').update(readFileSync(photo)).digest('hex');
 	check(jpeg.key === sha1, `imported as ${jpeg.key.slice(0, 12)}…, the photo's own SHA-1, and opened in the editor`);
 	check(jpeg.developed, `developed on the phone from its own copy (${jpeg.seconds.toFixed(1)} s from choosing it)`);
@@ -92,7 +93,7 @@ try {
 	check(Math.abs(saved - 1) < 1e-6, `the server holds the edit made on the phone (exposure ${saved} EV)`);
 
 	if (raw) {
-		const r = await open(raw, 'input[accept^="image/*,"]', async (started) => {
+		const r = await open(raw, async (started) => {
 			const previewed = await page
 				.getByRole('img', { name: /camera's own preview/ })
 				.waitFor({ timeout: 30_000 })

@@ -19,6 +19,20 @@ person something, and what would fix it. They are ordered by how often someone r
   three buttons in its corner pick one; the choice is remembered. At 150 % and 200 % the server renders a smaller
   full-resolution tile and it is shown pixel for pixel, so what is judged is still the real render.
 
+## The owner's answers, and what was built (2026-10-26)
+
+| # | Answer | Built |
+|---|---|---|
+| 3 | No button: holding is the common way. A quiet hint instead | Shown once per device, after the first change, for five seconds ("Press and hold the photo…", with `\` on a desktop); never again once seen or once compared. The desktop canvas's tooltip says it too |
+| 4 | Canadian spelling; a section mustn't share its group's name | "Color" → **Mixer**; no other American spelling was on screen |
+| 5 | Hidden, not greyed | `GET /api/capabilities` (the worker's `models`, `gpu`); Depth leaves the tabs and the sidebar without the models, Detail without a GPU, and Masks offers the brush without a sentence about the models |
+| 6 | Agreed | The Histogram toggle is with Focus, Camera and sRGB over the photo |
+| 9 | Agreed, but only after a press and hold | A handle on the panel's top edge: held for a third of a second it lights up (and buzzes where a phone can), and only then does a drag set the height, which is remembered. A swipe that starts there changes nothing |
+| 10 | Agreed; the iPhone's *Edit in Sidecar* shortcut still goes straight to the photo | The home page is the way in on a phone too: it imports into the editing folder by default there, shows a RAW's own preview while uploading, and has lost its "On this phone" link. `/m` now only sends the installed app to it, and the module's manifest covers the whole app (`scope: "/"`), so opening the editor from it stays inside the app |
+| 12–14 | Agreed | One level of folding, each section's state remembered; the sRGB / P3 switch is labelled **Output** (it decides the export as well as the screen, so "Display" would mislead); `?` lists the shortcuts, a link at the foot of the sidebar opens the list, and Undo, Redo and Export carry theirs in their titles |
+
+Items 1, 2, 7, 8, 11 and 15–17 had no answer and are not built.
+
 ## Worth doing next
 
 ### On every photo

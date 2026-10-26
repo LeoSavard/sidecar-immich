@@ -2,7 +2,8 @@
 <script lang="ts">
 	import { api, thumbnailUrl } from '$lib/api';
 	import { importPhoto, type Who } from '$lib/intake';
-	import { ACCEPT_RAW } from '$lib/formats';
+	import { ACCEPT_RAW, isRaw } from '$lib/formats';
+	import { showPreview, type ShownPreview } from '$lib/local/preview';
 
 	type Recent = { assetKey: string; fileName: string; immichAssetId: string | null; openedAt: string };
 	let recent = $state<Recent[] | null>(null);
@@ -109,8 +110,17 @@
 	let intakeName = $state('');
 	let intakeError = $state('');
 	let dragging = $state(false);
-	/** Where an imported photo goes. The library when there is one, since that is what this always did. */
-	let intakeTo = $state<'immich' | 'folder'>('immich');
+	/**
+	 * Where an imported photo goes. On a desktop the library when there is one, since that is what this always
+	 * did; on a phone the editing folder where there is one, the import that isn't Immich's (owner's call): a photo
+	 * from the phone is one being worked on, and the editor develops it on the phone either way.
+	 */
+	let intakeTo = $state<'immich' | 'folder'>(typeof matchMedia !== 'undefined' && matchMedia('(pointer: coarse)').matches ? 'folder' : 'immich');
+	$effect(() => {
+		if (who && !who.intakeFolder) intakeTo = 'immich';
+	});
+	/** A RAW's embedded preview, shown while it uploads: the camera's own rendering, from inside the file. */
+	let intakePreview = $state<ShownPreview | null>(null);
 	const canChoose = $derived(!!who?.immich && !!who?.intakeFolder);
 	/** Settled once the session says what this deployment has: one destination needs no question asked. */
 	const destination = $derived(who?.immich ? intakeTo : 'folder');
@@ -118,11 +128,14 @@
 	async function intake(file: File) {
 		intakeName = file.name;
 		intakeError = '';
+		if (isRaw(file.name)) file.arrayBuffer().then((b) => showPreview(new Uint8Array(b), 2560)).then((p) => intakeName === file.name && (intakePreview = p));
 		try {
-			location.href = `/edit/${await importPhoto(file, destination)}`;
+			// What a test asked of this page (`?inspect`, `?device`) it asks of the editor too.
+			location.href = `/edit/${await importPhoto(file, destination)}${location.search}`;
 		} catch (e) {
 			intakeError = e instanceof Error ? e.message : String(e);
 			intakeName = '';
+			intakePreview = null;
 		}
 	}
 
@@ -188,8 +201,6 @@
 	<header class="flex items-baseline justify-between">
 		<h1 class="text-xl">Sidecar</h1>
 		<div class="flex items-baseline gap-4">
-			<!-- Only in an image built with the mobile module (docs/MOBILE.md). -->
-			{#if who?.mobile}<a href="/m/" class="text-sm text-[#c6c6c6] underline underline-offset-4">On this phone</a>{/if}
 			{#if who?.authRequired}<button class="text-sm text-[#c6c6c6]" onclick={signOut}>Sign out {who.name}</button>{/if}
 		</div>
 	</header>
@@ -218,6 +229,10 @@
 		ondrop={dropped}
 	>
 		{#if intakeName}
+			{#if intakePreview}
+				<img src={intakePreview.url} alt="The camera's own preview of {intakeName}" class="mx-auto mb-2 block max-h-[50dvh] max-w-full object-contain" />
+				<p class="mb-2 text-xs text-fg-2">The camera's own rendering, from inside the file — not Sidecar's development.</p>
+			{/if}
 			<p aria-live="polite">
 				Adding <span class="font-mono">{intakeName}</span>
 				to {destination === 'folder' ? (who?.intakeFolder ?? 'the editing folder') : 'your library'}…

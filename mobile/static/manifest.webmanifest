@@ -1,9 +1,9 @@
 {
 	"name": "Sidecar on this phone",
 	"short_name": "Sidecar",
-	"description": "Develop a photo on the phone, with the same pipeline as the server",
+	"description": "A RAW editor beside Immich, developing on the phone",
 	"start_url": "/m/",
-	"scope": "/m/",
+	"scope": "/",
 	"display": "standalone",
 	"background_color": "#161616",
 	"theme_color": "#161616",

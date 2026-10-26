@@ -139,7 +139,7 @@ try {
 		await page.waitForFunction((was) => document.querySelector('svg[aria-label^="Tone curve"]')?.getAttribute('aria-label') !== was, before, { timeout: 5000 });
 	});
 	await step('color', async () => {
-		await section('Color');
+		await section('Mixer');
 		await set('saturation', 15);
 		await (await visible(page.getByRole('radio', { name: 'Blue' }))).click();
 		await set('mix-sat', -40);
