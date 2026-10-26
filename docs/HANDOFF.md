@@ -5,7 +5,7 @@ For whoever picks this up next, person or agent. [`ARCHITECTURE.md`](ARCHITECTUR
 checked), [`ROADMAP.md`](ROADMAP.md) what's known to be missing. This page is the state of play; update it when
 you stop.
 
-*Last updated 2026-10-22.*
+*Last updated 2026-10-26.*
 
 ## Where it stands, 2026-10-22
 
@@ -30,6 +30,16 @@ the folder path out of the box (it has no Immich, so that is the only destinatio
 everything `git branch -r --merged origin/main` lists except `main`. That needs `git push origin --delete`
 run by the owner; it is blocked here. `worktree-depth-spike` and `worktree-lens-correction` are not in that
 list and are kept on purpose.
+
+## 2026-10-26: a review of the decode pipeline
+
+[`research/pipeline-review-2026-10.md`](research/pipeline-review-2026-10.md) reads the pipeline from file to
+proxy. It covers where a decode can go wrong without an error (the shim's black pattern and DNG calibration, X-Trans
+preview vs export, colour spaces of developed files), why the top of the tone range drew ten PRs, duplication worth
+folding, and a staged, licence-clean plan for decoding on the phone. Branch `claude/sweet-maxwell-s67it6` carries
+its only two code changes, neither of which changes a pixel for a file that opened before: no colour matrix
+no longer panics (`camera.rs`), and the mosaic copy uses `raw_pitch` (`shim.cpp`, syntax-checked, not yet built in
+the dev container). Everything else in it is a proposal waiting on the owner and on test files.
 
 ## Open pull requests
 

@@ -48,7 +48,10 @@ impl CameraColor {
                 .clamp(0.0, 1.0);
                 mat::lerp(&lo.xyz_to_camera, &hi.xyz_to_camera, w)
             }
-            [] => panic!("camera has no colour calibration"),
+            // A file that states no matrix at all (a linear DNG without ColorMatrix1, say) still has to
+            // open: treat its camera RGB as sRGB primaries, as the LibRaw path does for an unknown camera.
+            // This also runs in the browser's wasm, where a panic takes the whole packer down.
+            [] => mat::mul(&mat::REC2020_TO_SRGB, &mat::XYZ_TO_REC2020),
         }
     }
 
@@ -162,5 +165,23 @@ mod tests {
             out.iter().all(|v| (v / out[1] - 1.0).abs() < 1e-3),
             "{out:?} at {t:.0} K {tint:+.1}"
         );
+    }
+
+    /// A file with no colour matrix resolves as sRGB instead of panicking, and its neutral stays neutral.
+    #[test]
+    fn no_calibration_resolves_as_srgb() {
+        let cam = CameraColor {
+            as_shot_mul: [1.0, 1.0, 1.0],
+            calibrations: Vec::new(),
+            baseline_exposure: None,
+        };
+        let wb = resolve(&cam, cam.as_shot_xy());
+        assert!(
+            wb.mul.iter().all(|m| (m - 1.0).abs() < 1e-6),
+            "{:?}",
+            wb.mul
+        );
+        let w = mat::apply(&wb.cam_to_rec2020, &[1.0, 1.0, 1.0]);
+        assert!(w.iter().all(|v| (v - 1.0).abs() < 1e-9), "{w:?}");
     }
 }
