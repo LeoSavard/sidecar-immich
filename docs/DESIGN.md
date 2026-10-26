@@ -7,6 +7,15 @@ Source: the architecture plan (PWA entry, XMP sidecars, server-side demosaic, We
 
 Where the code differs from the text below, the code and these notes win.
 
+- **An imported photo is called what it was filed as** (§3): an import into the editing folder showed its
+  staging name in the editor (`138b8c5d1f1ed5a3-IMG_EDITOR.jpg`). `place` reads the staged copy for its capture
+  date before filing it, and the worker's cached metadata, keyed by the bytes, kept the name of whichever path
+  read them first. On a cache hit the name now follows the path being read, and the cache is rewritten when it
+  changes; no re-hash and no ExifTool run. The same covers an import `free_name` numbered (`IMG_1-1.jpg`).
+  Checked: a worker test that fails without the fix with exactly the staging name, and two real imports into a
+  `sidecar dev` editing folder — `IMG_NAMED.jpg`, then a different photo of the same name as `IMG_NAMED-1.jpg`,
+  each named so in its metadata and in Recent.
+
 - **The mobile module, stage 0** (docs/MOBILE.md): an optional SvelteKit app in `mobile/`, served at `/m` by
   images built with the new `mobile` and `ml-mobile` targets (`-mobile` tags), and only where
   `server.mobile_root` holds a build. A developed photo chosen on the phone is decoded by the browser into the

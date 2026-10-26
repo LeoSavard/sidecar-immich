@@ -50,9 +50,10 @@ a JPEG or HEIC on the phone's GPU with the editor's own code. It has run against
 Chromium, never on a phone: the next step is an iPhone and an Android phone, with the three questions at the
 end of MOBILE.md.
 
-Found in passing and not fixed: **an import into the editing folder keeps the staging name in its metadata**
-(`meta.fileName` reads `138b8c5d1f1ed5a3-IMG_EDITOR.jpg` while the file is `IMG_EDITOR.jpg`), because `place`
-ingests the staged file before moving it. The editor's title shows the random prefix.
+Found in passing and fixed on the same branch: **an import into the editing folder kept the staging name in its
+metadata** (`meta.fileName` read `138b8c5d1f1ed5a3-IMG_EDITOR.jpg` while the file was `IMG_EDITOR.jpg`), because
+`place` ingests the staged file before moving it and the worker's cached metadata kept the first path's name. The
+name now follows the path a photo was last read from (DESIGN.md's build log).
 
 ## Open pull requests
 
