@@ -33,6 +33,10 @@ list and are kept on purpose.
 
 ## 2026-10-26: a review of the decode pipeline
 
+The whole day's session — both pull requests, the owner's decisions, what is left and how to check it again — is
+[`research/session-2026-10-26.md`](research/session-2026-10-26.md). The rest of this section is the detail as it
+happened.
+
 [`research/pipeline-review-2026-10.md`](research/pipeline-review-2026-10.md) reads the pipeline from file to
 proxy. It covers where a decode can go wrong without an error (the shim's black pattern and DNG calibration, X-Trans
 preview vs export, colour spaces of developed files), why the top of the tone range drew ten PRs, duplication worth
