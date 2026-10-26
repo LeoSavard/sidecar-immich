@@ -46,7 +46,6 @@ type Params = {
 	white: number;
 	clip: number;
 	desat: number;
-	soft: number;
 	sensor: number;
 	pattern: Uint32Array;
 };
@@ -62,7 +61,6 @@ function packParams(p: Params): ArrayBuffer {
 	f[12] = p.white;
 	f[13] = p.clip;
 	f[14] = p.desat;
-	f[15] = p.soft;
 	u[16] = p.sensor;
 	u.set(p.pattern, 20);
 	return buf;
@@ -222,7 +220,6 @@ export class IngestPass {
 			white: m.white,
 			clip: whiteObs > 0.5 ? Math.min(whiteObs * 0.98, 0.985) : 0.985,
 			desat: 0.3,
-			soft: 0.6,
 			sensor,
 			pattern
 		};
@@ -283,7 +280,7 @@ export class IngestPass {
 
 	/** Box-reduce then bilinear-resample to `longEdge`: `downsample_and_read` in ingest.rs, before the read. */
 	private downsample(rgb: GPUTexture, longEdge: number, t: (w: number, h: number, f: GPUTextureFormat) => GPUTexture): GPUTexture {
-		const zero: Params = { inSize: [0, 0], outSize: [0, 0], black: [0, 0, 0, 0], wb: [0, 0, 0, 0], white: 0, clip: 0, desat: 0, soft: 0, sensor: 0, pattern: new Uint32Array(36) };
+		const zero: Params = { inSize: [0, 0], outSize: [0, 0], black: [0, 0, 0, 0], wb: [0, 0, 0, 0], white: 0, clip: 0, desat: 0, sensor: 0, pattern: new Uint32Array(36) };
 		const sized = (inSize: [number, number], outSize: [number, number]): Params => ({ ...zero, inSize, outSize });
 		const [sw, sh] = [rgb.width, rgb.height];
 		const scale = Math.min(1, longEdge / Math.max(sw, sh));

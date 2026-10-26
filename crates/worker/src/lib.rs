@@ -44,8 +44,10 @@ pub const DEFAULT_EDGE: u32 = 2560;
 /// The two move for unrelated reasons. 0.2.1 fixed a HEIC at EXIF orientation 3 being rotated 180° twice —
 /// libheif had already applied the file's own `irot` — and left every proxy decoded before it in place and
 /// upside down, because nothing in the file name had changed. Generation 2 is that fix; 3 orients the
-/// mirrored EXIF orientations (2, 4, 5, 7), which every earlier generation left upright.
-pub const INGEST_GENERATION: u32 = 3;
+/// mirrored EXIF orientations (2, 4, 5, 7), which every earlier generation left upright. 4 is the bounded
+/// highlight fill (D14 in docs/research/pipeline-review-2026-10.md): measured channels kept, clipped ones
+/// filled to agree with them, and no NaN from a damaged file.
+pub const INGEST_GENERATION: u32 = 4;
 
 /// What cached metadata was *read* by, apart from the pixels: bump when `Meta` gains something a re-read of
 /// the same file would now fill in, so it is read again without rebuilding a single proxy. 1 adds the lens

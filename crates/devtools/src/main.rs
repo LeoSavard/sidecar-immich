@@ -5,6 +5,8 @@
 //! `sidecar-dev develop <raw> <out.png> [long_edge]`  decode → proxy → GPU develop (as shot) → PNG
 //! `sidecar-dev png <in.f16> <width> <height> <out.png>`  sRGB-encode a display-linear RGBA16F dump for viewing
 //! `sidecar-dev hilite <raw> <dir> [--crop]`  chromaticity by clip coverage: what reconstruction leaves
+//! `sidecar-dev hilite-truth <raw> <ev>…`  reconstruction against ground truth: an unclipped frame, clipped by
+//!                                        raising its mosaic `ev` stops, compared with itself
 //! `sidecar-dev lens <file>…`             the lens correction and identity each file yields
 //! `sidecar-dev radial <list>`            measured radial falloff per RAW (vignetting checks)
 //! `sidecar-dev camera-jpeg <list>`       a RAW's lens profile checked against the camera's own JPEG
@@ -42,6 +44,12 @@ fn main() -> Result<()> {
         ["hilite", input, out_dir, rest @ ..] => {
             hilite(input.as_ref(), out_dir.as_ref(), rest.contains(&"--crop"))
         }
+        ["hilite-truth", input, evs @ ..] if !evs.is_empty() => hilite_truth(
+            input.as_ref(),
+            &evs.iter()
+                .map(|v| v.parse())
+                .collect::<Result<Vec<f32>, _>>()?,
+        ),
         ["radial", list] => radial(list.as_ref()),
         ["linear-dng", input, out, rest @ ..] => {
             let input: &std::path::Path = input.as_ref();
@@ -222,6 +230,139 @@ fn develop(input: &std::path::Path, out: &std::path::Path, long_edge: u32) -> Re
 /// the mean chromaticity in white-balanced camera RGB — `r/(r+g+b)` and `b/(r+g+b)`, which a neutral renders
 /// at 0.333 each — so a cast shows up as a number instead of an impression, and its sign says which way.
 /// `--crop` writes the worst region magnified, for looking at.
+/// Highlight reconstruction measured against the truth. A frame that clips nowhere is clipped on purpose: its
+/// mosaic is raised `ev` stops and cut at the sensor's white, which saturates each colour where a longer
+/// exposure would have, green and red and blue at their own scene luminance. The proxy of that is compared,
+/// pixel for pixel, with the unclipped proxy raised by the same `ev`, which is what reconstruction should have
+/// recovered. Reported by how much of each pixel clipped: the colour error (white-balanced chromaticity, and
+/// its signed bias, which is the cast) and the brightness ratio in stops. `SIDECAR_NO_HILITE=1` gives the
+/// clipped baseline to beat.
+fn hilite_truth(input: &std::path::Path, evs: &[f32]) -> Result<()> {
+    let gpu = sidecar_engine::Gpu::new_headless()?;
+    let ing = sidecar_engine::Ingest::new(&gpu)?;
+    let raw = sidecar_raw::RawFile::open(input)?;
+    let info = raw.info();
+    let m = raw.mosaic()?;
+    let mul = info.color.as_shot_mul;
+    let wb = sidecar_color::camera::resolve(&info.color, info.color.as_shot_xy());
+    let run = |data: &[u16]| {
+        let input_m = sidecar_engine::MosaicInput {
+            width: m.width,
+            height: m.height,
+            data,
+            black: m.black,
+            white: m.white,
+            pattern: m.pattern,
+            period: m.period,
+        };
+        ing.proxy(&gpu, &input_m, [mul[0] as f32, 1.0, mul[2] as f32], 1600)
+    };
+    let truth = run(&m.data)?;
+    let clipped_already = truth.data.chunks(4).filter(|p| p[3] > 0.0).count();
+    println!(
+        "{} {} · proxy {}×{} · {:.3} % of the unraised proxy already touches clipping",
+        info.make,
+        info.model,
+        truth.width,
+        truth.height,
+        100.0 * clipped_already as f64 / (truth.data.len() / 4) as f64
+    );
+    let blk = m.black.iter().copied().fold(f32::MAX, f32::min);
+    const EDGES: [f32; 4] = [0.0, 0.5, 0.9, 1.01];
+    for &ev in evs {
+        let k = 2f32.powf(ev);
+        let raised: Vec<u16> = m
+            .data
+            .iter()
+            .map(|&v| (blk + (v as f32 - blk).max(0.0) * k).min(m.white) as u16)
+            .collect();
+        let got = run(&raised)?;
+        let (mut n, mut err, mut blended, mut bias, mut stops, mut bad) = (
+            [0u64; 4],
+            [0f64; 4],
+            [0f64; 4],
+            [[0f64; 2]; 4],
+            [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
+            [0u64; 4],
+        );
+        for (t, g) in truth.data.chunks(4).zip(got.data.chunks(4)) {
+            if t[3] > 0.0 {
+                continue;
+            }
+            let bal = |p: &[f32], s: f64| {
+                [
+                    p[0] as f64 * wb.mul[0] * s,
+                    p[1] as f64 * s,
+                    p[2] as f64 * wb.mul[2] * s,
+                ]
+            };
+            let (tc, gc) = (bal(t, k as f64), bal(g, 1.0));
+            let (ts, gs) = (tc.iter().sum::<f64>(), gc.iter().sum::<f64>());
+            if ts <= 1e-6 {
+                continue;
+            }
+            let b = if g[3] <= 0.0 {
+                0
+            } else {
+                EDGES
+                    .iter()
+                    .position(|&e| g[3] < e)
+                    .unwrap_or(4)
+                    .clamp(1, 3)
+            };
+            n[b] += 1;
+            if !gs.is_finite() || gs <= 1e-9 {
+                bad[b] += 1;
+                continue;
+            }
+            let d = [gc[0] / gs - tc[0] / ts, gc[2] / gs - tc[2] / ts];
+            err[b] += (d[0] * d[0] + d[1] * d[1]).sqrt();
+            // The develop pass's highlight blend at its default (`exposure.wgsl`), toward the mean: the same
+            // sum, so the chromaticity moves toward a third each by alpha × 0.5.
+            let t = (g[3] as f64 * 0.5).clamp(0.0, 1.0);
+            let e = [
+                gc[0] / gs + (1.0 / 3.0 - gc[0] / gs) * t - tc[0] / ts,
+                gc[2] / gs + (1.0 / 3.0 - gc[2] / gs) * t - tc[2] / ts,
+            ];
+            blended[b] += (e[0] * e[0] + e[1] * e[1]).sqrt();
+            bias[b][0] += d[0];
+            bias[b][1] += d[1];
+            stops[b].push((gs / ts).log2());
+        }
+        println!(
+            "  +{ev} EV       pixels   colour error (after blend)   bias r     bias b    stops vs truth (p10 / median / p90)   non-finite"
+        );
+        let names = ["unclipped", "clip < 0.5", "0.5–0.9", "≥ 0.9"];
+        for b in 0..4 {
+            if n[b] == 0 {
+                continue;
+            }
+            let k = (n[b] - bad[b]).max(1) as f64;
+            let s = &mut stops[b];
+            s.sort_by(|a, b| a.total_cmp(b));
+            let q = |f: f64| {
+                s.get(((s.len() as f64 - 1.0) * f) as usize)
+                    .copied()
+                    .unwrap_or(f64::NAN)
+            };
+            println!(
+                "  {:<11} {:>9}   {:>10.4}   ({:.4})       {:>+8.4}   {:>+8.4}   {:>+7.2} / {:>+7.2} / {:>+7.2}            {}",
+                names[b],
+                n[b],
+                err[b] / k,
+                blended[b] / k,
+                bias[b][0] / k,
+                bias[b][1] / k,
+                q(0.1),
+                q(0.5),
+                q(0.9),
+                bad[b]
+            );
+        }
+    }
+    Ok(())
+}
+
 fn hilite(input: &std::path::Path, out_dir: &std::path::Path, crop: bool) -> Result<()> {
     const BUCKETS: usize = 10;
     let gpu = sidecar_engine::Gpu::new_headless()?;

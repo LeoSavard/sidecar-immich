@@ -37,7 +37,7 @@ The short version:
 | D11 | Camera Adobe RGB JPEGs carry no ICC, only `InteropIndex = R03` | `decoded.rs` `exif` | Same as D10, for the most common case of it | Yes | XS |
 | D12 | CMYK/YCCK JPEG, float TIFF and PNM `maxval` ≠ 255/65535 are unchecked | `decoded.rs` | Wrong colours or 64× dark instead of a clear refusal | No (refuse) / yes (support) | S |
 | D13 | ProRAW `ProfileGainTableMap` not read | `linear_dng.rs` | ProRAW looks flatter than Apple's rendering (DNG 1.6 local tone map) | Optional stage | L |
-| D14 | Highlight reconstruction turns a damaged RAW into NaN | `shaders/ingest/hilite_*.wgsl` | A quarter of a truncated CR2's proxy is NaN, across nearly every row | Only where it is NaN today | M |
+| D14 | Highlight reconstruction turns a damaged RAW into NaN | `shaders/ingest/hilite_*.wgsl` | A quarter of a truncated CR2's proxy is NaN, across nearly every row | **Fixed here**, with the rest of the fill (§3, "The highlight stack, end to end"): every clipped photo changes, measurably for the better | — |
 
 The two fixes on this branch are D3 and D9. The rest are proposals. Every pixel-changing fix needs an
 `INGEST_GENERATION` bump (`crates/worker/src/lib.rs`), a file that shows the problem copied under
@@ -140,6 +140,11 @@ fix belongs in how the weights are formed (bounded exponents, or weights normali
 before `exp`), not in a NaN test: WGSL lets an implementation assume NaN never occurs, so `x != x` is not a
 reliable guard. Pixels that are finite today should stay bit-identical, which a parity case on an intact frame and
 this file both check. The phone's ingest (stage 2) reproduces the NaNs exactly, as it should.
+
+*Isolated and fixed the same day* — and not with finite pixels left bit-identical, because the pass-by-pass
+dump showed that the step that makes the NaN is the step that decides the colour of every reconstructed
+pixel, and measured against ground truth it was making clipped photos worse. §3, "The highlight stack, end to
+end", has the mechanism, the measurements and the fix.
 
 ### 2.3 Linear DNG (`crates/raw/src/linear_dng.rs`)
 
@@ -244,7 +249,7 @@ how colour fades over the last stop. The ingest end has no single owner. In orde
 |---|---|---|---|---|
 | 1 | Sensor white and black | Three decode paths | **Split** (D1, D6, D7) | `SensorLevels`, above, filled from the file first (§8: `linear_max`, `dng_whitelevel`, `LinearResponseLimit`) and from data only where the file is silent |
 | 2 | Clip coverage (the proxy's alpha) | Three decode paths | **Split** (D7) | One definition, "fraction of the pixel's samples at or above `clip`, before white balance", computed from `SensorLevels`. A unit test feeds the same synthetic frame to all three paths and compares alpha |
-| 3 | Reconstruction | GPU ingest, but not X-Trans export | **Split** (D5) | Reconstruction runs wherever alpha > 0, on every path. The highlight blend in develop then sees the same input in preview and export |
+| 3 | Reconstruction | GPU ingest, but not X-Trans export | **Fill corrected and measured** (below); still split (D5) | Reconstruction runs wherever alpha > 0, on every path. The highlight blend in develop then sees the same input in preview and export |
 | 4 | Middle grey | `pack`: `BASELINE_EV` or the file's `BaselineExposure` | **Half done**: only `linear_dng` reads the tag. The LibRaw path hard-codes `None` (`raw/src/lib.rs:170`), although LibRaw parses it (`dng_levels.baseline_exposure`) | Pass it through the shim. Then add the per-file exposure offsets the cameras record (§8: Fuji DR, Canon HTP, Nikon ADL), which explain some of the frames where "Sidecar is darker than the camera" (worth counting on the library before assuming how many) |
 | 5 | Shoulder and Contrast above grey | `pack` / `tone.wgsl` | **Open, owner's decision** (#21, HANDOFF) | Decide with pictures, but from a fixed set (below), so the decision is measured on the same frames each time |
 | 6 | Path to white | `pack` / `tone.wgsl` | Settled by #35/#41 | Keep; guard with the harness below |
@@ -260,6 +265,109 @@ reporting, for preview *and* export, the share at display white, the chroma in t
 probe's stops from grey (the Measure fold already computes all three). Every PR that touches links 1–6 posts
 that table before and after. #26, #35 and #41 each measured this way already, but on whichever frame
 reported the bug; a fixed set turns those one-off measurements into a regression test.
+
+### The highlight stack, end to end
+
+*Reviewed 2026-10-26, before fixing D14, on the owner's hunch that the two were linked. They were: the step
+that turned a damaged file into NaN is the step that decides the colour of every reconstructed pixel, and it
+had three defects that showed on intact frames too.*
+
+**The stack, in the order a pixel meets it.** Ingest (`crates/engine/src/ingest.rs`, mirrored for the phone by
+`web/src/lib/gpu/ingest.ts`):
+
+| Stage | Shader | What it decides about the top of the range |
+|---|---|---|
+| Levels | `normalize.wgsl` | 1.0 = declared white, per-channel black. Nothing bounds the top: a damaged file reaches 21.7 |
+| Clip threshold | `ingest.rs` `white_obs` | 98.5 % of white, or 98 % of the observed maximum (D6, D7) |
+| Block colour | `hilite_half.wgsl` | One RGB per 2×2 / 3×3 block; a clipped green takes its unclipped twin |
+| Push | `hilite_reduce.wgsl` | Gauss-reduce, skipping any pixel with a clipped channel; a level with no unclipped tap says (1, 1, 1) |
+| Pull | `hilite_assemble.wgsl` | Expand each coarse level back into the finer one |
+| Write back | `hilite_doub.wgsl` | Replace mosaic samples near white with the pulled estimate, rescaled to the block |
+| Demosaic | `rcd_*.wgsl`, `xtrans_bin.wgsl` | Alpha = clip coverage: any sample in the 2×2 / 3×3 at or above the threshold |
+| Proxy | `downsample.wgsl`, `resample.wgsl` | Alpha averages into the fraction clipped |
+
+Develop (`shaders/client/develop.wgsl`, shared with export): white balance → exposure → `highlight_blend`
+(toward the pixel's channel mean by alpha × `hl_strength`, default 0.5) → camera to Rec.2020 → gamut
+compression → `tone_apply` (white at `whiteEv` 3.63, Highlights reach 2 EV, the bleach over the last stop, the
+shoulder) → output. X-Trans export alone leaves this path and clips (D5).
+
+**What D14 was.** A dump of every pyramid level on the truncated CR2 (half its mosaic is "clipped" garbage):
+the reduce levels stay within [0, 1]; the pull goes 0.04 → 11.4 at 8 × 6, 152 at 16 × 11, 3,384 at the finest
+level; the write-back then makes 2,410,508 of 10,163,412 mosaic samples NaN. The pull rescaled its estimate by
+`fine / max(0.001, upsm)` per channel, averaged under weights `exp(upsm.c − max(others))`. Where the coarse
+estimate barely has a channel and the fine level holds the all-clipped fallback (1, 1, 1), that ratio is up to
+1,000; the result becomes the next level's estimate and grows again; once two channels are 88 apart `exp`
+returns infinity, and ∞/∞ or 0 × ∞ is NaN. `assemble` clamped each level (which on llvmpipe swallowed the NaN),
+`doub` had no clamp, so it surfaced there. vkdt is exposed to the same arithmetic but stores its input as
+16-bit unorm and its pyramid as f16, so it never sees values outside [0, 1] from a sane file; Sidecar's
+f32 pyramid and unbounded levels removed that accidental guard.
+
+**The same step on intact frames.** It decided every reconstructed pixel, and had three defects:
+
+1. *Measured samples were overwritten.* `doub` replaced all four (or nine) samples of a block as soon as one
+   neared white, measured ones included, and `assemble` blended every pixel at least 60 % toward the coarse
+   estimate (vkdt's `soft` = 0.6, and more where the coarse level had an edge). So in the band where only one
+   channel has clipped — the band ROADMAP calls "an honest measurement" — the pixel's own red and blue were
+   replaced by the surroundings' hue.
+2. *The scale averaged in what can't be measured:* the clipped channels' ratios (always underestimates) and the
+   (1, 1, 1) fallback. A synthetic blown block came back with blue at 0.16 of what the sensor had recorded.
+3. *The weights only make sense in [0, 1]*, as above.
+
+**Measured against the truth, not by eye.** `sidecar-dev hilite-truth <raw> <ev>…` takes a frame that clips
+nowhere, raises its mosaic `ev` stops and cuts it at white — each colour saturating where a longer exposure
+would have saturated it — and compares the proxy of that with the unclipped proxy raised by the same amount,
+which is what reconstruction should have recovered. Colour error is the distance in white-balanced
+chromaticity (r/Σ, b/Σ); "stops" is brightness against the truth. Three frames, two exposures, by how much of
+each proxy pixel clipped:
+
+| Frame, raise | Partly clipped (0.5–0.9): before / clipped / now | Blown (≥ 0.9): before / clipped / now | Blown, stops vs truth: before → now |
+|---|---|---|---|
+| 5D Mark II +2 | 0.0441 / 0.0078 / **0.0065** | 0.0984 / 0.0976 / **0.0612** | −0.34 → −0.19 |
+| 5D Mark II +4 | 0.0602 / 0.0223 / **0.0175** | 0.1049 / 0.1534 / **0.0695** | −0.48 → −0.23 |
+| Nikon D3S +2 | 0.0287 / 0.0066 / **0.0049** | 0.0462 / 0.0606 / **0.0159** | −0.21 → −0.05 |
+| Nikon D3S +4 | 0.0175 / 0.0036 / **0.0034** | 0.0435 / 0.0647 / **0.0310** | −0.15 → −0.09 |
+| Nikon D4 +2 | 0.0491 / 0.0391 / **0.0259** | 0.0672 / 0.1542 / **0.0519** | −0.62 → −0.12 |
+| Nikon D4 +4 | 0.0405 / 0.0208 / **0.0150** | 0.0710 / 0.1503 / **0.0561** | −0.45 → −0.17 |
+
+("Clipped" is `SIDECAR_NO_HILITE=1`.) Before, reconstruction was worse than doing nothing on every partly
+clipped bucket, 3–6× on two of the frames, and helped only in the blown core. Now it beats both everywhere,
+and the core lands 0.05–0.23 stops under the truth instead of 0.15–0.62.
+
+**The fix** (`INGEST_GENERATION` 4; vkdt's structure kept, the arithmetic replaced and the files say so):
+
+- `assemble` is a push-pull fill. A pixel with every channel measured keeps it; one with nothing measured
+  takes the estimate whole (only its hue matters, as `doub` fits the scale); one partly clipped keeps its
+  measured channels and fills the others from the estimate.
+- `doub` replaces only samples nearing white, each by the estimate scaled to the block, never below its own
+  recorded value: a clipped sample is a lower bound on the light that reached it.
+- The scale (`hilite_scale` in `common.wgsl`) is a ratio of sums over measured samples only, weighted by the
+  estimate, so a channel the estimate barely has can't blow it up; with nothing measured, the least scale that
+  leaves no channel below what it recorded. No `exp`. Every value is held within 16× the clip level (four
+  stops); the measurements don't move from 16 up, and get worse below 4.
+- vkdt's `soft` and the edge-strength alpha, which only the old blend read, are gone.
+
+Checked: the truncated CR2 now has 0 non-finite samples, on the server and on the phone; the phone's proxy still
+matches the server's on three files (mean 0.06–0.10 % of signal, `mobile/scripts/raw-parity.mjs`); a GPU test
+(`highlight_fill_stays_bounded_beside_a_channel_the_estimate_lacks`, Bayer and X-Trans) holds a half-blown frame
+beside one with no blue finite, bounded, no darker than recorded and with its measured half untouched — the old
+shaders fail it.
+
+**What this changes for the other links, and what is left:**
+
+- **`highlight_blend` now works against the fill** (link 3 → 5, a `PROCESS_VERSION` question, so the
+  owner's). `hilite-truth` also scores the proxy after the develop pass's blend at its default 0.5: it raises
+  the colour error everywhere it acts, e.g. on the 5D Mark II at +2 partly clipped 0.0065 → 0.125 and blown
+  0.061 → 0.216. It was added to hide the cast the old fill left; the bleach (#41) already takes the last stop
+  to white. The recommendation is default 0 for new edits, with old edits pinned at 0.5 — exactly the
+  migration #33 did — decided on pictures from the fixed highlight set.
+- **D5 is now a bigger gap**: the proxy's blown areas are better and an X-Trans export still clips them.
+- **Real blown frames have no truth to compare with.** The synthetic raise is honest for the transition band
+  and for moderately blown cores; a sun or a specular is pure inpainting, judged on pictures. `sidecar-dev
+  hilite` on ROADMAP's `_D5N3075.NEF` (red's deficit in the window's core) and `DSC01899.ARW` is the first
+  thing to look at, beside a render of the same frames from generation 3.
+- X-Trans ran only on the synthetic test (no RAF large enough is in `testdata/`).
+- Nothing bounds `normalize`'s top. Now harmless (a damaged file's garbage stays where it is, finite), but
+  values above declared white in a sane file are link 1's question.
 
 ## 4. Industry practice for the problem areas, in brief
 
@@ -422,6 +530,7 @@ above. They are all fields of `libraw_data_t` already in memory after `open_file
 1. **Small, no pixel change:** D4 guard; D12 refusals; the extension lists generated from Rust (§5.6);
    `device.lost` recovery. (Share-target keep-and-import, §7 gap 1, is done.)
 2. **The fixed highlight set** (§3), before anything below changes a pixel, so each step is measured on it.
+   `sidecar-dev hilite-truth` is its ground-truth half; the pictures are the other. The fill itself (D14) is done.
 3. **Decode correctness and links 1–3 of the highlight path, one `INGEST_GENERATION` bump for the lot:** D1, D2
    (+ `linear_dng` CC/AB/per-channel levels), `SensorLevels` filled from §8's fields, one clip definition (D7),
    D5, D11's Adobe RGB marker. Each needs a file that shows it, under `testdata/`.
@@ -446,6 +555,9 @@ above. They are all fields of `libraw_data_t` already in memory after `open_file
 - §7 stage 1: a RAW's embedded preview shown on the phone, checked byte for byte against ExifTool.
 - §7 stage 2: a RAW decoded and developed on the phone — LibRaw in wasm, the ingest shaders in WebGPU — matching
   the server's proxy for the same file to half-float rounding (docs/MOBILE.md). Testing it on real files found D14.
+- D14 and the highlight fill (§3, "The highlight stack, end to end"): the pyramid's pull and write-back are a
+  bounded fill that keeps measured samples; `sidecar-dev hilite-truth` measures reconstruction against ground
+  truth; `INGEST_GENERATION` 4.
 - §5.6's extension lists are one TypeScript module checked against Rust; the TypeScript sRGB curve and half
   floats (§5.4's web side) are one module; `SourceSpace` lives in `sidecar-color`, which also removes the
   hand-written XYZ→sRGB matrix from the no-calibration fallback (§5.3, partly).

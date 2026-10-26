@@ -7,6 +7,18 @@ Source: the architecture plan (PWA entry, XMP sidecars, server-side demosaic, We
 
 Where the code differs from the text below, the code and these notes win.
 
+- **Highlight reconstruction: a bounded fill that keeps what was measured** (`INGEST_GENERATION` 4; the review's
+  D14 and §3, "The highlight stack, end to end"). The pyramid's pull (`hilite_assemble`) keeps a measured pixel,
+  takes the coarse estimate for one with nothing measured, and fills only the clipped channels of one partly
+  clipped; the write-back (`hilite_doub`) replaces only samples nearing white, never below their own value. The
+  scale is a ratio of sums over measured samples (`hilite_scale` in `shaders/ingest/common.wgsl`) held within
+  16× the clip level, with no `exp`: vkdt's weights overflowed outside [0, 1] and made a truncated CR2 a
+  quarter NaN. vkdt's `soft` and edge alpha are gone. Measured with the new `sidecar-dev hilite-truth` (a frame
+  clipped on purpose, compared with itself unclipped): the old pass was worse than plain clipping in the partly
+  clipped band and is now better than both everywhere, on three frames at +2 and +4 EV. Checked: 0 NaN on the
+  damaged file, server and phone; phone/server parity unchanged; a GPU test on Bayer and X-Trans. Open:
+  `highlight_blend`'s default now adds error (owner's decision, `PROCESS_VERSION`).
+
 - **The mobile module, stage 2: a RAW decoded and developed on the phone** (docs/MOBILE.md): LibRaw and the
   server's shim compiled to WebAssembly with Emscripten (`mobile/libraw/`) unpack the mosaic in a Web Worker;
   `web/src/lib/gpu/ingest.ts` runs the server's ingest shaders (now in `WEB_ENTRIES`) pass for pass as
@@ -1599,7 +1611,7 @@ Sidecar is published as an Apache-2.0 Docker image on GitHub Container Registry,
 | RAW decoding | LibRaw (LibRaw LLC; builds on Dave Coffin's dcraw) | LGPL-2.1 or CDDL-1.0 — Sidecar takes CDDL-1.0 | Pinned source in `third_party/libraw`, statically linked through bindings adapted from `libraw-rs`. CDDL is file-level: LibRaw's files stay CDDL and their source is linked from the notices; Sidecar's own code is unaffected. LGPL-2.1 would oblige letting users relink a static binary |
 | Bayer demosaic (RCD) | vkdt `demosaic/rcd_conv.comp`, `rcd_fill.comp` (Johannes Hanika) | BSD-2-Clause | Ported GLSL → WGSL. None of the vkdt files in `demosaic`, `hilite`, `denoise`, `deconv` or `filmcurv` carries a GPL marking |
 | X-Trans demosaic (Markesteijn) | LibRaw `xtrans_demosaic.cpp` | CDDL-1.0 | Ported to WGSL; the ported file stays CDDL-1.0 with LibRaw's notice |
-| Highlight reconstruction | vkdt `hilite` | BSD-2-Clause | Ported |
+| Highlight reconstruction | vkdt `hilite` | BSD-2-Clause | Ported; the fill's arithmetic since rewritten (build log) |
 | Denoise, deconvolution | vkdt `denoise`, `deconv`; Starck & Murtagh (à-trous), Richardson 1972, Lucy 1974 | BSD-2-Clause; papers | Ported, checked against the papers |
 | Tone map reference | vkdt `filmcurv` | BSD-2-Clause | Reference for the sigmoid |
 | Gamut compression | ACES Reference Gamut Compression, `aces-aswf/aces-core`; also in OpenColorIO | Apache-2.0; BSD-3-Clause | Formulas and constants |

@@ -19,7 +19,7 @@ pub struct IngestParams {
     pub white: f32,
     pub clip: f32,
     pub desat: f32,
-    pub soft: f32,
+    pub _unused: f32,
     pub sensor: u32,
     pub _p: [u32; 3],
     pub pattern: [[u32; 4]; 9],
@@ -224,7 +224,7 @@ impl Ingest {
                 0.985
             },
             desat: 0.3,
-            soft: 0.6,
+            _unused: 0.0,
             sensor,
             _p: [0; 3],
             pattern,
@@ -499,6 +499,91 @@ mod tests {
         assert_eq!(off("wb"), std::mem::offset_of!(IngestParams, wb));
         assert_eq!(off("sensor"), std::mem::offset_of!(IngestParams, sensor));
         assert_eq!(off("pattern"), std::mem::offset_of!(IngestParams, pattern));
+    }
+
+    /// D14: half a frame blown, beside a measured half with no blue in it at all. Before, the fill's ratios
+    /// against the estimate's empty blue multiplied level by level until `exp` overflowed and NaN covered the
+    /// frame. Every value must now be finite and bounded (16× clip on the mosaic, which the demosaic overshoots
+    /// by up to half again on the step between the halves), the blown half no darker than what the sensor
+    /// recorded there, and the measured half left exactly as it was. On Bayer and on X-Trans.
+    #[test]
+    fn highlight_fill_stays_bounded_beside_a_channel_the_estimate_lacks() {
+        let Ok(gpu) = crate::test_gpu() else {
+            eprintln!("skipped: no GPU");
+            return;
+        };
+        let ing = Ingest::new(gpu).unwrap();
+        let bayer = std::array::from_fn(|y| {
+            std::array::from_fn(|x| match (y % 2, x % 2) {
+                (0, 0) => 0,
+                (1, 1) => 2,
+                (0, _) => 1,
+                _ => 3,
+            })
+        });
+        // The vkdt block phase `phase` looks for: greens on each 3×3 block's corners and centre, blue left and
+        // right of the centre on even blocks and red above and below it, swapped on odd ones.
+        let xtrans = std::array::from_fn(|y| {
+            std::array::from_fn(|x| {
+                let (bx, by, i, j) = (x / 3, y / 3, x % 3, y % 3);
+                let (side, cap) = if (bx + by) % 2 == 0 { (2, 0) } else { (0, 2) };
+                match (i, j) {
+                    (1, 1) => 1,
+                    (1, _) => cap,
+                    (_, 1) => side,
+                    _ => 1,
+                }
+            })
+        });
+        for (name, pattern, period) in [("Bayer", bayer, 2), ("X-Trans", xtrans, 6)] {
+            let (w, h) = (288u32, 288u32);
+            let white = 4000.0;
+            let data: Vec<u16> = (0..w * h)
+                .map(|i| {
+                    let (x, y) = (i % w, i / w);
+                    let c = pattern[(y % period) as usize][(x % period) as usize];
+                    match (y < h / 2, c) {
+                        (true, _) => white as u16,
+                        (false, 2) => 0,
+                        (false, _) => 1200,
+                    }
+                })
+                .collect();
+            let m = MosaicInput {
+                width: w,
+                height: h,
+                data: &data,
+                black: [0.0; 4],
+                white,
+                pattern,
+                period,
+            };
+            let out = ing.demosaic(gpu, &m, [2.0, 1.0, 1.5], false).unwrap();
+            let img = crate::read_rgba16(gpu, &out).unwrap();
+            let (ow, oh) = (img.width, img.height);
+            let edge = ow / 32;
+            for (i, p) in img.data.chunks(4).enumerate() {
+                let (x, y) = (i as u32 % ow, i as u32 / ow);
+                assert!(
+                    p[..3].iter().all(|v| v.is_finite() && *v <= 32.0),
+                    "{name} ({x}, {y}): {p:?}"
+                );
+                let inside = (edge..ow - edge).contains(&x);
+                if inside && (edge..oh / 2 - edge).contains(&y) {
+                    assert!(
+                        p[..3].iter().all(|v| *v >= 0.99),
+                        "{name} blown ({x}, {y}): {p:?}"
+                    );
+                }
+                if inside && (oh / 2 + edge..oh - edge).contains(&y) {
+                    let want = [0.3, 0.3, 0.0];
+                    assert!(
+                        (0..3).all(|c| (p[c] - want[c]).abs() < 1e-3),
+                        "{name} measured ({x}, {y}): {p:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

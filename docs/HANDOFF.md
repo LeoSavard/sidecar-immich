@@ -54,7 +54,21 @@ end of MOBILE.md.
 proxy for the same file to half-float rounding. Its loose ends: bin-first proxies on both sides (the 26 MP phone
 limit comes from ingest memory), zlib/libjpeg in the wasm build, Emscripten in the dev container, and a real phone.
 It also turned up **D14** in the review: highlight reconstruction makes a truncated RAW a quarter NaN, on the
-server as on the phone — a server bug, written up with the evidence, not fixed.
+server as on the phone — a server bug, fixed next (below).
+
+**Then the whole highlight stack was reviewed before D14 was fixed** (the owner suspected they were linked; they
+were), and the fix went with it, on branch `claude/sweet-maxwell-s67it6` again, from `main` after #42. The
+review's §3, "The highlight stack, end to end", walks every stage from `normalize` to the bleach. The step that
+made the NaN was the pyramid's rescale, which also decided every reconstructed pixel's colour; measured against
+ground truth with a new tool (`sidecar-dev hilite-truth`: a frame clipped on purpose, compared with itself
+unclipped) the old pass was worse than no reconstruction in the partly clipped band. `hilite_assemble` and
+`hilite_doub` are now a bounded fill that keeps measured samples (`INGEST_GENERATION` 4, so every proxy rebuilds
+once); it beats both the old pass and plain clipping on three frames at two exposures, the damaged file has no
+NaN, and the phone still matches the server. **Waiting on the owner:** `highlight_blend`'s default (0.5) now
+adds colour error wherever it acts; the review recommends 0 for new edits with old edits pinned, a
+`PROCESS_VERSION` bump like #33's, decided on pictures. And a look at real blown frames (`_D5N3075.NEF`,
+`DSC01899.ARW`) against generation 3, since a synthetic clip is honest for the transition band but a sun has no
+truth to compare with.
 
 **Stage 1 of the mobile module followed** (a RAW's embedded preview on the phone; MOBILE.md), with real RAW
 files for the first time in this work: CR2s and NEFs from rawpy's test set, under `testdata/cache/samples/`
