@@ -7,6 +7,19 @@ Source: the architecture plan (PWA entry, XMP sidecars, server-side demosaic, We
 
 Where the code differs from the text below, the code and these notes win.
 
+- **The mobile module, stage 1: a RAW's embedded preview on the phone** (docs/MOBILE.md): choosing a RAW in
+  `/m` shows the JPEG the camera embedded in it at once, found by the phone (`mobile/src/local/preview.ts`), the
+  right way up, with nothing uploaded, and labelled as the camera's rendering. JPEG streams are found by walking their
+  marker segments rather than per format; lossless JPEG (CR2/DNG sensor data) is refused by its frame type; the
+  largest wins; a JPEG's own orientation applies, else the RAW's. Checked: `mobile/scripts/preview-check.mjs`
+  against ExifTool — byte-identical to its largest extracted image, same orientation — on 13 files (real CR2 incl.
+  sRAW and a 180° frame, real NEF, ExifTool's samples, and a DNG and RW2 given previews by ExifTool); in Chromium,
+  the shown picture against ExifTool's turned with PIL, 0.8 / 255 for the 180° CR2 (23.8 unturned); and
+  `mobile-smoke.mjs --raw`, the preview on screen 432 ms after the pick with no request to the server. Real CR3,
+  RAF, ARW and ORF previews are untested. The same session's real files also ran the LibRaw shim's `raw_pitch`
+  copy (the review's D3) through the GPU ingest on llvmpipe: CR2 and NEF proxies correlate 0.91 with the camera's
+  preview of the same frame.
+
 - **An imported photo is called what it was filed as** (§3): an import into the editing folder showed its
   staging name in the editor (`138b8c5d1f1ed5a3-IMG_EDITOR.jpg`). `place` reads the staged copy for its capture
   date before filing it, and the worker's cached metadata, keyed by the bytes, kept the name of whichever path

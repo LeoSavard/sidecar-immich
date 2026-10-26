@@ -50,6 +50,16 @@ a JPEG or HEIC on the phone's GPU with the editor's own code. It has run against
 Chromium, never on a phone: the next step is an iPhone and an Android phone, with the three questions at the
 end of MOBILE.md.
 
+**Stage 1 of the mobile module followed** (a RAW's embedded preview on the phone; MOBILE.md), with real RAW
+files for the first time in this work: CR2s and NEFs from rawpy's test set, under `testdata/cache/samples/`
+(not committed). They also ran the shim's `raw_pitch` change through the GPU ingest, so that caveat is gone.
+
+Found in passing, not fixed: **an import into the editing folder pre-builds its proxy from the staging path**.
+The worker's ingest endpoint starts a background proxy build, and `place` ingests the staged copy before
+renaming it into the folder, so that build races the rename. It won in testing; when it loses, the build fails
+with a warning and the editor's own request decodes it again — a wasted decode, never a wrong picture.
+`place` could ask for metadata without the pre-build.
+
 Found in passing and fixed on the same branch: **an import into the editing folder kept the staging name in its
 metadata** (`meta.fileName` read `138b8c5d1f1ed5a3-IMG_EDITOR.jpg` while the file was `IMG_EDITOR.jpg`), because
 `place` ingests the staged file before moving it and the worker's cached metadata kept the first path's name. The

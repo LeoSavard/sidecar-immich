@@ -425,11 +425,12 @@ above. They are all fields of `libraw_data_t` already in memory after `open_file
 - `crates/color/src/camera.rs`: a camera colour with no calibration resolves with sRGB primaries instead of
   panicking (D9), with a test. No pixel changes for any file that opened before.
 - `crates/libraw-sys/shim/shim.cpp`: the mosaic copy uses `raw_pitch` (D3) and refuses a crop wider than the row.
-  This is identical for every file that worked. It has since been compiled with the rest of the workspace and its
-  tests pass (on the host, not in the dev container), but no RAW file was available here to run it on.
+  This is identical for every file that worked. It has since been compiled, and real CR2 and NEF files ran through
+  it via the GPU ingest (on llvmpipe): their proxies correlate 0.91 with the camera's preview of the same frame.
 - The share target keeps a shared photo on the phone and the pick page offers to import it (§7 gap 1; DESIGN.md's
   build log has the details and how it was checked).
 - `mobile/`: the start of the mobile module, its own package and its own image target (`docs/MOBILE.md`).
+- §7 stage 1: a RAW's embedded preview shown on the phone, checked byte for byte against ExifTool.
 - §5.6's extension lists are one TypeScript module checked against Rust; the TypeScript sRGB curve and half
   floats (§5.4's web side) are one module; `SourceSpace` lives in `sidecar-color`, which also removes the
   hand-written XYZ→sRGB matrix from the no-calibration fallback (§5.3, partly).

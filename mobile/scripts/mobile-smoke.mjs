@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // The mobile module end to end, at a phone's size and with touch: choose a JPEG, see it developed by the
 // browser's own GPU, move Exposure and see the picture brighten, save a copy on the device, then send it to
-// the server and check the edit made on the phone is the one the server stored.
+// the server and check the edit made on the phone is the one the server stored. With --raw, also choose a RAW
+// and check its embedded preview is shown at once, from the phone, the right way up.
 //
-// Usage: node scripts/mobile-smoke.mjs <sidecar url> <photo.jpg> [--swiftshader] [--shots <dir>]   (CHROMIUM_PATH to pick a browser)
+// Usage: node scripts/mobile-smoke.mjs <sidecar url> <photo.jpg> [--raw <file>] [--swiftshader] [--shots <dir>]
+// (CHROMIUM_PATH to pick a browser)
 // Needs a running Sidecar whose image (or `server.mobile_root`) has the module, and an editing folder or a
 // library to import into.
 import { chromium } from 'playwright';
@@ -16,6 +18,8 @@ if (!url || !photo) throw new Error('usage: mobile-smoke.mjs <url> <photo.jpg> [
 const swiftshader = process.argv.includes('--swiftshader');
 const shotsAt = process.argv.indexOf('--shots');
 const shots = shotsAt > 0 ? process.argv[shotsAt + 1] : null;
+const rawAt = process.argv.indexOf('--raw');
+const raw = rawAt > 0 ? process.argv[rawAt + 1] : null;
 if (shots) mkdirSync(shots, { recursive: true });
 
 const gpuArgs = swiftshader
@@ -108,6 +112,21 @@ try {
 	const state = await page.evaluate(async (k) => (await fetch(`/api/assets/${k}/edit`)).json(), key);
 	check(Math.abs(state.edit.exposure.ev - 1) < 1e-6, `the server holds the phone's edit (exposure ${state.edit.exposure.ev} EV)`);
 	if (shots) await page.waitForTimeout(3000), await page.screenshot({ path: join(shots, '3-full-editor.png') });
+
+	if (raw) {
+		await page.goto(`${url}/m/`);
+		const uploads = [];
+		page.on('request', (r) => r.method() === 'POST' && uploads.push(r.url()));
+		const started = Date.now();
+		await page.locator('input[accept^="image/*,"]').setInputFiles(raw);
+		const shown = page.getByRole('img', { name: /camera's own preview/ });
+		await shown.waitFor({ timeout: 30_000 });
+		await page.waitForFunction(() => document.querySelector('main img')?.complete ?? false);
+		const [w, h] = await shown.evaluate((img) => [img.naturalWidth, img.naturalHeight]);
+		check(w > 0 && h > 0, `a RAW's embedded preview is shown in ${Date.now() - started} ms (${w}×${h})`);
+		check(uploads.length === 0, 'and nothing was sent to the server to show it');
+		if (shots) await page.screenshot({ path: join(shots, '4-raw-preview.png') });
+	}
 } finally {
 	check(errors.length === 0, `no errors in the page${errors.length ? `: ${errors.join(' | ')}` : ''}`);
 	await browser.close();

@@ -17,6 +17,7 @@ the server, which is the only place that decodes one today (docs/MOBILE.md, stag
 	import ColorSection from '$lib/ui/sections/ColorSection.svelte';
 	import { decodeLocally } from '../local/decode';
 	import { encodeJpeg, saveToDevice } from '../local/export';
+	import { showPreview, type ShownPreview } from '../local/preview';
 
 	/** The long edge a photo is decoded at for editing: the phone-sized proxy the server would send. */
 	const EDIT_EDGE = 2560;
@@ -27,6 +28,8 @@ the server, which is the only place that decodes one today (docs/MOBILE.md, stag
 	let busy = $state('');
 
 	let file: File | null = null;
+	/** A RAW's embedded preview, shown while the RAW itself waits for the server. */
+	let preview = $state<ShownPreview | null>(null);
 	let sha1 = '';
 	let fileName = $state('');
 
@@ -70,10 +73,14 @@ the server, which is the only place that decodes one today (docs/MOBILE.md, stag
 		fileName = picked.name;
 		message = '';
 		phase = 'decoding';
-		sha1 = await sha1Hex(await picked.arrayBuffer());
+		const bytes = await picked.arrayBuffer();
+		sha1 = await sha1Hex(bytes);
 		// A RAW is decoded only by the server for now (stage 2 brings LibRaw to the phone). Asked by extension,
 		// not by trying: a browser that can decode a RAW's embedded JPEG would hand that back as the photo.
 		if (isRaw(picked.name)) {
+			// What the phone can show at once is the camera's own rendering, from inside the file (stage 1).
+			if (preview) URL.revokeObjectURL(preview.url);
+			preview = await showPreview(new Uint8Array(bytes), EDIT_EDGE);
 			phase = 'raw';
 			return;
 		}
@@ -266,9 +273,18 @@ the server, which is the only place that decodes one today (docs/MOBILE.md, stag
 		{#if phase === 'decoding'}
 			<p class="mt-4 text-sm text-fg-2" aria-live="polite">Opening <span class="font-mono">{fileName}</span>…</p>
 		{:else if phase === 'raw'}
-			<section class="mt-4 rounded bg-panel p-3 text-sm">
-				<p><span class="font-mono">{fileName}</span> is a RAW file. Developing RAW on the phone is the next stage of this module; for now the server develops it.</p>
-				<button type="button" class="mt-3 h-11 rounded bg-raised px-4 disabled:opacity-50" disabled={!!busy} onclick={continueOnServer}>Open it in Sidecar</button>
+			<section class="mt-4 overflow-hidden rounded bg-panel text-sm">
+				{#if preview}
+					<img src={preview.url} alt="The camera's own preview of {fileName}" class="block max-h-[60dvh] w-full bg-ground object-contain" />
+					<p class="px-3 pt-2 text-xs text-fg-2">
+						The camera's own rendering, {preview.stored[0]} × {preview.stored[1]}, from inside the file: what the camera made of it, not
+						Sidecar's development.
+					</p>
+				{/if}
+				<div class="p-3">
+					<p><span class="font-mono">{fileName}</span> is a RAW file. Developing RAW on the phone is a later stage of this module; for now the server develops it.</p>
+					<button type="button" class="mt-3 h-11 rounded bg-raised px-4 disabled:opacity-50" disabled={!!busy} onclick={continueOnServer}>Open it in Sidecar</button>
+				</div>
 			</section>
 		{:else if phase === 'no-gpu'}
 			<section class="mt-4 rounded bg-panel p-3 text-sm">
