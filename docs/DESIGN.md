@@ -7,6 +7,17 @@ Source: the architecture plan (PWA entry, XMP sidecars, server-side demosaic, We
 
 Where the code differs from the text below, the code and these notes win.
 
+- **Apple's ProRAW white balance reads as what it is** (the review's D2; `META_REVISION` 3). ProRAW writes
+  `AsShotNeutral` as 1 1 1 and keeps the shot's white balance in `AnalogBalance`, which the DNG specification
+  composes into XYZ → camera as `AnalogBalance · CameraCalibration · ColorMatrix`. Both DNG paths took the bare
+  `ColorMatrix`, so the as-shot white of an iPhone 17 Pro frame read 2,786 K and tint −158 (the slider pinned at
+  −150) on a photo whose white is daylight. `camera::dng_xyz_to_camera` composes it for `linear_dng` (JPEG XL
+  ProRAW) and for LibRaw's DNGs, whose two tags the shim and the phone's LibRaw build now pass through. Checked:
+  the editor shows that frame at 6880 K +32; its as-shot rendering moves by 2.4 / 255 (the colour matrix is
+  taken at the right temperature, white was already white); phone/server RAW parity still holds, colour model
+  identical. An edit that set its own Temperature or Tint on a ProRAW set them on the wrong scale and will
+  render differently; one left at As shot keeps its picture to within that 2.4 / 255.
+
 - **A camera's Adobe RGB JPEG is read as Adobe RGB** (the review's D11; `INGEST_GENERATION` 5, `META_REVISION` 2).
   A camera set to Adobe RGB embeds no profile and marks the file in EXIF only — `ColorSpace` 0xFFFF with
   `InteropIndex` "R03" (the DCF rule), or `ColorSpace` 2 on some bodies — so it was decoded as sRGB and came out

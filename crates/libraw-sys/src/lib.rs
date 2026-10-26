@@ -20,6 +20,8 @@ pub struct sc_info {
     pub cam_xyz: [[f32; 3]; 4],
     pub dng_illuminant: [u16; 2],
     pub dng_colormatrix: [[[f32; 3]; 4]; 2],
+    pub dng_analogbalance: [f32; 4],
+    pub dng_calibration: [[[f32; 4]; 4]; 2],
     pub iso: f32,
     pub shutter: f32,
     pub aperture: f32,

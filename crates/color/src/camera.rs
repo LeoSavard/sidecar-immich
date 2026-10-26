@@ -172,6 +172,29 @@ pub fn illuminant_temperature(code: u16) -> Option<f64> {
     })
 }
 
+/// XYZ → camera for one DNG calibration, composed as the DNG specification composes it ("Mapping Camera Color
+/// Space to CIE XYZ Space"): `AnalogBalance · CameraCalibration · ColorMatrix`. A `ColorMatrix` alone maps XYZ
+/// to the *reference* camera; the other two carry it to this unit's values. A calibration that is absent (or
+/// all zero) is the identity, and so is a balance that isn't three positive gains.
+///
+/// Apple's ProRAW is the case that makes this matter: it records `AsShotNeutral` as 1 1 1 and the shot's
+/// white balance in `AnalogBalance` (2.92 1 1.65 on an iPhone 17 Pro), so a neutral read against the bare
+/// `ColorMatrix` came out at 2,786 K and tint −158 on a photo whose white is ordinary daylight.
+pub fn dng_xyz_to_camera(
+    color_matrix: &mat::M3,
+    calibration: Option<&mat::M3>,
+    analog_balance: Option<[f64; 3]>,
+) -> mat::M3 {
+    let cc = calibration
+        .filter(|m| !is_zero(m))
+        .copied()
+        .unwrap_or(mat::diag([1.0; 3]));
+    let ab = analog_balance
+        .filter(|b| b.iter().all(|v| *v > 0.0 && v.is_finite()))
+        .unwrap_or([1.0; 3]);
+    mat::mul(&mat::diag(ab), &mat::mul(&cc, color_matrix))
+}
+
 fn rows3(m: &[[f32; 3]; 4]) -> [[f64; 3]; 3] {
     [0, 1, 2].map(|r| m[r].map(|v| v as f64))
 }
@@ -192,6 +215,12 @@ pub struct LibrawColor {
     /// EXIF LightSource codes of the DNG calibration illuminants; 0 where there is none.
     pub dng_illuminant: [u16; 2],
     pub dng_colormatrix: [[[f32; 3]; 4]; 2],
+    /// DNG `AnalogBalance`, per colour; zero (or absent, from an older build) is no balance.
+    #[serde(default)]
+    pub dng_analogbalance: [f32; 4],
+    /// DNG `CameraCalibration1/2`, beside each `dng_colormatrix`; zero (or absent) is the identity.
+    #[serde(default)]
+    pub dng_calibration: [[[f32; 4]; 4]; 2],
 }
 
 impl LibrawColor {
@@ -199,13 +228,16 @@ impl LibrawColor {
     /// camera nobody knows; as-shot multipliers from the camera, then LibRaw's daylight ones.
     pub fn camera_color(&self) -> CameraColor {
         let mut calibrations = Vec::new();
+        let ab = self.dng_analogbalance;
+        let ab = [ab[0] as f64, ab[1] as f64, ab[2] as f64];
         for n in 0..2 {
             let m = rows3(&self.dng_colormatrix[n]);
+            let cc = [0, 1, 2].map(|r| [0, 1, 2].map(|c| self.dng_calibration[n][r][c] as f64));
             if let (Some(t), false) = (illuminant_temperature(self.dng_illuminant[n]), is_zero(&m))
             {
                 calibrations.push(Calibration {
                     temperature_k: t,
-                    xyz_to_camera: m,
+                    xyz_to_camera: dng_xyz_to_camera(&m, Some(&cc), Some(ab)),
                 });
             }
         }
@@ -300,6 +332,68 @@ mod tests {
     use super::*;
 
     /// D11: a camera's Adobe RGB JPEG is known by its EXIF when it has no profile; a profile always wins.
+    /// Apple's ProRAW keeps the shot's white balance in `AnalogBalance` and writes 1 1 1 as `AsShotNeutral`
+    /// (an iPhone 17 Pro frame's tags, verbatim). Read against the bare `ColorMatrix` its white came out at
+    /// 2,786 K and tint −158, off the end of the slider, on a photo whose white is ordinary daylight; composed
+    /// as the DNG specification composes it, it reads as daylight.
+    #[test]
+    fn proraw_white_balance_comes_from_its_analog_balance() {
+        let cm1 = [
+            [1.299852848, -0.6473193765, -0.2318986207],
+            [-0.4558799858, 1.513552667, -0.02695739455],
+            [-0.04014902193, 0.1442424505, 0.6399207116],
+        ];
+        let cm2 = [
+            [0.9567329279, -0.3796998561, -0.1292831898],
+            [-0.4220122099, 1.30898881, 0.0894335062],
+            [-0.09921766815, 0.2101706116, 0.467231214],
+        ];
+        let colour = |ab: Option<[f64; 3]>| CameraColor {
+            as_shot_mul: [1.0, 1.0, 1.0],
+            calibrations: vec![
+                Calibration {
+                    temperature_k: 2856.0,
+                    xyz_to_camera: dng_xyz_to_camera(&cm1, None, ab),
+                },
+                Calibration {
+                    temperature_k: 6504.0,
+                    xyz_to_camera: dng_xyz_to_camera(&cm2, None, ab),
+                },
+            ],
+            baseline_exposure: None,
+        };
+        let shot = |c: &CameraColor| resolve(c, c.as_shot_xy());
+        let bare = shot(&colour(None));
+        assert!(
+            bare.tint < -100.0,
+            "the bug this guards: {} K {}",
+            bare.temperature_k,
+            bare.tint
+        );
+        let composed = shot(&colour(Some([2.921630961, 1.0, 1.649902266])));
+        assert!(
+            (5500.0..8000.0).contains(&composed.temperature_k) && composed.tint.abs() < 50.0,
+            "{} K {}",
+            composed.temperature_k,
+            composed.tint
+        );
+        // No calibration and no balance is the matrix itself.
+        assert_eq!(
+            dng_xyz_to_camera(&cm1, Some(&[[0.0; 3]; 3]), Some([0.0; 3])),
+            cm1
+        );
+    }
+
+    /// The phone's LibRaw build from before `AnalogBalance` and `CameraCalibration` were passed still parses.
+    #[test]
+    fn libraw_colour_without_the_dng_balance_fields_still_reads() {
+        let json = r#"{"camMul":[2,1,1.5,0],"preMul":[2,1,1.5,0],"camXyz":[[1,0,0],[0,1,0],[0,0,1],[0,0,0]],
+            "dngIlluminant":[0,0],"dngColormatrix":[[[0,0,0],[0,0,0],[0,0,0],[0,0,0]],[[0,0,0],[0,0,0],[0,0,0],[0,0,0]]]}"#;
+        let c: LibrawColor = serde_json::from_str(json).unwrap();
+        assert_eq!(c.dng_analogbalance, [0.0; 4]);
+        assert_eq!(c.camera_color().as_shot_mul, [2.0, 1.0, 1.5]);
+    }
+
     #[test]
     fn adobe_rgb_is_read_from_exif_when_there_is_no_profile() {
         use SourceSpace::*;

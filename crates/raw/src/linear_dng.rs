@@ -13,7 +13,7 @@
 
 use std::path::Path;
 
-use sidecar_color::camera::{Calibration, CameraColor};
+use sidecar_color::camera::{Calibration, CameraColor, dng_xyz_to_camera};
 
 use crate::{RawInfo, SensorKind, SourceKind};
 
@@ -202,17 +202,26 @@ fn matrix(tags: &Tags, tag: u16) -> Option<[[f64; 3]; 3]> {
     (v.len() >= 9).then(|| [[v[0], v[1], v[2]], [v[3], v[4], v[5]], [v[6], v[7], v[8]]])
 }
 
-/// The colour model a linear DNG declares: its calibrations and as-shot white.
+/// The colour model a linear DNG declares: its calibrations and as-shot white. Each calibration is
+/// `AnalogBalance · CameraCalibration · ColorMatrix` (`dng_xyz_to_camera`), which is what makes Apple's ProRAW
+/// read right: it keeps its white balance in `AnalogBalance` and says 1 1 1 in `AsShotNeutral`.
 fn color(ifd0: &Tags) -> CameraColor {
+    let analog_balance = ifd0
+        .get(&50727)
+        .filter(|f| f.values.len() == 3)
+        .map(|f| [f.values[0], f.values[1], f.values[2]]);
+    let compose = |m: &[[f64; 3]; 3], cc: u16| {
+        dng_xyz_to_camera(m, matrix(ifd0, cc).as_ref(), analog_balance)
+    };
     let mut calibrations = Vec::new();
-    for (m, i) in [(50721, 50778), (50722, 50779)] {
+    for (m, cc, i) in [(50721, 50723, 50778), (50722, 50724, 50779)] {
         if let (Some(m), Some(t)) = (
             matrix(ifd0, m),
             first(ifd0, i).and_then(|code| crate::illuminant_temperature(code as u16)),
         ) {
             calibrations.push(Calibration {
                 temperature_k: t,
-                xyz_to_camera: m,
+                xyz_to_camera: compose(&m, cc),
             });
         }
     }
@@ -221,7 +230,7 @@ fn color(ifd0: &Tags) -> CameraColor {
     {
         calibrations.push(Calibration {
             temperature_k: 6504.0,
-            xyz_to_camera: m,
+            xyz_to_camera: compose(&m, 50723),
         });
     }
     let neutral = ifd0

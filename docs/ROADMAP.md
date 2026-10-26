@@ -441,7 +441,12 @@ table beyond what lensfun already supplies. They also carry no HDR gain map — 
 describes how an *already-rendered* SDR picture should be lifted for HDR display, and a DNG hasn't been
 rendered yet; the gain map work below is a HEIC/JPEG-export concern, not something a DNG path would also
 unlock. `AsShotNeutral` is present but always `1 1 1` on every file checked — Apple doesn't put the as-shot
-white balance there; LibRaw already gets it from `cam_mul` instead (DESIGN.md §5), so this isn't a gap.
+white balance there. *This was a gap after all* (2026-10-26): it is in `AnalogBalance` (2.92 1 1.65 on one
+iPhone 17 Pro frame), which the DNG specification composes into XYZ → camera as `AnalogBalance ·
+CameraCalibration · ColorMatrix`. Neither decode path read it, so the as-shot white came out at 2,786 K and tint
+−158 — the Tint slider pinned at −150 on every ProRAW — while the picture itself looked right, because the
+develop pass maps the neutral to white whatever it is called. Composed, the same frame reads 6,880 K +32.
+`camera::dng_xyz_to_camera`, on both paths (the review's D2).
 
 *Resolution and registration.* The effects matte is half the main image's edge, same aspect, the same HEIF
 rotation libheif already applies to the main image — close enough to the proxy's frame that it could slot in

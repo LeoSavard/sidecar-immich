@@ -52,8 +52,9 @@ pub const INGEST_GENERATION: u32 = 5;
 
 /// What cached metadata was *read* by, apart from the pixels: bump when `Meta` gains something a re-read of
 /// the same file would now fill in, so it is read again without rebuilding a single proxy. 1 adds the lens
-/// correction the file carries and the lens's identity; 2 the Adobe RGB source space, read from EXIF.
-pub const META_REVISION: u32 = 2;
+/// correction the file carries and the lens's identity; 2 the Adobe RGB source space, read from EXIF; 3 a DNG's
+/// colour composed with its `AnalogBalance` and `CameraCalibration`, which is where Apple's ProRAW keeps its white.
+pub const META_REVISION: u32 = 3;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
