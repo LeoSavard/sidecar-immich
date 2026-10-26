@@ -4,7 +4,7 @@ Sidecar on the phone, as an optional part of the image. It lives in `mobile/`, i
 `-mobile` tag, and is served at **`/m`** next to the main app. The plan it starts on is in
 [`research/pipeline-review-2026-10.md`](research/pipeline-review-2026-10.md) §7.
 
-## What it does today (stages 0 and 1)
+## What it does today (stages 0, 1 and 2)
 
 - **Choose a photo** from the phone's Photos (`accept="image/*"`) or its files (every RAW extension
   Sidecar knows, from `web/src/lib/formats.ts`).
@@ -22,8 +22,12 @@ Sidecar on the phone, as an optional part of the image. It lives in `mobile/`, i
   first version, so the work carries over.
 - **A RAW file shows the camera's own preview at once** (stage 1): the JPEG the camera embedded in the RAW,
   found and shown by the phone (`mobile/src/local/preview.ts`), the right way up, with nothing uploaded. It is
-  labelled as the camera's rendering, not Sidecar's. *Open it in Sidecar* then takes the RAW to the server the way a
-  share does. Decoding RAW on the phone is stage 2.
+  labelled as the camera's rendering, not Sidecar's.
+- **…and then develops the RAW itself** (stage 2): LibRaw, compiled to WebAssembly, unpacks the sensor data in a
+  Web Worker, and the server's own ingest shaders turn it into the proxy on the phone's GPU. The editor then opens
+  on it with a RAW's controls (Highlight recovery among them), still with nothing uploaded. An sRAW or linear
+  DNG, a frame larger than the GPU's textures, more than 26 megapixels on a phone, or any failure leaves the
+  preview up with the reason, and *Open it in Sidecar* takes the RAW to the server the way a share does.
 - **A browser without WebGPU** goes to the server the same way.
 
 ## How it is put together
@@ -38,8 +42,11 @@ packer, the generated types, the controls and the api client are used as they ar
 | `src/local/decode.ts` | Browser decode → linear RGBA16F proxy |
 | `src/local/export.ts` | Readback → JPEG; the share sheet or a download |
 | `src/local/preview.ts` | A RAW's embedded JPEG: found by its own structure, oriented, scaled |
+| `src/local/raw.ts`, `raw.worker.ts` | LibRaw in a Web Worker: the mosaic and the file's metadata |
+| `libraw/build.sh`, `libraw/wasm_api.cpp` | LibRaw and the server's shim built for the browser; JSON out, so no struct is mirrored |
 | `scripts/mobile-smoke.mjs` | End to end at a phone's size: decode, develop, Exposure, save, send, the server's copy of the edit; with `--raw`, the preview shown with nothing sent |
 | `scripts/preview-check.mjs` | `preview.ts` against ExifTool on RAW files: the same bytes, the same orientation |
+| `scripts/raw-parity.mjs` | A RAW decoded on the phone against the same RAW decoded by the server: colour model and proxy |
 
 This is deliberate. The project's one rule is that a develop stage is written once (ARCHITECTURE.md), and a
 mobile app with its own copy of the pipeline would break it the first time either side changed. What the module
@@ -54,6 +61,10 @@ Two things in the shared code exist because of it, and are worth knowing:
   worker gives the same JPEG.
 - `web/src/lib/color/transfer.ts` (sRGB curve, half floats), `formats.ts` (extensions, checked against Rust by a
   `sidecar-template` test), `shared.ts` and `intake.ts` are shared with the main app.
+- For stage 2: `sidecar_color::camera::LibrawColor` is the one mapping from what LibRaw reads to a `CameraColor`,
+  used by the server's `sidecar-raw` and by the browser (`sc_camera_color`, `ColorPacker.cameraColor`);
+  `web/src/lib/gpu/ingest.ts` runs `shaders/ingest/*` (now in `WEB_ENTRIES`) as `crates/engine/src/ingest.rs` does
+  — **change one, change the other**; and `requestDevice` asks for the adapter's texture and buffer limits.
 
 `files.lib` is marked deprecated by SvelteKit in favour of a workspace package. It still works. If it is ever
 removed, the move is to make `web/src/lib` a package both apps depend on, which is the same sharing done with more
@@ -92,12 +103,48 @@ In Chromium at phone size, the shown preview matches ExifTool's, turned and scal
 **Not yet checked on real files:** CR3, RAF, ARW, ORF, PEF, SRW previews. The approach doesn't depend on the format,
 but no real file of those was at hand. They want a run of `preview-check.mjs` over a folder of them.
 
+## RAW on the phone (stage 2)
+
+**The decoder** is LibRaw from `third_party/libraw` and the server's `crates/libraw-sys/shim/shim.cpp`, compiled
+with Emscripten 6.0.13 (`mobile/libraw/build.sh`): 630 KB of wasm, 255 KB gzipped, with C++ exceptions as wasm
+exceptions. `shim.cpp` gained `sc_open_buffer`, since a browser has no paths; `wasm_api.cpp` hands the metadata
+and mosaic back as JSON. Built without zlib and libjpeg for now, so deflate and lossy DNGs go to the server.
+
+**The pipeline** after it is the server's, pass for pass: `IngestPass.proxy` in `$lib/gpu/ingest.ts` is
+`Ingest::proxy` then `RgbaF32::oriented` — the same composed WGSL, crop phase, highlight pyramid, RCD (or the
+X-Trans bin), clip threshold and downsample — and WebGPU error scopes turn a GPU that runs out of memory into a
+message instead of a black picture. The colour model is `LibrawColor::camera_color`, the server's own.
+
+**How it was checked**, on real CR2 and NEF files (rawpy's test set) against a real `sidecar dev` whose worker
+ingests on llvmpipe, with Chromium's WebGPU on SwiftShader:
+
+- *The wasm build is the native one:* `wasm_api.cpp` built natively and as wasm reads all five files to the same
+  metadata and the same FNV-1a hash over every mosaic sample (21–26 million each).
+- *The phone's proxy is the server's* (`scripts/raw-parity.mjs`): for four files with a mosaic, the colour model is
+  identical and the proxy differs by **0.06–0.10 % of the signal on average, at most 2 × 10⁻³** — half-float
+  rounding between two GPUs — at the same size. The sRAW is declined, as it should be. A truncated CR2 matches
+  too, NaNs and all; those NaNs are the server's own (the review's D14).
+- *The developed picture is the server's:* the phone's saved copy of a NEF at default settings against the
+  server's `/preview` render of it differs by 2.3 / 255 at full size, 1.0 at a quarter, 0.2 at a sixteenth, with
+  no bias in any channel (0.01–0.03 / 255): JPEG and dither noise, not development.
+- *The flow:* `scripts/mobile-smoke.mjs --raw` — preview at once, then the RAW developed on the phone, RAW
+  controls offered, a picture on screen, nothing sent to the server.
+
+**What it costs.** On SwiftShader (a CPU standing in for a GPU) a 12–21 MP RAW takes 27–55 s; a phone's GPU should
+be one to two orders faster, and that is to be measured. Memory is the real limit: the ingest holds about 60 bytes
+per sensor pixel (review §6), so the page declines more than 26 MP on a phone until proxies bin before
+demosaicing.
+
 ## Building and running it
 
 ```bash
 # once the main app's generated files exist (./dev/bootstrap, or `npm run generate` in web/)
-cd mobile && npm ci && npm run build          # → mobile/build
+source <emsdk>/emsdk_env.sh                   # Emscripten 6.0.13, as the Dockerfile and CI pin it
+cd mobile && npm run libraw                   # → src/local/libraw/ (LibRaw for the browser; ~30 s)
+npm ci && npm run build                       # → mobile/build
 ```
+
+The dev container has no Emscripten yet; the Dockerfile's `build-mobile` stage and CI install it themselves.
 
 The api serves `server.mobile_root` (default `/usr/share/sidecar/mobile`) at `/m` **only when that directory has an
 `index.html`**. In development, point it at the build:
@@ -115,19 +162,18 @@ module. The image workflow publishes them as `vX.Y.Z-mobile` and `vX.Y.Z-ml-mobi
 one `COPY` on top of an image already built, so they cost the module's npm build and little else. Moving an
 existing deployment over is a tag change: `ghcr.io/…/sidecar-immich:latest` → `:latest-mobile`.
 
-**Smoke test:** `node scripts/mobile-smoke.mjs <url> <photo.jpg> [--swiftshader] [--shots <dir>]`, from
-`mobile/`.
+**Smoke test:** `node scripts/mobile-smoke.mjs <url> <photo.jpg> [--raw <file>] [--swiftshader] [--shots <dir>]`,
+from `mobile/`. **RAW parity:** `node scripts/raw-parity.mjs <url> <RAW>… [--swiftshader] [--dump <dir>]`.
 
 ## What comes next
 
 In the order the review gives:
 
 1. ~~Stage 1 — the embedded preview~~ — done (below).
-2. **Stage 2 — RAW on the phone.** LibRaw and `shim.cpp` compiled to wasm with Emscripten, doing
-   `open_file` + `unpack` + `sc_get_mosaic` only (CDDL-1.0, as the server uses it). `shaders/ingest/*` goes into
-   `WEB_ENTRIES` so normalize, highlight reconstruction and RCD run in the browser from the same files. Proxies
-   must bin before demosaicing to fit a phone's memory (review §6). The shim fixes (D1–D4) then apply on both
-   sides at once.
+2. **Stage 2 — RAW on the phone:** done (above). What is left of it: **bin before demosaicing** for proxies,
+   on both sides at once (review §6), which lifts the 26 MP limit and cuts the time; zlib and libjpeg in the wasm
+   build for deflate and lossy DNGs; measuring it on a real phone. The shim fixes (D1–D4) now apply on both sides
+   at once.
 3. **Stage 3 — offline.** Edits in OPFS, synced as XMP when a server is reachable; a full-resolution export
    on the phone, tiled; EXIF read in wasm (`kamadak-exif`, BSD-2-Clause) where ExifTool can't go.
 

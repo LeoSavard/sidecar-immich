@@ -60,7 +60,7 @@ edged by the brush passes before develop samples them.
 |---|---|
 | A develop control (slider) | the checklist below |
 | What a develop stage does to pixels | `shaders/develop/*.wgsl`, called from `shaders/client/develop.wgsl` |
-| Decode, demosaic, highlight reconstruction | `crates/raw`, `shaders/ingest/`, `crates/engine/src/ingest.rs` |
+| Decode, demosaic, highlight reconstruction | `crates/raw`, `shaders/ingest/`, `crates/engine/src/ingest.rs` — **and** `web/src/lib/gpu/ingest.ts`, its pass-for-pass port for the mobile module: change both, then `mobile/scripts/raw-parity.mjs` |
 | Sharpening, noise reduction | `shaders/detail/`, `crates/engine/src/detail.rs` (server only: loupe, export) |
 | Crop, straighten, keystone | `crates/color/src/geometry.rs`, `shaders/server/warp.wgsl`, `web/src/lib/ui/CropOverlay.svelte` |
 | Lens correction | `crates/color/src/lens.rs`, `crates/raw/src/{lens,lensfun}.rs`, `shaders/lens/` |

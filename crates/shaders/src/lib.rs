@@ -24,6 +24,20 @@ pub const WEB_ENTRIES: &[&str] = &[
     "client/mask_edge.wgsl",
     "client/density_down.wgsl",
     "client/density_blur.wgsl",
+    // The ingest passes, for decoding a RAW in the browser (docs/MOBILE.md, stage 2): the same files the worker
+    // runs, so a phone's proxy is the server's.
+    "ingest/normalize.wgsl",
+    "ingest/hilite_half.wgsl",
+    "ingest/hilite_reduce.wgsl",
+    "ingest/hilite_assemble.wgsl",
+    "ingest/hilite_doub.wgsl",
+    "ingest/rcd_conv.wgsl",
+    "ingest/rcd_green.wgsl",
+    "ingest/rcd_rb_diag.wgsl",
+    "ingest/rcd_rb_green.wgsl",
+    "ingest/xtrans_bin.wgsl",
+    "ingest/downsample.wgsl",
+    "ingest/resample.wgsl",
 ];
 
 pub fn source(path: &str) -> Result<&'static str> {

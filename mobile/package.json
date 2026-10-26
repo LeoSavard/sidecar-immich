@@ -5,6 +5,7 @@
 	"type": "module",
 	"description": "Sidecar on the phone: an optional module, served at /m by images built with a -mobile target",
 	"scripts": {
+		"libraw": "./libraw/build.sh",
 		"dev": "vite dev",
 		"build": "vite build",
 		"preview": "vite preview",

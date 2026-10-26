@@ -50,6 +50,12 @@ a JPEG or HEIC on the phone's GPU with the editor's own code. It has run against
 Chromium, never on a phone: the next step is an iPhone and an Android phone, with the three questions at the
 end of MOBILE.md.
 
+**Stage 2 followed the same day: a RAW decoded and developed on the phone** (MOBILE.md), matching the server's
+proxy for the same file to half-float rounding. Its loose ends: bin-first proxies on both sides (the 26 MP phone
+limit comes from ingest memory), zlib/libjpeg in the wasm build, Emscripten in the dev container, and a real phone.
+It also turned up **D14** in the review: highlight reconstruction makes a truncated RAW a quarter NaN, on the
+server as on the phone — a server bug, written up with the evidence, not fixed.
+
 **Stage 1 of the mobile module followed** (a RAW's embedded preview on the phone; MOBILE.md), with real RAW
 files for the first time in this work: CR2s and NEFs from rawpy's test set, under `testdata/cache/samples/`
 (not committed). They also ran the shim's `raw_pitch` change through the GPU ingest, so that caveat is gone.

@@ -465,5 +465,10 @@ export async function requestDevice(): Promise<GPUDevice> {
 	if (!('gpu' in navigator)) throw new Error('This browser has no WebGPU. Sidecar needs Safari 26 or a current Chromium.');
 	const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
 	if (!adapter) throw new Error('WebGPU found no GPU adapter.');
-	return adapter.requestDevice({ label: 'sidecar' });
+	// The adapter's own limits rather than WebGPU's defaults, for a RAW decoded in the browser (mobile/,
+	// `$lib/gpu/ingest`): its whole mosaic is uploaded, and a 61-megapixel sensor is 9,504 pixels wide (default
+	// 8,192); and Chromium zero-fills a full-size RGBA32F texture through one staging buffer, 338 MB for a
+	// 21-megapixel sensor (default limit 256 MB).
+	const { maxTextureDimension2D, maxBufferSize } = adapter.limits;
+	return adapter.requestDevice({ label: 'sidecar', requiredLimits: { maxTextureDimension2D, maxBufferSize } });
 }

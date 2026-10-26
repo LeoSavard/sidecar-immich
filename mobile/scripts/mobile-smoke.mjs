@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // The mobile module end to end, at a phone's size and with touch: choose a JPEG, see it developed by the
 // browser's own GPU, move Exposure and see the picture brighten, save a copy on the device, then send it to
-// the server and check the edit made on the phone is the one the server stored. With --raw, also choose a RAW
-// and check its embedded preview is shown at once, from the phone, the right way up.
+// the server and check the edit made on the phone is the one the server stored. With --raw, also choose a RAW:
+// its embedded preview is shown at once, then the phone decodes and develops the RAW itself, with nothing sent.
 //
 // Usage: node scripts/mobile-smoke.mjs <sidecar url> <photo.jpg> [--raw <file>] [--swiftshader] [--shots <dir>]
 // (CHROMIUM_PATH to pick a browser)
@@ -124,8 +124,15 @@ try {
 		await page.waitForFunction(() => document.querySelector('main img')?.complete ?? false);
 		const [w, h] = await shown.evaluate((img) => [img.naturalWidth, img.naturalHeight]);
 		check(w > 0 && h > 0, `a RAW's embedded preview is shown in ${Date.now() - started} ms (${w}×${h})`);
-		check(uploads.length === 0, 'and nothing was sent to the server to show it');
 		if (shots) await page.screenshot({ path: join(shots, '4-raw-preview.png') });
+		const decoding = Date.now();
+		await page.locator('canvas').waitFor({ timeout: 600_000 });
+		check(true, `then the RAW is developed on the phone (${((Date.now() - decoding) / 1e3).toFixed(1)} s here)`);
+		check(await page.getByRole('slider', { name: 'Highlight recovery' }).first().isVisible(), 'with the controls a RAW has, Highlight recovery among them');
+		await page.waitForTimeout(swiftshader ? 4000 : 1500);
+		const rawShown = await brightness('5-raw-developed');
+		check(rawShown > 5, `and a picture (mean ${rawShown.toFixed(1)} of 255)`);
+		check(uploads.length === 0, 'with nothing sent to the server for any of it');
 	}
 } finally {
 	check(errors.length === 0, `no errors in the page${errors.length ? `: ${errors.join(' | ')}` : ''}`);

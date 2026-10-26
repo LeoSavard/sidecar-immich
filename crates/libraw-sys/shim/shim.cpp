@@ -12,6 +12,11 @@ int sc_open(void *raw, const char *path) {
   r->imgdata.rawparams.max_raw_memory_mb = 8192; /* panoramas and medium format */
   return r->open_file(path);
 }
+int sc_open_buffer(void *raw, const void *data, size_t size) {
+  LibRaw *r = static_cast<LibRaw *>(raw);
+  r->imgdata.rawparams.max_raw_memory_mb = 8192;
+  return r->open_buffer(data, size);
+}
 int sc_unpack(void *raw) { return static_cast<LibRaw *>(raw)->unpack(); }
 
 void sc_get_info(void *raw, sc_info *i) {

@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: Apache-2.0
  * Flat C interface over the parts of LibRaw that Sidecar uses. Keeps Rust free of LibRaw's struct layout. */
 #pragma once
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -32,6 +33,9 @@ typedef struct sc_image {
 void *sc_new(void);
 void sc_free(void *raw);
 int sc_open(void *raw, const char *path);
+/* The same, from bytes already in memory (the browser's build has no file paths). LibRaw reads `data` in place,
+ * so it must outlive `raw`. */
+int sc_open_buffer(void *raw, const void *data, size_t size);
 int sc_unpack(void *raw);
 void sc_get_info(void *raw, sc_info *info);
 /* Demosaic to linear camera RGB, no white balance, sensor saturation at 65535, orientation applied.

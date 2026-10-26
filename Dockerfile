@@ -68,7 +68,14 @@ RUN --mount=type=cache,target=/root/.npm cd web && npm ci --no-audit --no-fund &
 
 # The mobile module: its own SvelteKit app over the main app's `$lib`, so it builds here, after the main app has
 # generated the WGSL and the colour wasm the two share.
+# Its RAW decoder is LibRaw and the server's shim compiled to WebAssembly with Emscripten, pinned here to the
+# version it was built and checked with (docs/MOBILE.md, stage 2).
 FROM build AS build-mobile
+ARG EMSDK_VERSION=6.0.13
+RUN apt-get update && apt-get install -y --no-install-recommends python3 xz-utils && rm -rf /var/lib/apt/lists/* \
+ && git clone --depth 1 https://github.com/emscripten-core/emsdk.git /emsdk \
+ && /emsdk/emsdk install "$EMSDK_VERSION" && /emsdk/emsdk activate "$EMSDK_VERSION"
+RUN bash -c 'source /emsdk/emsdk_env.sh && mobile/libraw/build.sh'
 RUN --mount=type=cache,target=/root/.npm cd mobile && npm ci --no-audit --no-fund && npm run build
 
 # sidecar-ml and its weights. The import runs first and sidecar-ml is compiled after it, so the program is

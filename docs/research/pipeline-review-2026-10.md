@@ -37,6 +37,7 @@ The short version:
 | D11 | Camera Adobe RGB JPEGs carry no ICC, only `InteropIndex = R03` | `decoded.rs` `exif` | Same as D10, for the most common case of it | Yes | XS |
 | D12 | CMYK/YCCK JPEG, float TIFF and PNM `maxval` ≠ 255/65535 are unchecked | `decoded.rs` | Wrong colours or 64× dark instead of a clear refusal | No (refuse) / yes (support) | S |
 | D13 | ProRAW `ProfileGainTableMap` not read | `linear_dng.rs` | ProRAW looks flatter than Apple's rendering (DNG 1.6 local tone map) | Optional stage | L |
+| D14 | Highlight reconstruction turns a damaged RAW into NaN | `shaders/ingest/hilite_*.wgsl` | A quarter of a truncated CR2's proxy is NaN, across nearly every row | Only where it is NaN today | M |
 
 The two fixes on this branch are D3 and D9. The rest are proposals. Every pixel-changing fix needs an
 `INGEST_GENERATION` bump (`crates/worker/src/lib.rs`), a file that shows the problem copied under
@@ -127,6 +128,18 @@ standard shape, as in darktable's hot-pixel module. Two notes: Bayer greens have
 nearer same-colour neighbours on the diagonal than at ±2, so green hot pixels are judged against farther
 samples than needed; and star fields will lose faint stars. Both are acceptable defaults. A comment saying so
 would save the next person the investigation.
+
+**D14 — a damaged file poisons the highlight pyramid.** *Found 2026-10-26, after this review was first written,
+on real files.* rawpy's `M0054341_01_00005.cr2` is truncated (LibRaw warns "data corrupted at 3764709" and decodes
+the rest). Its proxy from the server's GPU ingest is **25 % NaN, across rows 0–1674 of 1705**; with highlight
+reconstruction off (`SIDECAR_NO_HILITE`) it has none. So one bad region, through the pyramid's coarse levels,
+reaches nearly the whole frame. The likely mechanism, from reading the shaders and not yet isolated pass by pass:
+`fine / max(0.001, upsm)` ratios grow level by level in the corrupted region up to the ±65,535 clamp, then the
+weights `exp(upsm.c − max(others))` in `hilite_assemble`/`hilite_doub` overflow to infinity, and ∞/∞ is NaN. The
+fix belongs in how the weights are formed (bounded exponents, or weights normalised against the largest channel
+before `exp`), not in a NaN test: WGSL lets an implementation assume NaN never occurs, so `x != x` is not a
+reliable guard. Pixels that are finite today should stay bit-identical, which a parity case on an intact frame and
+this file both check. The phone's ingest (stage 2) reproduces the NaNs exactly, as it should.
 
 ### 2.3 Linear DNG (`crates/raw/src/linear_dng.rs`)
 
@@ -431,6 +444,8 @@ above. They are all fields of `libraw_data_t` already in memory after `open_file
   build log has the details and how it was checked).
 - `mobile/`: the start of the mobile module, its own package and its own image target (`docs/MOBILE.md`).
 - §7 stage 1: a RAW's embedded preview shown on the phone, checked byte for byte against ExifTool.
+- §7 stage 2: a RAW decoded and developed on the phone — LibRaw in wasm, the ingest shaders in WebGPU — matching
+  the server's proxy for the same file to half-float rounding (docs/MOBILE.md). Testing it on real files found D14.
 - §5.6's extension lists are one TypeScript module checked against Rust; the TypeScript sRGB curve and half
   floats (§5.4's web side) are one module; `SourceSpace` lives in `sidecar-color`, which also removes the
   hand-written XYZ→sRGB matrix from the no-calibration fallback (§5.3, partly).

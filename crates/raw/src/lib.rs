@@ -2,7 +2,8 @@
 //! Safe wrapper over LibRaw (through `sidecar-libraw-sys`).
 
 use serde::{Deserialize, Serialize};
-use sidecar_color::camera::{Calibration, CameraColor};
+pub(crate) use sidecar_color::camera::illuminant_temperature;
+use sidecar_color::camera::{CameraColor, LibrawColor};
 use sidecar_libraw_sys as sys;
 use std::ffi::{CStr, CString, c_char};
 use std::path::Path;
@@ -100,75 +101,17 @@ pub enum SensorKind {
     Other,
 }
 
-/// EXIF LightSource → correlated colour temperature, for DNG calibration illuminants.
-pub(crate) fn illuminant_temperature(code: u16) -> Option<f64> {
-    Some(match code {
-        17 | 3 => 2856.0,
-        24 => 3200.0,
-        15 => 3450.0,
-        14 => 4150.0,
-        2 => 4200.0,
-        18 => 4874.0,
-        13 => 5000.0,
-        23 => 5003.0,
-        1 | 4 | 9 => 5500.0,
-        20 => 5503.0,
-        12 => 6430.0,
-        10 | 21 => 6504.0,
-        19 => 6774.0,
-        11 | 22 => 7504.0,
-        _ => return None,
-    })
-}
-
-fn rows3(m: &[[f32; 3]; 4]) -> [[f64; 3]; 3] {
-    [0, 1, 2].map(|r| m[r].map(|v| v as f64))
-}
-
-fn is_zero(m: &[[f64; 3]; 3]) -> bool {
-    m.iter().flatten().all(|v| v.abs() < 1e-9)
-}
-
+/// The colour data LibRaw read, in the shape `sidecar_color` maps to a `CameraColor` — the same mapping the
+/// browser's LibRaw build goes through, by way of the colour wasm.
 fn camera_color(i: &sys::sc_info) -> CameraColor {
-    let mut calibrations = Vec::new();
-    for n in 0..2 {
-        let m = rows3(&i.dng_colormatrix[n]);
-        if let (Some(t), false) = (illuminant_temperature(i.dng_illuminant[n]), is_zero(&m)) {
-            calibrations.push(Calibration {
-                temperature_k: t,
-                xyz_to_camera: m,
-            });
-        }
+    LibrawColor {
+        cam_mul: i.cam_mul,
+        pre_mul: i.pre_mul,
+        cam_xyz: i.cam_xyz,
+        dng_illuminant: i.dng_illuminant,
+        dng_colormatrix: i.dng_colormatrix,
     }
-    if calibrations.is_empty() {
-        let m = rows3(&i.cam_xyz);
-        let m = if is_zero(&m) {
-            // Unknown camera: treat camera RGB as sRGB primaries (XYZ → linear sRGB).
-            [
-                [3.2404542, -1.5371385, -0.4985314],
-                [-0.9692660, 1.8760108, 0.0415560],
-                [0.0556434, -0.2040259, 1.0572252],
-            ]
-        } else {
-            m
-        };
-        calibrations.push(Calibration {
-            temperature_k: 6504.0,
-            xyz_to_camera: m,
-        });
-    }
-    let pick = |m: [f32; 4]| {
-        (m[0] > 0.0 && m[1] > 0.0 && m[2] > 0.0)
-            .then(|| [m[0] as f64 / m[1] as f64, 1.0, m[2] as f64 / m[1] as f64])
-    };
-    let as_shot_mul = pick(i.cam_mul)
-        .or_else(|| pick(i.pre_mul))
-        .unwrap_or([2.0, 1.0, 1.5]);
-    CameraColor {
-        as_shot_mul,
-        calibrations,
-        baseline_exposure: None,
-    }
+    .camera_color()
 }
 
 /// Linear camera RGB, 16-bit, sensor saturation at 65535, orientation applied.

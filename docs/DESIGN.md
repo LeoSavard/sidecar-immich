@@ -7,6 +7,21 @@ Source: the architecture plan (PWA entry, XMP sidecars, server-side demosaic, We
 
 Where the code differs from the text below, the code and these notes win.
 
+- **The mobile module, stage 2: a RAW decoded and developed on the phone** (docs/MOBILE.md): LibRaw and the
+  server's shim compiled to WebAssembly with Emscripten (`mobile/libraw/`) unpack the mosaic in a Web Worker;
+  `web/src/lib/gpu/ingest.ts` runs the server's ingest shaders (now in `WEB_ENTRIES`) pass for pass as
+  `Ingest::proxy` does; `LibrawColor::camera_color` in `sidecar-color` is now the one mapping from LibRaw's data to
+  a `CameraColor`, for the worker and the browser alike. The page shows the embedded preview, then opens the editor
+  on the phone's own proxy with a RAW's controls; an sRAW/linear DNG, an oversized frame, more than 26 MP on a
+  phone or a GPU error leaves the preview and the way to the server. `requestDevice` now asks for the adapter's
+  texture and buffer limits (Chromium zero-fills a 21 MP RGBA32F texture through a 338 MB buffer). Checked: the
+  wasm build reads five real CR2/NEF files to the same metadata and mosaic hash as the native build;
+  `mobile/scripts/raw-parity.mjs` against a real `sidecar dev` — colour model identical and the proxy within
+  0.06–0.10 % of signal (max 2 × 10⁻³) on four files; the phone's default render of a NEF against the server's
+  `/preview` within JPEG and dither noise (0.2 / 255 at a sixteenth, no bias); `mobile-smoke.mjs --raw` end to
+  end. Testing on real files found the review's D14 (the highlight pyramid turns a truncated CR2 into NaN, on the
+  server first). Not yet run on a phone.
+
 - **The mobile module, stage 1: a RAW's embedded preview on the phone** (docs/MOBILE.md): choosing a RAW in
   `/m` shows the JPEG the camera embedded in it at once, found by the phone (`mobile/src/local/preview.ts`), the
   right way up, with nothing uploaded, and labelled as the camera's rendering. JPEG streams are found by walking their

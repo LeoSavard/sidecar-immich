@@ -336,6 +336,21 @@ pub unsafe extern "C" fn sc_source_color(ptr: *const u8, len: usize) -> *const u
     )
 }
 
+/// `LibrawColor` (what the browser's LibRaw build read from a RAW) → the `CameraColor` the server would give the
+/// same file: one mapping for both (`LibrawColor::camera_color`).
+///
+/// # Safety
+/// `ptr` must point to `len` readable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sc_camera_color(ptr: *const u8, len: usize) -> *const u8 {
+    let input = unsafe { std::slice::from_raw_parts(ptr, len) };
+    respond(
+        serde_json::from_slice::<sidecar_color::camera::LibrawColor>(input)
+            .map_err(|e| e.to_string())
+            .and_then(|c| serde_json::to_vec(&c.camera_color()).map_err(|e| e.to_string())),
+    )
+}
+
 #[derive(Deserialize)]
 struct DepthRequest {
     edit: EditParams,
