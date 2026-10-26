@@ -209,6 +209,11 @@ struct PickRecord {
     user_id: String,
     query: String,
     candidates: Vec<Candidate>,
+    /// The checksum `/open` was asked for, when it was given one. A photo shared from the phone carries it,
+    /// and the share target kept the file under it: with this, the pick page can offer to import that file
+    /// when nothing matched. Absent in records made before it existed.
+    #[serde(default)]
+    sha1: Option<String>,
 }
 
 fn error_page(status: StatusCode, message: &str) -> Response {
@@ -790,6 +795,7 @@ async fn new_pick(
     user: &User,
     query: String,
     candidates: Vec<Candidate>,
+    sha1: Option<String>,
 ) -> Result<String> {
     let token = random_hex(16);
     app.store
@@ -800,6 +806,7 @@ async fn new_pick(
                 user_id: user.id.clone(),
                 query,
                 candidates,
+                sha1,
             },
         )
         .await?;
@@ -817,6 +824,7 @@ async fn open(
         Err(e) => return error_page(StatusCode::BAD_GATEWAY, &format!("{e:#}")),
     };
     let query = q.name.clone().unwrap_or_default();
+    let sha1 = shared_sha1(q.sha1.as_deref());
     match outcome {
         Resolved::Found(c) if !sidecar_template::is_editable(&c.path) => {
             error_page(StatusCode::UNPROCESSABLE_ENTITY, &cant_open(&c.file_name))
@@ -825,15 +833,22 @@ async fn open(
             Ok(key) => Redirect::to(&format!("/edit/{key}")).into_response(),
             Err(e) => error_page(StatusCode::UNPROCESSABLE_ENTITY, &format!("{e:#}")),
         },
-        Resolved::Choose(list) => match new_pick(&app, &user, query, list).await {
+        Resolved::Choose(list) => match new_pick(&app, &user, query, list, sha1).await {
             Ok(t) => Redirect::to(&format!("/pick/{t}")).into_response(),
             Err(e) => internal(e),
         },
-        Resolved::NotFound => match new_pick(&app, &user, query, Vec::new()).await {
+        Resolved::NotFound => match new_pick(&app, &user, query, Vec::new(), sha1).await {
             Ok(t) => Redirect::to(&format!("/pick/{t}")).into_response(),
             Err(e) => internal(e),
         },
     }
+}
+
+/// A checksum as the share target writes it: forty hex digits, lower-cased so the page finds the file the
+/// service worker kept under it. Anything else is not one, and the pick page then offers no import.
+fn shared_sha1(sha1: Option<&str>) -> Option<String> {
+    sha1.filter(|s| s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit()))
+        .map(str::to_ascii_lowercase)
 }
 
 #[derive(Deserialize)]
@@ -867,7 +882,8 @@ async fn get_pick(
             Err(e) => return (StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response(),
         }
     }
-    Json(serde_json::json!({ "query": rec.query, "candidates": rec.candidates })).into_response()
+    Json(serde_json::json!({ "query": rec.query, "candidates": rec.candidates, "sha1": rec.sha1 }))
+        .into_response()
 }
 
 #[derive(Deserialize)]
@@ -1835,6 +1851,27 @@ mod tests {
     fn a_folder_of_unexported_photos_offers_nothing() {
         let items = [item("a.CR2", 1, false), item("b.CR2", 2, false)];
         assert!(evictable(&items).is_none());
+    }
+
+    /// Only a real checksum reaches the pick page, in the case the share target stored it under.
+    #[test]
+    fn a_shared_checksum_is_forty_hex_digits_lower_cased() {
+        let sha1 = "DA39A3EE5E6B4B0D3255BFEF95601890AFD80709";
+        assert_eq!(
+            shared_sha1(Some(sha1)).as_deref(),
+            Some(&*sha1.to_ascii_lowercase())
+        );
+        assert_eq!(shared_sha1(Some("da39a3ee")), None, "too short");
+        assert_eq!(shared_sha1(Some(&"g".repeat(40))), None, "not hex");
+        assert_eq!(shared_sha1(None), None);
+    }
+
+    /// A pick saved before the field existed still loads, with no checksum.
+    #[test]
+    fn a_pick_from_before_the_checksum_still_reads() {
+        let rec: PickRecord =
+            serde_json::from_str(r#"{"userId":"u","query":"DSC_1.NEF","candidates":[]}"#).unwrap();
+        assert_eq!((rec.query.as_str(), rec.sha1), ("DSC_1.NEF", None));
     }
 
     /// The limit defaults to four, and it is the editing folder's alone.

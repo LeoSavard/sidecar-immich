@@ -7,6 +7,20 @@ Source: the architecture plan (PWA entry, XMP sidecars, server-side demosaic, We
 
 Where the code differs from the text below, the code and these notes win.
 
+- **A shared photo nothing matched can be imported** (§3): the Android share target hashed the file, opened
+  `/open?sha1=…` and dropped the bytes, so a photo the server couldn't see — not backed up to Immich yet, or
+  any photo in a deployment with no Immich — ended on an empty pick page with no way forward but finding the
+  file some other way. The service worker now keeps the shared file in Cache Storage under its checksum
+  (`web/src/lib/shared.ts`: the last three shares, none older than a day), the pick record carries the
+  checksum `/open` was given, and the pick page offers **Import this photo** — first when nothing matched,
+  under the matches when a name matched, since a name alone may be a different photo — through the same
+  `POST /api/intake` the home page uses (`web/src/lib/intake.ts`), with the same choice of destination and the
+  same consent before a full editing folder gives a photo up. The file leaves the phone only on that tap, and
+  is let go once imported or found. Checked: two api tests (only a real checksum is carried; a pick saved
+  before the field still reads) and a Playwright run of a real multipart POST to `/share` through the built
+  service worker against a stand-in api, for both the no-match and the name-match case — the upload carried
+  the shared bytes unchanged and the phone's copy was gone afterwards.
+
 - **Highlights could not reach a highlight** (§7): reported from the editor — bringing Exposure down
   recovered a blown sky, so the data was plainly there, but Highlights at −100 left it exactly as it was.
   It was structural. The tone map sends everything at or above `white_ev` to display white before the LUT
@@ -206,7 +220,7 @@ Where the code differs from the text below, the code and these notes win.
 - **Export (milestone 6):** JPEG through `jpeg-encoder` (pure Rust, MIT/Apache + IJG) rather than mozjpeg. The worker streams NDJSON progress to the api, which relays it as SSE with `Last-Event-ID` replay. The outbox is reached through worker endpoints, so the api keeps `/cache` read-only.
 - **Detail (milestone 7):** denoise and sharpening are implemented from the published methods (à-trous wavelets with square-root variance stabilization and a per-image noise estimate; Richardson–Lucy on luminance), not ported — vkdt's denoise depends on per-camera noise profiles. The worker keeps the last two full-resolution buffers for loupe tiles.
 - **Internal library** roots can set `per_user = true`: Immich keeps a folder per user (storage label or id) before the template.
-- **Entry points (milestone 8):** Android share target hashes in the service worker and opens `/open?sha1=…`; desktop pastes an Immich link, resolved through `GET /api/assets/{id}`.
+- **Entry points (milestone 8):** Android share target hashes in the service worker and opens `/open?sha1=…` (keeping the file, so a photo nothing matches can be imported from the pick page); desktop pastes an Immich link, resolved through `GET /api/assets/{id}`.
 - **Development:** `./dev/serve` runs api + worker on the first free port from `127.0.0.1:8091`, the real library read-only, and a writable test copy under `testdata/cache/library`. It builds the `dev-serve` cargo profile (dependencies optimized, Sidecar's crates at `opt-level = 1`, incremental): touching `sidecar-color` rebuilds in 2 s instead of 22 s. Each git worktree has its own target directory, server state and container; sccache shares compiled dependencies between them. `--web` adds Vite's dev server for live reload. See `docs/ARCHITECTURE.md`.
 - **First live run (2026-09-15):** share → resolve → develop → sidecar → export → upload → stack, against the real external library. The Immich *admin* key is scoped without `asset.read`, so stacks can't be checked from the CLI — only in the Immich app.
 - **Output space is a user setting** (§11), not a guess from `matchMedia`. It drives the develop uniform, the canvas, the loupe request and the export default together; the export sheet still overrides it for one export. The editor previewing in P3 while exports defaulted to sRGB was a real trap: saturated reds fit on screen and clipped in the file.

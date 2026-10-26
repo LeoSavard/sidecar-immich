@@ -1,10 +1,11 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 <script lang="ts">
 	import { api, thumbnailUrl } from '$lib/api';
+	import { importPhoto, type Who } from '$lib/intake';
 
 	type Recent = { assetKey: string; fileName: string; immichAssetId: string | null; openedAt: string };
 	let recent = $state<Recent[] | null>(null);
-	let who = $state<{ name: string; authRequired: boolean; immich: boolean; intakeFolder: string | null } | null>(null);
+	let who = $state<Who | null>(null);
 
 	$effect(() => {
 		(async () => {
@@ -117,10 +118,7 @@
 		intakeName = file.name;
 		intakeError = '';
 		try {
-			const body = new FormData();
-			body.append('file', file, file.name);
-			const r = await api(`/api/intake?to=${destination}`, { method: 'POST', body });
-			location.href = `/edit/${(await r.json()).assetKey}`;
+			location.href = `/edit/${await importPhoto(file, destination)}`;
 		} catch (e) {
 			intakeError = e instanceof Error ? e.message : String(e);
 			intakeName = '';
