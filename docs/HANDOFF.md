@@ -38,8 +38,8 @@ proxy. It covers where a decode can go wrong without an error (the shim's black 
 preview vs export, colour spaces of developed files), why the top of the tone range drew ten PRs, duplication worth
 folding, and a staged, licence-clean plan for decoding on the phone. Branch `claude/sweet-maxwell-s67it6` carries
 its only two code changes, neither of which changes a pixel for a file that opened before: no colour matrix
-no longer panics (`camera.rs`), and the mosaic copy uses `raw_pitch` (`shim.cpp`, syntax-checked, not yet built in
-the dev container). Everything else in it is a proposal waiting on the owner and on test files.
+no longer panics (`camera.rs`), and the mosaic copy uses `raw_pitch` (`shim.cpp`, built and its tests passing, though
+not yet run on a RAW file or in the dev container). Everything else in it is a proposal waiting on the owner and on test files.
 
 Later the same day, on the same branch: **the share target keeps a photo nothing matched** and the pick page
 offers to import it; the review gained **a path to reconcile the highlights** (six links, an owner and a state
