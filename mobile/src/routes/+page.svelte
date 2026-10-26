@@ -117,7 +117,9 @@ the server, which is the only place that decodes one today (docs/MOBILE.md, stag
 			return;
 		}
 		packer ??= await ColorPacker.load();
-		await startEditing(photo, packer.sourceColor(photo.space), 'developed');
+		const camera = packer.sourceColor(photo.space);
+		if (new URLSearchParams(location.search).has('inspect')) Object.assign(window, { __sidecarInspect: { proxy: photo, camera, space: photo.space } });
+		await startEditing(photo, camera, 'developed');
 	}
 
 	/** The GPU device, asked for once; null where this browser has no WebGPU. */

@@ -74,35 +74,68 @@ impl CameraColor {
     }
 }
 
-/// The colour space a developed (non-RAW) image already lives in, decoded by the worker or by the browser.
-/// Both use the sRGB transfer function and a D65 white; they differ only in primaries.
+/// The colour space a developed (non-RAW) image already lives in, decoded by the worker or by the browser. All
+/// have a D65 white; sRGB and Display P3 share the sRGB transfer function, Adobe RGB (1998) has its own.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum SourceSpace {
     #[default]
     Srgb,
     DisplayP3,
+    AdobeRgb,
 }
 
 impl SourceSpace {
     /// Guess from an ICC profile description. Anything unrecognised is treated as sRGB, which is what an
     /// untagged JPEG almost always is.
     pub fn from_profile(description: &str) -> Self {
+        let d = description.to_ascii_lowercase();
         if description.contains("P3") {
             Self::DisplayP3
+        } else if d.contains("adobe rgb") || d.contains("adobergb") {
+            Self::AdobeRgb
         } else {
             Self::Srgb
         }
     }
 
-    /// XYZ → this space, derived from the working-space constants rather than written out again, so there is
-    /// one source of truth for the primaries.
+    /// From what a file says about itself: its ICC profile's description when it has one, else EXIF. A camera set
+    /// to Adobe RGB writes its JPEGs with no profile at all and marks them in EXIF instead, with `ColorSpace`
+    /// 0xFFFF ("uncalibrated") and `InteropIndex` "R03" — the DCF option-file rule — or, on some bodies,
+    /// `ColorSpace` 2. Read as sRGB, such a photo comes out desaturated (the review's D11).
+    pub fn from_tags(profile: &str, color_space: u32, interop: &str) -> Self {
+        if !profile.trim().is_empty() {
+            return Self::from_profile(profile);
+        }
+        match (color_space, interop.trim()) {
+            (2, _) | (0xFFFF, "R03") => Self::AdobeRgb,
+            _ => Self::Srgb,
+        }
+    }
+
+    /// Encoded value (0…1) → linear light: the space's transfer function. Adobe RGB's is a pure power of
+    /// 563/256 (2.2 in round numbers), with no linear segment.
+    pub fn decode(self, v: f32) -> f32 {
+        match self {
+            Self::Srgb | Self::DisplayP3 => {
+                if v <= 0.04045 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            }
+            Self::AdobeRgb => v.max(0.0).powf(563.0 / 256.0),
+        }
+    }
+
+    /// XYZ → this space, derived from the working-space constants (or the space's own primaries) rather than
+    /// written out again, so there is one source of truth for each.
     pub fn xyz_to_rgb(self) -> mat::M3 {
-        let from_rec2020 = match self {
-            Self::Srgb => &mat::REC2020_TO_SRGB,
-            Self::DisplayP3 => &mat::REC2020_TO_P3,
-        };
-        mat::mul(from_rec2020, &mat::XYZ_TO_REC2020)
+        match self {
+            Self::Srgb => mat::mul(&mat::REC2020_TO_SRGB, &mat::XYZ_TO_REC2020),
+            Self::DisplayP3 => mat::mul(&mat::REC2020_TO_P3, &mat::XYZ_TO_REC2020),
+            Self::AdobeRgb => mat::inverse(&mat::rgb_to_xyz(mat::ADOBE_RGB_PRIMARIES, mat::D65)),
+        }
     }
 
     /// A `CameraColor` that makes the existing colour pipeline treat this space as the camera's native one.
@@ -265,6 +298,47 @@ pub(crate) fn nikon_d850() -> CameraColor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// D11: a camera's Adobe RGB JPEG is known by its EXIF when it has no profile; a profile always wins.
+    #[test]
+    fn adobe_rgb_is_read_from_exif_when_there_is_no_profile() {
+        use SourceSpace::*;
+        assert_eq!(SourceSpace::from_tags("", 0xFFFF, "R03"), AdobeRgb);
+        assert_eq!(SourceSpace::from_tags("", 2, ""), AdobeRgb);
+        assert_eq!(SourceSpace::from_tags("", 1, "R98"), Srgb);
+        assert_eq!(SourceSpace::from_tags("", 0xFFFF, ""), Srgb);
+        assert_eq!(SourceSpace::from_tags("", 0, ""), Srgb);
+        assert_eq!(SourceSpace::from_tags("Adobe RGB (1998)", 0, ""), AdobeRgb);
+        assert_eq!(
+            SourceSpace::from_tags("Display P3", 0xFFFF, "R03"),
+            DisplayP3
+        );
+        assert_eq!(
+            SourceSpace::from_tags("sRGB IEC61966-2.1", 0xFFFF, "R03"),
+            Srgb
+        );
+    }
+
+    /// Adobe RGB's green is far wider than sRGB's, and its white is still D65.
+    #[test]
+    fn adobe_rgb_is_wider_than_srgb_with_the_same_white() {
+        let to_srgb = |space: SourceSpace| {
+            mat::mul(
+                &SourceSpace::Srgb.xyz_to_rgb(),
+                &mat::inverse(&space.xyz_to_rgb()),
+            )
+        };
+        let m = to_srgb(SourceSpace::AdobeRgb);
+        let white = mat::apply(&m, &[1.0, 1.0, 1.0]);
+        assert!(white.iter().all(|w| (w - 1.0).abs() < 1e-3), "{white:?}");
+        let green = mat::apply(&m, &[0.0, 1.0, 0.0]);
+        assert!(
+            green[0] < -0.3 && green[2] < -0.03,
+            "pure Adobe green is outside sRGB: {green:?}"
+        );
+        assert!((SourceSpace::AdobeRgb.decode(0.5) - 0.5f32.powf(2.199_218_8)).abs() < 1e-6);
+        assert!((SourceSpace::Srgb.decode(0.5) - 0.214_041).abs() < 1e-5);
+    }
 
     #[test]
     fn neutral_maps_to_neutral_and_as_shot_round_trips() {

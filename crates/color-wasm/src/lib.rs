@@ -320,7 +320,7 @@ pub unsafe extern "C" fn sc_white_from_neutral(ptr: *const u8, len: usize) -> *c
     )
 }
 
-/// `"srgb"` or `"display-p3"` → the `CameraColor` a developed photo in that space renders through
+/// `"srgb"`, `"display-p3"` or `"adobe-rgb"` → the `CameraColor` a developed photo in that space renders through
 /// (`SourceSpace::camera_color`): what the worker puts in a JPEG's metadata, for a photo the browser decoded
 /// itself and the server has never seen.
 ///

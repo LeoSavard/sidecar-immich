@@ -64,11 +64,18 @@ ground truth with a new tool (`sidecar-dev hilite-truth`: a frame clipped on pur
 unclipped) the old pass was worse than no reconstruction in the partly clipped band. `hilite_assemble` and
 `hilite_doub` are now a bounded fill that keeps measured samples (`INGEST_GENERATION` 4, so every proxy rebuilds
 once); it beats both the old pass and plain clipping on three frames at two exposures, the damaged file has no
-NaN, and the phone still matches the server. **Waiting on the owner:** `highlight_blend`'s default (0.5) now
-adds colour error wherever it acts; the review recommends 0 for new edits with old edits pinned, a
-`PROCESS_VERSION` bump like #33's, decided on pictures. And a look at real blown frames (`_D5N3075.NEF`,
+NaN, and the phone still matches the server. **Still worth doing:** a look at real blown frames (`_D5N3075.NEF`,
 `DSC01899.ARW`) against generation 3, since a synthetic clip is honest for the transition band but a sun has no
 truth to compare with.
+
+**Then, on the owner's word, three more on the same branch** (DESIGN.md's build log has each):
+- **D11:** a camera's Adobe RGB JPEG, marked only in EXIF, decodes in Adobe RGB on the server and on the phone
+  (`INGEST_GENERATION` 5, `META_REVISION` 2, so cached metadata and proxies are read again once).
+- **Highlight recovery starts at 0** for new edits; existing edits keep the 0.5 they stored, with no
+  `PROCESS_VERSION` bump (the review's §3 says why none is needed).
+- **A half-float view canvas** where the display reports more than 8 bits a channel, with the dither scaled to
+  a 10-bit step; `?canvas=8` / `?canvas=16` compares the two. It can't be checked headless (Chromium can't present
+  a WebGPU canvas there), so the first look is on a real iPhone or Mac.
 
 **Stage 1 of the mobile module followed** (a RAW's embedded preview on the phone; MOBILE.md), with real RAW
 files for the first time in this work: CR2s and NEFs from rawpy's test set, under `testdata/cache/samples/`

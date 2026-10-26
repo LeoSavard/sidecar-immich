@@ -46,13 +46,14 @@ pub const DEFAULT_EDGE: u32 = 2560;
 /// upside down, because nothing in the file name had changed. Generation 2 is that fix; 3 orients the
 /// mirrored EXIF orientations (2, 4, 5, 7), which every earlier generation left upright. 4 is the bounded
 /// highlight fill (D14 in docs/research/pipeline-review-2026-10.md): measured channels kept, clipped ones
-/// filled to agree with them, and no NaN from a damaged file.
-pub const INGEST_GENERATION: u32 = 4;
+/// filled to agree with them, and no NaN from a damaged file. 5 decodes a camera's Adobe RGB JPEG, marked only in
+/// its EXIF, in Adobe RGB's primaries and curve instead of as sRGB (the review's D11).
+pub const INGEST_GENERATION: u32 = 5;
 
 /// What cached metadata was *read* by, apart from the pixels: bump when `Meta` gains something a re-read of
 /// the same file would now fill in, so it is read again without rebuilding a single proxy. 1 adds the lens
-/// correction the file carries and the lens's identity.
-pub const META_REVISION: u32 = 1;
+/// correction the file carries and the lens's identity; 2 the Adobe RGB source space, read from EXIF.
+pub const META_REVISION: u32 = 2;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

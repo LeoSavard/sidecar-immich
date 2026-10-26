@@ -3,7 +3,8 @@
 //! requires: common/transfer.wgsl common/hash.wgsl
 // View pass: developedTex (display-linear) → canvas. Pan/zoom, the geometry (crop, straighten, keystone,
 // turns — the same projective map the worker's warp pass applies to an export), clip overlays, sRGB encoding
-// and triangular dither. Runs on view changes and after each develop; never touches the develop uniforms.
+// and triangular dither of one step of the canvas's format (8-bit, or 10 bits for a half-float canvas on a
+// deeper display). Runs on view changes and after each develop; never touches the develop uniforms.
 
 struct ViewParams {
   out_from_px: mat3x3f,  // canvas pixel → output (0…1): fit, zoom and pan
@@ -14,6 +15,7 @@ struct ViewParams {
   lo_t: f32,             // display-linear threshold for "at black"
   background: f32,       // encoded grey outside the image
   peak_t: f32,           // focus_mask threshold (0…1) that counts as in focus
+  dither: f32,           // one encoded step of what the display gets: 1/255, or 1/1023
 }
 
 const CLIP_HIGHS = 1u;
@@ -65,6 +67,6 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     if (textureSampleLevel(focus_mask, bilinear, uv, 0.0).r >= V.peak_t) { return vec4f(PEAK_COLOUR, 1.0); }
   }
   let p = vec2u(pos.xy);
-  let noise = (hash_unit(p, 1u) - hash_unit(p, 2u)) / 255.0;
+  let noise = (hash_unit(p, 1u) - hash_unit(p, 2u)) * V.dither;
   return vec4f(srgb_encode(c) + noise, 1.0);
 }

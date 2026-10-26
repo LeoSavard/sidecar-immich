@@ -7,6 +7,30 @@ Source: the architecture plan (PWA entry, XMP sidecars, server-side demosaic, We
 
 Where the code differs from the text below, the code and these notes win.
 
+- **A camera's Adobe RGB JPEG is read as Adobe RGB** (the review's D11; `INGEST_GENERATION` 5, `META_REVISION` 2).
+  A camera set to Adobe RGB embeds no profile and marks the file in EXIF only — `ColorSpace` 0xFFFF with
+  `InteropIndex` "R03" (the DCF rule), or `ColorSpace` 2 on some bodies — so it was decoded as sRGB and came out
+  desaturated. `SourceSpace::AdobeRgb` carries Adobe's primaries and its 563/256 power curve, and the decoders
+  linearise through the source's own curve; `SourceSpace::from_tags` reads a profile's name first ("Adobe RGB"
+  now counts), then those tags. The phone reads the same tags itself (`mobile/src/local/exif-space.ts`): a browser
+  takes such a file for sRGB, so the page draws it onto an sRGB canvas, which converts nothing, and linearises it
+  as Adobe RGB. Checked: on JPEGs marked each way with ExifTool, the server's metadata says `adobe-rgb` and the
+  phone's colour model equals it to the last digit (proxies within the two JPEG decoders' 0.9 %); an sRGB
+  `R98` file, a file with an ICC profile and an unmarked one stay as they were.
+
+- **Highlight recovery starts at 0.** `Exposure::highlight_blend` defaults to 0 for a new edit (the slider's
+  reset too): against ground truth the blend only adds colour error now that the fill keeps measured colour
+  (the review's §3). No `PROCESS_VERSION` bump: every stored edit carries the field, so an existing edit keeps
+  its 0.5; a test holds that.
+
+- **A half-float view canvas on deeper displays** (`canvasFormat` in `web/src/lib/gpu/view.ts`). Where the
+  display reports 10 bits a channel or HDR (`(min-color: 10)`, `(dynamic-range: high)`), the canvas is
+  `rgba16float` and the view pass dithers by a 10-bit step instead of an 8-bit one; elsewhere it stays the
+  browser's 8-bit format, which a float canvas would only be quantised back to, undithered. The encoded values
+  are the same either way. `?canvas=8` or `?canvas=16` forces one. Checked headless only for validity (both
+  formats render with no GPU error); Chromium can't present a WebGPU canvas headless, so what it looks like
+  is for a real display.
+
 - **Highlight reconstruction: a bounded fill that keeps what was measured** (`INGEST_GENERATION` 4; the review's
   D14 and §3, "The highlight stack, end to end"). The pyramid's pull (`hilite_assemble`) keeps a measured pixel,
   takes the coarse estimate for one with nothing measured, and fills only the clipped channels of one partly
@@ -902,7 +926,7 @@ Module functions take their values as arguments and never read the uniform buffe
    pixels across there, leaves out pixels the ingest flagged as clipped, and sets the temperature and tint under
    which that average is grey. Needs WebGPU (the source lives on the GPU); without it the button is hidden.
 2. **Exposure.** `2^EV`, computed on the CPU. Values above 1.0 pass through untouched.
-   **Highlight blend.** Where alpha > 0, blend toward the pixel's luminance-preserving neutral by `alpha × strength`, suppressing the magenta cast WB multipliers put on reconstructed highlights.
+   **Highlight blend.** Where alpha > 0, blend toward the pixel's luminance-preserving neutral by `alpha × strength`, suppressing the magenta cast WB multipliers put on reconstructed highlights. Since the bounded highlight fill (build log) there is no such cast to suppress and the blend only adds colour error, so a new edit starts at strength 0 ("Highlight recovery" 0 %); an existing edit keeps the 0.5 it stored.
 3. **Color space.** Camera → XYZ (inverse of the interpolated XYZ → camera matrix, normalized so camera white lands on D65) then XYZ → Rec.2020, recomputed whenever WB changes. Gamut compression (distance-based, in the style of the ACES reference gamut compression) keeps saturated lights from producing negative channels.
 #### Highlights, and what it can reach
 

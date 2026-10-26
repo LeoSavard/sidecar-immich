@@ -271,8 +271,8 @@ traded for the surroundings' hue. That is also why the `scale` experiment above 
 fault was not in the scale's value but in what it was applied to. The same arithmetic turned a truncated CR2
 into NaN (the review's D14). The fill is now bounded and keeps measured samples, and beats both the old pass
 and plain clipping on every frame and bucket; the review's §3, "The highlight stack, end to end", has the
-table. Open: `highlight_blend`'s default now adds error wherever it acts (an owner's decision, with a
-`PROCESS_VERSION` bump), and real blown frames — `_D5N3075.NEF` above — want looking at against generation 3.
+table. `highlight_blend`, which now only added error, starts at 0 for new edits (existing ones keep the value
+they stored). Open: real blown frames — `_D5N3075.NEF` above — want looking at against generation 3.
 
 **X-Trans at full resolution — parked, and out of milestone 5** (owner's call, 2026-10-16: the Fuji body is
 gone, and nobody else has asked). It still runs LibRaw's Markesteijn on the CPU; only Bayer has a GPU demosaic

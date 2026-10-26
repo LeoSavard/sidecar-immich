@@ -17,6 +17,20 @@ const VIEW_UNIFORM_BYTES = 128;
  * What the canvas shows of the developed picture: the output of a geometry (`Frame.toPicture`, output 0…1 →
  * picture 0…1, row-major), `size` pixels.
  */
+/**
+ * The canvas's format. Half float where the display shows more than 8 bits a channel (a 10-bit or HDR panel, as
+ * on iPhones and recent Macs), so a smooth gradient reaches it without an 8-bit step and the grain of the
+ * dither that hides that step; the browser's preferred 8-bit format otherwise, because the compositor would
+ * only quantise a float canvas to 8 bits again, and without dither. The values written are the same either
+ * way: a float canvas in `srgb` or `display-p3` takes encoded values, as an 8-bit one does. `?canvas=8` or
+ * `?canvas=16` picks one regardless, to compare the two on the same screen.
+ */
+export function canvasFormat(): GPUTextureFormat {
+	const forced = new URLSearchParams(location.search).get('canvas');
+	const deep = forced ? forced === '16' : matchMedia('(min-color: 10)').matches || matchMedia('(dynamic-range: high)').matches;
+	return deep ? 'rgba16float' : navigator.gpu.getPreferredCanvasFormat();
+}
+
 export type ViewGeometry = { toPicture: number[][]; size: [number, number] };
 
 /**
@@ -88,7 +102,7 @@ export class ViewPass {
 	static async create(device: GPUDevice, canvas: HTMLCanvasElement, displayP3: boolean): Promise<ViewPass> {
 		const context = canvas.getContext('webgpu');
 		if (!context) throw new Error('Could not create a WebGPU canvas.');
-		const format = navigator.gpu.getPreferredCanvasFormat();
+		const format = canvasFormat();
 		context.configure({ device, format, alphaMode: 'opaque', colorSpace: displayP3 ? 'display-p3' : 'srgb' });
 		const module = device.createShaderModule({ label: 'view', code: viewWgsl });
 		const pipeline = await device.createRenderPipelineAsync({
@@ -127,6 +141,7 @@ export class ViewPass {
 		dv.setFloat32(104, srgbDecode(0.5 / 255), true);
 		dv.setFloat32(108, 0x16 / 255, true);
 		dv.setFloat32(112, PEAK_THRESHOLD, true);
+		dv.setFloat32(116, this.format === 'rgba16float' ? 1 / 1023 : 1 / 255, true);
 		this.device.queue.writeBuffer(this.ubo, 0, this.params);
 		if (this.boundTexture !== developed || this.boundFocusMask !== this.focusMask || this.boundOverlay !== this.overlay) {
 			this.bindGroup = this.device.createBindGroup({

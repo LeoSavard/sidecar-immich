@@ -20,6 +20,6 @@ Light: exposure and the tone map's controls (DESIGN.md §7, modules 2 and 4). --
 	<!-- Highlight recovery reconstructs clipped sensor channels; an already-developed file has none to
 	     reconstruct, so the control would sit there doing nothing. -->
 	{#if !developed}
-		<Slider id="hl-blend" label="Highlight recovery" value={sliders.highlightRecovery(edit)} min={0} max={100} defaultValue={50} format={(v) => `${decimals(v)} %`} onchange={(v) => onchange((e) => { e.exposure.highlightBlend = v / 100; })} {oncommit} />
+		<Slider id="hl-blend" label="Highlight recovery" value={sliders.highlightRecovery(edit)} min={0} max={100} defaultValue={0} format={(v) => `${decimals(v)} %`} onchange={(v) => onchange((e) => { e.exposure.highlightBlend = v / 100; })} {oncommit} />
 	{/if}
 </div>

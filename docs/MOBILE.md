@@ -9,7 +9,8 @@ Sidecar on the phone, as an optional part of the image. It lives in `mobile/`, i
 - **Choose a photo** from the phone's Photos (`accept="image/*"`) or its files (every RAW extension
   Sidecar knows, from `web/src/lib/formats.ts`).
 - **A developed photo (JPEG, HEIC, PNG, WebP, AVIF) is decoded and developed on the phone.** The browser decodes
-  it, converting its profile into Display P3 where the browser can. `mobile/src/local/decode.ts` turns it into the same
+  it, converting its profile into Display P3 where the browser can; a camera's Adobe RGB JPEG, which has no profile
+  and says so only in EXIF, is read as Adobe RGB, as the server reads it. `mobile/src/local/decode.ts` turns it into the same
   linear RGBA16F proxy the server would send, and the editor's own `DevelopPass`, `ViewPass`, colour packer and
   Light / Colour / White balance sections develop it. Nothing is uploaded. HEIC is decoded by the phone's
   system decoder, so the server's licence boundary for HEIC (CLAUDE.md) doesn't come into it.

@@ -34,7 +34,7 @@ The short version:
 | D8 | Linear DNG reads one black and one white for all channels; ignores `BlackLevelDeltaH/V`, `DefaultCrop`, `ForwardMatrix`, `CameraCalibration` | `linear_dng.rs` | Small casts; uncropped edges | Yes | M |
 | D9 | No colour matrix → `panic!` | `color/src/camera.rs` | Worker task fails; in the browser the wasm packer traps | **Fixed here** | — |
 | D10 | ICC detection is `contains("P3")`, and no ICC means sRGB | `decoded.rs` `SourceSpace::from_profile` | Adobe RGB / ProPhoto / Rec.2020 sources desaturated, with the wrong tone curve | Yes, those files | M |
-| D11 | Camera Adobe RGB JPEGs carry no ICC, only `InteropIndex = R03` | `decoded.rs` `exif` | Same as D10, for the most common case of it | Yes | XS |
+| D11 | Camera Adobe RGB JPEGs carry no ICC, only `InteropIndex = R03` | `decoded.rs` `exif` | Same as D10, for the most common case of it | **Fixed here**, on the server and the phone (§2.4) | — |
 | D12 | CMYK/YCCK JPEG, float TIFF and PNM `maxval` ≠ 255/65535 are unchecked | `decoded.rs` | Wrong colours or 64× dark instead of a clear refusal | No (refuse) / yes (support) | S |
 | D13 | ProRAW `ProfileGainTableMap` not read | `linear_dng.rs` | ProRAW looks flatter than Apple's rendering (DNG 1.6 local tone map) | Optional stage | L |
 | D14 | Highlight reconstruction turns a damaged RAW into NaN | `shaders/ingest/hilite_*.wgsl` | A quarter of a truncated CR2's proxy is NaN, across nearly every row | **Fixed here**, with the rest of the fill (§3, "The highlight stack, end to end"): every clipped photo changes, measurably for the better | — |
@@ -178,6 +178,13 @@ the stream's bit depth is not `BitsPerSample`. What it still assumes:
      `InteropIndex = "R03"`. That pair is how a camera set to Adobe RGB marks a JPEG with *no* embedded profile
      (the DCF option-file rule). These are two primaries matrices and two transfer curves; `SourceSpace` grows
      two variants.
+
+     *Done for Adobe RGB (D11):* `SourceSpace::AdobeRgb` (Adobe's primaries, its 563/256 power curve) and
+     `SourceSpace::from_tags`, which takes a profile's name when there is one ("Adobe RGB" now counts) and
+     otherwise EXIF `ColorSpace` 2, or 0xFFFF with `InteropIndex` "R03". The decoders linearise through the
+     source's own curve. The phone reads the same two tags (`mobile/src/local/exif-space.ts`) and decodes such
+     a JPEG without the browser's sRGB assumption, landing on the server's colour model to the last digit.
+     `INGEST_GENERATION` 5, `META_REVISION` 2. ProPhoto and any other profile remain D10.
   2. **Right:** parse the embedded ICC and build the transform from it. **moxcms** (pure Rust, BSD-3-Clause OR
      Apache-2.0) and qcms (MIT) both qualify under `deny.toml`. V2.md's survey already recommends this shape
      for display: bake the transform once into a LUT or matrix, never per pixel.
@@ -354,12 +361,13 @@ shaders fail it.
 
 **What this changes for the other links, and what is left:**
 
-- **`highlight_blend` now works against the fill** (link 3 → 5, a `PROCESS_VERSION` question, so the
-  owner's). `hilite-truth` also scores the proxy after the develop pass's blend at its default 0.5: it raises
-  the colour error everywhere it acts, e.g. on the 5D Mark II at +2 partly clipped 0.0065 → 0.125 and blown
+- **`highlight_blend` worked against the fill**, and new edits now start it at 0 (owner's call, 2026-10-26).
+  `hilite-truth` also scores the proxy after the develop pass's blend at its old default 0.5: it raises the
+  colour error everywhere it acts, e.g. on the 5D Mark II at +2 partly clipped 0.0065 → 0.125 and blown
   0.061 → 0.216. It was added to hide the cast the old fill left; the bleach (#41) already takes the last stop
-  to white. The recommendation is default 0 for new edits, with old edits pinned at 0.5 — exactly the
-  migration #33 did — decided on pictures from the fixed highlight set.
+  to white. No `PROCESS_VERSION` bump was needed after all: every stored edit carries the field (the history's
+  root holds the complete parameters), so an existing edit keeps its 0.5 as stored, and only a new edit, or
+  the original, sees 0.
 - **D5 is now a bigger gap**: the proxy's blown areas are better and an X-Trans export still clips them.
 - **Real blown frames have no truth to compare with.** The synthetic raise is honest for the transition band
   and for moderately blown cores; a sun or a specular is pure inpainting, judged on pictures. `sidecar-dev
@@ -533,7 +541,7 @@ above. They are all fields of `libraw_data_t` already in memory after `open_file
    `sidecar-dev hilite-truth` is its ground-truth half; the pictures are the other. The fill itself (D14) is done.
 3. **Decode correctness and links 1–3 of the highlight path, one `INGEST_GENERATION` bump for the lot:** D1, D2
    (+ `linear_dng` CC/AB/per-channel levels), `SensorLevels` filled from §8's fields, one clip definition (D7),
-   D5, D11's Adobe RGB marker. Each needs a file that shows it, under `testdata/`.
+   D5 (D11's Adobe RGB marker is done). Each needs a file that shows it, under `testdata/`.
 4. **Link 4:** `BaselineExposure` through the shim, then the makers' exposure shifts (§8), behind a
    `PROCESS_VERSION` bump that pins old edits.
 5. **Structure:** one decode dispatcher (§5.1) carrying the D5 fix; `RawInfo::new`; ExifTool `-stay_open` behind
@@ -558,6 +566,8 @@ above. They are all fields of `libraw_data_t` already in memory after `open_file
 - D14 and the highlight fill (§3, "The highlight stack, end to end"): the pyramid's pull and write-back are a
   bounded fill that keeps measured samples; `sidecar-dev hilite-truth` measures reconstruction against ground
   truth; `INGEST_GENERATION` 4.
+- D11 (Adobe RGB JPEGs, server and phone; `INGEST_GENERATION` 5), Highlight recovery at 0 for new edits, and a
+  half-float view canvas on displays deeper than 8 bits (DESIGN.md's build log).
 - §5.6's extension lists are one TypeScript module checked against Rust; the TypeScript sRGB curve and half
   floats (§5.4's web side) are one module; `SourceSpace` lives in `sidecar-color`, which also removes the
   hand-written XYZ→sRGB matrix from the no-calibration fallback (§5.3, partly).
