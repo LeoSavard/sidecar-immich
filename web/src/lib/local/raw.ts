@@ -2,6 +2,7 @@
 // A RAW decoded on the phone (docs/MOBILE.md, stage 2): LibRaw, built for the browser, unpacks the sensor data in
 // a worker; the server's own ingest shaders then develop it to a proxy on the phone's GPU (`$lib/gpu/ingest`).
 import type { Mosaic } from '$lib/gpu/ingest';
+import { LIBRAW_URL } from './raw-url';
 
 /** What `scw_info` reports (mobile/libraw/wasm_api.cpp). `color` is `sidecar_color::camera::LibrawColor`. */
 export type RawInfo = {
@@ -23,6 +24,16 @@ export type RawInfo = {
 
 /** A decode: the sensor's mosaic, or null for a RAW with none (sRAW, linear DNG, Foveon), or why it failed. */
 export type RawResult = { info: RawInfo; mosaic: Mosaic | null; error?: undefined } | { error: string; info?: undefined; mosaic?: undefined };
+
+/** Whether this deployment can unpack a RAW on the device: the mobile module serves LibRaw. Asked once a page. */
+export async function rawOnDevice(): Promise<boolean> {
+	// Without the module the path still answers 200, with the main app's page: the type is what says.
+	available ??= fetch(LIBRAW_URL, { method: 'HEAD' })
+		.then((r) => r.ok && /javascript/.test(r.headers.get('content-type') ?? ''))
+		.catch(() => false);
+	return available;
+}
+let available: Promise<boolean> | undefined;
 
 let worker: Worker | undefined;
 

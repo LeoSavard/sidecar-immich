@@ -182,7 +182,7 @@ the stream's bit depth is not `BitsPerSample`. What it still assumes:
      *Done for Adobe RGB (D11):* `SourceSpace::AdobeRgb` (Adobe's primaries, its 563/256 power curve) and
      `SourceSpace::from_tags`, which takes a profile's name when there is one ("Adobe RGB" now counts) and
      otherwise EXIF `ColorSpace` 2, or 0xFFFF with `InteropIndex` "R03". The decoders linearise through the
-     source's own curve. The phone reads the same two tags (`mobile/src/local/exif-space.ts`) and decodes such
+     source's own curve. The phone reads the same two tags (`web/src/lib/local/exif-space.ts`) and decodes such
      a JPEG without the browser's sRGB assumption, landing on the server's colour model to the last digit.
      `INGEST_GENERATION` 5, `META_REVISION` 2. ProPhoto and any other profile remain D10.
   2. **Right:** parse the embedded ICC and build the transform from it. **moxcms** (pure Rust, BSD-3-Clause OR

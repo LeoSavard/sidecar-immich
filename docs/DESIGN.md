@@ -7,6 +7,23 @@ Source: the architecture plan (PWA entry, XMP sidecars, server-side demosaic, We
 
 Where the code differs from the text below, the code and these notes win.
 
+- **The phone runs the one editor** (owner's call, 2026-10-26; docs/MOBILE.md). The mobile module's own editor is
+  gone. `/m` chooses a photo, shows a RAW's embedded preview while it uploads, imports it the way the home page
+  does (`importPhoto`: the editing folder, or the library where there is none) and opens `/edit/<key>`. An import
+  made on a phone keeps the original there (`$lib/local/originals.ts`, Cache Storage under the asset key), and the
+  editor, finding it, makes the proxy on the device (`developHere`, `$lib/local/develop.ts`: LibRaw in a worker and
+  the ingest shaders for a RAW, the browser's decoder for a developed photo) instead of downloading it, and says
+  "Developed on this device, so some advanced features might be missing", with a link that develops it on the
+  server (`?server`). It uses the server's proxy, as before, wherever the device can't: no copy, a linear DNG or
+  sRAW, too large, no module, any failure. A developed photo the browser decoded into Display P3 packs with that
+  space's colour model (`cameraColor()`); a RAW packs with the server's, which the device's equals. LibRaw is now
+  loaded at run time from `/m/libraw/`, so the main app builds without Emscripten and a deployment without the
+  module just doesn't decode RAW on the device. Checked, in Chromium as a phone against a real `sidecar dev`:
+  `mobile/scripts/mobile-smoke.mjs` (import by SHA-1, developed on the device, the notice, the full editor's
+  groups, an edit the server keeps; `--raw`: the preview, then the RAW developed on the device), `raw-parity.mjs`
+  through the same way in, and the fallbacks — Apple's JPEG XL ProRAW and `?server` go to the server's proxy with
+  no notice.
+
 - **Apple's ProRAW white balance reads as what it is** (the review's D2; `META_REVISION` 3). ProRAW writes
   `AsShotNeutral` as 1 1 1 and keeps the shot's white balance in `AnalogBalance`, which the DNG specification
   composes into XYZ → camera as `AnalogBalance · CameraCalibration · ColorMatrix`. Both DNG paths took the bare
@@ -23,7 +40,7 @@ Where the code differs from the text below, the code and these notes win.
   `InteropIndex` "R03" (the DCF rule), or `ColorSpace` 2 on some bodies — so it was decoded as sRGB and came out
   desaturated. `SourceSpace::AdobeRgb` carries Adobe's primaries and its 563/256 power curve, and the decoders
   linearise through the source's own curve; `SourceSpace::from_tags` reads a profile's name first ("Adobe RGB"
-  now counts), then those tags. The phone reads the same tags itself (`mobile/src/local/exif-space.ts`): a browser
+  now counts), then those tags. The phone reads the same tags itself (`web/src/lib/local/exif-space.ts`): a browser
   takes such a file for sRGB, so the page draws it onto an sRGB canvas, which converts nothing, and linearises it
   as Adobe RGB. Checked: on JPEGs marked each way with ExifTool, the server's metadata says `adobe-rgb` and the
   phone's colour model equals it to the last digit (proxies within the two JPEG decoders' 0.9 %); an sRGB

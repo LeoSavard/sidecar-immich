@@ -68,7 +68,12 @@ NaN, and the phone still matches the server. **Still worth doing:** a look at re
 `DSC01899.ARW`) against generation 3, since a synthetic clip is honest for the transition band but a sun has no
 truth to compare with.
 
-**Then, on the owner's word, three more on the same branch** (DESIGN.md's build log has each):
+**Then two more asks, same branch:** **the phone runs the one editor** — `/m` imports into the editing folder and
+opens `/edit/<key>`, which develops the phone's own copy on the phone and says so; the module's small editor is
+gone (MOBILE.md) — and **Apple's ProRAW white balance** (`AnalogBalance`, the review's D2), which read 2,786 K and
+tint −158 on a daylight frame and now reads 6,880 K +32. Neither has run on a real iPhone yet.
+
+**Before those, on the owner's word, three more on the same branch** (DESIGN.md's build log has each):
 - **D11:** a camera's Adobe RGB JPEG, marked only in EXIF, decodes in Adobe RGB on the server and on the phone
   (`INGEST_GENERATION` 5, `META_REVISION` 2, so cached metadata and proxies are read again once).
 - **Highlight recovery starts at 0** for new edits; existing edits keep the 0.5 they stored, with no

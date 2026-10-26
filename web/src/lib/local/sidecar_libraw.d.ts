@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-// Types for the Emscripten module build.sh writes beside this file's copy (mobile/src/local/libraw/).
+// Types for the Emscripten module mobile/libraw/build.sh writes into the mobile module (mobile/static/libraw/), which
+// serves it at /m/libraw/; raw.worker.ts loads it from there at run time.
 export type LibRaw = {
 	HEAPU8: Uint8Array;
 	HEAPU16: Uint16Array;

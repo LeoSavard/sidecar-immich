@@ -32,7 +32,9 @@
 	import ColorSection from '$lib/ui/sections/ColorSection.svelte';
 	import DetailSection from '$lib/ui/sections/DetailSection.svelte';
 	import { NO_GEOMETRY, isNoGeometry, project, twist, untwist } from '$lib/state/edit-view';
-	import type { Crop, DisplaySpace, EditParams, Frame, Geometry, MaskAdjustment, Meta } from '$lib/types';
+	import type { CameraColor, Crop, DisplaySpace, EditParams, Frame, Geometry, MaskAdjustment, Meta } from '$lib/types';
+	import { originalFile } from '$lib/local/originals';
+	import { developOnDevice } from '$lib/local/develop';
 
 	const SPACES: DisplaySpace[] = ['srgb', 'display-p3'];
 
@@ -54,6 +56,18 @@
 	 * it every few pixels of a drag.
 	 */
 	let asShotWb = $state({ temperatureK: 5000, tint: 0 });
+	/**
+	 * The proxy was made on this device from its own copy of the original (docs/MOBILE.md), not downloaded: the
+	 * editor is the same, and says so in case something it shows relies on the server's decode.
+	 */
+	let onDevice = $state(false);
+	let onDeviceNoticeDismissed = $state(false);
+	/**
+	 * The colour model the proxy is in when it isn't the server's: a developed photo the browser decoded into
+	 * Display P3. Everything that packs or samples the proxy reads `cameraColor()`.
+	 */
+	let deviceColor: CameraColor | null = null;
+	const cameraColor = () => deviceColor ?? meta!.info.color;
 	let lookClipboard = $state<LookClipboard | null>(readLookClipboard());
 	let lut = $state<Float32Array | null>(null);
 	/** The profile of the spectral colour stock this edit names, once the server has sent it. */
@@ -263,7 +277,7 @@
 		// `schedule`, not the flag alone: the profile lands in a promise, with no frame on the way.
 		if (stock) loadProfile(stock, () => schedule(true));
 		slideProfile = stock ? cachedProfile(stock) : undefined;
-		const packed = packer.pack(source, meta!.info.color, meta!.info.sourceKind ?? 'raw', display, slideProfile);
+		const packed = packer.pack(source, cameraColor(), meta!.info.sourceKind ?? 'raw', display, slideProfile);
 		if (!before) {
 			lut = packed.lut;
 			maskCurves = packed.maskCurves;
@@ -711,7 +725,7 @@
 			setTimeout(() => (status = ''), 3000);
 			return;
 		}
-		const wb = packer.whiteFromNeutral(meta.info.color, rgb);
+		const wb = packer.whiteFromNeutral(cameraColor(), rgb);
 		const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, Math.round(v)));
 		update((ed) => {
 			ed.whiteBalance = { mode: 'custom', temperatureK: clamp(wb.temperatureK, 2000, 12000), tint: clamp(wb.tint, -150, 150) };
@@ -1136,6 +1150,43 @@
 		schedule(true);
 	}
 
+	/**
+	 * On a phone that still holds the original — it was imported from here — develop the proxy here instead of
+	 * downloading it (a 2,560-pixel proxy is some 35 MB over the network, and the server may not decode every
+	 * format the phone does). False, and the server's proxy is used as before, wherever it can't: no copy on the
+	 * device, a format the device can't decode, or `?server` in the address. `?device` asks for it on a desktop.
+	 */
+	async function developHere(device: GPUDevice, edge: number, phone: boolean): Promise<boolean> {
+		const q = page.url.searchParams;
+		if (q.has('server') || !(phone || q.has('device'))) return false;
+		const original = await originalFile(key).catch(() => null);
+		if (!original) return false;
+		status = 'Developing on this device…';
+		const local = await developOnDevice(device, original, packer, edge).catch((e) => `it failed (${e instanceof Error ? e.message : e})`);
+		if (typeof local === 'string') {
+			console.info(`Not developed on this device, so the server develops it: ${local}.`);
+			return false;
+		}
+		if (local.camera) {
+			deviceColor = local.camera;
+			const asShot = packer.pack(defaults, cameraColor(), meta!.info.sourceKind ?? 'raw', display);
+			asShotWb = { temperatureK: asShot.temperatureK, tint: asShot.tint };
+		}
+		develop.setSource(local.proxy.width, local.proxy.height, local.proxy.f16);
+		proxyLoaded = true;
+		onDevice = true;
+		status = '';
+		// For tests and for looking: `?inspect` leaves the proxy and its colour model on the window.
+		if (q.has('inspect')) Object.assign(window, { __sidecarInspect: { proxy: local.proxy, camera: local.rawColor ?? cameraColor(), info: local.raw, space: local.space } });
+		schedule(true);
+		// Focus peaking's mask is the server's to compute; it arrives when it does, and nothing waits for it.
+		api(`/api/assets/${key}/focus?edge=${edge}`)
+			.then((r) => r.arrayBuffer())
+			.then((b) => view.loadFocusMask(b))
+			.catch(() => {});
+		return true;
+	}
+
 	async function start() {
 		try {
 			const [metaResp, stateResp] = await Promise.all([api(`/api/assets/${key}/meta`), api(`/api/assets/${key}/edit`)]);
@@ -1184,6 +1235,7 @@
 			histStride = phone ? 2 : 1;
 			const wanted = Math.round(Math.max(innerWidth, innerHeight) * devicePixelRatio * 1.25);
 			const edge = Math.min(wanted, device.limits.maxTextureDimension2D, phone ? 2560 : 4096);
+			if (await developHere(device, edge, phone)) return;
 			status = 'Loading preview…';
 			await loadProxy(768);
 			status = '';
@@ -1557,6 +1609,14 @@
 		{/if}
 		{#if status || error}
 			<p class="absolute inset-x-4 top-[max(1rem,env(safe-area-inset-top))] text-center text-sm {error ? 'text-danger' : 'text-fg-2'}">{error || status}</p>
+		{:else if onDevice && !onDeviceNoticeDismissed}
+			<div role="note" class="absolute inset-x-4 bottom-[max(1rem,env(safe-area-inset-bottom))] mx-auto flex max-w-md items-start gap-2 rounded bg-ground/85 px-3 py-2 text-xs text-fg-2">
+				<p class="flex-1">
+					Developed on this device, so some advanced features might be missing.
+					<a href="?server" data-sveltekit-reload class="underline underline-offset-2">Develop it on the server</a>
+				</p>
+				<button type="button" class="-my-1 px-1 text-fg-2" aria-label="Dismiss" onclick={() => (onDeviceNoticeDismissed = true)}>×</button>
+			</div>
 		{/if}
 		<!-- The way back. Until this, the only way out of the editor on a phone was the browser's own back
 		     gesture, which a photo opened from a share or a link does not always have. -->

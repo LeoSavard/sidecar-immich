@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Checks src/local/preview.ts against ExifTool, which reads each RAW format with its own maker-specific parser:
+// Checks web/src/lib/local/preview.ts against ExifTool, which reads each RAW format with its own maker-specific parser:
 // for every file, the JPEG the browser would show must be byte for byte the largest one ExifTool extracts, and
 // the orientation must be the file's.
 //
@@ -7,7 +7,7 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { largestEmbeddedJpeg, rawOrientation } from '../src/local/preview.ts';
+import { largestEmbeddedJpeg, rawOrientation } from '../../web/src/lib/local/preview.ts';
 
 const TAGS = ['JpgFromRaw', 'PreviewImage', 'OtherImage', 'ThumbnailImage'];
 const files = process.argv.slice(2).flatMap((p) => (statSync(p).isDirectory() ? readdirSync(p).sort().map((f) => join(p, f)) : [p]));
