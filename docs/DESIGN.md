@@ -7,6 +7,74 @@ Source: the architecture plan (PWA entry, XMP sidecars, server-side demosaic, We
 
 Where the code differs from the text below, the code and these notes win.
 
+- **The mobile module, stage 2: a RAW decoded and developed on the phone** (docs/MOBILE.md): LibRaw and the
+  server's shim compiled to WebAssembly with Emscripten (`mobile/libraw/`) unpack the mosaic in a Web Worker;
+  `web/src/lib/gpu/ingest.ts` runs the server's ingest shaders (now in `WEB_ENTRIES`) pass for pass as
+  `Ingest::proxy` does; `LibrawColor::camera_color` in `sidecar-color` is now the one mapping from LibRaw's data to
+  a `CameraColor`, for the worker and the browser alike. The page shows the embedded preview, then opens the editor
+  on the phone's own proxy with a RAW's controls; an sRAW/linear DNG, an oversized frame, more than 26 MP on a
+  phone or a GPU error leaves the preview and the way to the server. `requestDevice` now asks for the adapter's
+  texture and buffer limits (Chromium zero-fills a 21 MP RGBA32F texture through a 338 MB buffer). Checked: the
+  wasm build reads five real CR2/NEF files to the same metadata and mosaic hash as the native build;
+  `mobile/scripts/raw-parity.mjs` against a real `sidecar dev` — colour model identical and the proxy within
+  0.06–0.10 % of signal (max 2 × 10⁻³) on four files; the phone's default render of a NEF against the server's
+  `/preview` within JPEG and dither noise (0.2 / 255 at a sixteenth, no bias); `mobile-smoke.mjs --raw` end to
+  end. Testing on real files found the review's D14 (the highlight pyramid turns a truncated CR2 into NaN, on the
+  server first). Not yet run on a phone.
+
+- **The mobile module, stage 1: a RAW's embedded preview on the phone** (docs/MOBILE.md): choosing a RAW in
+  `/m` shows the JPEG the camera embedded in it at once, found by the phone (`mobile/src/local/preview.ts`), the
+  right way up, with nothing uploaded, and labelled as the camera's rendering. JPEG streams are found by walking their
+  marker segments rather than per format; lossless JPEG (CR2/DNG sensor data) is refused by its frame type; the
+  largest wins; a JPEG's own orientation applies, else the RAW's. Checked: `mobile/scripts/preview-check.mjs`
+  against ExifTool — byte-identical to its largest extracted image, same orientation — on 13 files (real CR2 incl.
+  sRAW and a 180° frame, real NEF, ExifTool's samples, and a DNG and RW2 given previews by ExifTool); in Chromium,
+  the shown picture against ExifTool's turned with PIL, 0.8 / 255 for the 180° CR2 (23.8 unturned); and
+  `mobile-smoke.mjs --raw`, the preview on screen 432 ms after the pick with no request to the server. Real CR3,
+  RAF, ARW and ORF previews are untested. The same session's real files also ran the LibRaw shim's `raw_pitch`
+  copy (the review's D3) through the GPU ingest on llvmpipe: CR2 and NEF proxies correlate 0.91 with the camera's
+  preview of the same frame.
+
+- **An imported photo is called what it was filed as** (§3): an import into the editing folder showed its
+  staging name in the editor (`138b8c5d1f1ed5a3-IMG_EDITOR.jpg`). `place` reads the staged copy for its capture
+  date before filing it, and the worker's cached metadata, keyed by the bytes, kept the name of whichever path
+  read them first. On a cache hit the name now follows the path being read, and the cache is rewritten when it
+  changes; no re-hash and no ExifTool run. The same covers an import `free_name` numbered (`IMG_1-1.jpg`).
+  Checked: a worker test that fails without the fix with exactly the staging name, and two real imports into a
+  `sidecar dev` editing folder — `IMG_NAMED.jpg`, then a different photo of the same name as `IMG_NAMED-1.jpg`,
+  each named so in its metadata and in Recent.
+
+- **The mobile module, stage 0** (docs/MOBILE.md): an optional SvelteKit app in `mobile/`, served at `/m` by
+  images built with the new `mobile` and `ml-mobile` targets (`-mobile` tags), and only where
+  `server.mobile_root` holds a build. A developed photo chosen on the phone is decoded by the browser into the
+  proxy shape the server sends (linear RGBA16F, Display P3 where the canvas allows), developed by the editor's
+  own `DevelopPass`/`ViewPass`/packer and sections, saved as a JPEG on the phone, or sent to the server with the
+  phone's edit as its first version; a RAW goes to the server the way a share does. Its `$lib` is the main
+  app's (`files.lib`), so there is no second pipeline; for it, `SourceSpace` moved into `sidecar-color` with a
+  wasm export (`sc_source_color`), and the TypeScript sRGB curve, half floats and extension lists became one
+  module each (the extension list checked against Rust by a test, after the picker and share target had drifted
+  to 10 and 11 of 21). Checked: `mobile/scripts/mobile-smoke.mjs` against a real `sidecar dev` (no GPU on the
+  worker, Chromium on SwiftShader) — the photo drawn, Exposure +1 EV brightening it 164 → 207 of 255, the
+  shared Colour controls, a saved JPEG, and an import whose asset key is the photo's SHA-1 with the phone's
+  edit stored on it; and the phone's render at default settings against the original JPEG, **mean 0.5 / 255
+  per channel, p99 2 / 255** (re-encoding and dither). SwiftShader loses the device when it presents a WebGPU
+  canvas headless, so under `--swiftshader` the script measures through the page's own readback instead of
+  the screen; the module has not yet been on a phone.
+
+- **A shared photo nothing matched can be imported** (§3): the Android share target hashed the file, opened
+  `/open?sha1=…` and dropped the bytes, so a photo the server couldn't see — not backed up to Immich yet, or
+  any photo in a deployment with no Immich — ended on an empty pick page with no way forward but finding the
+  file some other way. The service worker now keeps the shared file in Cache Storage under its checksum
+  (`web/src/lib/shared.ts`: the last three shares, none older than a day), the pick record carries the
+  checksum `/open` was given, and the pick page offers **Import this photo** — first when nothing matched,
+  under the matches when a name matched, since a name alone may be a different photo — through the same
+  `POST /api/intake` the home page uses (`web/src/lib/intake.ts`), with the same choice of destination and the
+  same consent before a full editing folder gives a photo up. The file leaves the phone only on that tap, and
+  is let go once imported or found. Checked: two api tests (only a real checksum is carried; a pick saved
+  before the field still reads) and a Playwright run of a real multipart POST to `/share` through the built
+  service worker against a stand-in api, for both the no-match and the name-match case — the upload carried
+  the shared bytes unchanged and the phone's copy was gone afterwards.
+
 - **Highlights could not reach a highlight** (§7): reported from the editor — bringing Exposure down
   recovered a blown sky, so the data was plainly there, but Highlights at −100 left it exactly as it was.
   It was structural. The tone map sends everything at or above `white_ev` to display white before the LUT
@@ -206,7 +274,7 @@ Where the code differs from the text below, the code and these notes win.
 - **Export (milestone 6):** JPEG through `jpeg-encoder` (pure Rust, MIT/Apache + IJG) rather than mozjpeg. The worker streams NDJSON progress to the api, which relays it as SSE with `Last-Event-ID` replay. The outbox is reached through worker endpoints, so the api keeps `/cache` read-only.
 - **Detail (milestone 7):** denoise and sharpening are implemented from the published methods (à-trous wavelets with square-root variance stabilization and a per-image noise estimate; Richardson–Lucy on luminance), not ported — vkdt's denoise depends on per-camera noise profiles. The worker keeps the last two full-resolution buffers for loupe tiles.
 - **Internal library** roots can set `per_user = true`: Immich keeps a folder per user (storage label or id) before the template.
-- **Entry points (milestone 8):** Android share target hashes in the service worker and opens `/open?sha1=…`; desktop pastes an Immich link, resolved through `GET /api/assets/{id}`.
+- **Entry points (milestone 8):** Android share target hashes in the service worker and opens `/open?sha1=…` (keeping the file, so a photo nothing matches can be imported from the pick page); desktop pastes an Immich link, resolved through `GET /api/assets/{id}`.
 - **Development:** `./dev/serve` runs api + worker on the first free port from `127.0.0.1:8091`, the real library read-only, and a writable test copy under `testdata/cache/library`. It builds the `dev-serve` cargo profile (dependencies optimized, Sidecar's crates at `opt-level = 1`, incremental): touching `sidecar-color` rebuilds in 2 s instead of 22 s. Each git worktree has its own target directory, server state and container; sccache shares compiled dependencies between them. `--web` adds Vite's dev server for live reload. See `docs/ARCHITECTURE.md`.
 - **First live run (2026-09-15):** share → resolve → develop → sidecar → export → upload → stack, against the real external library. The Immich *admin* key is scoped without `asset.read`, so stacks can't be checked from the CLI — only in the Immich app.
 - **Output space is a user setting** (§11), not a guess from `matchMedia`. It drives the develop uniform, the canvas, the loupe request and the export default together; the export sheet still overrides it for one export. The editor previewing in P3 while exports defaulted to sRGB was a real trap: saturated reds fit on screen and clipped in the file.

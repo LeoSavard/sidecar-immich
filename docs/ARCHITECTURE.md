@@ -60,7 +60,7 @@ edged by the brush passes before develop samples them.
 |---|---|
 | A develop control (slider) | the checklist below |
 | What a develop stage does to pixels | `shaders/develop/*.wgsl`, called from `shaders/client/develop.wgsl` |
-| Decode, demosaic, highlight reconstruction | `crates/raw`, `shaders/ingest/`, `crates/engine/src/ingest.rs` |
+| Decode, demosaic, highlight reconstruction | `crates/raw`, `shaders/ingest/`, `crates/engine/src/ingest.rs` — **and** `web/src/lib/gpu/ingest.ts`, its pass-for-pass port for the mobile module: change both, then `mobile/scripts/raw-parity.mjs` |
 | Sharpening, noise reduction | `shaders/detail/`, `crates/engine/src/detail.rs` (server only: loupe, export) |
 | Crop, straighten, keystone | `crates/color/src/geometry.rs`, `shaders/server/warp.wgsl`, `web/src/lib/ui/CropOverlay.svelte` |
 | Lens correction | `crates/color/src/lens.rs`, `crates/raw/src/{lens,lensfun}.rs`, `shaders/lens/` |
@@ -82,6 +82,9 @@ edged by the brush passes before develop samples them.
 | Loading, saving, drafts, undo, versions | `web/src/lib/state/edit-session.svelte.ts` |
 | Drawing: develop, view, geometry, brush, gestures | `web/src/routes/edit/[key]/+page.svelte` (the next thing worth splitting out) |
 | What a section offers History and a copied look | `web/src/lib/state/edit-view.ts` (`CONTROLS`, `PICKS`) |
+| The mobile module (`/m`, `-mobile` images): the phone's flow over the editor's own `$lib` | `mobile/`, [`MOBILE.md`](MOBILE.md); served by `server.mobile_root` in `crates/api` |
+| A shared photo the server couldn't find; importing from the device | `web/src/service-worker.ts`, `web/src/lib/{shared,intake}.ts`, the pick page |
+| File extensions the web app offers | `web/src/lib/formats.ts` — checked against `sidecar_template::RAW_EXTENSIONS` by a test |
 
 ### Adding a develop control
 

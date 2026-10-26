@@ -20,6 +20,8 @@ type Exports = {
 	sc_last_error(): number;
 	sc_develop_uniform_bytes(): number;
 	sc_white_from_neutral(ptr: number, len: number): number;
+	sc_source_color(ptr: number, len: number): number;
+	sc_camera_color(ptr: number, len: number): number;
 	sc_pack_depth(ptr: number, len: number): number;
 	sc_mask_edge(ptr: number, len: number): number;
 };
@@ -142,6 +144,18 @@ export class ColorPacker {
 	/** The temperature and tint under which `neutral`, a camera RGB, is grey: the white balance eyedropper. */
 	whiteFromNeutral(camera: CameraColor, neutral: [number, number, number]): { temperatureK: number; tint: number } {
 		return JSON.parse(new TextDecoder().decode(this.call(this.x.sc_white_from_neutral, { camera, neutral })));
+	}
+
+	/** The colour model of a developed photo in `space`, for one the browser decoded itself
+	 *  (`sidecar_color::camera::SourceSpace::camera_color`, the same one the worker gives a JPEG). */
+	sourceColor(space: 'srgb' | 'display-p3'): CameraColor {
+		return JSON.parse(new TextDecoder().decode(this.call(this.x.sc_source_color, space)));
+	}
+
+	/** The colour model of a RAW the browser decoded, from the colour data LibRaw read (`LibrawColor`): the same
+	 *  mapping the server applies to the same file (`sidecar_color::camera::LibrawColor::camera_color`). */
+	cameraColor(libraw: unknown): CameraColor {
+		return JSON.parse(new TextDecoder().decode(this.call(this.x.sc_camera_color, libraw)));
 	}
 
 	/** `source` picks the develop pass's tone path: sensor light, or a picture a camera or app already rendered. */

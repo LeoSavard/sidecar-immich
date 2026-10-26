@@ -35,9 +35,16 @@ jobs:
           repo="ghcr.io/${GITHUB_REPOSITORY,,}"
           tags="$repo:${GITHUB_REF_NAME}"
           ml="$repo:${GITHUB_REF_NAME}-ml"
-          case "$GITHUB_REF_NAME" in *-*) ;; *) tags="$tags,$repo:latest"; ml="$ml,$repo:latest-ml" ;; esac
+          mobile="$repo:${GITHUB_REF_NAME}-mobile"
+          mlmobile="$repo:${GITHUB_REF_NAME}-ml-mobile"
+          case "$GITHUB_REF_NAME" in *-*) ;; *)
+            tags="$tags,$repo:latest"; ml="$ml,$repo:latest-ml"
+            mobile="$mobile,$repo:latest-mobile"; mlmobile="$mlmobile,$repo:latest-ml-mobile" ;;
+          esac
           echo "tags=$tags" >> "$GITHUB_OUTPUT"
           echo "ml=$ml" >> "$GITHUB_OUTPUT"
+          echo "mobile=$mobile" >> "$GITHUB_OUTPUT"
+          echo "mlmobile=$mlmobile" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-buildx-action@v4
       - uses: docker/login-action@v4
         with: { registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}" }
@@ -62,5 +69,29 @@ jobs:
             VERSION=${{ github.ref_name }}
             REVISION=${{ github.sha }}
           tags: ${{ steps.tags.outputs.ml }}
+          sbom: true
+          provenance: mode=max
+      # Each image plus the mobile module at /m (`v0.4.0-mobile`, `v0.4.0-ml-mobile`). One layer on top of an
+      # image already built, so these two cost the module's npm build and little else.
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: mobile
+          push: true
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            REVISION=${{ github.sha }}
+          tags: ${{ steps.tags.outputs.mobile }}
+          sbom: true
+          provenance: mode=max
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: ml-mobile
+          push: true
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            REVISION=${{ github.sha }}
+          tags: ${{ steps.tags.outputs.mlmobile }}
           sbom: true
           provenance: mode=max

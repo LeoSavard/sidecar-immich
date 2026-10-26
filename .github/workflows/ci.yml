@@ -72,3 +72,14 @@ jobs:
       - working-directory: web
         run: npm ci && npx playwright install --with-deps chromium && npm run build && node scripts/parity-browser.mjs ../testdata/parity-out --swiftshader
       - run: cargo run -p sidecar-devtools -- parity compare web/static/parity testdata/parity-out
+      # The mobile module builds on the main app's `$lib` and its generated files, so a change there can break it
+      # without touching it: type-check and build it here, where those files exist. Its RAW decoder is LibRaw
+      # built with Emscripten, at the version the Dockerfile pins.
+      - name: Emscripten for the mobile module's LibRaw
+        run: |
+          git clone --depth 1 https://github.com/emscripten-core/emsdk.git "$RUNNER_TEMP/emsdk"
+          "$RUNNER_TEMP/emsdk/emsdk" install 6.0.13 && "$RUNNER_TEMP/emsdk/emsdk" activate 6.0.13
+      - run: source "$RUNNER_TEMP/emsdk/emsdk_env.sh" && mobile/libraw/build.sh
+        shell: bash
+      - working-directory: mobile
+        run: npm ci && npm run check && npm run build

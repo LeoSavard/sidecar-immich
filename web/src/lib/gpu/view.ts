@@ -2,6 +2,7 @@
 // View pass: developedTex → canvas with pan/zoom, clip overlays and dither. Mirrors shaders/client/view.wgsl.
 import viewWgsl from './wgsl/client_view.wgsl?raw';
 import { greyTexture } from '$lib/masks';
+import { srgbDecode } from '$lib/color/transfer';
 
 export const CLIP_HIGHS = 1;
 export const CLIP_LOWS = 2;
@@ -25,7 +26,6 @@ export type ViewGeometry = { toPicture: number[][]; size: [number, number] };
  */
 const PEAK_THRESHOLD = 0.5;
 
-const srgbDecode = (v: number) => (v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4);
 
 export type Viewport = { zoom: number; panX: number; panY: number };
 

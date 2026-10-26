@@ -6,7 +6,10 @@ This product is licensed under the Apache License, Version 2.0 (see LICENSE).
 Sidecar builds on the work of others. Full licence texts for every dependency and ported file are in
 THIRD_PARTY_NOTICES.md, which ships in the Docker image at /usr/share/doc/sidecar/.
 
-- LibRaw — LibRaw LLC, used under CDDL-1.0; LibRaw builds on dcraw by Dave Coffin.
+- LibRaw — LibRaw LLC, used under CDDL-1.0; LibRaw builds on dcraw by Dave Coffin. Also compiled to WebAssembly
+  for the mobile module, in `-mobile` images.
+- Emscripten — the Emscripten authors (MIT OR NCSA), with the runtime it compiles into the mobile module's
+  WebAssembly: musl libc (MIT) and LLVM's libc++, libc++abi and compiler-rt (Apache-2.0 WITH LLVM-exception).
 - vkdt — Johannes Hanika (BSD-2-Clause): demosaic, highlight, denoise and deconvolution shaders ported to WGSL.
 - ACES Reference Gamut Compression — Academy Software Foundation (Apache-2.0).
 - OKLab — Björn Ottosson.

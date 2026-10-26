@@ -19,9 +19,6 @@
 //! unsupported; a deployment opts in by installing one.
 
 use crate::{RawInfo, SensorKind, SourceKind};
-use serde::{Deserialize, Serialize};
-use sidecar_color::camera::{Calibration, CameraColor};
-use sidecar_color::mat;
 use std::path::Path;
 
 /// Environment override for the HEIC decode command, with `%i` and `%o` standing for the input and output
@@ -44,49 +41,9 @@ pub enum DecodeError {
     Decode(String),
 }
 
-/// The colour space a decoded non-RAW image already lives in. Both use the sRGB transfer function and a D65
-/// white; they differ only in primaries.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "kebab-case")]
-pub enum SourceSpace {
-    #[default]
-    Srgb,
-    DisplayP3,
-}
-
-impl SourceSpace {
-    /// Guess from an ICC profile description. Anything unrecognised is treated as sRGB, which is what an
-    /// untagged JPEG almost always is.
-    pub fn from_profile(description: &str) -> Self {
-        if description.contains("P3") {
-            Self::DisplayP3
-        } else {
-            Self::Srgb
-        }
-    }
-
-    /// XYZ → this space, derived from the working-space constants rather than written out again, so there is
-    /// one source of truth for the primaries.
-    fn xyz_to_rgb(self) -> mat::M3 {
-        let from_rec2020 = match self {
-            Self::Srgb => &mat::REC2020_TO_SRGB,
-            Self::DisplayP3 => &mat::REC2020_TO_P3,
-        };
-        mat::mul(from_rec2020, &mat::XYZ_TO_REC2020)
-    }
-
-    /// A `CameraColor` that makes the existing colour pipeline treat this space as the camera's native one.
-    pub fn camera_color(self) -> CameraColor {
-        CameraColor {
-            as_shot_mul: [1.0, 1.0, 1.0],
-            calibrations: vec![Calibration {
-                temperature_k: 6504.0,
-                xyz_to_camera: self.xyz_to_rgb(),
-            }],
-            baseline_exposure: None,
-        }
-    }
-}
+/// The colour space a decoded non-RAW image already lives in. Defined in `sidecar_color`, beside the camera
+/// model it stands in for, so the browser's wasm can build the same colour model for a photo it decoded itself.
+pub use sidecar_color::camera::SourceSpace;
 
 /// Linear RGBA in the source's own primaries, orientation not yet applied — the same shape the RAW path
 /// hands the worker, so downsampling, the focus measure and the develop pass are all unchanged.
@@ -620,6 +577,7 @@ fn captured_unix(stamp: &str) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sidecar_color::mat;
 
     /// The whole point of the colour model: unity multipliers, and a matrix that lands the source's own
     /// white on Rec.2020 neutral. If this holds, temperature and tint behave as relative shifts and nothing

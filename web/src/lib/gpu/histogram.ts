@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Histogram compute over developedTex. At most one readback in flight; a newer request replaces a queued one.
 import histogramWgsl from './wgsl/client_histogram.wgsl?raw';
+import { srgbDecode } from '$lib/color/transfer';
 
 /** The output's map to the picture (row-major, output 0…1 → picture 0…1) and its size in pixels. */
 export type HistogramGeometry = { toPicture: number[][]; size: [number, number] };
 
 export type HistogramData = { r: Uint32Array; g: Uint32Array; b: Uint32Array; luma: Uint32Array; clippedHigh: number; clippedLow: number; total: number };
 
-const srgbDecode = (v: number) => (v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4);
 const BINS = 1026;
 
 export class HistogramPass {

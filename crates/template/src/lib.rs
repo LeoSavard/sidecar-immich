@@ -256,6 +256,32 @@ pub fn find_by_date_and_name(
 mod tests {
     use super::*;
 
+    /// The web app's copy of the extension lists (`web/src/lib/formats.ts`, for file pickers) and the share
+    /// target's in the manifest are hand-kept; they had drifted to 10 and 11 of these 21 before this test.
+    #[test]
+    fn the_web_app_offers_every_extension() {
+        let web = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../web");
+        let formats = std::fs::read_to_string(web.join("src/lib/formats.ts")).unwrap();
+        let listed = |name: &str| -> Vec<String> {
+            let start = formats.find(&format!("export const {name} = [")).unwrap();
+            let list = &formats[start..];
+            let list = &list[list.find('[').unwrap() + 1..list.find(']').unwrap()];
+            list.split(',')
+                .map(|s| s.trim().trim_matches('\'').to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        };
+        assert_eq!(listed("RAW_EXTENSIONS"), RAW_EXTENSIONS, "formats.ts");
+        assert_eq!(listed("IMAGE_EXTENSIONS"), IMAGE_EXTENSIONS, "formats.ts");
+        let manifest = std::fs::read_to_string(web.join("static/manifest.webmanifest")).unwrap();
+        for ext in RAW_EXTENSIONS {
+            assert!(
+                manifest.contains(&format!("\".{ext}\"")),
+                "the share target doesn't accept .{ext}"
+            );
+        }
+    }
+
     const T: &str = "{{y}}/{{MM}}.{{MMMM}}/{{y}}-{{MM}}-{{dd}}/{{filename}}";
 
     #[test]

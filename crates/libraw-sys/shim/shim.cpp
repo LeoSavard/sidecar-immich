@@ -12,6 +12,11 @@ int sc_open(void *raw, const char *path) {
   r->imgdata.rawparams.max_raw_memory_mb = 8192; /* panoramas and medium format */
   return r->open_file(path);
 }
+int sc_open_buffer(void *raw, const void *data, size_t size) {
+  LibRaw *r = static_cast<LibRaw *>(raw);
+  r->imgdata.rawparams.max_raw_memory_mb = 8192;
+  return r->open_buffer(data, size);
+}
 int sc_unpack(void *raw) { return static_cast<LibRaw *>(raw)->unpack(); }
 
 void sc_get_info(void *raw, sc_info *i) {
@@ -87,11 +92,15 @@ int sc_get_mosaic(void *raw, sc_mosaic *out) {
   LibRaw *r = static_cast<LibRaw *>(raw);
   libraw_data_t &d = r->imgdata;
   if (!d.rawdata.raw_image || !d.idata.filters) return LIBRAW_REQUEST_FOR_NONEXISTENT_IMAGE;
-  const int w = d.sizes.width, h = d.sizes.height, rw = d.sizes.raw_width;
+  const int w = d.sizes.width, h = d.sizes.height;
   const int top = d.sizes.top_margin, left = d.sizes.left_margin;
+  /* Row stride in samples. LibRaw's own raw2image reads raw_pitch, which a decoder may set wider than
+     raw_width (RawSpeed, some DNG paths); raw_width is the fallback for one that leaves it unset. */
+  const size_t pitch = d.sizes.raw_pitch ? d.sizes.raw_pitch / sizeof(uint16_t) : (size_t)d.sizes.raw_width;
+  if (w <= 0 || h <= 0 || (size_t)(left + w) > pitch) return LIBRAW_REQUEST_FOR_NONEXISTENT_IMAGE;
   uint16_t *buf = static_cast<uint16_t *>(malloc((size_t)w * h * sizeof(uint16_t)));
   if (!buf) return LIBRAW_UNSUFFICIENT_MEMORY;
-  for (int y = 0; y < h; y++) std::memcpy(buf + (size_t)y * w, d.rawdata.raw_image + (size_t)(y + top) * rw + left, w * sizeof(uint16_t));
+  for (int y = 0; y < h; y++) std::memcpy(buf + (size_t)y * w, d.rawdata.raw_image + (size_t)(y + top) * pitch + left, w * sizeof(uint16_t));
   out->width = w;
   out->height = h;
   out->data = buf;

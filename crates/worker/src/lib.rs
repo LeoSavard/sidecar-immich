@@ -261,10 +261,21 @@ impl Worker {
                 .as_ref()
                 .is_none_or(|p| p.id.starts_with("lensfun:"));
             let raw = meta.info.source_kind == sidecar_raw::SourceKind::Raw;
-            if raw && from_lensfun && meta.lensfun != self.lensfun.updated() {
+            let relens = raw && from_lensfun && meta.lensfun != self.lensfun.updated();
+            if relens {
                 meta.info.lens_profile = None;
                 meta.info.lens_profile = self.lensfun.profile_for(&meta.info);
                 meta.lensfun = self.lensfun.updated();
+            }
+            // The same bytes under another name: the name is the path's, not whichever path read them first. An
+            // import is read once from its staging copy (`<random>-IMG_1.jpg`) and then from where it was filed,
+            // and the editor showed the staging name for as long as the cache held it.
+            let name = file_name_of(&path);
+            let renamed = meta.file_name != name;
+            if renamed {
+                meta.file_name = name;
+            }
+            if relens || renamed {
                 let tmp = unique_tmp(&meta_path);
                 tokio::fs::write(&tmp, serde_json::to_vec_pretty(&meta)?).await?;
                 tokio::fs::rename(&tmp, &meta_path).await?;
@@ -288,10 +299,7 @@ impl Worker {
             };
             Ok(Meta {
                 asset_key: k,
-                file_name: p
-                    .file_name()
-                    .map(|f| f.to_string_lossy().into_owned())
-                    .unwrap_or_default(),
+                file_name: file_name_of(&p),
                 process_version: PROCESS_VERSION,
                 generation: INGEST_GENERATION,
                 revision: META_REVISION,
@@ -514,6 +522,13 @@ async fn read_proxy(path: &std::path::Path) -> Option<(u32, u32, Bytes)> {
     let w = u32::from_le_bytes(bytes.get(0..4)?.try_into().ok()?);
     let h = u32::from_le_bytes(bytes.get(4..8)?.try_into().ok()?);
     Some((w, h, bytes.slice(8..)))
+}
+
+/// What `Meta::file_name` holds: the last component of the path the photo was read from.
+fn file_name_of(path: &std::path::Path) -> String {
+    path.file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 /// A tmp path next to `target` that won't collide with a concurrent writer of the same target: `/open`'s
@@ -1487,6 +1502,35 @@ mod tests {
         let second = w.ingest(photo.clone()).await.unwrap().asset_key;
         assert_ne!(second, first, "a new mtime is a new file");
         assert_eq!(second, sidecar_xmp::sha1_file(&photo).unwrap());
+    }
+
+    /// An import is read from its staging copy before it is filed, and the same bytes then arrive under their
+    /// own name: the metadata takes the name of the path it was last read from, cached or not, rather than
+    /// keeping the staging name the editor used to show.
+    #[tokio::test]
+    async fn the_same_bytes_under_another_name_take_that_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _turn = GPU_TURN.lock().await;
+        let w = Worker::new(tmp.path().join("cache")).unwrap();
+        let mut png = Vec::new();
+        let mut enc = png::Encoder::new(&mut png, 1, 1);
+        enc.set_color(png::ColorType::Grayscale);
+        enc.write_header().unwrap().write_image_data(&[10]).unwrap();
+        let staged = tmp.path().join("138b8c5d1f1ed5a3-IMG_1.png");
+        let filed = tmp.path().join("IMG_1.png");
+        std::fs::write(&staged, &png).unwrap();
+        std::fs::write(&filed, &png).unwrap();
+
+        let first = w.ingest(staged).await.unwrap();
+        assert_eq!(first.file_name, "138b8c5d1f1ed5a3-IMG_1.png");
+        let again = w.ingest(filed).await.unwrap();
+        assert_eq!(again.asset_key, first.asset_key, "the same photo");
+        assert_eq!(again.file_name, "IMG_1.png");
+        assert_eq!(
+            w.cached_meta(&first.asset_key).await.unwrap().file_name,
+            "IMG_1.png",
+            "and the cached copy says so too"
+        );
     }
 
     /// The map is keyed by asset, so it would otherwise hold one entry per photo ever opened.

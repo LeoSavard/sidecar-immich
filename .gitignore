@@ -2,6 +2,10 @@
 node_modules
 /web/.svelte-kit
 /web/build
+/mobile/.svelte-kit
+/mobile/build
+/mobile/src/local/libraw
+/mobile/libraw/.obj
 /web/static/parity
 /web/src/lib/gpu/wgsl/*.wgsl
 /testdata/cache

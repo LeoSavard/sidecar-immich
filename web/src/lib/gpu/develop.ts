@@ -5,6 +5,7 @@ import developWgsl from './wgsl/client_develop.wgsl?raw';
 import densityDownWgsl from './wgsl/client_density_down.wgsl?raw';
 import densityBlurWgsl from './wgsl/client_density_blur.wgsl?raw';
 import { DEVELOP_UNIFORM_BYTES } from '$lib/color/pack';
+import { fromHalf } from '$lib/color/transfer';
 import { kernel } from './depth';
 
 /** `MaskParams` (shaders/develop/masks.wgsl), and the texture slots it describes. */
@@ -388,7 +389,7 @@ export class DevelopPass {
 		let n = 0;
 		for (let row = 0; row < h; row++) {
 			const bits = new Uint16Array(buf.getMappedRange(row * bytesPerRow, bytesPerRow), 0, w * 4);
-			const px = Array.from(bits, half);
+			const px = Array.from(bits, fromHalf);
 			for (let i = 0; i < w * 4; i += 4) {
 				if (px[i + 3] > 0) continue;
 				sum[0] += px[i];
@@ -428,7 +429,7 @@ export class DevelopPass {
 		let max = 0;
 		for (let row = 0; row < h; row++) {
 			const bits = new Uint16Array(buf.getMappedRange(row * bytesPerRow, bytesPerRow), 0, w * 4);
-			const px = Array.from(bits, half);
+			const px = Array.from(bits, fromHalf);
 			for (let i = 0; i < w * 4; i += 4) {
 				sum[0] += px[i];
 				sum[1] += px[i + 1];
@@ -460,19 +461,14 @@ export class DevelopPass {
 	}
 }
 
-/** An IEEE half float's bits → its value. */
-function half(h: number): number {
-	const exp = (h >> 10) & 0x1f;
-	const frac = h & 0x3ff;
-	const sign = h & 0x8000 ? -1 : 1;
-	if (exp === 0) return sign * frac * 2 ** -24;
-	if (exp === 31) return frac ? NaN : sign * Infinity;
-	return sign * (1 + frac / 1024) * 2 ** (exp - 15);
-}
-
 export async function requestDevice(): Promise<GPUDevice> {
 	if (!('gpu' in navigator)) throw new Error('This browser has no WebGPU. Sidecar needs Safari 26 or a current Chromium.');
 	const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
 	if (!adapter) throw new Error('WebGPU found no GPU adapter.');
-	return adapter.requestDevice({ label: 'sidecar' });
+	// The adapter's own limits rather than WebGPU's defaults, for a RAW decoded in the browser (mobile/,
+	// `$lib/gpu/ingest`): its whole mosaic is uploaded, and a 61-megapixel sensor is 9,504 pixels wide (default
+	// 8,192); and Chromium zero-fills a full-size RGBA32F texture through one staging buffer, 338 MB for a
+	// 21-megapixel sensor (default limit 256 MB).
+	const { maxTextureDimension2D, maxBufferSize } = adapter.limits;
+	return adapter.requestDevice({ label: 'sidecar', requiredLimits: { maxTextureDimension2D, maxBufferSize } });
 }

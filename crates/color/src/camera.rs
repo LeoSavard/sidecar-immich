@@ -48,7 +48,10 @@ impl CameraColor {
                 .clamp(0.0, 1.0);
                 mat::lerp(&lo.xyz_to_camera, &hi.xyz_to_camera, w)
             }
-            [] => panic!("camera has no colour calibration"),
+            // A file that states no matrix at all (a linear DNG without ColorMatrix1, say) still has to
+            // open: treat its camera RGB as sRGB primaries, as the LibRaw path does for an unknown camera.
+            // This also runs in the browser's wasm, where a panic takes the whole packer down.
+            [] => SourceSpace::Srgb.xyz_to_rgb(),
         }
     }
 
@@ -68,6 +71,140 @@ impl CameraColor {
             xy = mat::xyz_to_xy(&xyz);
         }
         xy
+    }
+}
+
+/// The colour space a developed (non-RAW) image already lives in, decoded by the worker or by the browser.
+/// Both use the sRGB transfer function and a D65 white; they differ only in primaries.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum SourceSpace {
+    #[default]
+    Srgb,
+    DisplayP3,
+}
+
+impl SourceSpace {
+    /// Guess from an ICC profile description. Anything unrecognised is treated as sRGB, which is what an
+    /// untagged JPEG almost always is.
+    pub fn from_profile(description: &str) -> Self {
+        if description.contains("P3") {
+            Self::DisplayP3
+        } else {
+            Self::Srgb
+        }
+    }
+
+    /// XYZ → this space, derived from the working-space constants rather than written out again, so there is
+    /// one source of truth for the primaries.
+    pub fn xyz_to_rgb(self) -> mat::M3 {
+        let from_rec2020 = match self {
+            Self::Srgb => &mat::REC2020_TO_SRGB,
+            Self::DisplayP3 => &mat::REC2020_TO_P3,
+        };
+        mat::mul(from_rec2020, &mat::XYZ_TO_REC2020)
+    }
+
+    /// A `CameraColor` that makes the existing colour pipeline treat this space as the camera's native one.
+    pub fn camera_color(self) -> CameraColor {
+        CameraColor {
+            as_shot_mul: [1.0, 1.0, 1.0],
+            calibrations: vec![Calibration {
+                temperature_k: 6504.0,
+                xyz_to_camera: self.xyz_to_rgb(),
+            }],
+            baseline_exposure: None,
+        }
+    }
+}
+
+/// EXIF LightSource → correlated colour temperature, for DNG calibration illuminants.
+pub fn illuminant_temperature(code: u16) -> Option<f64> {
+    Some(match code {
+        17 | 3 => 2856.0,
+        24 => 3200.0,
+        15 => 3450.0,
+        14 => 4150.0,
+        2 => 4200.0,
+        18 => 4874.0,
+        13 => 5000.0,
+        23 => 5003.0,
+        1 | 4 | 9 => 5500.0,
+        20 => 5503.0,
+        12 => 6430.0,
+        10 | 21 => 6504.0,
+        19 => 6774.0,
+        11 | 22 => 7504.0,
+        _ => return None,
+    })
+}
+
+fn rows3(m: &[[f32; 3]; 4]) -> [[f64; 3]; 3] {
+    [0, 1, 2].map(|r| m[r].map(|v| v as f64))
+}
+
+fn is_zero(m: &[[f64; 3]; 3]) -> bool {
+    m.iter().flatten().all(|v| v.abs() < 1e-9)
+}
+
+/// The colour data LibRaw reads from a file, as the server's shim (`sc_info`) and the browser's LibRaw build
+/// (mobile/libraw/wasm_api.cpp, in these camelCase names) hand it over. One mapping to a `CameraColor` for both.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LibrawColor {
+    pub cam_mul: [f32; 4],
+    pub pre_mul: [f32; 4],
+    /// XYZ → camera, from LibRaw's colour data (rows; the fourth is a fourth colour's, unused).
+    pub cam_xyz: [[f32; 3]; 4],
+    /// EXIF LightSource codes of the DNG calibration illuminants; 0 where there is none.
+    pub dng_illuminant: [u16; 2],
+    pub dng_colormatrix: [[[f32; 3]; 4]; 2],
+}
+
+impl LibrawColor {
+    /// DNG calibrations where the file has them, LibRaw's matrix for the model otherwise, sRGB primaries for a
+    /// camera nobody knows; as-shot multipliers from the camera, then LibRaw's daylight ones.
+    pub fn camera_color(&self) -> CameraColor {
+        let mut calibrations = Vec::new();
+        for n in 0..2 {
+            let m = rows3(&self.dng_colormatrix[n]);
+            if let (Some(t), false) = (illuminant_temperature(self.dng_illuminant[n]), is_zero(&m))
+            {
+                calibrations.push(Calibration {
+                    temperature_k: t,
+                    xyz_to_camera: m,
+                });
+            }
+        }
+        if calibrations.is_empty() {
+            let m = rows3(&self.cam_xyz);
+            let m = if is_zero(&m) {
+                // Unknown camera: treat camera RGB as sRGB primaries (XYZ → linear sRGB).
+                [
+                    [3.2404542, -1.5371385, -0.4985314],
+                    [-0.9692660, 1.8760108, 0.0415560],
+                    [0.0556434, -0.2040259, 1.0572252],
+                ]
+            } else {
+                m
+            };
+            calibrations.push(Calibration {
+                temperature_k: 6504.0,
+                xyz_to_camera: m,
+            });
+        }
+        let pick = |m: [f32; 4]| {
+            (m[0] > 0.0 && m[1] > 0.0 && m[2] > 0.0)
+                .then(|| [m[0] as f64 / m[1] as f64, 1.0, m[2] as f64 / m[1] as f64])
+        };
+        let as_shot_mul = pick(self.cam_mul)
+            .or_else(|| pick(self.pre_mul))
+            .unwrap_or([2.0, 1.0, 1.5]);
+        CameraColor {
+            as_shot_mul,
+            calibrations,
+            baseline_exposure: None,
+        }
     }
 }
 
@@ -162,5 +299,59 @@ mod tests {
             out.iter().all(|v| (v / out[1] - 1.0).abs() < 1e-3),
             "{out:?} at {t:.0} K {tint:+.1}"
         );
+    }
+
+    /// The JSON the browser's LibRaw build writes (mobile/libraw/wasm_api.cpp) is what `LibrawColor` reads, field
+    /// for field, and maps as the server's shim does: a camera's matrix, its as-shot multipliers over green.
+    #[test]
+    fn libraw_color_reads_the_browser_builds_json() {
+        let json = r#"{"camMul":[2.0996,1,1.4453,0],"preMul":[2,1,1.3,0],
+            "camXyz":[[1.0405,-0.3755,-0.127],[-0.5461,1.3787,0.1793],[-0.104,0.2015,0.6785],[0,0,0]],
+            "dngIlluminant":[0,0],"dngColormatrix":[[[0,0,0],[0,0,0],[0,0,0],[0,0,0]],[[0,0,0],[0,0,0],[0,0,0],[0,0,0]]]}"#;
+        let color: LibrawColor = serde_json::from_str(json).unwrap();
+        let cam = color.camera_color();
+        let d850 = nikon_d850();
+        assert_eq!(cam.as_shot_mul, [2.0996f32 as f64, 1.0, 1.4453f32 as f64]);
+        assert_eq!(cam.calibrations.len(), 1);
+        for (a, b) in cam.calibrations[0]
+            .xyz_to_camera
+            .iter()
+            .flatten()
+            .zip(d850.calibrations[0].xyz_to_camera.iter().flatten())
+        {
+            assert!((a - b).abs() < 1e-6, "{a} vs {b}");
+        }
+        // Two DNG calibrations, and no multipliers from the camera: LibRaw's daylight ones stand in.
+        let mut dng = color.clone();
+        dng.cam_mul = [0.0; 4];
+        dng.dng_illuminant = [17, 21];
+        dng.dng_colormatrix = [color.cam_xyz, color.cam_xyz];
+        let cam = dng.camera_color();
+        assert_eq!(
+            cam.calibrations
+                .iter()
+                .map(|c| c.temperature_k)
+                .collect::<Vec<_>>(),
+            [2856.0, 6504.0]
+        );
+        assert_eq!(cam.as_shot_mul, [2.0, 1.0, 1.3f32 as f64]);
+    }
+
+    /// A file with no colour matrix resolves as sRGB instead of panicking, and its neutral stays neutral.
+    #[test]
+    fn no_calibration_resolves_as_srgb() {
+        let cam = CameraColor {
+            as_shot_mul: [1.0, 1.0, 1.0],
+            calibrations: Vec::new(),
+            baseline_exposure: None,
+        };
+        let wb = resolve(&cam, cam.as_shot_xy());
+        assert!(
+            wb.mul.iter().all(|m| (m - 1.0).abs() < 1e-6),
+            "{:?}",
+            wb.mul
+        );
+        let w = mat::apply(&wb.cam_to_rec2020, &[1.0, 1.0, 1.0]);
+        assert!(w.iter().all(|v| (v - 1.0).abs() < 1e-9), "{w:?}");
     }
 }

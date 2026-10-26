@@ -7,6 +7,15 @@ This hand-kept section covers code and data that Sidecar ports or embeds directl
 Copyright LibRaw LLC. Source: https://github.com/LibRaw/LibRaw, tag 0.22.2, vendored at `third_party/libraw`.
 LibRaw uses code from dcraw.c by Dave Coffin; LibRaw does not use dcraw's restricted code.
 The full CDDL-1.0 text is in `third_party/libraw/LICENSE.CDDL`.
+The mobile module compiles the same sources, unmodified, to WebAssembly (`mobile/libraw/build.sh`); images with
+the module carry it under `/usr/share/sidecar/mobile`, under the same licence.
+
+## Emscripten and the runtime it compiles in — MIT OR NCSA; MIT; Apache-2.0 WITH LLVM-exception
+The mobile module's LibRaw build (`mobile/libraw/build.sh`) is made with Emscripten (the Emscripten authors;
+MIT or the University of Illinois/NCSA licence), whose generated JavaScript loads it. Compiled into that
+WebAssembly: musl libc (Rich Felker et al., MIT) and LLVM's libc++, libc++abi and compiler-rt (the LLVM
+project, Apache-2.0 WITH LLVM-exception, whose exception waives the attribution requirement for compiled
+binaries). Licence texts: Emscripten's `LICENSE`, `system/lib/libc/musl/COPYRIGHT`, `system/lib/libcxx/LICENSE.TXT`.
 
 ## vkdt — BSD-2-Clause
 Ported shaders: `shaders/ingest/hilite_*.wgsl`, `shaders/ingest/rcd_*.wgsl` (from vkdt @ 13756b3e).

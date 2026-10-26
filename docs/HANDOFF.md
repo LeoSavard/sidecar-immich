@@ -5,7 +5,7 @@ For whoever picks this up next, person or agent. [`ARCHITECTURE.md`](ARCHITECTUR
 checked), [`ROADMAP.md`](ROADMAP.md) what's known to be missing. This page is the state of play; update it when
 you stop.
 
-*Last updated 2026-10-22.*
+*Last updated 2026-10-26.*
 
 ## Where it stands, 2026-10-22
 
@@ -30,6 +30,46 @@ the folder path out of the box (it has no Immich, so that is the only destinatio
 everything `git branch -r --merged origin/main` lists except `main`. That needs `git push origin --delete`
 run by the owner; it is blocked here. `worktree-depth-spike` and `worktree-lens-correction` are not in that
 list and are kept on purpose.
+
+## 2026-10-26: a review of the decode pipeline
+
+[`research/pipeline-review-2026-10.md`](research/pipeline-review-2026-10.md) reads the pipeline from file to
+proxy. It covers where a decode can go wrong without an error (the shim's black pattern and DNG calibration, X-Trans
+preview vs export, colour spaces of developed files), why the top of the tone range drew ten PRs, duplication worth
+folding, and a staged, licence-clean plan for decoding on the phone. Branch `claude/sweet-maxwell-s67it6` carries
+its only two code changes, neither of which changes a pixel for a file that opened before: no colour matrix
+no longer panics (`camera.rs`), and the mosaic copy uses `raw_pitch` (`shim.cpp`, built and its tests passing, though
+not yet run on a RAW file or in the dev container). Everything else in it is a proposal waiting on the owner and on test files.
+
+Later the same day, on the same branch: **the share target keeps a photo nothing matched** and the pick page
+offers to import it; the review gained **a path to reconcile the highlights** (six links, an owner and a state
+each, and a fixed highlight set to measure them on) and **what the file already says** (fields LibRaw parses
+that the pipeline estimates instead — among them `BaselineExposure`, which the LibRaw path drops); and **the
+mobile module** started ([`MOBILE.md`](MOBILE.md)): `mobile/`, served at `/m` by `-mobile` images, developing
+a JPEG or HEIC on the phone's GPU with the editor's own code. It has run against a real server in headless
+Chromium, never on a phone: the next step is an iPhone and an Android phone, with the three questions at the
+end of MOBILE.md.
+
+**Stage 2 followed the same day: a RAW decoded and developed on the phone** (MOBILE.md), matching the server's
+proxy for the same file to half-float rounding. Its loose ends: bin-first proxies on both sides (the 26 MP phone
+limit comes from ingest memory), zlib/libjpeg in the wasm build, Emscripten in the dev container, and a real phone.
+It also turned up **D14** in the review: highlight reconstruction makes a truncated RAW a quarter NaN, on the
+server as on the phone — a server bug, written up with the evidence, not fixed.
+
+**Stage 1 of the mobile module followed** (a RAW's embedded preview on the phone; MOBILE.md), with real RAW
+files for the first time in this work: CR2s and NEFs from rawpy's test set, under `testdata/cache/samples/`
+(not committed). They also ran the shim's `raw_pitch` change through the GPU ingest, so that caveat is gone.
+
+Found in passing, not fixed: **an import into the editing folder pre-builds its proxy from the staging path**.
+The worker's ingest endpoint starts a background proxy build, and `place` ingests the staged copy before
+renaming it into the folder, so that build races the rename. It won in testing; when it loses, the build fails
+with a warning and the editor's own request decodes it again — a wasted decode, never a wrong picture.
+`place` could ask for metadata without the pre-build.
+
+Found in passing and fixed on the same branch: **an import into the editing folder kept the staging name in its
+metadata** (`meta.fileName` read `138b8c5d1f1ed5a3-IMG_EDITOR.jpg` while the file was `IMG_EDITOR.jpg`), because
+`place` ingests the staged file before moving it and the worker's cached metadata kept the first path's name. The
+name now follows the path a photo was last read from (DESIGN.md's build log).
 
 ## Open pull requests
 
