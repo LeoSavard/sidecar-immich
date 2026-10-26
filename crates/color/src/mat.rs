@@ -54,6 +54,22 @@ pub fn xyz_to_xy(v: &V3) -> [f64; 2] {
 
 pub const D65: [f64; 2] = [0.3127, 0.3290];
 
+/// RGB → XYZ for an RGB space given by its primaries' and white's chromaticities: each primary's XYZ, scaled so
+/// that (1, 1, 1) lands on the white at Y = 1 (SMPTE RP 177).
+pub fn rgb_to_xyz(primaries: [[f64; 2]; 3], white: [f64; 2]) -> M3 {
+    let p = primaries.map(xy_to_xyz);
+    let cols = [
+        [p[0][0], p[1][0], p[2][0]],
+        [p[0][1], p[1][1], p[2][1]],
+        [p[0][2], p[1][2], p[2][2]],
+    ];
+    let s = apply(&inverse(&cols), &xy_to_xyz(white));
+    mul(&cols, &diag(s))
+}
+
+/// Adobe RGB (1998) primaries, as Adobe's specification of the space gives them; its white is D65.
+pub const ADOBE_RGB_PRIMARIES: [[f64; 2]; 3] = [[0.64, 0.33], [0.21, 0.71], [0.15, 0.06]];
+
 pub const XYZ_TO_REC2020: M3 = [
     [1.716651188, -0.3556707838, -0.2533662814],
     [-0.6666843518, 1.6164812366, 0.0157685458],
@@ -91,6 +107,22 @@ pub fn bradford(src: [f64; 2], dst: [f64; 2]) -> M3 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The primaries route reproduces the sRGB matrix written out above, so it can be trusted for Adobe RGB.
+    #[test]
+    fn primaries_give_the_srgb_matrix() {
+        let srgb = rgb_to_xyz([[0.64, 0.33], [0.30, 0.60], [0.15, 0.06]], D65);
+        let want = inverse(&mul(&REC2020_TO_SRGB, &XYZ_TO_REC2020));
+        for (r, row) in srgb.iter().enumerate() {
+            for (c, v) in row.iter().enumerate() {
+                assert!(
+                    (v - want[r][c]).abs() < 1e-4,
+                    "{r},{c}: {v} vs {}",
+                    want[r][c]
+                );
+            }
+        }
+    }
 
     #[test]
     fn inverse_round_trips() {

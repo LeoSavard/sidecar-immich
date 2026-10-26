@@ -110,6 +110,8 @@ fn camera_color(i: &sys::sc_info) -> CameraColor {
         cam_xyz: i.cam_xyz,
         dng_illuminant: i.dng_illuminant,
         dng_colormatrix: i.dng_colormatrix,
+        dng_analogbalance: i.dng_analogbalance,
+        dng_calibration: i.dng_calibration,
     }
     .camera_color()
 }

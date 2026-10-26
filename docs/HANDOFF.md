@@ -33,6 +33,10 @@ list and are kept on purpose.
 
 ## 2026-10-26: a review of the decode pipeline
 
+The whole day's session — both pull requests, the owner's decisions, what is left and how to check it again — is
+[`research/session-2026-10-26.md`](research/session-2026-10-26.md). The rest of this section is the detail as it
+happened.
+
 [`research/pipeline-review-2026-10.md`](research/pipeline-review-2026-10.md) reads the pipeline from file to
 proxy. It covers where a decode can go wrong without an error (the shim's black pattern and DNG calibration, X-Trans
 preview vs export, colour spaces of developed files), why the top of the tone range drew ten PRs, duplication worth
@@ -54,7 +58,39 @@ end of MOBILE.md.
 proxy for the same file to half-float rounding. Its loose ends: bin-first proxies on both sides (the 26 MP phone
 limit comes from ingest memory), zlib/libjpeg in the wasm build, Emscripten in the dev container, and a real phone.
 It also turned up **D14** in the review: highlight reconstruction makes a truncated RAW a quarter NaN, on the
-server as on the phone — a server bug, written up with the evidence, not fixed.
+server as on the phone — a server bug, fixed next (below).
+
+**Then the whole highlight stack was reviewed before D14 was fixed** (the owner suspected they were linked; they
+were), and the fix went with it, on branch `claude/sweet-maxwell-s67it6` again, from `main` after #42. The
+review's §3, "The highlight stack, end to end", walks every stage from `normalize` to the bleach. The step that
+made the NaN was the pyramid's rescale, which also decided every reconstructed pixel's colour; measured against
+ground truth with a new tool (`sidecar-dev hilite-truth`: a frame clipped on purpose, compared with itself
+unclipped) the old pass was worse than no reconstruction in the partly clipped band. `hilite_assemble` and
+`hilite_doub` are now a bounded fill that keeps measured samples (`INGEST_GENERATION` 4, so every proxy rebuilds
+once); it beats both the old pass and plain clipping on three frames at two exposures, the damaged file has no
+NaN, and the phone still matches the server. **Still worth doing:** a look at real blown frames (`_D5N3075.NEF`,
+`DSC01899.ARW`) against generation 3, since a synthetic clip is honest for the transition band but a sun has no
+truth to compare with.
+
+**Then two more asks, same branch:** **the phone runs the one editor** — `/m` imports into the editing folder and
+opens `/edit/<key>`, which develops the phone's own copy on the phone and says so; the module's small editor is
+gone (MOBILE.md) — and **Apple's ProRAW white balance** (`AnalogBalance`, the review's D2), which read 2,786 K and
+tint −158 on a daylight frame and now reads 6,880 K +32. Neither has run on a real iPhone yet.
+
+**And then the interface:** the page no longer zooms itself on a phone, the camera's rendering follows the edit's
+zoom and position (and drives it), and the loupe reaches 150 % and 200 %. A wider look at the interface, with
+seventeen suggestions in order of how often they are met, is
+[`research/ui-review-2026-10.md`](research/ui-review-2026-10.md). The owner answered nine of them and those are
+built (the table at its top); the rest are open.
+
+**Before those, on the owner's word, three more on the same branch** (DESIGN.md's build log has each):
+- **D11:** a camera's Adobe RGB JPEG, marked only in EXIF, decodes in Adobe RGB on the server and on the phone
+  (`INGEST_GENERATION` 5, `META_REVISION` 2, so cached metadata and proxies are read again once).
+- **Highlight recovery starts at 0** for new edits; existing edits keep the 0.5 they stored, with no
+  `PROCESS_VERSION` bump (the review's §3 says why none is needed).
+- **A half-float view canvas** where the display reports more than 8 bits a channel, with the dither scaled to
+  a 10-bit step; `?canvas=8` / `?canvas=16` compares the two. It can't be checked headless (Chromium can't present
+  a WebGPU canvas there), so the first look is on a real iPhone or Mac.
 
 **Stage 1 of the mobile module followed** (a RAW's embedded preview on the phone; MOBILE.md), with real RAW
 files for the first time in this work: CR2s and NEFs from rawpy's test set, under `testdata/cache/samples/`

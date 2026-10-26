@@ -6,6 +6,12 @@
 //! requires: ingest/common.wgsl
 // Write reconstructed colour back into the mosaic where samples approach clipping. Runs on the coarse grid;
 // in_size is the mosaic size, out_size the coarse size. Each invocation writes one 2×2 or 3×3 block.
+//
+// Changed from vkdt: vkdt replaces every sample of a block once any of them nears white, measured ones
+// included, with a scale that averages in the clipped samples' ratios (which are underestimates) under
+// weights that overflow outside [0, 1]. Here only a sample nearing white is replaced, by the estimate scaled
+// to the block's measured samples, never below its own value and within a bounded headroom (common.wgsl).
+// docs/research/pipeline-review-2026-10.md, "The highlight stack", has the measurements.
 
 @group(0) @binding(0) var<uniform> P: IngestParams;
 @group(0) @binding(1) var cfa: texture_2d<f32>;
@@ -30,67 +36,51 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   if (P.sensor == 1u) {
     if (((ipos.x + ipos.y) & 1) == 0) { upsm = upsm.bgr; }
     let o = 3 * ipos;
-    var c0 = at(o);
-    var c1 = at(o + vec2i(0, 1));
-    var c2 = at(o + vec2i(0, 2));
-    var c3 = at(o + vec2i(1, 0));
-    var c4 = at(o + vec2i(1, 1));
-    var c5 = at(o + vec2i(1, 2));
-    var c6 = at(o + vec2i(2, 0));
-    var c7 = at(o + vec2i(2, 1));
-    var c8 = at(o + vec2i(2, 2));
-    let minr = min(c1, c7);
-    let minb = min(c3, c5);
-    let ming = min(min(min(c0, c2), c4), min(c6, c8));
-    let sr = minr / max(0.001, upsm.r);
-    let sg = ming / max(0.001, upsm.g);
-    let sb = minb / max(0.001, upsm.b);
-    let wr = exp(upsm.r - max(upsm.g, upsm.b));
-    let wg = exp(upsm.g - max(upsm.r, upsm.b));
-    let wbw = exp(upsm.b - max(upsm.r, upsm.g));
-    let scale = (sr * wr + sg * wg + sb * wbw) / (wr + wg + wbw);
-    let maxr = max(c1, c7);
-    let maxb = max(c3, c5);
-    let maxg = max(max(max(c0, c2), c4), max(c6, c8));
-    let maxrgb = max(maxr, max(maxg, maxb));
-    if (maxrgb > softw) {
-      var t = smoothstep(softw, white, maxrgb);
-      c1 = mix(c1, upsm.r * scale, t);
-      c7 = mix(c7, upsm.r * scale, t);
-      c3 = mix(c3, upsm.b * scale, t);
-      c5 = mix(c5, upsm.b * scale, t);
-      t = smoothstep(softw, white, ming);
-      c0 = mix(c0, upsm.g * scale, t);
-      c2 = mix(c2, upsm.g * scale, t);
-      c4 = mix(c4, upsm.g * scale, t);
-      c6 = mix(c6, upsm.g * scale, t);
-      c8 = mix(c8, upsm.g * scale, t);
+    // c1, c7 red; c3, c5 blue; the rest green.
+    var c = array<f32, 9>(
+      at(o), at(o + vec2i(0, 1)), at(o + vec2i(0, 2)),
+      at(o + vec2i(1, 0)), at(o + vec2i(1, 1)), at(o + vec2i(1, 2)),
+      at(o + vec2i(2, 0)), at(o + vec2i(2, 1)), at(o + vec2i(2, 2)));
+    var ch = array<u32, 9>(1u, 0u, 1u, 2u, 1u, 2u, 1u, 0u, 1u);
+    var sum = vec3f(0.0);
+    var n = vec3f(0.0);
+    var top = vec3f(0.0);
+    for (var i = 0; i < 9; i++) {
+      let k = ch[i];
+      top[k] = max(top[k], c[i]);
+      if (c[i] < softw) {
+        sum[k] += c[i];
+        n[k] += 1.0;
+      }
     }
-    put(o, c0);
-    put(o + vec2i(0, 1), c1);
-    put(o + vec2i(0, 2), c2);
-    put(o + vec2i(1, 0), c3);
-    put(o + vec2i(1, 1), c4);
-    put(o + vec2i(1, 2), c5);
-    put(o + vec2i(2, 0), c6);
-    put(o + vec2i(2, 1), c7);
-    put(o + vec2i(2, 2), c8);
+    if (max(top.r, max(top.g, top.b)) > softw) {
+      let est = hilite_estimate(upsm, hilite_scale(upsm, sum, n, top), white);
+      for (var i = 0; i < 9; i++) {
+        c[i] = mix(c[i], max(est[ch[i]], c[i]), smoothstep(softw, white, c[i]));
+      }
+    }
+    put(o, c[0]);
+    put(o + vec2i(0, 1), c[1]);
+    put(o + vec2i(0, 2), c[2]);
+    put(o + vec2i(1, 0), c[3]);
+    put(o + vec2i(1, 1), c[4]);
+    put(o + vec2i(1, 2), c[5]);
+    put(o + vec2i(2, 0), c[6]);
+    put(o + vec2i(2, 1), c[7]);
+    put(o + vec2i(2, 2), c[8]);
   } else {
     let o = 2 * ipos;
     // gather order as in vkdt: w = (0,0) R, z = (1,0) G, x = (0,1) G, y = (1,1) B
     var c = vec4f(at(o + vec2i(0, 1)), at(o + vec2i(1, 1)), at(o + vec2i(1, 0)), at(o));
-    let ming = min(c.x, c.z);
-    let sr = c.w / max(0.001, upsm.r);
-    let sg = ming / max(0.001, upsm.g);
-    let sb = c.y / max(0.001, upsm.b);
-    let wr = exp(upsm.r - max(upsm.g, upsm.b));
-    let wg = exp(upsm.g - max(upsm.r, upsm.b));
-    let wbw = exp(upsm.b - max(upsm.r, upsm.g));
-    let scale = (sr * wr + sg * wg + sb * wbw) / (wr + wg + wbw);
     let maxrgb = max(max(c.x, c.y), max(c.z, c.w));
     if (maxrgb > softw) {
-      let t = smoothstep(softw, white, maxrgb);
-      c = mix(c, scale * vec4f(upsm.g, upsm.b, upsm.g, upsm.r), vec4f(t));
+      let m = select(vec4f(0.0), vec4f(1.0), c < vec4f(softw));
+      let sum = vec3f(c.w * m.w, c.x * m.x + c.z * m.z, c.y * m.y);
+      let n = vec3f(m.w, m.x + m.z, m.y);
+      let top = vec3f(c.w, max(c.x, c.z), c.y);
+      let est = hilite_estimate(upsm, hilite_scale(upsm, sum, n, top), white);
+      let t = smoothstep(vec4f(softw), vec4f(white), c);
+      c = mix(c, max(vec4f(est.g, est.b, est.g, est.r), c), t);
     }
     put(o, c.w);
     put(o + vec2i(1, 0), c.z);

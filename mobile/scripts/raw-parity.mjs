@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // A RAW decoded on the phone against the same RAW decoded by the server (docs/MOBILE.md, stage 2): the colour
-// model must be the one the worker gives the file, and the proxy — LibRaw in wasm, the ingest shaders in WebGPU —
-// the server's proxy at the same size, sample for sample, within what two GPUs' float arithmetic allows.
+// model the phone's LibRaw reads must be the one the worker gives the file, and the proxy — LibRaw in wasm, the
+// ingest shaders in WebGPU — the server's proxy at the same size, sample for sample, within what two GPUs' float
+// arithmetic allows. The phone's way in is the real one: chosen on the home page, imported, and developed by the editor.
 //
 // Usage: node scripts/raw-parity.mjs <sidecar url> <RAW file>… [--swiftshader] [--dump <dir>]   (CHROMIUM_PATH to pick a browser)
 // --dump writes both proxies as raw RGBA16F, <name>.phone.f16 and <name>.server.f16, for a closer look.
 // Needs a running Sidecar with the module and an editing folder to import into, and a worker with a GPU (the
 // server's proxy must come from its GPU ingest, as the phone's does).
 import { chromium } from 'playwright';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { basename } from 'node:path';
 
@@ -18,13 +19,14 @@ const dumpAt = args.indexOf('--dump');
 const dump = dumpAt >= 0 ? args.splice(dumpAt, 2)[1] : null;
 if (dump) mkdirSync(dump, { recursive: true });
 const [url, ...files] = args.filter((a) => !a.startsWith('--'));
-const EDGE = 2560;
 
 const gpuArgs = swiftshader
 	? ['--enable-unsafe-webgpu', '--use-webgpu-adapter=swiftshader', '--enable-unsafe-swiftshader']
 	: ['--enable-unsafe-webgpu', '--enable-features=Vulkan', '--use-vulkan=native', '--use-angle=vulkan', '--disable-vulkan-surface', '--ignore-gpu-blocklist'];
 const browser = await chromium.launch({ headless: true, executablePath: process.env.CHROMIUM_PATH || undefined, args: ['--no-sandbox', ...gpuArgs] });
-const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
+// A phone: `(pointer: coarse)`, which is what has the editor develop on the device. At 3× the editor asks for a
+// 2,560-pixel proxy, as it does on an iPhone.
+const context = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true });
 // SwiftShader can't present a WebGPU canvas headless (see mobile-smoke.mjs); nothing here needs the screen.
 if (swiftshader)
 	await context.addInitScript(() => {
@@ -54,30 +56,22 @@ function close(a, b, path = '') {
 let failed = 0;
 for (const file of files) {
 	const name = basename(file);
-	const bytes = readFileSync(file);
-	// The server's decode: import, then its metadata and its proxy.
-	const body = new FormData();
-	body.append('file', new Blob([bytes]), name);
-	const imported = await fetch(`${url}/api/intake?to=folder`, { method: 'POST', body });
-	if (!imported.ok) throw new Error(`import of ${name}: ${imported.status} ${await imported.text()}`);
-	const { assetKey } = await imported.json();
-	const meta = await (await fetch(`${url}/api/assets/${assetKey}/meta`)).json();
-	const served = await fetch(`${url}/api/assets/${assetKey}/proxy?long_edge=${EDGE}`);
-	const [sw, sh] = [Number(served.headers.get('x-width')), Number(served.headers.get('x-height'))];
-	const server = new Uint16Array(new Uint8Array(await served.arrayBuffer()).buffer);
-
-	// The phone's decode.
+	// The phone's decode: chosen on the home page, imported, and developed on the phone by the editor.
 	const page = await context.newPage();
 	const errors = [];
+	const notHere = [];
 	page.on('pageerror', (e) => errors.push(String(e)));
-	await page.goto(`${url}/m/?inspect`);
+	page.on('console', (m) => /Not developed on this device/.test(m.text()) && notHere.push(m.text()));
+	await page.goto(`${url}/?inspect`);
 	const started = Date.now();
-	await page.locator('input[accept^="image/*,"]').setInputFiles(file);
-	await page.waitForFunction(() => window.__sidecarInspect || /phone couldn't|failed|server can|server decodes/.test(document.querySelector('main')?.textContent ?? ''), null, { timeout: 600_000 });
+	await page.locator('input[type=file]').setInputFiles(file);
+	await page.waitForURL('**/edit/**', { timeout: 600_000 });
+	const assetKey = page.url().split('/edit/')[1].split('?')[0];
+	await page.waitForFunction(() => window.__sidecarInspect, null, { timeout: 600_000 }).catch(() => {});
 	const seconds = (Date.now() - started) / 1e3;
 	const phone = await page.evaluate(() => {
 		const i = window.__sidecarInspect;
-		if (!i) return { reason: document.querySelector('[aria-live]')?.textContent };
+		if (!i) return {};
 		const b = new Uint8Array(i.proxy.f16.buffer);
 		let s = '';
 		for (let k = 0; k < b.length; k += 0x8000) s += String.fromCharCode(...b.subarray(k, k + 0x8000));
@@ -85,10 +79,15 @@ for (const file of files) {
 	});
 	await page.close();
 	if (!phone.f16) {
-		// The page declined and said why (an sRAW, a frame too large…): reported, not compared.
-		console.log(`skip ${name}: not developed on the phone: ${phone.reason}`);
+		// The editor declined and said why (an sRAW, a frame too large…) and asked the server: reported, not compared.
+		console.log(`skip ${name}: not developed on the phone: ${notHere.join(' ') || 'no reason given'}`);
 		continue;
 	}
+	// The server's decode of the same import: its metadata, and its proxy at the size the phone made.
+	const meta = await (await fetch(`${url}/api/assets/${assetKey}/meta`)).json();
+	const served = await fetch(`${url}/api/assets/${assetKey}/proxy?long_edge=${Math.max(phone.width, phone.height)}`);
+	const [sw, sh] = [Number(served.headers.get('x-width')), Number(served.headers.get('x-height'))];
+	const server = new Uint16Array(new Uint8Array(await served.arrayBuffer()).buffer);
 	const mine = new Uint16Array(Buffer.from(phone.f16, 'base64').buffer.slice(0));
 	if (dump) {
 		writeFileSync(join(dump, `${name}.phone.f16`), new Uint8Array(mine.buffer));

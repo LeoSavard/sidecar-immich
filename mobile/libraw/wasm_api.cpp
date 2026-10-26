@@ -104,6 +104,19 @@ const char *scw_info(void) {
     }
     text += "]";
   }
+  text += "],";
+  nums(text, "dngAnalogbalance", i.dng_analogbalance);
+  text += "\"dngCalibration\":[";
+  for (int n = 0; n < 2; n++) {
+    text += n ? ",[" : "[";
+    for (int r = 0; r < 4; r++) {
+      char b[128];
+      std::snprintf(b, sizeof b, "%s[%.9g,%.9g,%.9g,%.9g]", r ? "," : "", i.dng_calibration[n][r][0], i.dng_calibration[n][r][1],
+                    i.dng_calibration[n][r][2], i.dng_calibration[n][r][3]);
+      text += b;
+    }
+    text += "]";
+  }
   text += "]},";
   return done(text);
 }

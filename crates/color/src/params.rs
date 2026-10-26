@@ -261,6 +261,12 @@ pub struct Exposure {
     /// Stored per edit rather than applied as a constant so that an edit made before `PROCESS_VERSION` 3
     /// keeps the picture it had: `migrate` sets it to zero for those, and only a new edit gets the baseline.
     pub baseline_ev: f64,
+    /// "Highlight recovery": how far a sensor-clipped pixel moves toward a neutral of its own level, by its
+    /// clip coverage (`highlight_blend` in `exposure.wgsl`). **0 for a new edit**: it was added to hide the cast
+    /// the old highlight fill left, and against ground truth it now only adds colour error, on the order of 0.06
+    /// → 0.22 in a blown core (docs/research/pipeline-review-2026-10.md §3). An existing edit keeps the 0.5 it
+    /// was approved with without a migration, because every stored edit carries the field: the history's root
+    /// holds the complete parameters and `sc:Edit` the complete current edit.
     pub highlight_blend: f64,
 }
 
@@ -296,7 +302,7 @@ impl Default for Exposure {
         Self {
             ev: 0.0,
             baseline_ev: BASELINE_EV,
-            highlight_blend: 0.5,
+            highlight_blend: 0.0,
         }
     }
 }
@@ -1631,6 +1637,18 @@ mod tests {
             (gain(&plus, SourceKind::Raw) - 2f64.powf(1.0 + BASELINE_EV)).abs() < 1e-5,
             "the person's stacks on the baseline"
         );
+    }
+
+    /// Highlight recovery starts at 0 for a new edit, and an existing one keeps what it stored: every stored
+    /// edit is written whole, so the 0.5 an older Sidecar defaulted to is in it and no migration is needed.
+    #[test]
+    fn highlight_recovery_is_off_for_a_new_edit_and_kept_for_an_old_one() {
+        assert_eq!(EditParams::default().exposure.highlight_blend, 0.0);
+        let mut stored = serde_json::to_value(EditParams::default()).unwrap();
+        stored["exposure"]["highlightBlend"] = serde_json::json!(0.5);
+        let mut old: EditParams = serde_json::from_value(stored).unwrap();
+        old.migrate();
+        assert_eq!(old.exposure.highlight_blend, 0.5);
     }
 
     /// An edit made before `PROCESS_VERSION` 3 was approved as the picture it rendered, so it keeps that

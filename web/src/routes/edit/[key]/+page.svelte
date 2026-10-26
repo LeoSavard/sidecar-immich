@@ -32,7 +32,9 @@
 	import ColorSection from '$lib/ui/sections/ColorSection.svelte';
 	import DetailSection from '$lib/ui/sections/DetailSection.svelte';
 	import { NO_GEOMETRY, isNoGeometry, project, twist, untwist } from '$lib/state/edit-view';
-	import type { Crop, DisplaySpace, EditParams, Frame, Geometry, MaskAdjustment, Meta } from '$lib/types';
+	import type { CameraColor, Crop, DisplaySpace, EditParams, Frame, Geometry, MaskAdjustment, Meta } from '$lib/types';
+	import { originalFile } from '$lib/local/originals';
+	import { developOnDevice } from '$lib/local/develop';
 
 	const SPACES: DisplaySpace[] = ['srgb', 'display-p3'];
 
@@ -54,6 +56,18 @@
 	 * it every few pixels of a drag.
 	 */
 	let asShotWb = $state({ temperatureK: 5000, tint: 0 });
+	/**
+	 * The proxy was made on this device from its own copy of the original (docs/MOBILE.md), not downloaded: the
+	 * editor is the same, and says so in case something it shows relies on the server's decode.
+	 */
+	let onDevice = $state(false);
+	let onDeviceNoticeDismissed = $state(false);
+	/**
+	 * The colour model the proxy is in when it isn't the server's: a developed photo the browser decoded into
+	 * Display P3. Everything that packs or samples the proxy reads `cameraColor()`.
+	 */
+	let deviceColor: CameraColor | null = null;
+	const cameraColor = () => deviceColor ?? meta!.info.color;
 	let lookClipboard = $state<LookClipboard | null>(readLookClipboard());
 	let lut = $state<Float32Array | null>(null);
 	/** The profile of the spectral colour stock this edit names, once the server has sent it. */
@@ -79,6 +93,24 @@
 	let before = $state(false);
 	let section = $state<Section>('light');
 	let showPhoneHistogram = $state(true);
+	/** The keyboard shortcuts, listed over the editor (`?`). */
+	let showShortcuts = $state(false);
+	const SHORTCUTS: [string, string][] = [
+		['\\', 'Before and after: see it as shot (or as the version chosen in History), and back'],
+		['Press and hold the photo', 'The same, while held'],
+		['⌘Z / Ctrl+Z', 'Undo'],
+		['⇧⌘Z / Ctrl+Shift+Z', 'Redo'],
+		['E', 'Export'],
+		['Z', 'Open or close Detail, with the loupe'],
+		['R', 'Crop and straighten'],
+		['J', 'Show clipped highlights and shadows'],
+		['H', 'Hide or show the editing tools'],
+		['Double click or double tap', 'Zoom to 100 % and back; in the loupe, 100 → 150 → 200 %'],
+		['Esc', 'Stop picking (white balance, focus, measure)'],
+		['?', 'This list']
+	];
+	/** What the worker can do (`GET /api/capabilities`); null until it says. */
+	let capabilities = $state<{ models: boolean; gpu: boolean } | null>(null);
 	/** The editing tools put away so the photo has the screen: only the section tabs stay. Kept per device. */
 	let toolsHidden = $state(typeof localStorage !== 'undefined' && localStorage.getItem('sidecar.toolsHidden') === '1');
 	let wide = $state(false);
@@ -125,7 +157,33 @@
 	const edit = $derived(session.edit);
 	const readOnly = $derived(session.readOnly);
 	const compare = $derived(session.compare);
-	const changed = () => session.changed();
+	const changed = () => {
+		session.changed();
+		offerBeforeHint();
+	};
+
+	// ---------- the before/after hint: how to compare, said once and quietly (owner's call: no button for it)
+	const BEFORE_HINT_KEY = 'sidecar.beforeHintSeen';
+	let beforeHint = $state(false);
+	let beforeHintDone = (() => {
+		try {
+			return localStorage.getItem(BEFORE_HINT_KEY) === '1';
+		} catch {
+			return true;
+		}
+	})();
+	/** After the first change on this device, for a few seconds; never again once seen or once compared. */
+	function offerBeforeHint() {
+		if (beforeHintDone) return;
+		beforeHintDone = true;
+		beforeHint = true;
+		setTimeout(() => (beforeHint = false), 5000);
+		try {
+			localStorage.setItem(BEFORE_HINT_KEY, '1');
+		} catch {
+			// Shown again next time; that is all.
+		}
+	}
 	const committed = () => session.committed();
 	/** The crop tool is in use: the canvas shows the whole straightened picture, with the crop's frame over it. */
 	const cropping = $derived(!readOnly && !toolsHidden && (wide ? cropOpen : section === 'crop'));
@@ -263,7 +321,7 @@
 		// `schedule`, not the flag alone: the profile lands in a promise, with no frame on the way.
 		if (stock) loadProfile(stock, () => schedule(true));
 		slideProfile = stock ? cachedProfile(stock) : undefined;
-		const packed = packer.pack(source, meta!.info.color, meta!.info.sourceKind ?? 'raw', display, slideProfile);
+		const packed = packer.pack(source, cameraColor(), meta!.info.sourceKind ?? 'raw', display, slideProfile);
 		if (!before) {
 			lut = packed.lut;
 			maskCurves = packed.maskCurves;
@@ -317,7 +375,49 @@
 		view.render(develop.output, canvas, viewport, (clipHigh ? CLIP_HIGHS : 0) | (clipLow ? CLIP_LOWS : 0) | (peaking ? PEAKING : 0) | maskFlags, geometry);
 		markerPos = cropping ? null : imageToScreen(afPoint());
 		if (cropping) layoutTick++;
+		placeCamera();
 	}
+
+	// ---------- the camera's own rendering beside the edit, at the edit's zoom and position
+	let cameraPane = $state<HTMLDivElement | null>(null);
+	let cameraImg = $state<HTMLImageElement | null>(null);
+	let cameraTransform = $state('');
+
+	/**
+	 * Put the camera's JPEG where each of its points sits in the edit's view. The JPEG is the whole picture, as the
+	 * proxy is, so a point of the picture (the edit's output frame mapped back through crop, straighten and turns) is
+	 * a point of the JPEG; three canvas points give the affine map that turns the JPEG's pixels into the pane's, which
+	 * has the canvas's size. Zoom, pan, a crop and a straighten all follow; keystone and lens correction are
+	 * linearised at the centre, close enough to compare by.
+	 */
+	function placeCamera() {
+		const img = cameraImg;
+		if (!sideBySide || !img?.naturalWidth || !develop?.output) return;
+		const r = imageRect();
+		const toPicture = displayFrame()?.frame.toPicture ?? [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+		const at = (x: number, y: number) => project(toPicture, [(x - r.x) / r.w, (y - r.y) / r.h]);
+		const [cx, cy, d] = [canvas.width / 2, canvas.height / 2, Math.max(16, canvas.width / 4)];
+		const [s0, sx, sy] = [at(cx, cy), at(cx + d, cy), at(cx, cy + d)];
+		// d(picture)/d(canvas pixel), and its inverse.
+		const [a, b, c, e] = [(sx[0] - s0[0]) / d, (sy[0] - s0[0]) / d, (sx[1] - s0[1]) / d, (sy[1] - s0[1]) / d];
+		const det = a * e - b * c;
+		if (!Number.isFinite(det) || Math.abs(det) < 1e-12) return;
+		const inv = [e / det, -b / det, -c / det, a / det];
+		// JPEG pixel m → picture m / (W, H) → canvas pixel p0 + inv · (m / (W, H) − s0) → pane CSS pixel p / dpr.
+		const [W, H, k] = [img.naturalWidth, img.naturalHeight, 1 / devicePixelRatio];
+		const m = [(inv[0] * k) / W, (inv[2] * k) / W, (inv[1] * k) / H, (inv[3] * k) / H];
+		const tx = (cx - (inv[0] * s0[0] + inv[1] * s0[1])) * k;
+		const ty = (cy - (inv[2] * s0[0] + inv[3] * s0[1])) * k;
+		cameraTransform = `matrix(${m.join(',')},${tx},${ty})`;
+	}
+
+	// The pane takes the canvas's wheel as it takes its pointers; a wheel listener must be able to cancel.
+	$effect(() => {
+		const pane = cameraPane;
+		if (!pane) return;
+		pane.addEventListener('wheel', wheel, { passive: false });
+		return () => pane.removeEventListener('wheel', wheel);
+	});
 
 	// ---------- geometry: crop, straighten, keystone, turns (sidecar_color::geometry, through wasm)
 
@@ -711,7 +811,7 @@
 			setTimeout(() => (status = ''), 3000);
 			return;
 		}
-		const wb = packer.whiteFromNeutral(meta.info.color, rgb);
+		const wb = packer.whiteFromNeutral(cameraColor(), rgb);
 		const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, Math.round(v)));
 		update((ed) => {
 			ed.whiteBalance = { mode: 'custom', temperatureK: clamp(wb.temperatureK, 2000, 12000), tint: clamp(wb.tint, -150, 150) };
@@ -1136,7 +1236,52 @@
 		schedule(true);
 	}
 
+	/**
+	 * On a phone that still holds the original — it was imported from here — develop the proxy here instead of
+	 * downloading it (a 2,560-pixel proxy is some 35 MB over the network, and the server may not decode every
+	 * format the phone does). False, and the server's proxy is used as before, wherever it can't: no copy on the
+	 * device, a format the device can't decode, or `?server` in the address. `?device` asks for it on a desktop.
+	 */
+	async function developHere(device: GPUDevice, edge: number, phone: boolean): Promise<boolean> {
+		const q = page.url.searchParams;
+		if (q.has('server') || !(phone || q.has('device'))) return false;
+		const original = await originalFile(key).catch(() => null);
+		if (!original) return false;
+		status = 'Developing on this device…';
+		const local = await developOnDevice(device, original, packer, edge).catch((e) => `it failed (${e instanceof Error ? e.message : e})`);
+		if (typeof local === 'string') {
+			console.info(`Not developed on this device, so the server develops it: ${local}.`);
+			return false;
+		}
+		if (local.camera) {
+			deviceColor = local.camera;
+			const asShot = packer.pack(defaults, cameraColor(), meta!.info.sourceKind ?? 'raw', display);
+			asShotWb = { temperatureK: asShot.temperatureK, tint: asShot.tint };
+		}
+		develop.setSource(local.proxy.width, local.proxy.height, local.proxy.f16);
+		proxyLoaded = true;
+		onDevice = true;
+		status = '';
+		// For tests and for looking: `?inspect` leaves the proxy and its colour model on the window.
+		if (q.has('inspect')) Object.assign(window, { __sidecarInspect: { proxy: local.proxy, camera: local.rawColor ?? cameraColor(), info: local.raw, space: local.space } });
+		schedule(true);
+		// Focus peaking's mask is the server's to compute; it arrives when it does, and nothing waits for it.
+		api(`/api/assets/${key}/focus?edge=${edge}`)
+			.then((r) => r.arrayBuffer())
+			.then((b) => view.loadFocusMask(b))
+			.catch(() => {});
+		return true;
+	}
+
 	async function start() {
+		api('/api/capabilities')
+			.then((r) => r.json())
+			.then((c) => {
+				capabilities = c;
+				// A section the server can't run, left open from another photo, gives way to Light.
+				if (!offered(section)) section = 'light';
+			})
+			.catch(() => {});
 		try {
 			const [metaResp, stateResp] = await Promise.all([api(`/api/assets/${key}/meta`), api(`/api/assets/${key}/edit`)]);
 			meta = await metaResp.json();
@@ -1184,12 +1329,84 @@
 			histStride = phone ? 2 : 1;
 			const wanted = Math.round(Math.max(innerWidth, innerHeight) * devicePixelRatio * 1.25);
 			const edge = Math.min(wanted, device.limits.maxTextureDimension2D, phone ? 2560 : 4096);
+			if (await developHere(device, edge, phone)) return;
 			status = 'Loading preview…';
 			await loadProxy(768);
 			status = '';
 			await loadProxy(edge);
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
+		}
+	}
+
+	// ---------- the phone's panel: its height, set by holding its handle and then dragging
+	const SHEET_KEY = 'sidecar.sheetVh';
+	const SHEET_MIN = 22;
+	const SHEET_MAX = 85;
+	let sheet = $state<{ vh: number | null; armed: boolean }>({ vh: null, armed: false });
+	try {
+		const v = Number(localStorage.getItem(SHEET_KEY));
+		if (v >= SHEET_MIN && v <= SHEET_MAX) sheet.vh = v;
+	} catch {
+		// No storage: the panel keeps its usual height.
+	}
+	let sheetHold: ReturnType<typeof setTimeout> | undefined;
+
+	// ---------- the desktop sidebar: which sections are open, as each person last left them
+	const OPEN_KEY = 'sidecar.openSections';
+	const openSections = (() => {
+		try {
+			const v = JSON.parse(localStorage.getItem(OPEN_KEY) ?? 'null');
+			if (Array.isArray(v)) return new Set<Section>(v);
+		} catch {
+			// Nothing remembered: the defaults.
+		}
+		return new Set<Section>(['wb', 'light']);
+	})();
+	function rememberOpen(id: Section, open: boolean) {
+		// Crop and Detail open themselves from shortcuts and taps; only a person's own choice is remembered.
+		if (id === 'crop') return;
+		if (open) openSections.add(id);
+		else openSections.delete(id);
+		try {
+			localStorage.setItem(OPEN_KEY, JSON.stringify([...openSections]));
+		} catch {
+			// Remembered for this page only.
+		}
+	}
+	let sheetFrom = { y: 0, id: -1 };
+
+	function sheetDown(e: PointerEvent) {
+		(e.currentTarget as Element).setPointerCapture(e.pointerId);
+		sheetFrom = { y: e.clientY, id: e.pointerId };
+		clearTimeout(sheetHold);
+		sheetHold = setTimeout(() => {
+			sheet.armed = true;
+			navigator.vibrate?.(10);
+		}, 350);
+	}
+
+	function sheetMove(e: PointerEvent) {
+		if (e.pointerId !== sheetFrom.id) return;
+		// Moving before the hold has armed it is a swipe, not a resize: let it go.
+		if (!sheet.armed) {
+			if (Math.abs(e.clientY - sheetFrom.y) > 8) clearTimeout(sheetHold);
+			return;
+		}
+		const vh = ((innerHeight - e.clientY) / innerHeight) * 100;
+		sheet.vh = Math.round(Math.min(SHEET_MAX, Math.max(SHEET_MIN, vh)));
+	}
+
+	function sheetUp(e: PointerEvent) {
+		if (e.pointerId !== sheetFrom.id) return;
+		clearTimeout(sheetHold);
+		sheetFrom.id = -1;
+		if (!sheet.armed) return;
+		sheet.armed = false;
+		try {
+			if (sheet.vh) localStorage.setItem(SHEET_KEY, String(sheet.vh));
+		} catch {
+			// The height lasts as long as the page.
 		}
 	}
 
@@ -1200,7 +1417,16 @@
 	let downAt = { x: 0, y: 0, t: 0 };
 	let lastTapAt = 0;
 
-	const px = (e: PointerEvent) => ({ x: e.offsetX * devicePixelRatio, y: e.offsetY * devicePixelRatio });
+	/**
+	 * A pointer in device pixels of the view it is over: the canvas, or the camera's pane beside it, which is the
+	 * canvas's size and shows the same picture at the same place, so it has the canvas's coordinates and the same
+	 * gestures (`data-view` marks both).
+	 */
+	const px = (e: PointerEvent | WheelEvent) => {
+		const host = (e.target as Element | null)?.closest?.('[data-view]') ?? canvas;
+		const r = host.getBoundingClientRect();
+		return { x: (e.clientX - r.left) * devicePixelRatio, y: (e.clientY - r.top) * devicePixelRatio };
+	};
 
 	function zoomAt(point: { x: number; y: number }, nextZoom: number, from = { zoom: viewport.zoom, panX: viewport.panX, panY: viewport.panY }) {
 		const z = Math.min(16, Math.max(1, nextZoom));
@@ -1214,13 +1440,16 @@
 
 	function setBefore(on: boolean) {
 		if (before === on) return;
+		// Comparing is the hint learnt: it isn't needed again.
+		beforeHint = false;
+		beforeHintDone = true;
 		before = on;
 		schedule(true);
 		if (fallback) renderPreview();
 	}
 
 	function canvasDown(e: PointerEvent) {
-		canvas.setPointerCapture(e.pointerId);
+		(e.currentTarget as Element).setPointerCapture(e.pointerId);
 		pointers.set(e.pointerId, px(e));
 		downAt = { ...px(e), t: performance.now() };
 		clearTimeout(holdTimer);
@@ -1298,11 +1527,19 @@
 
 	function wheel(e: WheelEvent) {
 		e.preventDefault();
-		zoomAt({ x: e.offsetX * devicePixelRatio, y: e.offsetY * devicePixelRatio }, viewport.zoom * Math.exp(-e.deltaY * 0.002));
+		zoomAt(px(e), viewport.zoom * Math.exp(-e.deltaY * 0.002));
 	}
 
 	function keydown(e: KeyboardEvent) {
 		if ((e.target as HTMLElement)?.tagName === 'INPUT') return;
+		if (e.key === '?') {
+			showShortcuts = !showShortcuts;
+			return;
+		}
+		if (e.key === 'Escape' && showShortcuts) {
+			showShortcuts = false;
+			return;
+		}
 		if (e.key === 'Escape' && (pickingWhite || pickingFocus || probing)) {
 			pickingWhite = pickingFocus = probing = false;
 			return;
@@ -1341,18 +1578,13 @@
 		});
 		ro.observe(canvas);
 		const onHide = () => document.visibilityState === 'hidden' && session.commit(true);
-		const noGesture = (e: Event) => e.preventDefault();
 		document.addEventListener('visibilitychange', onHide);
-		canvas.addEventListener('gesturestart', noGesture);
-		canvas.addEventListener('gesturechange', noGesture);
 		canvas.addEventListener('wheel', wheel, { passive: false });
 		start();
 		return () => {
 			ro.disconnect();
 			mq.removeEventListener('change', onWide);
 			document.removeEventListener('visibilitychange', onHide);
-			canvas.removeEventListener('gesturestart', noGesture);
-			canvas.removeEventListener('gesturechange', noGesture);
 			canvas.removeEventListener('wheel', wheel);
 		};
 	});
@@ -1378,10 +1610,11 @@
 		]
 			.filter(Boolean)
 			.join(' · ');
-	const sections: { id: Section; label: string; short: string }[] = [
+	const allSections: { id: Section; label: string; short: string }[] = [
 		{ id: 'wb', label: 'White balance', short: 'WB' },
 		{ id: 'film', label: 'Film', short: 'Film' },
-		{ id: 'color', label: 'Color', short: 'Color' },
+		// Not "Colour": that is the group it sits in, and a section named after its group reads as the same thing.
+		{ id: 'color', label: 'Mixer', short: 'Mixer' },
 		{ id: 'light', label: 'Light', short: 'Light' },
 		{ id: 'curve', label: 'Curve', short: 'Curve' },
 		{ id: 'crop', label: 'Crop and straighten', short: 'Crop' },
@@ -1391,16 +1624,24 @@
 		{ id: 'lens', label: 'Lens', short: 'Lens' },
 		{ id: 'history', label: 'History', short: 'History' }
 	];
-	const sectionById = (id: Section) => sections.find((x) => x.id === id)!;
+	const sectionById = (id: Section) => allSections.find((x) => x.id === id)!;
 	/** The tools as the panel groups them: a group with one section is that section. */
-	const groups: { id: string; label: string; short: string; children: Section[] }[] = [
+	const allGroups: { id: string; label: string; short: string; children: Section[] }[] = [
 		{ id: 'colour', label: 'Colour', short: 'Colour', children: ['wb', 'film', 'color'] },
 		{ id: 'light', label: 'Light', short: 'Light', children: ['light', 'curve'] },
 		{ id: 'crop', label: 'Crop and straighten', short: 'Crop', children: ['crop'] },
 		{ id: 'processing', label: 'Processing', short: 'Processing', children: ['depth', 'masks', 'detail', 'lens'] },
 		{ id: 'history', label: 'History', short: 'History', children: ['history'] }
 	];
-	const groupOf = (id: Section) => groups.find((g) => g.children.includes(id))!;
+	/**
+	 * A tool this server can't run is left out rather than shown with a sentence saying so (owner's call,
+	 * 2026-10-26): Depth without the models, Detail's loupe without a GPU on the worker. Until the worker has said
+	 * (`GET /api/capabilities`), everything is shown.
+	 */
+	const offered = (id: Section) => !capabilities || ((id !== 'depth' || capabilities.models) && (id !== 'detail' || capabilities.gpu));
+	const sections = $derived(allSections.filter((x) => offered(x.id)));
+	const groups = $derived(allGroups.map((g) => ({ ...g, children: g.children.filter(offered) })).filter((g) => g.children.length > 0));
+	const groupOf = (id: Section) => groups.find((g) => g.children.includes(id)) ?? groups[0];
 </script>
 
 <svelte:head><title>{meta?.fileName ?? 'Sidecar'}</title></svelte:head>
@@ -1480,11 +1721,12 @@
 	<details
 		id="section-{s.id}"
 		class="{top ? 'border-t border-line' : 'border-t border-line/50'} py-2"
-		open={s.id === 'wb' || s.id === 'light' || (s.id === 'crop' && cropOpen)}
+		open={openSections.has(s.id) || (s.id === 'crop' && cropOpen)}
 		ontoggle={(e) => {
 			const open = (e.currentTarget as HTMLDetailsElement).open;
 			if (s.id === 'detail') detailOpen = open;
 			if (s.id === 'crop') cropOpen = open;
+			rememberOpen(s.id, open);
 		}}
 	>
 		<summary class="cursor-pointer py-1 text-xs font-medium">{s.label}</summary>
@@ -1504,6 +1746,8 @@
 		     without WebGPU nothing ever draws into it and the server's JPEG sits on top. -->
 		<canvas
 			bind:this={canvas}
+			data-view
+			title={wide ? 'Hold, or press \\, to see it as shot · double click for 100 %' : undefined}
 			class="block touch-none {sideBySide ? (wide ? 'h-full w-1/2' : 'h-1/2 w-full') : 'h-full w-full'} {fallback ? 'invisible' : ''} {pickingWhite || pickingFocus || probing ? 'cursor-crosshair' : ''}"
 			onpointerdown={canvasDown}
 			onpointermove={canvasMove}
@@ -1514,9 +1758,33 @@
 		></canvas>
 		{#if sideBySide}
 			<!-- After the canvas, so the canvas keeps its corner and everything drawn over it keeps its place. -->
-			<div class="absolute flex items-center justify-center border-line bg-ground p-2 {wide ? 'inset-y-0 right-0 w-1/2 border-l' : 'inset-x-0 bottom-0 h-1/2 border-t'}">
-				<img src="/api/assets/{key}/camera" alt="The camera's own rendering" class="max-h-full max-w-full object-contain" onerror={() => { cameraMissing = true; showCamera = false; }} />
-				<span class="absolute top-2 left-2 rounded bg-ground/80 px-2 py-1 text-xs text-fg-2">Camera</span>
+			<!-- The same gestures as the canvas, in the canvas's coordinates: either side zooms and pans both. -->
+			<div
+				bind:this={cameraPane}
+				data-view
+				role="img"
+				aria-label="The camera's own rendering, at the edit's zoom and position"
+				class="absolute touch-none overflow-hidden border-line bg-ground {wide ? 'inset-y-0 right-0 w-1/2 border-l' : 'inset-x-0 bottom-0 h-1/2 border-t'} {pickingWhite || pickingFocus || probing ? 'cursor-crosshair' : ''}"
+				onpointerdown={canvasDown}
+				onpointermove={canvasMove}
+				onpointerup={canvasUp}
+				onpointercancel={canvasUp}
+				oncontextmenu={(e) => e.preventDefault()}
+			>
+				<img
+					bind:this={cameraImg}
+					src="/api/assets/{key}/camera"
+					alt=""
+					draggable="false"
+					class="pointer-events-none absolute top-0 left-0 max-w-none origin-top-left select-none {cameraTransform ? '' : 'invisible'}"
+					style="transform: {cameraTransform}"
+					onload={() => schedule()}
+					onerror={() => {
+						cameraMissing = true;
+						showCamera = false;
+					}}
+				/>
+				<span class="pointer-events-none absolute top-2 left-2 rounded bg-ground/80 px-2 py-1 text-xs text-fg-2">Camera</span>
 			</div>
 		{/if}
 		{#if fallback}
@@ -1555,8 +1823,21 @@
 				onclick={jumpToAfPoint}
 			></button>
 		{/if}
+		{#if beforeHint && !status && !error}
+			<p class="pointer-events-none absolute inset-x-4 top-[max(3.25rem,calc(env(safe-area-inset-top)+2.5rem))] mx-auto w-fit rounded bg-ground/80 px-3 py-1.5 text-center text-xs text-fg-2" role="status">
+				{wide ? 'Press \\ or hold the photo to see it as shot' : 'Press and hold the photo to see it as shot'}
+			</p>
+		{/if}
 		{#if status || error}
 			<p class="absolute inset-x-4 top-[max(1rem,env(safe-area-inset-top))] text-center text-sm {error ? 'text-danger' : 'text-fg-2'}">{error || status}</p>
+		{:else if onDevice && !onDeviceNoticeDismissed}
+			<div role="note" class="absolute inset-x-4 bottom-[max(1rem,env(safe-area-inset-bottom))] mx-auto flex max-w-md items-start gap-2 rounded bg-ground/85 px-3 py-2 text-xs text-fg-2">
+				<p class="flex-1">
+					Developed on this device, so some advanced features might be missing.
+					<a href="?server" data-sveltekit-reload class="underline underline-offset-2">Develop it on the server</a>
+				</p>
+				<button type="button" class="-my-1 px-1 text-fg-2" aria-label="Dismiss" onclick={() => (onDeviceNoticeDismissed = true)}>×</button>
+			</div>
 		{/if}
 		<!-- The way back. Until this, the only way out of the editor on a phone was the browser's own back
 		     gesture, which a photo opened from a share or a link does not always have. -->
@@ -1593,6 +1874,8 @@
 				</div>
 			{/if}
 			{#if !wide && !fallback}
+				<!-- With the photo's other toggles, above them: in the tool row it was pushed off a 390-pixel screen. -->
+				<button type="button" aria-pressed={showPhoneHistogram} class="rounded-full px-2.5 py-1 text-[0.6875rem] {showPhoneHistogram ? 'bg-fg text-ground' : 'bg-ground/80 text-fg-2'}" onclick={() => (showPhoneHistogram = !showPhoneHistogram)}>Histogram</button>
 				<button type="button" aria-pressed={peaking} class="rounded-full px-2.5 py-1 text-[0.6875rem] {peaking ? 'bg-fg text-ground' : 'bg-ground/80 text-fg-2'}" onclick={() => { peaking = !peaking; schedule(); }}>Focus</button>
 				{#if cameraOffered}
 					<button type="button" aria-pressed={showCamera} class="rounded-full px-2.5 py-1 text-[0.6875rem] {showCamera ? 'bg-fg text-ground' : 'bg-ground/80 text-fg-2'}" onclick={() => (showCamera = !showCamera)}>Camera</button>
@@ -1612,7 +1895,26 @@
 	{#if edit && meta && !(wide && toolsHidden)}
 		<!-- Phone: one tool at a time in a bottom sheet. Desktop: all sections in pipeline order. Tools hidden:
 		     the phone keeps its tab row, the desktop a strip of tabs over the photo. -->
-		<aside class="flex max-h-[48dvh] shrink-0 flex-col bg-panel pb-[max(0.75rem,env(safe-area-inset-bottom))] lg:max-h-none lg:w-80 lg:pb-3">
+		<aside
+			class="flex max-h-[48dvh] shrink-0 flex-col bg-panel pb-[max(0.75rem,env(safe-area-inset-bottom))] lg:max-h-none lg:w-80 lg:pb-3"
+			style={!wide && sheet.vh ? `height: ${sheet.vh}dvh; max-height: ${sheet.vh}dvh` : undefined}
+		>
+			{#if !wide && !toolsHidden}
+				<!-- Hold, then drag: a press on the handle arms it (it lights up), and only then does moving resize the
+				     panel, so a swipe that starts here by accident changes nothing (owner's call). -->
+				<div
+					class="flex h-5 shrink-0 touch-none items-center justify-center"
+					role="separator"
+					aria-orientation="horizontal"
+					aria-label="Panel height: press and hold, then drag"
+					onpointerdown={sheetDown}
+					onpointermove={sheetMove}
+					onpointerup={sheetUp}
+					onpointercancel={sheetUp}
+				>
+					<span class="h-1 w-10 rounded-full transition-colors {sheet.armed ? 'bg-fg' : 'bg-line'}"></span>
+				</div>
+			{/if}
 			{#if !toolsHidden}
 			<header class="flex items-center justify-between gap-3 px-6 pt-3 pb-2 lg:flex-col lg:items-stretch lg:gap-2 lg:px-4">
 				<div class="min-w-0 text-xs text-fg-2">
@@ -1620,13 +1922,13 @@
 					<p class="truncate">{cameraLine(meta.info)}</p>
 				</div>
 				<div class="flex shrink-0 gap-2">
-					<button type="button" class="grid size-9 place-items-center rounded bg-raised text-fg-2 disabled:opacity-40" aria-label="Undo" disabled={!session.canUndo || readOnly} onclick={() => session.undo()}>
+					<button type="button" class="grid size-9 place-items-center rounded bg-raised text-fg-2 disabled:opacity-40" aria-label="Undo" title="Undo (⌘Z)" disabled={!session.canUndo || readOnly} onclick={() => session.undo()}>
 						<svg viewBox="0 0 16 16" class="size-4" aria-hidden="true"><path d="M6 3 2 7l4 4M2.5 7H10a4 4 0 0 1 0 8H8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></svg>
 					</button>
-					<button type="button" class="grid size-9 place-items-center rounded bg-raised text-fg-2 disabled:opacity-40" aria-label="Redo" disabled={!session.canRedo || readOnly} onclick={() => session.redo()}>
+					<button type="button" class="grid size-9 place-items-center rounded bg-raised text-fg-2 disabled:opacity-40" aria-label="Redo" title="Redo (⇧⌘Z)" disabled={!session.canRedo || readOnly} onclick={() => session.redo()}>
 						<svg viewBox="0 0 16 16" class="size-4 -scale-x-100" aria-hidden="true"><path d="M6 3 2 7l4 4M2.5 7H10a4 4 0 0 1 0 8H8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></svg>
 					</button>
-					<button type="button" class="h-9 rounded bg-raised px-3 text-sm" onclick={() => (exporting = true)}>Export</button>
+					<button type="button" class="h-9 rounded bg-raised px-3 text-sm" title="Export (E)" onclick={() => (exporting = true)}>Export</button>
 					<button type="button" class="h-9 rounded bg-fg px-4 text-sm font-medium text-ground disabled:bg-raised disabled:text-muted" disabled={!session.dirty || session.saving || readOnly} onclick={() => session.commit()}>
 						{session.saving ? 'Saving…' : session.dirty ? 'Save' : 'Saved'}
 					</button>
@@ -1720,7 +2022,9 @@
 						{/if}
 						{/if}
 					</div>
-					<div class="flex items-center gap-1" role="radiogroup" aria-label="Viewing and exporting in">
+					<!-- "Output", not "Display": the space decides the export as well as the screen. -->
+					<div class="flex items-center gap-1" role="radiogroup" aria-label="Viewing and exporting in" title="The colour space the photo is shown and exported in">
+						<span class="pr-0.5 text-muted">Output</span>
 						{#each SPACES as sp (sp)}
 							<button type="button" role="radio" aria-checked={displaySpace === sp} title="View and export in {SPACE_LABELS[sp]}" class="rounded-full px-2 py-0.5 {displaySpace === sp ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" onclick={() => setOutputSpace(sp)}>{sp === 'srgb' ? 'sRGB' : 'P3'}</button>
 						{/each}
@@ -1734,9 +2038,6 @@
 					{@const on = groupOf(section).id === g.id && !toolsHidden}
 					<button type="button" aria-pressed={on} class="h-8 shrink-0 rounded-full px-3 text-xs {on ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" aria-label={g.label} onclick={() => setToolsHidden(false, groupOf(section).id === g.id ? section : g.children[0])}>{g.short}</button>
 				{/each}
-				<button type="button" aria-pressed={showPhoneHistogram} aria-label="Show histogram" class="ml-auto grid size-8 shrink-0 place-items-center rounded-full {showPhoneHistogram ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" onclick={() => (showPhoneHistogram = !showPhoneHistogram)}>
-					<svg viewBox="0 0 16 16" class="size-4" aria-hidden="true"><path d="M1 14 L4 8 L7 10 L10 3 L13 9 L15 6 L15 14 Z" fill="currentColor" /></svg>
-				</button>
 			</nav>
 
 			{#if !toolsHidden && groupOf(section).children.length > 1}
@@ -1759,18 +2060,33 @@
 					{#if g.children.length === 1}
 						{@render sectionDetails(sectionById(g.children[0]), true)}
 					{:else}
-						<details class="border-t border-line py-2" open={g.id === 'colour' || g.id === 'light'}>
-							<summary class="cursor-pointer py-1 text-[11px] font-semibold tracking-wide text-fg-2 uppercase">{g.label}</summary>
-							<div class="pl-2">
-								{#each g.children as id (id)}{@render sectionDetails(sectionById(id), false)}{/each}
-							</div>
-						</details>
+						<!-- One level of folding (owner's call): the group is a heading, its sections fold. -->
+						<section class="border-t border-line pt-3 pb-1">
+							<h2 class="py-1 text-[11px] font-semibold tracking-wide text-fg-2 uppercase">{g.label}</h2>
+							{#each g.children as id (id)}{@render sectionDetails(sectionById(id), false)}{/each}
+						</section>
 					{/if}
 				{/each}
+				<button type="button" class="mt-3 mb-1 text-[0.6875rem] text-muted underline underline-offset-2" onclick={() => (showShortcuts = true)}>Keyboard shortcuts (?)</button>
 			</div>
 			{/if}
 		</aside>
 	{/if}
 </div>
+
+{#if showShortcuts}
+	<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+	<div class="fixed inset-0 z-50 grid place-items-center bg-ground/70 p-4" onclick={() => (showShortcuts = false)}>
+		<div role="dialog" aria-modal="true" aria-label="Keyboard shortcuts" tabindex="-1" class="w-full max-w-md rounded bg-panel p-4 text-sm" onclick={(e) => e.stopPropagation()}>
+			<div class="mb-3 flex items-baseline justify-between">
+				<h2 class="font-medium">Keyboard shortcuts</h2>
+				<button type="button" class="text-fg-2" aria-label="Close" onclick={() => (showShortcuts = false)}>×</button>
+			</div>
+			<dl class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-xs">
+				{#each SHORTCUTS as [k, what] (k)}<dt class="font-mono whitespace-nowrap text-fg">{k}</dt><dd class="text-fg-2">{what}</dd>{/each}
+			</dl>
+		</div>
+	</div>
+{/if}
 
 {#if exporting}<ExportSheet assetKey={key} colorSpace={displaySpace} prepare={() => session.prepareExport()} onclose={() => (exporting = false)} />{/if}

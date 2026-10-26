@@ -44,13 +44,17 @@ pub const DEFAULT_EDGE: u32 = 2560;
 /// The two move for unrelated reasons. 0.2.1 fixed a HEIC at EXIF orientation 3 being rotated 180° twice —
 /// libheif had already applied the file's own `irot` — and left every proxy decoded before it in place and
 /// upside down, because nothing in the file name had changed. Generation 2 is that fix; 3 orients the
-/// mirrored EXIF orientations (2, 4, 5, 7), which every earlier generation left upright.
-pub const INGEST_GENERATION: u32 = 3;
+/// mirrored EXIF orientations (2, 4, 5, 7), which every earlier generation left upright. 4 is the bounded
+/// highlight fill (D14 in docs/research/pipeline-review-2026-10.md): measured channels kept, clipped ones
+/// filled to agree with them, and no NaN from a damaged file. 5 decodes a camera's Adobe RGB JPEG, marked only in
+/// its EXIF, in Adobe RGB's primaries and curve instead of as sRGB (the review's D11).
+pub const INGEST_GENERATION: u32 = 5;
 
 /// What cached metadata was *read* by, apart from the pixels: bump when `Meta` gains something a re-read of
 /// the same file would now fill in, so it is read again without rebuilding a single proxy. 1 adds the lens
-/// correction the file carries and the lens's identity.
-pub const META_REVISION: u32 = 1;
+/// correction the file carries and the lens's identity; 2 the Adobe RGB source space, read from EXIF; 3 a DNG's
+/// colour composed with its `AnalogBalance` and `CameraCalibration`, which is where Apple's ProRAW keeps its white.
+pub const META_REVISION: u32 = 3;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1091,6 +1095,7 @@ pub fn router(worker: Arc<Worker>) -> Router {
     sweep_outbox(worker.cache.clone());
     Router::new()
         .route("/v1/health", get(|| async { "ok" }))
+        .route("/v1/capabilities", get(capabilities))
         .route("/v1/render", post(render))
         .route("/v1/loupe", post(loupe))
         .route("/v1/preview", post(preview))
@@ -1109,6 +1114,13 @@ pub fn router(worker: Arc<Worker>) -> Router {
         .route("/v1/lensfun/done", post(lensfun_done))
         .route("/v1/lensfun/{name}", axum::routing::put(lensfun_put))
         .with_state(worker)
+}
+
+/// What this worker can do beyond decoding, so the editor shows only the tools that will work: the models'
+/// masks and depth (`sidecar-ml`, in the `-ml` image, and a GPU), and the loupe and full-resolution renders (a GPU).
+async fn capabilities(State(w): State<Arc<Worker>>) -> Response {
+    let gpu = w.gpu.is_some();
+    Json(serde_json::json!({ "models": gpu && w.ml.is_some(), "gpu": gpu })).into_response()
 }
 
 /// The spectral colour stocks this deployment can render: empty unless the operator's two standards are there

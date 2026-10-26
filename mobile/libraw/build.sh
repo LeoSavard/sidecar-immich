@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 # LibRaw and the server's shim, built for the browser with Emscripten (docs/MOBILE.md, stage 2). Writes
-# mobile/src/local/libraw/sidecar_libraw.{js,wasm}, which are build products and not committed.
+# mobile/static/libraw/sidecar_libraw.{js,wasm}, which are build products and not committed. The module serves them
+# at /m/libraw/, and the editor's RAW worker (web/src/lib/local/raw.worker.ts) loads them from there at run time.
 #
 # The object list is LibRaw's own (LIB_OBJECTS in third_party/libraw/Makefile.dist), as crates/libraw-sys/build.rs
 # reads it for the server. LibRaw is used under CDDL-1.0, as the server uses it. Needs `emcc` on PATH: the
@@ -11,7 +12,7 @@ here="$(cd "$(dirname "$0")" && pwd)"
 root="$(cd "$here/../.." && pwd)"
 libraw="$root/third_party/libraw"
 shim="$root/crates/libraw-sys/shim"
-out="$root/mobile/src/local/libraw"
+out="$root/mobile/static/libraw"
 obj="${SIDECAR_LIBRAW_WASM_OBJ:-$root/mobile/libraw/.obj}"
 mkdir -p "$out" "$obj"
 
@@ -35,7 +36,5 @@ em++ -O3 -fwasm-exceptions "$obj"/*.o -o "$out/sidecar_libraw.js" \
   -sMODULARIZE=1 -sEXPORT_ES6=1 -sEXPORT_NAME=createLibRaw -sENVIRONMENT=web,worker \
   -sALLOW_MEMORY_GROWTH=1 -sINITIAL_MEMORY=64MB -sMAXIMUM_MEMORY=4GB -sFILESYSTEM=0 \
   -sEXPORTED_FUNCTIONS="$exports" -sEXPORTED_RUNTIME_METHODS='["HEAPU8","HEAPU16","UTF8ToString"]'
-# TypeScript doesn't check Emscripten's generated JavaScript; its types are the declaration kept beside this script.
-sed -i '1i // @ts-nocheck' "$out/sidecar_libraw.js"
-cp "$here/sidecar_libraw.d.ts" "$out/sidecar_libraw.d.ts"
+# Its types are web/src/lib/local/sidecar_libraw.d.ts; the file itself is served as it is, never bundled.
 ls -l "$out"

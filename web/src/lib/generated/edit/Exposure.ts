@@ -11,4 +11,13 @@ export type Exposure = { ev: number,
  * Stored per edit rather than applied as a constant so that an edit made before `PROCESS_VERSION` 3
  * keeps the picture it had: `migrate` sets it to zero for those, and only a new edit gets the baseline.
  */
-baselineEv: number, highlightBlend: number, };
+baselineEv: number, 
+/**
+ * "Highlight recovery": how far a sensor-clipped pixel moves toward a neutral of its own level, by its
+ * clip coverage (`highlight_blend` in `exposure.wgsl`). **0 for a new edit**: it was added to hide the cast
+ * the old highlight fill left, and against ground truth it now only adds colour error, on the order of 0.06
+ * → 0.22 in a blown core (docs/research/pipeline-review-2026-10.md §3). An existing edit keeps the 0.5 it
+ * was approved with without a migration, because every stored edit carries the field: the history's root
+ * holds the complete parameters and `sc:Edit` the complete current edit.
+ */
+highlightBlend: number, };

@@ -148,7 +148,7 @@ export class ColorPacker {
 
 	/** The colour model of a developed photo in `space`, for one the browser decoded itself
 	 *  (`sidecar_color::camera::SourceSpace::camera_color`, the same one the worker gives a JPEG). */
-	sourceColor(space: 'srgb' | 'display-p3'): CameraColor {
+	sourceColor(space: 'srgb' | 'display-p3' | 'adobe-rgb'): CameraColor {
 		return JSON.parse(new TextDecoder().decode(this.call(this.x.sc_source_color, space)));
 	}
 

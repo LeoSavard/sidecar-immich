@@ -262,6 +262,18 @@ But note what the per-channel census above implies: the fully-blown core is the 
 the band that *does* carry data is the one where the pass already measures correctly. So this is a small
 refinement to a stage that is working, which is why the entry now sits low rather than at the top.
 
+*2026-10-26 — measured against ground truth, and that last conclusion was wrong.* `sidecar-dev hilite-truth`
+clips an unclipped frame on purpose (its mosaic raised 2 or 4 stops and cut at white) and compares the result
+with the truth. On three frames the old pass was **worse than no reconstruction at all in the partly clipped
+band**, 3–6× on two of them: `doub` replaced every sample of a block once one neared white, measured ones
+included, and `assemble` blended every pixel toward the coarse estimate, so the band's own red and blue were
+traded for the surroundings' hue. That is also why the `scale` experiment above showed nothing: the
+fault was not in the scale's value but in what it was applied to. The same arithmetic turned a truncated CR2
+into NaN (the review's D14). The fill is now bounded and keeps measured samples, and beats both the old pass
+and plain clipping on every frame and bucket; the review's §3, "The highlight stack, end to end", has the
+table. `highlight_blend`, which now only added error, starts at 0 for new edits (existing ones keep the value
+they stored). Open: real blown frames — `_D5N3075.NEF` above — want looking at against generation 3.
+
 **X-Trans at full resolution — parked, and out of milestone 5** (owner's call, 2026-10-16: the Fuji body is
 gone, and nobody else has asked). It still runs LibRaw's Markesteijn on the CPU; only Bayer has a GPU demosaic
 for loupe and export, so an X-Trans file is slower, not broken. Porting LibRaw's algorithm to WGSL (CDDL-1.0,
@@ -429,7 +441,12 @@ table beyond what lensfun already supplies. They also carry no HDR gain map — 
 describes how an *already-rendered* SDR picture should be lifted for HDR display, and a DNG hasn't been
 rendered yet; the gain map work below is a HEIC/JPEG-export concern, not something a DNG path would also
 unlock. `AsShotNeutral` is present but always `1 1 1` on every file checked — Apple doesn't put the as-shot
-white balance there; LibRaw already gets it from `cam_mul` instead (DESIGN.md §5), so this isn't a gap.
+white balance there. *This was a gap after all* (2026-10-26): it is in `AnalogBalance` (2.92 1 1.65 on one
+iPhone 17 Pro frame), which the DNG specification composes into XYZ → camera as `AnalogBalance ·
+CameraCalibration · ColorMatrix`. Neither decode path read it, so the as-shot white came out at 2,786 K and tint
+−158 — the Tint slider pinned at −150 on every ProRAW — while the picture itself looked right, because the
+develop pass maps the neutral to white whatever it is called. Composed, the same frame reads 6,880 K +32.
+`camera::dng_xyz_to_camera`, on both paths (the review's D2).
 
 *Resolution and registration.* The effects matte is half the main image's edge, same aspect, the same HEIF
 rotation libheif already applies to the main image — close enough to the proxy's frame that it could slot in

@@ -7,6 +7,91 @@ Source: the architecture plan (PWA entry, XMP sidecars, server-side demosaic, We
 
 Where the code differs from the text below, the code and these notes win.
 
+- **The interface, after the owner's answers to the UI review** (docs/research/ui-review-2026-10.md has the table).
+  "Color" is **Mixer**; the phone's Histogram toggle sits with the photo's toggles; tools the worker can't run are
+  hidden (`GET /api/capabilities`: no Depth without the models, no Detail without a GPU, no model-mask sentence);
+  the phone's panel is resized by holding its handle, then dragging, and remembers its height; a before/after hint
+  shows once, after the first change; the home page is the phone's way in (the editing folder by default there, a
+  RAW's preview while it uploads) and `/m` only sends the installed app to it, under a manifest whose scope is the
+  whole app; on a desktop the sidebar folds one level and remembers each section, sRGB / P3 is labelled Output, and
+  `?` lists the shortcuts. Checked in Chromium at phone and desktop sizes against a real server, every item by a
+  scripted check; not yet on a phone.
+
+- **Zoom, on the page and on the photo** (docs/research/ui-review-2026-10.md has the rest of that review). The page
+  itself no longer zooms on a phone — `touch-action: pan-x pan-y`, Safari's gesture events cancelled, and
+  `maximum-scale=1` against iOS zooming a focused field (`$lib/page-zoom.ts`) — so a pinch on the panels or a
+  double tap can't leave the interface zoomed. The camera's own rendering beside the edit (`placeCamera`) is placed
+  at the edit's zoom and position, crop and straighten included, by the affine map three canvas points give
+  through the edit's frame; its pane takes the canvas's gestures in the canvas's coordinates (`px` reads the
+  `data-view` the pointer is over), so either side pans and zooms both. The loupe shows 100, 150 or 200 %: the
+  server renders a smaller full-resolution tile and it is shown pixel for pixel; a double tap or double click
+  steps through them, three buttons pick one, and the choice is remembered. Checked in Chromium against a real
+  server; not yet on a phone.
+
+- **The phone runs the one editor** (owner's call, 2026-10-26; docs/MOBILE.md). The mobile module's own editor is
+  gone. `/m` chooses a photo, shows a RAW's embedded preview while it uploads, imports it the way the home page
+  does (`importPhoto`: the editing folder, or the library where there is none) and opens `/edit/<key>`. An import
+  made on a phone keeps the original there (`$lib/local/originals.ts`, Cache Storage under the asset key), and the
+  editor, finding it, makes the proxy on the device (`developHere`, `$lib/local/develop.ts`: LibRaw in a worker and
+  the ingest shaders for a RAW, the browser's decoder for a developed photo) instead of downloading it, and says
+  "Developed on this device, so some advanced features might be missing", with a link that develops it on the
+  server (`?server`). It uses the server's proxy, as before, wherever the device can't: no copy, a linear DNG or
+  sRAW, too large, no module, any failure. A developed photo the browser decoded into Display P3 packs with that
+  space's colour model (`cameraColor()`); a RAW packs with the server's, which the device's equals. LibRaw is now
+  loaded at run time from `/m/libraw/`, so the main app builds without Emscripten and a deployment without the
+  module just doesn't decode RAW on the device. Checked, in Chromium as a phone against a real `sidecar dev`:
+  `mobile/scripts/mobile-smoke.mjs` (import by SHA-1, developed on the device, the notice, the full editor's
+  groups, an edit the server keeps; `--raw`: the preview, then the RAW developed on the device), `raw-parity.mjs`
+  through the same way in, and the fallbacks — Apple's JPEG XL ProRAW and `?server` go to the server's proxy with
+  no notice.
+
+- **Apple's ProRAW white balance reads as what it is** (the review's D2; `META_REVISION` 3). ProRAW writes
+  `AsShotNeutral` as 1 1 1 and keeps the shot's white balance in `AnalogBalance`, which the DNG specification
+  composes into XYZ → camera as `AnalogBalance · CameraCalibration · ColorMatrix`. Both DNG paths took the bare
+  `ColorMatrix`, so the as-shot white of an iPhone 17 Pro frame read 2,786 K and tint −158 (the slider pinned at
+  −150) on a photo whose white is daylight. `camera::dng_xyz_to_camera` composes it for `linear_dng` (JPEG XL
+  ProRAW) and for LibRaw's DNGs, whose two tags the shim and the phone's LibRaw build now pass through. Checked:
+  the editor shows that frame at 6880 K +32; its as-shot rendering moves by 2.4 / 255 (the colour matrix is
+  taken at the right temperature, white was already white); phone/server RAW parity still holds, colour model
+  identical. An edit that set its own Temperature or Tint on a ProRAW set them on the wrong scale and will
+  render differently; one left at As shot keeps its picture to within that 2.4 / 255.
+
+- **A camera's Adobe RGB JPEG is read as Adobe RGB** (the review's D11; `INGEST_GENERATION` 5, `META_REVISION` 2).
+  A camera set to Adobe RGB embeds no profile and marks the file in EXIF only — `ColorSpace` 0xFFFF with
+  `InteropIndex` "R03" (the DCF rule), or `ColorSpace` 2 on some bodies — so it was decoded as sRGB and came out
+  desaturated. `SourceSpace::AdobeRgb` carries Adobe's primaries and its 563/256 power curve, and the decoders
+  linearise through the source's own curve; `SourceSpace::from_tags` reads a profile's name first ("Adobe RGB"
+  now counts), then those tags. The phone reads the same tags itself (`web/src/lib/local/exif-space.ts`): a browser
+  takes such a file for sRGB, so the page draws it onto an sRGB canvas, which converts nothing, and linearises it
+  as Adobe RGB. Checked: on JPEGs marked each way with ExifTool, the server's metadata says `adobe-rgb` and the
+  phone's colour model equals it to the last digit (proxies within the two JPEG decoders' 0.9 %); an sRGB
+  `R98` file, a file with an ICC profile and an unmarked one stay as they were.
+
+- **Highlight recovery starts at 0.** `Exposure::highlight_blend` defaults to 0 for a new edit (the slider's
+  reset too): against ground truth the blend only adds colour error now that the fill keeps measured colour
+  (the review's §3). No `PROCESS_VERSION` bump: every stored edit carries the field, so an existing edit keeps
+  its 0.5; a test holds that.
+
+- **A half-float view canvas on deeper displays** (`canvasFormat` in `web/src/lib/gpu/view.ts`). Where the
+  display reports 10 bits a channel or HDR (`(min-color: 10)`, `(dynamic-range: high)`), the canvas is
+  `rgba16float` and the view pass dithers by a 10-bit step instead of an 8-bit one; elsewhere it stays the
+  browser's 8-bit format, which a float canvas would only be quantised back to, undithered. The encoded values
+  are the same either way. `?canvas=8` or `?canvas=16` forces one. Checked headless only for validity (both
+  formats render with no GPU error); Chromium can't present a WebGPU canvas headless, so what it looks like
+  is for a real display.
+
+- **Highlight reconstruction: a bounded fill that keeps what was measured** (`INGEST_GENERATION` 4; the review's
+  D14 and §3, "The highlight stack, end to end"). The pyramid's pull (`hilite_assemble`) keeps a measured pixel,
+  takes the coarse estimate for one with nothing measured, and fills only the clipped channels of one partly
+  clipped; the write-back (`hilite_doub`) replaces only samples nearing white, never below their own value. The
+  scale is a ratio of sums over measured samples (`hilite_scale` in `shaders/ingest/common.wgsl`) held within
+  16× the clip level, with no `exp`: vkdt's weights overflowed outside [0, 1] and made a truncated CR2 a
+  quarter NaN. vkdt's `soft` and edge alpha are gone. Measured with the new `sidecar-dev hilite-truth` (a frame
+  clipped on purpose, compared with itself unclipped): the old pass was worse than plain clipping in the partly
+  clipped band and is now better than both everywhere, on three frames at +2 and +4 EV. Checked: 0 NaN on the
+  damaged file, server and phone; phone/server parity unchanged; a GPU test on Bayer and X-Trans. Open:
+  `highlight_blend`'s default now adds error (owner's decision, `PROCESS_VERSION`).
+
 - **The mobile module, stage 2: a RAW decoded and developed on the phone** (docs/MOBILE.md): LibRaw and the
   server's shim compiled to WebAssembly with Emscripten (`mobile/libraw/`) unpack the mosaic in a Web Worker;
   `web/src/lib/gpu/ingest.ts` runs the server's ingest shaders (now in `WEB_ENTRIES`) pass for pass as
@@ -890,7 +975,7 @@ Module functions take their values as arguments and never read the uniform buffe
    pixels across there, leaves out pixels the ingest flagged as clipped, and sets the temperature and tint under
    which that average is grey. Needs WebGPU (the source lives on the GPU); without it the button is hidden.
 2. **Exposure.** `2^EV`, computed on the CPU. Values above 1.0 pass through untouched.
-   **Highlight blend.** Where alpha > 0, blend toward the pixel's luminance-preserving neutral by `alpha × strength`, suppressing the magenta cast WB multipliers put on reconstructed highlights.
+   **Highlight blend.** Where alpha > 0, blend toward the pixel's luminance-preserving neutral by `alpha × strength`, suppressing the magenta cast WB multipliers put on reconstructed highlights. Since the bounded highlight fill (build log) there is no such cast to suppress and the blend only adds colour error, so a new edit starts at strength 0 ("Highlight recovery" 0 %); an existing edit keeps the 0.5 it stored.
 3. **Color space.** Camera → XYZ (inverse of the interpolated XYZ → camera matrix, normalized so camera white lands on D65) then XYZ → Rec.2020, recomputed whenever WB changes. Gamut compression (distance-based, in the style of the ACES reference gamut compression) keeps saturated lights from producing negative channels.
 #### Highlights, and what it can reach
 
@@ -1599,7 +1684,7 @@ Sidecar is published as an Apache-2.0 Docker image on GitHub Container Registry,
 | RAW decoding | LibRaw (LibRaw LLC; builds on Dave Coffin's dcraw) | LGPL-2.1 or CDDL-1.0 — Sidecar takes CDDL-1.0 | Pinned source in `third_party/libraw`, statically linked through bindings adapted from `libraw-rs`. CDDL is file-level: LibRaw's files stay CDDL and their source is linked from the notices; Sidecar's own code is unaffected. LGPL-2.1 would oblige letting users relink a static binary |
 | Bayer demosaic (RCD) | vkdt `demosaic/rcd_conv.comp`, `rcd_fill.comp` (Johannes Hanika) | BSD-2-Clause | Ported GLSL → WGSL. None of the vkdt files in `demosaic`, `hilite`, `denoise`, `deconv` or `filmcurv` carries a GPL marking |
 | X-Trans demosaic (Markesteijn) | LibRaw `xtrans_demosaic.cpp` | CDDL-1.0 | Ported to WGSL; the ported file stays CDDL-1.0 with LibRaw's notice |
-| Highlight reconstruction | vkdt `hilite` | BSD-2-Clause | Ported |
+| Highlight reconstruction | vkdt `hilite` | BSD-2-Clause | Ported; the fill's arithmetic since rewritten (build log) |
 | Denoise, deconvolution | vkdt `denoise`, `deconv`; Starck & Murtagh (à-trous), Richardson 1972, Lucy 1974 | BSD-2-Clause; papers | Ported, checked against the papers |
 | Tone map reference | vkdt `filmcurv` | BSD-2-Clause | Reference for the sigmoid |
 | Gamut compression | ACES Reference Gamut Compression, `aces-aswf/aces-core`; also in OpenColorIO | Apache-2.0; BSD-3-Clause | Formulas and constants |

@@ -4,71 +4,80 @@ Sidecar on the phone, as an optional part of the image. It lives in `mobile/`, i
 `-mobile` tag, and is served at **`/m`** next to the main app. The plan it starts on is in
 [`research/pipeline-review-2026-10.md`](research/pipeline-review-2026-10.md) §7.
 
-## What it does today (stages 0, 1 and 2)
+## What it does today
 
-- **Choose a photo** from the phone's Photos (`accept="image/*"`) or its files (every RAW extension
-  Sidecar knows, from `web/src/lib/formats.ts`).
-- **A developed photo (JPEG, HEIC, PNG, WebP, AVIF) is decoded and developed on the phone.** The browser decodes
-  it, converting its profile into Display P3 where the browser can. `mobile/src/local/decode.ts` turns it into the same
-  linear RGBA16F proxy the server would send, and the editor's own `DevelopPass`, `ViewPass`, colour packer and
-  Light / Colour / White balance sections develop it. Nothing is uploaded. HEIC is decoded by the phone's
-  system decoder, so the server's licence boundary for HEIC (CLAUDE.md) doesn't come into it.
-- **Save a copy:** the edit rendered in sRGB, read back and encoded as a JPEG on the phone. It goes to the share
-  sheet where there is one (Save to Photos on an iPhone), and is a download otherwise. It is saved at the size it
-  was edited at (2,560 px long edge at most).
-- **Open in Sidecar:** to the full editor on the server. An untouched photo goes the way a share does: it is kept
-  on the phone and opened by checksum, so a photo already in the library opens as itself, and the pick page offers to
-  import one that isn't. An edited photo is imported (`POST /api/intake`), and the phone's edit is saved as its
-  first version, so the work carries over.
-- **A RAW file shows the camera's own preview at once** (stage 1): the JPEG the camera embedded in the RAW,
-  found and shown by the phone (`mobile/src/local/preview.ts`), the right way up, with nothing uploaded. It is
-  labelled as the camera's rendering, not Sidecar's.
-- **…and then develops the RAW itself** (stage 2): LibRaw, compiled to WebAssembly, unpacks the sensor data in a
-  Web Worker, and the server's own ingest shaders turn it into the proxy on the phone's GPU. The editor then opens
-  on it with a RAW's controls (Highlight recovery among them), still with nothing uploaded. An sRAW or linear
-  DNG, a frame larger than the GPU's textures, more than 26 megapixels on a phone, or any failure leaves the
-  preview up with the reason, and *Open it in Sidecar* takes the RAW to the server the way a share does.
-- **A browser without WebGPU** goes to the server the same way.
+**The phone runs Sidecar's one editor** (owner's call, 2026-10-26). The module's own small editor — Light, Colour
+and White balance only — is gone: the split between phone and server is no longer made before the editor, so
+there is one editor to keep, and it is the full one.
+
+- **The way in is the home page**, on a phone as on a desktop (owner's call). `/m` only sends the installed app
+  there; the iPhone's *Edit in Sidecar* shortcut still goes straight to the photo it was shared from.
+- **Choose a photo** on the home page, from the phone's Photos or its files (every RAW extension Sidecar knows,
+  from `web/src/lib/formats.ts`).
+- **It is imported** (`importPhoto`, `POST /api/intake`): on a phone into the **editing folder** by default, which
+  Immich never sees, or into the library where there is no folder. A RAW shows **the camera's own preview** from
+  inside the file while it uploads (stage 1, `$lib/local/preview.ts`), labelled as the camera's rendering.
+- **It opens in the editor at `/edit/<key>`**, the same page a desktop uses, with every section it has.
+- **The editor develops it on the phone** where it can: an import made on a phone keeps the original on the phone
+  (`$lib/local/originals.ts`, Cache Storage, keyed by the asset key, which is the file's SHA-1), and the editor,
+  finding it, builds the proxy there (`$lib/local/develop.ts`) instead of downloading the server's — some 35 MB for
+  a 2,560-pixel proxy. A **developed photo** (JPEG, HEIC, PNG, WebP, AVIF) is decoded by the browser, in Display P3
+  where it can; a camera's Adobe RGB JPEG, marked only in EXIF, is read as Adobe RGB, as the server reads it.
+  HEIC is decoded by the phone's system decoder, so the server's licence boundary for HEIC (CLAUDE.md) doesn't come
+  into it. A **RAW** is unpacked by LibRaw in WebAssembly and developed by the server's own ingest shaders on the
+  phone's GPU (stage 2).
+- **The editor says so:** "Developed on this device, so some advanced features might be missing", with a link that
+  develops it on the server instead (`?server`), the same way a JPEG's editor already hides what only a RAW has.
+  Everything that needs the server still has it — the photo is on the server, so saving, versions, export, the
+  loupe, masks and depth work as they do anywhere — and focus peaking's mask arrives from the server when it does.
+- **Where the phone can't**, the editor quietly uses the server's proxy, as it always has: no copy on the phone
+  (opened from a link, or kept more than a week ago), an sRAW or a linear DNG (Apple's JPEG XL ProRAW among them),
+  a frame larger than the GPU's textures, more than 26 megapixels on a phone, a deployment without the module (no
+  LibRaw for the browser), or any failure. The console says which. A browser without WebGPU gets the server's
+  rendering, as on a desktop.
 
 ## How it is put together
 
-**It owns the phone's flow and nothing else.** `mobile/` is its own SvelteKit app (base path `/m`), and its
-`$lib` *is* the main app's `web/src/lib` (`files.lib` in `mobile/vite.config.ts`). The GPU passes, the wasm
-packer, the generated types, the controls and the api client are used as they are. What is in `mobile/`:
+**The module owns the phone's way in and the browser's RAW decoder; the editor is the main app's.** `mobile/` is
+its own SvelteKit app (base path `/m`), and its `$lib` *is* the main app's `web/src/lib` (`files.lib` in
+`mobile/vite.config.ts`).
 
 | File | What |
 |---|---|
-| `src/routes/+page.svelte` | The page: choose, develop, save, send |
-| `src/local/decode.ts` | Browser decode → linear RGBA16F proxy |
-| `src/local/export.ts` | Readback → JPEG; the share sheet or a download |
-| `src/local/preview.ts` | A RAW's embedded JPEG: found by its own structure, oriented, scaled |
-| `src/local/raw.ts`, `raw.worker.ts` | LibRaw in a Web Worker: the mosaic and the file's metadata |
-| `libraw/build.sh`, `libraw/wasm_api.cpp` | LibRaw and the server's shim built for the browser; JSON out, so no struct is mirrored |
-| `scripts/mobile-smoke.mjs` | End to end at a phone's size: decode, develop, Exposure, save, send, the server's copy of the edit; with `--raw`, the preview shown with nothing sent |
-| `scripts/preview-check.mjs` | `preview.ts` against ExifTool on RAW files: the same bytes, the same orientation |
-| `scripts/raw-parity.mjs` | A RAW decoded on the phone against the same RAW decoded by the server: colour model and proxy |
+| `mobile/src/routes/+page.svelte` | The installed app's start page: it sends it to the home page |
+| `mobile/libraw/build.sh`, `libraw/wasm_api.cpp` | LibRaw and the server's shim built for the browser, into `mobile/static/libraw/`, served at `/m/libraw/`; JSON out, so no struct is mirrored |
+| `web/src/lib/local/develop.ts` | A proxy made on the device: the RAW path and the developed-photo path, and why not where it can't |
+| `web/src/lib/local/originals.ts` | The phone's copy of what it imported, by asset key |
+| `web/src/lib/local/decode.ts`, `exif-space.ts` | Browser decode → linear RGBA16F proxy; Adobe RGB JPEGs |
+| `web/src/lib/local/raw.ts`, `raw.worker.ts` | LibRaw in a Web Worker, loaded at run time from `/m/libraw/` |
+| `web/src/lib/local/preview.ts` | A RAW's embedded JPEG: found by its own structure, oriented, scaled |
+| `mobile/scripts/mobile-smoke.mjs` | End to end at a phone's size: import, the full editor developing on the phone, an edit the server keeps; with `--raw`, the preview, then the RAW developed on the phone |
+| `mobile/scripts/preview-check.mjs` | `preview.ts` against ExifTool on RAW files: the same bytes, the same orientation |
+| `mobile/scripts/raw-parity.mjs` | A RAW chosen on `/m` and developed by the editor on the phone, against the server's decode: colour model and proxy |
 
-This is deliberate. The project's one rule is that a develop stage is written once (ARCHITECTURE.md), and a
-mobile app with its own copy of the pipeline would break it the first time either side changed. What the module
-decouples is **packaging and pace**: it ships in its own image layer and can change its flow without touching the
-editor page, the most-changed file in the repository. The price is that a change to the shared `$lib` can break
-it, so CI type-checks and builds it in the job that has the generated files.
+**Why LibRaw is loaded at run time.** The main app's editor uses the RAW worker, but LibRaw needs Emscripten to
+build, which only the module's image stage has. So the worker imports it from the module's URL when it needs it,
+and the main app builds without it. A deployment without the module answers that URL with the app's page, which
+`rawOnDevice` tells by its content type: the editor then uses the server's proxy for a RAW.
 
-Two things in the shared code exist because of it, and are worth knowing:
+This keeps the project's one rule — a develop stage is written once (ARCHITECTURE.md). What the module decouples is
+**packaging**: it ships in its own image layer. The price is that a change to the shared `$lib` can break it, so CI
+type-checks and builds it in the job that has the generated files.
 
-- `sidecar_color::camera::SourceSpace` moved from `sidecar-raw` into `sidecar-color`, with a wasm export
-  (`sc_source_color`, `ColorPacker.sourceColor`). A photo the phone decoded gets exactly the colour model the
-  worker gives the same JPEG.
-- `web/src/lib/color/transfer.ts` (sRGB curve, half floats), `formats.ts` (extensions, checked against Rust by a
-  `sidecar-template` test), `shared.ts` and `intake.ts` are shared with the main app.
-- For stage 2: `sidecar_color::camera::LibrawColor` is the one mapping from what LibRaw reads to a `CameraColor`,
-  used by the server's `sidecar-raw` and by the browser (`sc_camera_color`, `ColorPacker.cameraColor`);
-  `web/src/lib/gpu/ingest.ts` runs `shaders/ingest/*` (now in `WEB_ENTRIES`) as `crates/engine/src/ingest.rs` does
-  — **change one, change the other**; and `requestDevice` asks for the adapter's texture and buffer limits.
+Shared code that exists because of it:
+
+- `sidecar_color::camera::SourceSpace` lives in `sidecar-color`, with a wasm export (`sc_source_color`,
+  `ColorPacker.sourceColor`): a photo the phone decoded gets exactly the colour model the worker gives the same
+  JPEG, in the primaries the phone decoded it in. The editor packs with it (`cameraColor()`) where it differs.
+- `sidecar_color::camera::LibrawColor` is the one mapping from what LibRaw reads to a `CameraColor`, for the
+  server's `sidecar-raw` and the browser (`sc_camera_color`, `ColorPacker.cameraColor`).
+- `web/src/lib/gpu/ingest.ts` runs `shaders/ingest/*` (in `WEB_ENTRIES`) as `crates/engine/src/ingest.rs` does —
+  **change one, change the other**; `requestDevice` asks for the adapter's texture and buffer limits.
+- `transfer.ts`, `formats.ts`, `shared.ts` and `intake.ts` are the main app's; `importPhoto` is where an import on a
+  phone keeps the original.
 
 `files.lib` is marked deprecated by SvelteKit in favour of a workspace package. It still works. If it is ever
-removed, the move is to make `web/src/lib` a package both apps depend on, which is the same sharing done with more
-ceremony.
+removed, the move is to make `web/src/lib` a package both apps depend on.
 
 ## The embedded preview (stage 1)
 
@@ -128,7 +137,8 @@ ingests on llvmpipe, with Chromium's WebGPU on SwiftShader:
   server's `/preview` render of it differs by 2.3 / 255 at full size, 1.0 at a quarter, 0.2 at a sixteenth, with
   no bias in any channel (0.01–0.03 / 255): JPEG and dither noise, not development.
 - *The flow:* `scripts/mobile-smoke.mjs --raw` — preview at once, then the RAW developed on the phone, RAW
-  controls offered, a picture on screen, nothing sent to the server.
+  controls offered. Since the phone runs the full editor (above), the RAW is imported first and the editor
+  develops the phone's own copy; `raw-parity.mjs` goes the same way in, and its numbers hold.
 
 **What it costs.** On SwiftShader (a CPU standing in for a GPU) a 12–21 MP RAW takes 27–55 s; a phone's GPU should
 be one to two orders faster, and that is to be measured. Memory is the real limit: the ingest holds about 60 bytes
@@ -140,7 +150,7 @@ demosaicing.
 ```bash
 # once the main app's generated files exist (./dev/bootstrap, or `npm run generate` in web/)
 source <emsdk>/emsdk_env.sh                   # Emscripten 6.0.13, as the Dockerfile and CI pin it
-cd mobile && npm run libraw                   # → src/local/libraw/ (LibRaw for the browser; ~30 s)
+cd mobile && npm run libraw                   # → static/libraw/ (LibRaw for the browser; ~30 s)
 npm ci && npm run build                       # → mobile/build
 ```
 

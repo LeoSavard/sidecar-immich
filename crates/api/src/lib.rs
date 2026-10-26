@@ -1195,6 +1195,11 @@ async fn focus(
 
 /// Which spectral colour stocks this deployment renders. Not cached by the browser: "none" must not outlive
 /// the operator adding their copies of the standards.
+/// `GET /api/capabilities` — what the worker can do (`models`, `gpu`), relayed, so the editor hides what won't work.
+async fn capabilities(State(app): State<Arc<App>>, ApiUser(_user): ApiUser) -> Response {
+    relay(app.http.get(app.worker("/v1/capabilities")).send().await).await
+}
+
 async fn film_stocks(State(app): State<Arc<App>>, ApiUser(_user): ApiUser) -> Response {
     relay(app.http.get(app.worker("/v1/film/stocks")).send().await).await
 }
@@ -1657,6 +1662,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/intake/folder", get(folder))
         .route("/api/intake/folder/{key}", axum::routing::delete(forget))
         .route("/api/immich/assets/{id}/thumbnail", get(thumbnail))
+        .route("/api/capabilities", get(capabilities))
         .route("/api/film/stocks", get(film_stocks))
         .route("/api/film/stocks/{id}", get(film_stock))
         .route("/api/assets/{key}/meta", get(meta))

@@ -19,6 +19,8 @@ typedef struct sc_info {
   float cam_xyz[4][3];           /* XYZ -> camera, from LibRaw's colour data */
   uint16_t dng_illuminant[2];
   float dng_colormatrix[2][4][3];
+  float dng_analogbalance[4];    /* DNG AnalogBalance (1 where the file has none) */
+  float dng_calibration[2][4][4];/* DNG CameraCalibration1/2, beside dng_colormatrix */
   float iso, shutter, aperture, focal_len;
   int64_t timestamp;
   char make[64], model[64], lens[128];

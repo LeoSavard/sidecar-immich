@@ -40,7 +40,10 @@ void sc_get_info(void *raw, sc_info *i) {
     i->dng_illuminant[n] = d.color.dng_color[n].illuminant;
     for (int c = 0; c < 4; c++)
       for (int k = 0; k < 3; k++) i->dng_colormatrix[n][c][k] = d.color.dng_color[n].colormatrix[c][k];
+    for (int c = 0; c < 4; c++)
+      for (int k = 0; k < 4; k++) i->dng_calibration[n][c][k] = d.color.dng_color[n].calibration[c][k];
   }
+  for (int c = 0; c < 4; c++) i->dng_analogbalance[c] = d.color.dng_levels.analogbalance[c];
   i->iso = d.other.iso_speed;
   i->shutter = d.other.shutter;
   i->aperture = d.other.aperture;

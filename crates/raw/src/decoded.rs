@@ -6,11 +6,13 @@
 //! the RAW path does: linear light, in the source's own primaries, orientation not yet applied.
 //!
 //! The colour model needs no special case downstream. `SourceSpace::camera_color` hands the develop pass a
-//! `CameraColor` whose "camera" space *is* sRGB or Display P3, with unity as-shot multipliers — so
+//! `CameraColor` whose "camera" space *is* sRGB, Display P3 or Adobe RGB, with unity as-shot multipliers — so
 //! `camera::resolve` returns unity multipliers and the correct primaries matrix, and temperature and tint
 //! become relative shifts around D65 rather than an illuminant estimate. That is what they can mean here:
 //! the white balance was baked in by whatever wrote the file, and there is no sensor data to re-derive it
-//! from. See docs/ROADMAP.md, "Editing non-RAW images".
+//! from. See docs/ROADMAP.md, "Editing non-RAW images". Which space, and so which transfer curve, comes from
+//! the file's ICC profile description or, for a camera's Adobe RGB JPEG that carries none, its EXIF
+//! (`SourceSpace::from_tags`); any other profile is still read as sRGB (the review's D10).
 //!
 //! **HEIC decoding is deliberately not built in.** libheif is LGPL-3.0-or-later, which this Apache-2.0 image
 //! cannot link (CLAUDE.md), and HEVC carries patent-pool exposure separate from any copyright licence. So
@@ -71,18 +73,11 @@ fn extension(path: &Path) -> String {
         .to_ascii_lowercase()
 }
 
-/// sRGB EOTF over a lookup table — exact for integer input, and much faster than a `powf` per sample on a
-/// 36-megapixel frame.
-fn linear_lut(levels: usize) -> Vec<f32> {
+/// The source's transfer function (`SourceSpace::decode`) over a lookup table — exact for integer input, and
+/// much faster than a `powf` per sample on a 36-megapixel frame.
+fn linear_lut(levels: usize, space: SourceSpace) -> Vec<f32> {
     (0..levels)
-        .map(|i| {
-            let v = i as f32 / (levels - 1) as f32;
-            if v <= 0.04045 {
-                v / 12.92
-            } else {
-                ((v + 0.055) / 1.055).powf(2.4)
-            }
-        })
+        .map(|i| space.decode(i as f32 / (levels - 1) as f32))
         .collect()
 }
 
@@ -99,14 +94,15 @@ enum Samples {
 /// Alpha is **zero**, and any alpha the source carried is dropped. Downstream, alpha is not opacity: it is the
 /// fraction of the pixel clipped at the sensor, which only a RAW has. (The develop pass also turns highlight
 /// blending off for developed files, so this is the honest value rather than a load-bearing one.)
-fn to_linear_rgba(samples: &Samples, channels: usize) -> Vec<f32> {
+fn to_linear_rgba(samples: &Samples, channels: usize, space: SourceSpace) -> Vec<f32> {
     fn convert<T: Copy>(
         samples: &[T],
         channels: usize,
         levels: usize,
+        space: SourceSpace,
         index: impl Fn(T) -> usize,
     ) -> Vec<f32> {
-        let lut = linear_lut(levels);
+        let lut = linear_lut(levels, space);
         let mut out = Vec::with_capacity(samples.len() / channels * 4);
         for p in samples.chunks_exact(channels) {
             let (r, g, b) = if channels < 3 {
@@ -122,14 +118,14 @@ fn to_linear_rgba(samples: &Samples, channels: usize) -> Vec<f32> {
         out
     }
     match samples {
-        Samples::Eight(v) => convert(v, channels, 256, |s| s as usize),
-        Samples::Sixteen(v) => convert(v, channels, 65536, |s| s as usize),
+        Samples::Eight(v) => convert(v, channels, 256, space, |s| s as usize),
+        Samples::Sixteen(v) => convert(v, channels, 65536, space, |s| s as usize),
     }
 }
 
 /// Binary PPM/PGM (P5, P6). This is the fast road out of an external decoder: compressing a 36-megapixel
 /// frame to PNG costs about twenty seconds of deflate, and writing it raw costs two.
-fn decode_pnm(bytes: &[u8]) -> Result<(u32, u32, Vec<f32>), DecodeError> {
+fn decode_pnm(bytes: &[u8], space: SourceSpace) -> Result<(u32, u32, Vec<f32>), DecodeError> {
     let bad = |what: &str| DecodeError::Decode(format!("PNM: {what}"));
     let mut fields: Vec<u64> = Vec::new();
     let mut magic = None;
@@ -196,11 +192,11 @@ fn decode_pnm(bytes: &[u8]) -> Result<(u32, u32, Vec<f32>), DecodeError> {
     Ok((
         width as u32,
         height as u32,
-        to_linear_rgba(&samples, channels),
+        to_linear_rgba(&samples, channels, space),
     ))
 }
 
-fn decode_jpeg(bytes: &[u8]) -> Result<(u32, u32, Vec<f32>), DecodeError> {
+fn decode_jpeg(bytes: &[u8], space: SourceSpace) -> Result<(u32, u32, Vec<f32>), DecodeError> {
     let mut decoder = zune_jpeg::JpegDecoder::new(std::io::Cursor::new(bytes));
     let pixels = decoder
         .decode()
@@ -215,11 +211,11 @@ fn decode_jpeg(bytes: &[u8]) -> Result<(u32, u32, Vec<f32>), DecodeError> {
     Ok((
         info.width as u32,
         info.height as u32,
-        to_linear_rgba(&Samples::Eight(pixels), channels),
+        to_linear_rgba(&Samples::Eight(pixels), channels, space),
     ))
 }
 
-fn decode_png(bytes: &[u8]) -> Result<(u32, u32, Vec<f32>), DecodeError> {
+fn decode_png(bytes: &[u8], space: SourceSpace) -> Result<(u32, u32, Vec<f32>), DecodeError> {
     let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
     // Palette and 1/2/4-bit files arrive as indices or packed bits otherwise: a palette PNG read as grey
     // indices, and grey + alpha as two channels the converter indexed three deep and panicked on.
@@ -249,10 +245,14 @@ fn decode_png(bytes: &[u8]) -> Result<(u32, u32, Vec<f32>), DecodeError> {
         ),
         _ => Samples::Eight(used.to_vec()),
     };
-    Ok((info.width, info.height, to_linear_rgba(&samples, channels)))
+    Ok((
+        info.width,
+        info.height,
+        to_linear_rgba(&samples, channels, space),
+    ))
 }
 
-fn decode_tiff(bytes: &[u8]) -> Result<(u32, u32, Vec<f32>), DecodeError> {
+fn decode_tiff(bytes: &[u8], space: SourceSpace) -> Result<(u32, u32, Vec<f32>), DecodeError> {
     use tiff::decoder::DecodingResult;
     let mut decoder = tiff::decoder::Decoder::new(std::io::Cursor::new(bytes))
         .map_err(|e| DecodeError::Decode(format!("TIFF: {e}")))?;
@@ -284,7 +284,7 @@ fn decode_tiff(bytes: &[u8]) -> Result<(u32, u32, Vec<f32>), DecodeError> {
             ));
         }
     };
-    Ok((width, height, to_linear_rgba(&samples, channels)))
+    Ok((width, height, to_linear_rgba(&samples, channels, space)))
 }
 
 /// Commands we know how to drive, tried in order when the environment doesn't name one.
@@ -342,7 +342,7 @@ fn which(program: &str) -> bool {
 
 /// Run an external decoder over `path` and read back what it wrote. Nothing licensed runs in this process:
 /// this is a `Command`, not a link.
-fn decode_heif(path: &Path) -> Result<(u32, u32, Vec<f32>), DecodeError> {
+fn decode_heif(path: &Path, space: SourceSpace) -> Result<(u32, u32, Vec<f32>), DecodeError> {
     let template = heif_command().ok_or(DecodeError::NoHeifDecoder)?;
     let dir = tempfile::tempdir().map_err(|e| DecodeError::HeifDecoder(e.to_string()))?;
     let out = dir
@@ -371,9 +371,9 @@ fn decode_heif(path: &Path) -> Result<(u32, u32, Vec<f32>), DecodeError> {
     let bytes = std::fs::read(&out)
         .map_err(|e| DecodeError::HeifDecoder(format!("reading {}: {e}", out.display())))?;
     match heif_output_extension(&template) {
-        "ppm" => decode_pnm(&bytes),
-        "tif" => decode_tiff(&bytes),
-        _ => decode_png(&bytes),
+        "ppm" => decode_pnm(&bytes, space),
+        "tif" => decode_tiff(&bytes, space),
+        _ => decode_png(&bytes, space),
     }
 }
 
@@ -407,14 +407,14 @@ pub fn decode(
 ) -> Result<Decoded, DecodeError> {
     let ext = extension(path);
     let (width, height, rgba) = match ext.as_str() {
-        "heic" | "heif" => decode_heif(path)?,
+        "heic" | "heif" => decode_heif(path, space)?,
         _ => {
             let bytes = std::fs::read(path)
                 .map_err(|e| DecodeError::Decode(format!("reading {}: {e}", path.display())))?;
             match ext.as_str() {
-                "jpg" | "jpeg" => decode_jpeg(&bytes)?,
-                "png" => decode_png(&bytes)?,
-                "tif" | "tiff" => decode_tiff(&bytes)?,
+                "jpg" | "jpeg" => decode_jpeg(&bytes, space)?,
+                "png" => decode_png(&bytes, space)?,
+                "tif" | "tiff" => decode_tiff(&bytes, space)?,
                 _ => return Err(DecodeError::Unsupported(path.display().to_string())),
             }
         }
@@ -510,6 +510,8 @@ pub fn exif(path: &Path) -> Exif {
             "-DateTimeOriginal",
             "-Orientation",
             "-ProfileDescription",
+            "-ColorSpace",
+            "-InteropIndex",
         ])
         // The AF point's tags too: one ExifTool run per photo rather than two, each paying Perl's startup.
         .args(crate::af::TAGS)
@@ -545,7 +547,11 @@ pub fn exif(path: &Path) -> Exif {
         focal_length_mm: number("FocalLength") as f32,
         captured_unix: captured_unix(&text("DateTimeOriginal")),
         orientation_flip,
-        space: SourceSpace::from_profile(&text("ProfileDescription")),
+        space: SourceSpace::from_tags(
+            &text("ProfileDescription"),
+            number("ColorSpace") as u32,
+            &text("InteropIndex"),
+        ),
         af_point: crate::af::from_tags(tags, orientation_flip),
     }
 }
@@ -619,7 +625,7 @@ mod tests {
 
     #[test]
     fn the_srgb_curve_is_inverted_exactly_at_the_ends() {
-        let lut = linear_lut(256);
+        let lut = linear_lut(256, SourceSpace::Srgb);
         assert_eq!(lut[0], 0.0);
         assert!((lut[255] - 1.0).abs() < 1e-6);
         // Mid grey, 128/255 encoded, is about 21.6 % of linear light.
@@ -641,7 +647,11 @@ mod tests {
     /// Alpha is the sensor-clip fraction downstream, and nothing in a developed file was clipped at a sensor.
     #[test]
     fn alpha_is_zero_because_nothing_here_is_sensor_clipped() {
-        let rgba = to_linear_rgba(&Samples::Eight(vec![255, 128, 0, 10, 20, 30]), 3);
+        let rgba = to_linear_rgba(
+            &Samples::Eight(vec![255, 128, 0, 10, 20, 30]),
+            3,
+            SourceSpace::Srgb,
+        );
         assert_eq!(rgba.len(), 8);
         assert_eq!(rgba[3], 0.0);
         assert_eq!(rgba[7], 0.0);
@@ -653,6 +663,7 @@ mod tests {
         let rgba = to_linear_rgba(
             &Samples::Eight(vec![0, 0, 0, 128, 128, 128, 255, 255, 255]),
             3,
+            SourceSpace::Srgb,
         );
         assert_eq!(rgba[0], 0.0);
         assert!((rgba[4] - 0.2158).abs() < 1e-3);
@@ -732,7 +743,7 @@ mod tests {
             Some(vec![255, 0, 0, 0, 0, 255]),
             &[0, 1],
         );
-        let (w, h, rgba) = decode_png(&red_blue).unwrap();
+        let (w, h, rgba) = decode_png(&red_blue, SourceSpace::Srgb).unwrap();
         assert_eq!((w, h), (2, 1));
         assert_eq!(&rgba[..3], &[1.0, 0.0, 0.0]);
         assert_eq!(&rgba[4..7], &[0.0, 0.0, 1.0]);
@@ -745,7 +756,7 @@ mod tests {
             None,
             &[255, 7],
         );
-        let (_, _, rgba) = decode_png(&grey_alpha).unwrap();
+        let (_, _, rgba) = decode_png(&grey_alpha, SourceSpace::Srgb).unwrap();
         assert_eq!(rgba.len(), 4);
         assert!(
             rgba[..3].iter().all(|&v| (v - 1.0).abs() < 1e-6),
@@ -761,7 +772,7 @@ mod tests {
             None,
             &[0b1000_0000],
         );
-        let (_, _, rgba) = decode_png(&one_bit).unwrap();
+        let (_, _, rgba) = decode_png(&one_bit, SourceSpace::Srgb).unwrap();
         assert_eq!(rgba.len(), 32);
         assert!(
             (rgba[0] - 1.0).abs() < 1e-6 && rgba[4] == 0.0,
