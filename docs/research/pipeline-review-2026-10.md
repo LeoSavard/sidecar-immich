@@ -278,7 +278,7 @@ These are worth folding together, each with a test that pins the single version:
    twice in `devtools`. That's fine for WGSL, but on the Rust side there should be one function in
    `sidecar_color::tone`.
 5. **`MosaicInput` is assembled field by field twice** (`worker/src/lib.rs:485`, `worker/src/export.rs:422`). One helper.
-6. **The list of RAW extensions exists three times and disagrees.** `sidecar_template::RAW_EXTENSIONS` has 21.
+6. *(Done on this branch: `web/src/lib/formats.ts`, checked by a `sidecar-template` test.)* **The list of RAW extensions exists three times and disagrees.** `sidecar_template::RAW_EXTENSIONS` has 21.
    The home page's `accept` has 10 (no `nrw srf sr2 crw x3f 3fr iiq erf mef mos rwl`). The manifest's
    `share_target` has 11. Generate the web lists from the Rust constant in `npm run generate`, as the edit types
    already are, or at least have a test compare them.
@@ -430,6 +430,9 @@ above. They are all fields of `libraw_data_t` already in memory after `open_file
 - The share target keeps a shared photo on the phone and the pick page offers to import it (§7 gap 1; DESIGN.md's
   build log has the details and how it was checked).
 - `mobile/`: the start of the mobile module, its own package and its own image target (`docs/MOBILE.md`).
+- §5.6's extension lists are one TypeScript module checked against Rust; the TypeScript sRGB curve and half
+  floats (§5.4's web side) are one module; `SourceSpace` lives in `sidecar-color`, which also removes the
+  hand-written XYZ→sRGB matrix from the no-calibration fallback (§5.3, partly).
 
 ## Sources
 

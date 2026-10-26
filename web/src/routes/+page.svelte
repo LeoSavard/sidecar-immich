@@ -2,6 +2,7 @@
 <script lang="ts">
 	import { api, thumbnailUrl } from '$lib/api';
 	import { importPhoto, type Who } from '$lib/intake';
+	import { ACCEPT_RAW } from '$lib/formats';
 
 	type Recent = { assetKey: string; fileName: string; immichAssetId: string | null; openedAt: string };
 	let recent = $state<Recent[] | null>(null);
@@ -186,7 +187,11 @@
 <main class="mx-auto min-h-dvh max-w-3xl bg-[#161616] px-4 pt-[max(1.5rem,env(safe-area-inset-top))] pb-[max(1.5rem,env(safe-area-inset-bottom))] text-[#f4f4f4]">
 	<header class="flex items-baseline justify-between">
 		<h1 class="text-xl">Sidecar</h1>
-		{#if who?.authRequired}<button class="text-sm text-[#c6c6c6]" onclick={signOut}>Sign out {who.name}</button>{/if}
+		<div class="flex items-baseline gap-4">
+			<!-- Only in an image built with the mobile module (docs/MOBILE.md). -->
+			{#if who?.mobile}<a href="/m/" class="text-sm text-[#c6c6c6] underline underline-offset-4">On this phone</a>{/if}
+			{#if who?.authRequired}<button class="text-sm text-[#c6c6c6]" onclick={signOut}>Sign out {who.name}</button>{/if}
+		</div>
 	</header>
 	<!-- With no Immich library there is nothing to share from and no link to paste: this deployment opens
 	     photos from its own folders, so saying otherwise would only send someone looking for a library. -->
@@ -218,7 +223,7 @@
 				to {destination === 'folder' ? (who?.intakeFolder ?? 'the editing folder') : 'your library'}…
 			</p>
 		{:else}
-			<input bind:this={picker} type="file" class="sr-only" accept="image/*,.arw,.nef,.cr2,.cr3,.raf,.rw2,.orf,.dng,.pef,.srw" onchange={chosen} />
+			<input bind:this={picker} type="file" class="sr-only" accept="image/*,{ACCEPT_RAW}" onchange={chosen} />
 			<button type="button" class="underline underline-offset-4" onclick={choose}>Choose a photo on this device</button>
 			{#if canChoose}
 				<fieldset class="mt-2 flex items-center justify-center gap-1 text-xs">

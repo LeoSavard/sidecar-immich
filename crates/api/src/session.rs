@@ -187,6 +187,8 @@ pub struct SessionInfo {
     /// The name of the editing folder, when one is configured: a root Immich knows nothing about, which a
     /// photo can be imported into instead of the library (DESIGN.md §3). `None` where there is none.
     intake_folder: Option<String>,
+    /// Whether this image ships the mobile module at `/m` (docs/MOBILE.md), so the home page can offer it.
+    mobile: bool,
 }
 
 pub async fn sign_in(State(app): State<Arc<App>>, Json(body): Json<SignIn>) -> Response {
@@ -224,6 +226,7 @@ pub async fn sign_in(State(app): State<Arc<App>>, Json(body): Json<SignIn>) -> R
             auth_required: true,
             immich: app.immich.enabled(),
             intake_folder: app.config.intake_root().map(|r| r.name.clone()),
+            mobile: app.config.mobile_root().is_some(),
         }),
     )
         .into_response()
@@ -237,6 +240,7 @@ pub async fn session(State(app): State<Arc<App>>, parts: Parts) -> Response {
             auth_required: app.immich.enabled(),
             immich: app.immich.enabled(),
             intake_folder: app.config.intake_root().map(|r| r.name.clone()),
+            mobile: app.config.mobile_root().is_some(),
         })
         .into_response(),
         None => StatusCode::UNAUTHORIZED.into_response(),

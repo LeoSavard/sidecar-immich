@@ -2,6 +2,8 @@ target
 **/node_modules
 web/.svelte-kit
 web/build
+mobile/.svelte-kit
+mobile/build
 web/static/parity
 testdata
 .git

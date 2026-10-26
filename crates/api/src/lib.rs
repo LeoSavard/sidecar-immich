@@ -1638,7 +1638,7 @@ pub fn router(app: Arc<App>) -> Router {
     app.start_lensfun_sync();
     let web = &app.config.server.web_root;
     let spa = ServeDir::new(web).fallback(ServeFile::new(web.join("index.html")));
-    Router::new()
+    let routes = Router::new()
         .route("/open", get(open))
         .route("/api/health", get(|| async { "ok" }))
         .route(
@@ -1681,7 +1681,17 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/exports", axum::routing::post(export::create))
         .route("/api/exports/{id}", get(export::status))
         .route("/api/exports/{id}/events", get(export::events))
-        .route("/api/exports/{id}/file", get(export::file))
+        .route("/api/exports/{id}/file", get(export::file));
+    // The mobile module, only where the image ships one (a `-mobile` target): it is an optional layer, and an
+    // image without it has no `/m` at all.
+    let routes = match app.config.mobile_root() {
+        Some(m) => routes.nest_service(
+            "/m",
+            ServeDir::new(m).fallback(ServeFile::new(m.join("index.html"))),
+        ),
+        None => routes,
+    };
+    routes
         .fallback_service(spa)
         // Proxies compress with brotli for Safari and zstd for Chromium.
         .layer(

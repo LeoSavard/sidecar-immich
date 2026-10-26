@@ -7,6 +7,23 @@ Source: the architecture plan (PWA entry, XMP sidecars, server-side demosaic, We
 
 Where the code differs from the text below, the code and these notes win.
 
+- **The mobile module, stage 0** (docs/MOBILE.md): an optional SvelteKit app in `mobile/`, served at `/m` by
+  images built with the new `mobile` and `ml-mobile` targets (`-mobile` tags), and only where
+  `server.mobile_root` holds a build. A developed photo chosen on the phone is decoded by the browser into the
+  proxy shape the server sends (linear RGBA16F, Display P3 where the canvas allows), developed by the editor's
+  own `DevelopPass`/`ViewPass`/packer and sections, saved as a JPEG on the phone, or sent to the server with the
+  phone's edit as its first version; a RAW goes to the server the way a share does. Its `$lib` is the main
+  app's (`files.lib`), so there is no second pipeline; for it, `SourceSpace` moved into `sidecar-color` with a
+  wasm export (`sc_source_color`), and the TypeScript sRGB curve, half floats and extension lists became one
+  module each (the extension list checked against Rust by a test, after the picker and share target had drifted
+  to 10 and 11 of 21). Checked: `mobile/scripts/mobile-smoke.mjs` against a real `sidecar dev` (no GPU on the
+  worker, Chromium on SwiftShader) — the photo drawn, Exposure +1 EV brightening it 164 → 207 of 255, the
+  shared Colour controls, a saved JPEG, and an import whose asset key is the photo's SHA-1 with the phone's
+  edit stored on it; and the phone's render at default settings against the original JPEG, **mean 0.5 / 255
+  per channel, p99 2 / 255** (re-encoding and dither). SwiftShader loses the device when it presents a WebGPU
+  canvas headless, so under `--swiftshader` the script measures through the page's own readback instead of
+  the screen; the module has not yet been on a phone.
+
 - **A shared photo nothing matched can be imported** (§3): the Android share target hashed the file, opened
   `/open?sha1=…` and dropped the bytes, so a photo the server couldn't see — not backed up to Immich yet, or
   any photo in a deployment with no Immich — ended on an empty pick page with no way forward but finding the

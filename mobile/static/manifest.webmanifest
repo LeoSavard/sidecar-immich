@@ -1,0 +1,11 @@
+{
+	"name": "Sidecar on this phone",
+	"short_name": "Sidecar",
+	"description": "Develop a photo on the phone, with the same pipeline as the server",
+	"start_url": "/m/",
+	"scope": "/m/",
+	"display": "standalone",
+	"background_color": "#161616",
+	"theme_color": "#161616",
+	"icons": [{ "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}

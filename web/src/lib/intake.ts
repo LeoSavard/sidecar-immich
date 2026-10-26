@@ -4,7 +4,7 @@
 import { api } from '$lib/api';
 
 /** What `GET /api/session` says about this deployment. */
-export type Who = { name: string; authRequired: boolean; immich: boolean; intakeFolder: string | null };
+export type Who = { name: string; authRequired: boolean; immich: boolean; intakeFolder: string | null; mobile?: boolean };
 
 export type Destination = 'immich' | 'folder';
 

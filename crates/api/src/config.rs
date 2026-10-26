@@ -45,6 +45,9 @@ pub struct Server {
     pub listen: String,
     pub worker_url: String,
     pub web_root: PathBuf,
+    /// The mobile module's build (`mobile/`, docs/MOBILE.md), served at `/m`. Only an image built with a
+    /// `mobile` target has it; where the directory doesn't exist, there is no `/m` and nothing links to it.
+    pub mobile_root: PathBuf,
     pub state_dir: PathBuf,
     /// Mark cookies `Secure`. On behind HTTPS (the normal deployment); off only for plain-HTTP development.
     pub secure_cookies: bool,
@@ -58,6 +61,7 @@ impl Default for Server {
             listen: "0.0.0.0:8080".into(),
             worker_url: "http://127.0.0.1:8081".into(),
             web_root: "/usr/share/sidecar/web".into(),
+            mobile_root: "/usr/share/sidecar/mobile".into(),
             state_dir: "/state".into(),
             secure_cookies: true,
             allow_path_open: false,
@@ -154,6 +158,12 @@ impl Config {
     /// Where a photo imported from the editing device is written, when the deployment has such a folder.
     pub fn intake_root(&self) -> Option<&Root> {
         self.roots.iter().find(|r| r.intake)
+    }
+
+    /// The mobile module's directory, when this image ships one (`index.html` is what makes it one).
+    pub fn mobile_root(&self) -> Option<&Path> {
+        let root = self.server.mobile_root.as_path();
+        root.join("index.html").is_file().then_some(root)
     }
 
     /// The root containing `path`, after resolving symlinks and `..`.

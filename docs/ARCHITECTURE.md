@@ -82,6 +82,9 @@ edged by the brush passes before develop samples them.
 | Loading, saving, drafts, undo, versions | `web/src/lib/state/edit-session.svelte.ts` |
 | Drawing: develop, view, geometry, brush, gestures | `web/src/routes/edit/[key]/+page.svelte` (the next thing worth splitting out) |
 | What a section offers History and a copied look | `web/src/lib/state/edit-view.ts` (`CONTROLS`, `PICKS`) |
+| The mobile module (`/m`, `-mobile` images): the phone's flow over the editor's own `$lib` | `mobile/`, [`MOBILE.md`](MOBILE.md); served by `server.mobile_root` in `crates/api` |
+| A shared photo the server couldn't find; importing from the device | `web/src/service-worker.ts`, `web/src/lib/{shared,intake}.ts`, the pick page |
+| File extensions the web app offers | `web/src/lib/formats.ts` — checked against `sidecar_template::RAW_EXTENSIONS` by a test |
 
 ### Adding a develop control
 

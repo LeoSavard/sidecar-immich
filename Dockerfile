@@ -1,6 +1,8 @@
 # syntax=docker/dockerfile:1
 # Sidecar — one image, two commands: `sidecar api` (public HTTP, sidecar writer) and `sidecar worker` (RAW, GPU).
 # `--target ml` builds the same image plus `sidecar-ml` and its models, published with a `-ml` tag suffix.
+# `--target mobile` (and `ml-mobile`) adds the mobile module at /m, published with a `-mobile` suffix
+# (docs/MOBILE.md). Each optional layer is a target, so an image carries only what its operator chose.
 # The models sidecar-ml runs, pinned by SHA-256, converted to ONNX that burn-onnx imports. Two need a Python
 # tool each; `dev/ml-models` builds `ml-onnx` from here too, so there is one list of what the models are.
 # The conversions are pinned by hash as well: the code in crates/ml/src/models/ is generated from exactly
@@ -64,6 +66,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry --mount=type=cache,targe
  && cp target/wasm32-unknown-unknown/release/sidecar_color_wasm.wasm web/src/lib/color/sidecar_color.wasm
 RUN --mount=type=cache,target=/root/.npm cd web && npm ci --no-audit --no-fund && npm run build
 
+# The mobile module: its own SvelteKit app over the main app's `$lib`, so it builds here, after the main app has
+# generated the WGSL and the colour wasm the two share.
+FROM build AS build-mobile
+RUN --mount=type=cache,target=/root/.npm cd mobile && npm ci --no-audit --no-fund && npm run build
+
 # sidecar-ml and its weights. The import runs first and sidecar-ml is compiled after it, so the program is
 # always built from the same conversion as the weights it ships with: weights are looked up by the names the
 # generated code gives them. (Compiled the other way round, a conversion that numbered its constants
@@ -126,5 +133,15 @@ COPY --from=build-ml /usr/local/bin/sidecar-ml /usr/local/bin/sidecar-ml
 COPY --from=build-ml /models /usr/share/sidecar/models
 LABEL org.opencontainers.image.description="A RAW editor beside Immich, with its machine-learning models"
 
-# The default target is the image without them.
+# Either image plus the mobile module, served at /m: developing on the phone's own GPU, with the server as the
+# fallback and the library. The api serves /m only where this directory exists, so the plain image has none.
+FROM runtime AS mobile
+COPY --from=build-mobile /src/mobile/build /usr/share/sidecar/mobile
+LABEL org.opencontainers.image.description="A RAW editor beside Immich, with the mobile module"
+
+FROM ml AS ml-mobile
+COPY --from=build-mobile /src/mobile/build /usr/share/sidecar/mobile
+LABEL org.opencontainers.image.description="A RAW editor beside Immich, with its machine-learning models and the mobile module"
+
+# The default target is the image without any of them.
 FROM runtime

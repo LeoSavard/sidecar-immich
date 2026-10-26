@@ -41,6 +41,19 @@ its only two code changes, neither of which changes a pixel for a file that open
 no longer panics (`camera.rs`), and the mosaic copy uses `raw_pitch` (`shim.cpp`, syntax-checked, not yet built in
 the dev container). Everything else in it is a proposal waiting on the owner and on test files.
 
+Later the same day, on the same branch: **the share target keeps a photo nothing matched** and the pick page
+offers to import it; the review gained **a path to reconcile the highlights** (six links, an owner and a state
+each, and a fixed highlight set to measure them on) and **what the file already says** (fields LibRaw parses
+that the pipeline estimates instead — among them `BaselineExposure`, which the LibRaw path drops); and **the
+mobile module** started ([`MOBILE.md`](MOBILE.md)): `mobile/`, served at `/m` by `-mobile` images, developing
+a JPEG or HEIC on the phone's GPU with the editor's own code. It has run against a real server in headless
+Chromium, never on a phone: the next step is an iPhone and an Android phone, with the three questions at the
+end of MOBILE.md.
+
+Found in passing and not fixed: **an import into the editing folder keeps the staging name in its metadata**
+(`meta.fileName` reads `138b8c5d1f1ed5a3-IMG_EDITOR.jpg` while the file is `IMG_EDITOR.jpg`), because `place`
+ingests the staged file before moving it. The editor's title shows the random prefix.
+
 ## Open pull requests
 
 **Everything up to #32 is merged.** `main` holds the whole first iteration — colour film from a data sheet,
