@@ -214,11 +214,39 @@ contract**. The ingest contract is darktable's *raw black/white point* stage, or
 subtract black → divide by (white − black): a value of 1.0 means "the sensor saturated here", in every decode
 path, before anything else runs. Exposure then places grey (Adobe's `BaselineExposure`, plus its "default black
 render" for the toe). The view transform owns the shoulder and the path to white (filmic/sigmoid in darktable,
-ACES 2's output transform with its gamut compression, already credited in NOTICE). The code is close to this. What's
+and ACES's output transforms, whose reference gamut compression Sidecar already uses and credits in NOTICE).
+The code is close to this. What's
 missing is that (1) and (2) live in three files with three constants. A `SensorLevels { black: [f32; 4], white:
 [f32; 4], clip: [f32; 4] }` computed once in `sidecar-raw` for all three sources, stored in `Meta` and
 asserted by a test ("each source maps its declared white to 1.0 and its clip flag agrees"), would make the next
 highlight PR a change in one place.
+
+### A path to reconcile the highlights
+
+The chain has six links. The display end is now coherent: since #35 and #41 one owner (`pack` plus
+`tone.wgsl`, shared by browser and server) decides where white is, how far Highlights can reach past it, and
+how colour fades over the last stop. The ingest end has no single owner. In order:
+
+| # | Link | Owner today | State | What reconciles it |
+|---|---|---|---|---|
+| 1 | Sensor white and black | Three decode paths | **Split** (D1, D6, D7) | `SensorLevels`, above, filled from the file first (§8: `linear_max`, `dng_whitelevel`, `LinearResponseLimit`) and from data only where the file is silent |
+| 2 | Clip coverage (the proxy's alpha) | Three decode paths | **Split** (D7) | One definition, "fraction of the pixel's samples at or above `clip`, before white balance", computed from `SensorLevels`. A unit test feeds the same synthetic frame to all three paths and compares alpha |
+| 3 | Reconstruction | GPU ingest, but not X-Trans export | **Split** (D5) | Reconstruction runs wherever alpha > 0, on every path. The highlight blend in develop then sees the same input in preview and export |
+| 4 | Middle grey | `pack`: `BASELINE_EV` or the file's `BaselineExposure` | **Half done**: only `linear_dng` reads the tag. The LibRaw path hard-codes `None` (`raw/src/lib.rs:170`), although LibRaw parses it (`dng_levels.baseline_exposure`) | Pass it through the shim. Then add the per-file exposure offsets the cameras record (§8: Fuji DR, Canon HTP, Nikon ADL), which explain some of the frames where "Sidecar is darker than the camera" (worth counting on the library before assuming how many) |
+| 5 | Shoulder and Contrast above grey | `pack` / `tone.wgsl` | **Open, owner's decision** (#21, HANDOFF) | Decide with pictures, but from a fixed set (below), so the decision is measured on the same frames each time |
+| 6 | Path to white | `pack` / `tone.wgsl` | Settled by #35/#41 | Keep; guard with the harness below |
+
+Order: 1 → 2 → 3 first, under one `INGEST_GENERATION` bump. They change what reaches `pack` but not what `pack`
+does, so `PROCESS_VERSION` and saved edits are untouched. Then 4, which does change rendering for DNGs that
+state a baseline and needs a `PROCESS_VERSION` bump with a migration that pins old edits, as #33 did. Then 5,
+which is a decision, not a defect.
+
+What stops a tenth highlight PR is a **fixed highlight set with numbers**: `highlight-recovery-smoke.mjs`
+grown from one frame to five (a blown window, a specular, a bright sky, an X-Trans frame, a ProRAW), each
+reporting, for preview *and* export, the share at display white, the chroma in the last stop, and the
+probe's stops from grey (the Measure fold already computes all three). Every PR that touches links 1–6 posts
+that table before and after. #26, #35 and #41 each measured this way already, but on whichever frame
+reported the bug; a fixed set turns those one-off measurements into a regression test.
 
 ## 4. Industry practice for the problem areas, in brief
 
@@ -292,7 +320,7 @@ Already true:
 
 ### Gaps, in order of how soon a user hits them
 
-1. **A shared photo that isn't in Immich goes nowhere.** The service worker hashes the file, redirects to
+1. **A shared photo that isn't in Immich goes nowhere.** *(Fixed on this branch: see §10.)* The service worker hashes the file, redirects to
    `/open?sha1=…`, and throws the bytes away. In a standalone deployment (#40), or for a photo the phone hasn't
    backed up yet, `/open` finds nothing and the user lands on an empty pick page. Fix: the worker keeps the `File`
    (Cache Storage or IndexedDB, keyed by its SHA-1), and the pick page offers **Import this photo**, posting it to
@@ -348,25 +376,60 @@ redesigning anything, add one smoke run against Playwright's WebKit with a phone
 screenshot each section. Then measure on a real device: time to first paint, time to full proxy, and whether a
 backgrounded tab survives (`device.lost`, §6).
 
-## 8. Proposed order of work
+## 8. What the file already says, before anything is computed
 
-1. **Small, no pixel change:** D4 guard; D12 refusals; the extension lists generated from Rust (§5.6); share-target
-   keep-and-import (§7.1); `device.lost` recovery.
-2. **Decode correctness, one `INGEST_GENERATION` bump for the lot:** D1, D2 (+ `linear_dng` CC/AB/per-channel
-   levels), D7's single threshold, D11's Adobe RGB marker. Each needs a file that shows it, under `testdata/`.
-3. **Structure:** one decode dispatcher (§5.1) carrying the D5 fix; `RawInfo::new`; ExifTool `-stay_open` behind
+Several things the pipeline estimates, guesses or runs a model for are written into the file by the camera.
+LibRaw parses most of them during `open_file` and the shim passes none of them through. Reading them through
+the shim also works in the browser's wasm build (§7 stage 2), which ExifTool never will.
+
+| Data | Where it is | Replaces | Sidecar today |
+|---|---|---|---|
+| **Embedded preview JPEG** | `JpgFromRaw` / `PreviewImage`; LibRaw `unpack_thumb` | A full decode before anything is on screen; Sidecar's own home-page thumbnail render | Read only for the Camera toggle (`worker/src/camera.rs`) |
+| **Per-channel linear limit** | LibRaw `color.linear_max[4]` (Canon's specular white level, most Olympus, Panasonic, Pentax, Sony, some Kodak, DNG); DNG `WhiteLevel` per sample → `dng_levels.dng_whitelevel[4]`; DNG `LinearResponseLimit` | The observed-maximum heuristic (D6/D7) | Unused |
+| **Black from the masked border** | Optical-black pixels around the active area; LibRaw keeps per-channel statistics over them (`color.black_stat`) for the formats where it reads them | Trusting the declared black where it is a constant | Unused |
+| **`BaselineExposure` on DNGs LibRaw opens** | `dng_levels.baseline_exposure` | `BASELINE_EV` for Leica, Pentax, Ricoh and older ProRAW | Read only for JPEG XL DNGs |
+| **The camera's own exposure shift** | Fuji `DynamicRangeSetting` / `DevelopmentDynamicRange` (DR200/400 underexpose by 1–2 stops), Canon `HighlightTonePriority`, Nikon `Active_D_Lighting` (all LibRaw makernote fields) | Guessing why a frame comes out darker than the camera's JPEG | Unused |
+| **Calibrated white-balance presets** | LibRaw `color.WB_Coeffs[]` (multipliers per preset) and `WBCT_Coeffs[]` (multipliers per colour temperature, measured for this body) | Trusting the matrix interpolation alone; a check on Temperature/Tint against the camera's own presets | Unused |
+| **Noise model** | DNG `NoiseProfile` (51041): per-channel signal-dependent noise | `noise_sigma`'s estimate from a central crop (`engine/src/detail.rs`) | Estimated |
+| **Default crop** | DNG `DefaultCropOrigin/Size` (`dng_levels.default_crop`); in-camera aspect-ratio crops on several makers | An uncropped default; ragged merge edges (§2.3) | Unused |
+| **Electronic level** | Nikon `RollAngle` / `PitchAngle` (LibRaw); other makers through ExifTool where present | Detecting lines to suggest a straighten | Unused |
+| **Faces the camera found** | Maker notes on Canon, Fuji, Sony, Panasonic, Olympus (`FacesDetected`, face positions, via ExifTool) | A first face guess before YuNet runs, or none needed for a quick face-weighted exposure | Unused. Treat as a hint: the boxes come from the live view at capture |
+| **Subject / AF point** | Sony `FocusLocation`, Fuji `FocusPixel` (done); Canon, Nikon, OM AF-area tags | — | Sony and Fuji only (`raw/src/af.rs`) |
+| **Focus distance** | Olympus/OM `FocusDistance` (LibRaw), Canon upper/lower, Nikon and Sony via ExifTool | Scaling the depth model's relative depth; the lens-blur focal plane's first guess; lensfun's distance-dependent terms | Unused |
+| **Lens correction** | DNG opcodes, Sony and Fuji maker parameters (done); Panasonic RW2 distortion parameters | lensfun lookups | Partly (`raw/src/lens.rs`) |
+| **Apple's semantic mattes and depth** | HEIC/ProRAW auxiliary images (person, skin, hair, teeth, glasses, sky; disparity) | Running BiRefNet or the multiclass model for those classes | Read (#1, `heif_aux.rs`); not yet used in place of a model run (HANDOFF) |
+| **Capture instant** | EXIF `OffsetTimeOriginal` | Reading local time as UTC; matching the iOS Shortcut's ISO 8601 `taken` | Read as UTC |
+
+The cheapest high-value set is the first five rows, which together are links 1 and 4 of the highlight path
+above. They are all fields of `libraw_data_t` already in memory after `open_file`: extending `sc_info` and
+`CameraColor` costs no extra file read and no ExifTool run.
+
+## 9. Proposed order of work
+
+1. **Small, no pixel change:** D4 guard; D12 refusals; the extension lists generated from Rust (§5.6);
+   `device.lost` recovery. (Share-target keep-and-import, §7 gap 1, is done.)
+2. **The fixed highlight set** (§3), before anything below changes a pixel, so each step is measured on it.
+3. **Decode correctness and links 1–3 of the highlight path, one `INGEST_GENERATION` bump for the lot:** D1, D2
+   (+ `linear_dng` CC/AB/per-channel levels), `SensorLevels` filled from §8's fields, one clip definition (D7),
+   D5, D11's Adobe RGB marker. Each needs a file that shows it, under `testdata/`.
+4. **Link 4:** `BaselineExposure` through the shim, then the makers' exposure shifts (§8), behind a
+   `PROCESS_VERSION` bump that pins old edits.
+5. **Structure:** one decode dispatcher (§5.1) carrying the D5 fix; `RawInfo::new`; ExifTool `-stay_open` behind
    one service.
-4. **Proxy cost:** bin-first proxies, the two-submit split, and the transfer-size settings.
-5. **Mobile stage 0 → 2**, with WebKit in the smoke test from the start.
-6. ICC via moxcms (D10) and, later, ProRAW's gain table map (D13) as an optional control.
+6. **Proxy cost:** bin-first proxies, the two-submit split, and the transfer-size settings.
+7. **Mobile stage 0 → 2**, with WebKit in the smoke test from the start (stage 0 has begun: `mobile/`).
+8. ICC via moxcms (D10) and, later, ProRAW's gain table map (D13) as an optional control.
 
-## 9. What changed on this branch
+## 10. What changed on this branch
 
 - `crates/color/src/camera.rs`: a camera colour with no calibration resolves with sRGB primaries instead of
   panicking (D9), with a test. No pixel changes for any file that opened before.
 - `crates/libraw-sys/shim/shim.cpp`: the mosaic copy uses `raw_pitch` (D3) and refuses a crop wider than the row.
   This is identical for every file that worked. It was syntax-checked against the LibRaw headers but **not compiled
   into a running build here**, so the next `./dev/run cargo test --workspace` is its first real build.
+- The share target keeps a shared photo on the phone and the pick page offers to import it (§7 gap 1; DESIGN.md's
+  build log has the details and how it was checked).
+- `mobile/`: the start of the mobile module, its own package and its own image target (`docs/MOBILE.md`).
 
 ## Sources
 
