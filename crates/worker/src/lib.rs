@@ -248,11 +248,16 @@ impl Worker {
         };
         self.paths.lock().unwrap().insert(key.clone(), path.clone());
         let meta_path = self.meta_path(&key);
+        let file_name = path
+            .file_name()
+            .map(|f| f.to_string_lossy().into_owned())
+            .unwrap_or_default();
         if let Ok(bytes) = tokio::fs::read(&meta_path).await
             && let Ok(mut meta) = serde_json::from_slice::<Meta>(&bytes)
             && meta.generation == INGEST_GENERATION
             && meta.revision == META_REVISION
         {
+            let mut changed = false;
             // A lensfun database that arrived since, for a photo whose file carries no correction: match again.
             // No ExifTool run needed — the lens's identity is already here.
             let from_lensfun = meta
@@ -265,6 +270,16 @@ impl Worker {
                 meta.info.lens_profile = None;
                 meta.info.lens_profile = self.lensfun.profile_for(&meta.info);
                 meta.lensfun = self.lensfun.updated();
+                changed = true;
+            }
+            // The same bytes at another path: an import into the editing folder is read once at its staging
+            // name and then again where it was placed. The key is the bytes, so the cached metadata is
+            // still right, but its name is the path it was read from — and `paths` now points at this one.
+            if meta.file_name != file_name {
+                meta.file_name = file_name;
+                changed = true;
+            }
+            if changed {
                 let tmp = unique_tmp(&meta_path);
                 tokio::fs::write(&tmp, serde_json::to_vec_pretty(&meta)?).await?;
                 tokio::fs::rename(&tmp, &meta_path).await?;
@@ -288,10 +303,7 @@ impl Worker {
             };
             Ok(Meta {
                 asset_key: k,
-                file_name: p
-                    .file_name()
-                    .map(|f| f.to_string_lossy().into_owned())
-                    .unwrap_or_default(),
+                file_name,
                 process_version: PROCESS_VERSION,
                 generation: INGEST_GENERATION,
                 revision: META_REVISION,
@@ -1487,6 +1499,37 @@ mod tests {
         let second = w.ingest(photo.clone()).await.unwrap().asset_key;
         assert_ne!(second, first, "a new mtime is a new file");
         assert_eq!(second, sidecar_xmp::sha1_file(&photo).unwrap());
+    }
+
+    /// An import into the editing folder is ingested at a staging name to read its date, then moved into place
+    /// and ingested again. Same bytes, same key, so the cached metadata answers the second time — and it named
+    /// the staging file, which the editor then showed as the photo's title. The name must follow the path.
+    #[tokio::test]
+    async fn the_same_bytes_at_a_second_path_take_its_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _turn = GPU_TURN.lock().await;
+        let w = Worker::new(tmp.path().join("cache")).unwrap();
+        let mut png = Vec::new();
+        let mut enc = png::Encoder::new(&mut png, 1, 1);
+        enc.set_color(png::ColorType::Grayscale);
+        enc.write_header().unwrap().write_image_data(&[10]).unwrap();
+        let staged = tmp.path().join("138b8c5d1f1ed5a3-IMG_EDITOR.png");
+        let placed = tmp.path().join("2026").join("IMG_EDITOR.png");
+        std::fs::write(&staged, &png).unwrap();
+        let first = w.ingest(staged.clone()).await.unwrap();
+        assert_eq!(first.file_name, "138b8c5d1f1ed5a3-IMG_EDITOR.png");
+
+        std::fs::create_dir_all(placed.parent().unwrap()).unwrap();
+        std::fs::rename(&staged, &placed).unwrap();
+        let second = w.ingest(placed.clone()).await.unwrap();
+        assert_eq!(second.asset_key, first.asset_key);
+        assert_eq!(second.file_name, "IMG_EDITOR.png");
+        assert_eq!(
+            w.cached_meta(&first.asset_key).await.unwrap().file_name,
+            "IMG_EDITOR.png",
+            "`GET …/meta` reads the cached file, so that must carry the new name too"
+        );
+        assert_eq!(w.paths.lock().unwrap()[&first.asset_key], placed);
     }
 
     /// The map is keyed by asset, so it would otherwise hold one entry per photo ever opened.
