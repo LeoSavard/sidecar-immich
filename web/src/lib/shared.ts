@@ -16,6 +16,12 @@ const MAX_AGE_MS = 24 * 3600 * 1000;
 
 const keyFor = (sha1: string) => `/__shared/${sha1}`;
 
+/** A file's SHA-1 as lower-case hex: the asset key the server gives the same bytes. */
+export async function sha1Hex(data: ArrayBuffer): Promise<string> {
+	const digest = await crypto.subtle.digest('SHA-1', data);
+	return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
 /** Store a shared file under its checksum, and drop shares that are old or beyond the last few. */
 export async function keepShared(file: File, sha1: string): Promise<void> {
 	const cache = await caches.open(CACHE);

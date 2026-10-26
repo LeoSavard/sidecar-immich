@@ -51,7 +51,7 @@ impl CameraColor {
             // A file that states no matrix at all (a linear DNG without ColorMatrix1, say) still has to
             // open: treat its camera RGB as sRGB primaries, as the LibRaw path does for an unknown camera.
             // This also runs in the browser's wasm, where a panic takes the whole packer down.
-            [] => mat::mul(&mat::REC2020_TO_SRGB, &mat::XYZ_TO_REC2020),
+            [] => SourceSpace::Srgb.xyz_to_rgb(),
         }
     }
 
@@ -71,6 +71,50 @@ impl CameraColor {
             xy = mat::xyz_to_xy(&xyz);
         }
         xy
+    }
+}
+
+/// The colour space a developed (non-RAW) image already lives in, decoded by the worker or by the browser.
+/// Both use the sRGB transfer function and a D65 white; they differ only in primaries.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum SourceSpace {
+    #[default]
+    Srgb,
+    DisplayP3,
+}
+
+impl SourceSpace {
+    /// Guess from an ICC profile description. Anything unrecognised is treated as sRGB, which is what an
+    /// untagged JPEG almost always is.
+    pub fn from_profile(description: &str) -> Self {
+        if description.contains("P3") {
+            Self::DisplayP3
+        } else {
+            Self::Srgb
+        }
+    }
+
+    /// XYZ → this space, derived from the working-space constants rather than written out again, so there is
+    /// one source of truth for the primaries.
+    pub fn xyz_to_rgb(self) -> mat::M3 {
+        let from_rec2020 = match self {
+            Self::Srgb => &mat::REC2020_TO_SRGB,
+            Self::DisplayP3 => &mat::REC2020_TO_P3,
+        };
+        mat::mul(from_rec2020, &mat::XYZ_TO_REC2020)
+    }
+
+    /// A `CameraColor` that makes the existing colour pipeline treat this space as the camera's native one.
+    pub fn camera_color(self) -> CameraColor {
+        CameraColor {
+            as_shot_mul: [1.0, 1.0, 1.0],
+            calibrations: vec![Calibration {
+                temperature_k: 6504.0,
+                xyz_to_camera: self.xyz_to_rgb(),
+            }],
+            baseline_exposure: None,
+        }
     }
 }
 

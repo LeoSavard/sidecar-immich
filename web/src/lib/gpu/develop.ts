@@ -5,6 +5,7 @@ import developWgsl from './wgsl/client_develop.wgsl?raw';
 import densityDownWgsl from './wgsl/client_density_down.wgsl?raw';
 import densityBlurWgsl from './wgsl/client_density_blur.wgsl?raw';
 import { DEVELOP_UNIFORM_BYTES } from '$lib/color/pack';
+import { fromHalf } from '$lib/color/transfer';
 import { kernel } from './depth';
 
 /** `MaskParams` (shaders/develop/masks.wgsl), and the texture slots it describes. */
@@ -388,7 +389,7 @@ export class DevelopPass {
 		let n = 0;
 		for (let row = 0; row < h; row++) {
 			const bits = new Uint16Array(buf.getMappedRange(row * bytesPerRow, bytesPerRow), 0, w * 4);
-			const px = Array.from(bits, half);
+			const px = Array.from(bits, fromHalf);
 			for (let i = 0; i < w * 4; i += 4) {
 				if (px[i + 3] > 0) continue;
 				sum[0] += px[i];
@@ -428,7 +429,7 @@ export class DevelopPass {
 		let max = 0;
 		for (let row = 0; row < h; row++) {
 			const bits = new Uint16Array(buf.getMappedRange(row * bytesPerRow, bytesPerRow), 0, w * 4);
-			const px = Array.from(bits, half);
+			const px = Array.from(bits, fromHalf);
 			for (let i = 0; i < w * 4; i += 4) {
 				sum[0] += px[i];
 				sum[1] += px[i + 1];
@@ -458,16 +459,6 @@ export class DevelopPass {
 		buf.destroy();
 		return out;
 	}
-}
-
-/** An IEEE half float's bits → its value. */
-function half(h: number): number {
-	const exp = (h >> 10) & 0x1f;
-	const frac = h & 0x3ff;
-	const sign = h & 0x8000 ? -1 : 1;
-	if (exp === 0) return sign * frac * 2 ** -24;
-	if (exp === 31) return frac ? NaN : sign * Infinity;
-	return sign * (1 + frac / 1024) * 2 ** (exp - 15);
 }
 
 export async function requestDevice(): Promise<GPUDevice> {

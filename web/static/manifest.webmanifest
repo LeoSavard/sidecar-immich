@@ -12,7 +12,7 @@
 		"method": "POST",
 		"enctype": "multipart/form-data",
 		"params": {
-			"files": [{ "name": "media", "accept": ["image/*", "application/octet-stream", ".nef", ".nrw", ".arw", ".dng", ".cr2", ".cr3", ".raf", ".orf", ".rw2", ".pef", ".srw"] }]
+			"files": [{ "name": "media", "accept": ["image/*", "application/octet-stream", ".nef", ".nrw", ".arw", ".srf", ".sr2", ".raf", ".cr2", ".cr3", ".crw", ".dng", ".orf", ".rw2", ".pef", ".srw", ".x3f", ".3fr", ".iiq", ".erf", ".mef", ".mos", ".rwl"] }]
 		}
 	}
 }
