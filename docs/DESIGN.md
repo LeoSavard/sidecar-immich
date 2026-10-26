@@ -7,6 +7,17 @@ Source: the architecture plan (PWA entry, XMP sidecars, server-side demosaic, We
 
 Where the code differs from the text below, the code and these notes win.
 
+- **Zoom, on the page and on the photo** (docs/research/ui-review-2026-10.md has the rest of that review). The page
+  itself no longer zooms on a phone — `touch-action: pan-x pan-y`, Safari's gesture events cancelled, and
+  `maximum-scale=1` against iOS zooming a focused field (`$lib/page-zoom.ts`) — so a pinch on the panels or a
+  double tap can't leave the interface zoomed. The camera's own rendering beside the edit (`placeCamera`) is placed
+  at the edit's zoom and position, crop and straighten included, by the affine map three canvas points give
+  through the edit's frame; its pane takes the canvas's gestures in the canvas's coordinates (`px` reads the
+  `data-view` the pointer is over), so either side pans and zooms both. The loupe shows 100, 150 or 200 %: the
+  server renders a smaller full-resolution tile and it is shown pixel for pixel; a double tap or double click
+  steps through them, three buttons pick one, and the choice is remembered. Checked in Chromium against a real
+  server; not yet on a phone.
+
 - **The phone runs the one editor** (owner's call, 2026-10-26; docs/MOBILE.md). The mobile module's own editor is
   gone. `/m` chooses a photo, shows a RAW's embedded preview while it uploads, imports it the way the home page
   does (`importPhoto`: the editing folder, or the library where there is none) and opens `/edit/<key>`. An import

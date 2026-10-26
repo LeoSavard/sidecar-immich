@@ -25,6 +25,12 @@ body {
 	overscroll-behavior: none;
 }
 
+/* Panning and nothing else: no pinch or double-tap zoom of the page itself, which the editor's own zoom of the photo
+   replaces ($lib/page-zoom.ts says why, and what else it takes). */
+html {
+	touch-action: pan-x pan-y;
+}
+
 :focus-visible {
 	outline: 2px solid var(--color-fg);
 	outline-offset: 2px;

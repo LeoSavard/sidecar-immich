@@ -331,7 +331,49 @@
 		view.render(develop.output, canvas, viewport, (clipHigh ? CLIP_HIGHS : 0) | (clipLow ? CLIP_LOWS : 0) | (peaking ? PEAKING : 0) | maskFlags, geometry);
 		markerPos = cropping ? null : imageToScreen(afPoint());
 		if (cropping) layoutTick++;
+		placeCamera();
 	}
+
+	// ---------- the camera's own rendering beside the edit, at the edit's zoom and position
+	let cameraPane = $state<HTMLDivElement | null>(null);
+	let cameraImg = $state<HTMLImageElement | null>(null);
+	let cameraTransform = $state('');
+
+	/**
+	 * Put the camera's JPEG where each of its points sits in the edit's view. The JPEG is the whole picture, as the
+	 * proxy is, so a point of the picture (the edit's output frame mapped back through crop, straighten and turns) is
+	 * a point of the JPEG; three canvas points give the affine map that turns the JPEG's pixels into the pane's, which
+	 * has the canvas's size. Zoom, pan, a crop and a straighten all follow; keystone and lens correction are
+	 * linearised at the centre, close enough to compare by.
+	 */
+	function placeCamera() {
+		const img = cameraImg;
+		if (!sideBySide || !img?.naturalWidth || !develop?.output) return;
+		const r = imageRect();
+		const toPicture = displayFrame()?.frame.toPicture ?? [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+		const at = (x: number, y: number) => project(toPicture, [(x - r.x) / r.w, (y - r.y) / r.h]);
+		const [cx, cy, d] = [canvas.width / 2, canvas.height / 2, Math.max(16, canvas.width / 4)];
+		const [s0, sx, sy] = [at(cx, cy), at(cx + d, cy), at(cx, cy + d)];
+		// d(picture)/d(canvas pixel), and its inverse.
+		const [a, b, c, e] = [(sx[0] - s0[0]) / d, (sy[0] - s0[0]) / d, (sx[1] - s0[1]) / d, (sy[1] - s0[1]) / d];
+		const det = a * e - b * c;
+		if (!Number.isFinite(det) || Math.abs(det) < 1e-12) return;
+		const inv = [e / det, -b / det, -c / det, a / det];
+		// JPEG pixel m → picture m / (W, H) → canvas pixel p0 + inv · (m / (W, H) − s0) → pane CSS pixel p / dpr.
+		const [W, H, k] = [img.naturalWidth, img.naturalHeight, 1 / devicePixelRatio];
+		const m = [(inv[0] * k) / W, (inv[2] * k) / W, (inv[1] * k) / H, (inv[3] * k) / H];
+		const tx = (cx - (inv[0] * s0[0] + inv[1] * s0[1])) * k;
+		const ty = (cy - (inv[2] * s0[0] + inv[3] * s0[1])) * k;
+		cameraTransform = `matrix(${m.join(',')},${tx},${ty})`;
+	}
+
+	// The pane takes the canvas's wheel as it takes its pointers; a wheel listener must be able to cancel.
+	$effect(() => {
+		const pane = cameraPane;
+		if (!pane) return;
+		pane.addEventListener('wheel', wheel, { passive: false });
+		return () => pane.removeEventListener('wheel', wheel);
+	});
 
 	// ---------- geometry: crop, straighten, keystone, turns (sidecar_color::geometry, through wasm)
 
@@ -1252,7 +1294,16 @@
 	let downAt = { x: 0, y: 0, t: 0 };
 	let lastTapAt = 0;
 
-	const px = (e: PointerEvent) => ({ x: e.offsetX * devicePixelRatio, y: e.offsetY * devicePixelRatio });
+	/**
+	 * A pointer in device pixels of the view it is over: the canvas, or the camera's pane beside it, which is the
+	 * canvas's size and shows the same picture at the same place, so it has the canvas's coordinates and the same
+	 * gestures (`data-view` marks both).
+	 */
+	const px = (e: PointerEvent | WheelEvent) => {
+		const host = (e.target as Element | null)?.closest?.('[data-view]') ?? canvas;
+		const r = host.getBoundingClientRect();
+		return { x: (e.clientX - r.left) * devicePixelRatio, y: (e.clientY - r.top) * devicePixelRatio };
+	};
 
 	function zoomAt(point: { x: number; y: number }, nextZoom: number, from = { zoom: viewport.zoom, panX: viewport.panX, panY: viewport.panY }) {
 		const z = Math.min(16, Math.max(1, nextZoom));
@@ -1272,7 +1323,7 @@
 	}
 
 	function canvasDown(e: PointerEvent) {
-		canvas.setPointerCapture(e.pointerId);
+		(e.currentTarget as Element).setPointerCapture(e.pointerId);
 		pointers.set(e.pointerId, px(e));
 		downAt = { ...px(e), t: performance.now() };
 		clearTimeout(holdTimer);
@@ -1350,7 +1401,7 @@
 
 	function wheel(e: WheelEvent) {
 		e.preventDefault();
-		zoomAt({ x: e.offsetX * devicePixelRatio, y: e.offsetY * devicePixelRatio }, viewport.zoom * Math.exp(-e.deltaY * 0.002));
+		zoomAt(px(e), viewport.zoom * Math.exp(-e.deltaY * 0.002));
 	}
 
 	function keydown(e: KeyboardEvent) {
@@ -1393,18 +1444,13 @@
 		});
 		ro.observe(canvas);
 		const onHide = () => document.visibilityState === 'hidden' && session.commit(true);
-		const noGesture = (e: Event) => e.preventDefault();
 		document.addEventListener('visibilitychange', onHide);
-		canvas.addEventListener('gesturestart', noGesture);
-		canvas.addEventListener('gesturechange', noGesture);
 		canvas.addEventListener('wheel', wheel, { passive: false });
 		start();
 		return () => {
 			ro.disconnect();
 			mq.removeEventListener('change', onWide);
 			document.removeEventListener('visibilitychange', onHide);
-			canvas.removeEventListener('gesturestart', noGesture);
-			canvas.removeEventListener('gesturechange', noGesture);
 			canvas.removeEventListener('wheel', wheel);
 		};
 	});
@@ -1556,6 +1602,7 @@
 		     without WebGPU nothing ever draws into it and the server's JPEG sits on top. -->
 		<canvas
 			bind:this={canvas}
+			data-view
 			class="block touch-none {sideBySide ? (wide ? 'h-full w-1/2' : 'h-1/2 w-full') : 'h-full w-full'} {fallback ? 'invisible' : ''} {pickingWhite || pickingFocus || probing ? 'cursor-crosshair' : ''}"
 			onpointerdown={canvasDown}
 			onpointermove={canvasMove}
@@ -1566,9 +1613,33 @@
 		></canvas>
 		{#if sideBySide}
 			<!-- After the canvas, so the canvas keeps its corner and everything drawn over it keeps its place. -->
-			<div class="absolute flex items-center justify-center border-line bg-ground p-2 {wide ? 'inset-y-0 right-0 w-1/2 border-l' : 'inset-x-0 bottom-0 h-1/2 border-t'}">
-				<img src="/api/assets/{key}/camera" alt="The camera's own rendering" class="max-h-full max-w-full object-contain" onerror={() => { cameraMissing = true; showCamera = false; }} />
-				<span class="absolute top-2 left-2 rounded bg-ground/80 px-2 py-1 text-xs text-fg-2">Camera</span>
+			<!-- The same gestures as the canvas, in the canvas's coordinates: either side zooms and pans both. -->
+			<div
+				bind:this={cameraPane}
+				data-view
+				role="img"
+				aria-label="The camera's own rendering, at the edit's zoom and position"
+				class="absolute touch-none overflow-hidden border-line bg-ground {wide ? 'inset-y-0 right-0 w-1/2 border-l' : 'inset-x-0 bottom-0 h-1/2 border-t'} {pickingWhite || pickingFocus || probing ? 'cursor-crosshair' : ''}"
+				onpointerdown={canvasDown}
+				onpointermove={canvasMove}
+				onpointerup={canvasUp}
+				onpointercancel={canvasUp}
+				oncontextmenu={(e) => e.preventDefault()}
+			>
+				<img
+					bind:this={cameraImg}
+					src="/api/assets/{key}/camera"
+					alt=""
+					draggable="false"
+					class="pointer-events-none absolute top-0 left-0 max-w-none origin-top-left select-none {cameraTransform ? '' : 'invisible'}"
+					style="transform: {cameraTransform}"
+					onload={() => schedule()}
+					onerror={() => {
+						cameraMissing = true;
+						showCamera = false;
+					}}
+				/>
+				<span class="pointer-events-none absolute top-2 left-2 rounded bg-ground/80 px-2 py-1 text-xs text-fg-2">Camera</span>
 			</div>
 		{/if}
 		{#if fallback}

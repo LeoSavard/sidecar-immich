@@ -73,6 +73,11 @@ opens `/edit/<key>`, which develops the phone's own copy on the phone and says s
 gone (MOBILE.md) — and **Apple's ProRAW white balance** (`AnalogBalance`, the review's D2), which read 2,786 K and
 tint −158 on a daylight frame and now reads 6,880 K +32. Neither has run on a real iPhone yet.
 
+**And then the interface:** the page no longer zooms itself on a phone, the camera's rendering follows the edit's
+zoom and position (and drives it), and the loupe reaches 150 % and 200 %. A wider look at the interface, with
+seventeen suggestions in order of how often they are met, is
+[`research/ui-review-2026-10.md`](research/ui-review-2026-10.md); none of those are built.
+
 **Before those, on the owner's word, three more on the same branch** (DESIGN.md's build log has each):
 - **D11:** a camera's Adobe RGB JPEG, marked only in EXIF, decodes in Adobe RGB on the server and on the phone
   (`INGEST_GENERATION` 5, `META_REVISION` 2, so cached metadata and proxies are read again once).
