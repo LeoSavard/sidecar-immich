@@ -8,7 +8,8 @@ Source: the architecture plan (PWA entry, XMP sidecars, server-side demosaic, We
 Where the code differs from the text below, the code and these notes win.
 
 - **D5: X-Trans proxies stop reconstructing highlights, so the preview clips where the export already did**
-  (the owner's call, 2026-10-27; docs/research/pipeline-review-2026-10.md). `export::full_source` sends
+  — **held, on its own branch, pending a re-evaluation of highlight reconstruction itself** (the owner's call,
+  2026-10-27: the feature's usefulness is in question, so this is not to ride along with other work; docs/research/pipeline-review-2026-10.md). `export::full_source` sends
   X-Trans to LibRaw's Markesteijn with `highlight = 0`, which clips, while `Ingest::proxy` ran the highlight
   pyramid — so the two disagreed in exactly the blown region reconstruction exists for, which is the one place
   ARCHITECTURE's "one rule" has to hold. The pyramid is now skipped entirely for X-Trans rather than computed
