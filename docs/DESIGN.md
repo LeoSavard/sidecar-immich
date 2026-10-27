@@ -7,6 +7,23 @@ Source: the architecture plan (PWA entry, XMP sidecars, server-side demosaic, We
 
 Where the code differs from the text below, the code and these notes win.
 
+- **D5: X-Trans proxies stop reconstructing highlights, so the preview clips where the export already did**
+  (the owner's call, 2026-10-27; docs/research/pipeline-review-2026-10.md). `export::full_source` sends
+  X-Trans to LibRaw's Markesteijn with `highlight = 0`, which clips, while `Ingest::proxy` ran the highlight
+  pyramid — so the two disagreed in exactly the blown region reconstruction exists for, which is the one place
+  ARCHITECTURE's "one rule" has to hold. The pyramid is now skipped entirely for X-Trans rather than computed
+  and discarded, so a RAF proxy also costs less memory and one less pass. `INGEST_GENERATION` 6: only X-Trans
+  files change, and only where they were blown. The alternative — the GPU front half read back and handed to
+  LibRaw for the demosaic — stays available for when a Markesteijn port lets both sides share this pass; at
+  that point the gate goes away rather than being inverted.
+
+  Checked on `DSCF5152.RAF` (X100F, 6048 × 4038): the proxy is now byte-identical with and without
+  `SIDECAR_NO_HILITE`, which is what "reconstruction is off" means, while `DSC01899.ARW` still differs between
+  the two, so Bayer is untouched. **Not yet checked on a blown X-Trans frame:** that RAF turns out to have no
+  clipped highlights — its render is identical before and after this change, largest difference 1 of 255 —
+  so it proves the gate is skipped but not what the gate does to a picture. A blown Fujifilm frame is still
+  owed.
+
 - **The decode review's stage 1: three guards and a recovery, no pixel changed**
   (docs/research/pipeline-review-2026-10.md §9). **D4:** `RawFile::mosaic()` refuses levels that cannot
   normalize — an empty mosaic, a maximum that is not a number, or a maximum at or below black for a colour the

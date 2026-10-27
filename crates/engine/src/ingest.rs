@@ -272,72 +272,80 @@ impl Ingest {
             &[Res::View(&view(&raw)), Res::View(&view(&norm))],
         );
 
-        // Highlight reconstruction pyramid.
         let block = if sensor == 1 { 3 } else { 2 };
         let (hw, hh) = (w / block, h / block);
-        let half = texture(gpu, hw, hh, F::Rgba32Float);
-        self.half.run(
-            gpu,
-            &mut enc,
-            &with([w, h], [hw, hh]),
-            [hw, hh],
-            &[Res::View(&view(&norm)), Res::View(&view(&half))],
-        );
-        let mut levels = vec![half];
-        loop {
-            let prev = levels.last().unwrap();
-            let (pw, ph) = (prev.width(), prev.height());
-            if pw <= 1 || ph <= 1 || levels.len() >= 15 {
-                break;
-            }
-            let (cw, ch) = ((pw - 1) / 2 + 1, (ph - 1) / 2 + 1);
-            let t = texture(gpu, cw, ch, F::Rgba32Float);
-            self.reduce.run(
-                gpu,
-                &mut enc,
-                &with([pw, ph], [cw, ch]),
-                [cw, ch],
-                &[Res::View(&view(prev)), Res::View(&view(&t))],
-            );
-            levels.push(t);
-        }
-        let mut coarse = levels.pop().unwrap();
-        while let Some(fine) = levels.pop() {
-            let out = texture(gpu, fine.width(), fine.height(), F::Rgba32Float);
-            self.assemble.run(
-                gpu,
-                &mut enc,
-                &with(
-                    [coarse.width(), coarse.height()],
-                    [fine.width(), fine.height()],
-                ),
-                [fine.width(), fine.height()],
-                &[
-                    Res::View(&view(&fine)),
-                    Res::View(&view(&coarse)),
-                    Res::View(&view(&out)),
-                ],
-            );
-            coarse = out;
-        }
-        let cfa = texture(gpu, w, h, F::R32Float);
-        self.doub.run(
-            gpu,
-            &mut enc,
-            &with([w, h], [hw, hh]),
-            [hw, hh],
-            &[
-                Res::View(&view(&norm)),
-                Res::View(&view(&coarse)),
-                Res::View(&view(&cfa)),
-            ],
-        );
-        // Diagnostic only, for `sidecar-dev hilite` (ROADMAP, "Highlight reconstruction"): keep the clipped
-        // mosaic instead of the reconstructed one, which is the A/B that says whether something in a blown
-        // area was invented here or was already in the picture. Never set in a deployment.
-        let cfa = if std::env::var_os("SIDECAR_NO_HILITE").is_some() {
+        // Highlight reconstruction, where it is done at all.
+        //
+        // X-Trans is excluded (D5, the owner's call on 2026-10-27). `export::full_source` sends X-Trans to
+        // LibRaw's Markesteijn with `highlight = 0`, which clips, so reconstructing here made the preview
+        // disagree with the export in exactly the blown region reconstruction exists for — the one place
+        // ARCHITECTURE's "one rule" has to hold. Both clip until a Markesteijn port lets the export share
+        // this pass, at which point this goes away rather than being inverted.
+        //
+        // SIDECAR_NO_HILITE is diagnostic only, for `sidecar-dev hilite` (ROADMAP, "Highlight
+        // reconstruction"): it keeps the clipped mosaic, which is the A/B that says whether something in a
+        // blown area was invented here or was already in the picture. Never set in a deployment.
+        let reconstruct = sensor != 1 && std::env::var_os("SIDECAR_NO_HILITE").is_none();
+        let cfa = if !reconstruct {
             norm.clone()
         } else {
+            let half = texture(gpu, hw, hh, F::Rgba32Float);
+            self.half.run(
+                gpu,
+                &mut enc,
+                &with([w, h], [hw, hh]),
+                [hw, hh],
+                &[Res::View(&view(&norm)), Res::View(&view(&half))],
+            );
+            let mut levels = vec![half];
+            loop {
+                let prev = levels.last().unwrap();
+                let (pw, ph) = (prev.width(), prev.height());
+                if pw <= 1 || ph <= 1 || levels.len() >= 15 {
+                    break;
+                }
+                let (cw, ch) = ((pw - 1) / 2 + 1, (ph - 1) / 2 + 1);
+                let t = texture(gpu, cw, ch, F::Rgba32Float);
+                self.reduce.run(
+                    gpu,
+                    &mut enc,
+                    &with([pw, ph], [cw, ch]),
+                    [cw, ch],
+                    &[Res::View(&view(prev)), Res::View(&view(&t))],
+                );
+                levels.push(t);
+            }
+            let mut coarse = levels.pop().unwrap();
+            while let Some(fine) = levels.pop() {
+                let out = texture(gpu, fine.width(), fine.height(), F::Rgba32Float);
+                self.assemble.run(
+                    gpu,
+                    &mut enc,
+                    &with(
+                        [coarse.width(), coarse.height()],
+                        [fine.width(), fine.height()],
+                    ),
+                    [fine.width(), fine.height()],
+                    &[
+                        Res::View(&view(&fine)),
+                        Res::View(&view(&coarse)),
+                        Res::View(&view(&out)),
+                    ],
+                );
+                coarse = out;
+            }
+            let cfa = texture(gpu, w, h, F::R32Float);
+            self.doub.run(
+                gpu,
+                &mut enc,
+                &with([w, h], [hw, hh]),
+                [hw, hh],
+                &[
+                    Res::View(&view(&norm)),
+                    Res::View(&view(&coarse)),
+                    Res::View(&view(&cfa)),
+                ],
+            );
             cfa
         };
 
