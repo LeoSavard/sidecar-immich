@@ -106,5 +106,5 @@ Chromium against a real server: the page reports `touch-action: pan-x pan-y` and
 `maximum-scale=1`; the camera's JPEG lands on the edit's image rectangle at fit (540 × 360 at y = 270 in a 540 × 900
 pane), follows a 3.3× zoom of the edit, moves exactly as far as a drag on its own pane (120, 60 px) and zooms both
 from its own wheel; the loupe asks for a 280-pixel tile at 100 % and a 140-pixel one at 200 %, and a double click or
-a double tap steps it to 150 %. None of it has been tried on a real iPhone yet, which is where the page-zoom change
-matters most.
+a double tap steps it to 150 %. On 2026-10-27 the owner confirmed on an iPhone that the page no longer zooms itself,
+that the panel resizes by press and hold then drag, and that the camera's rendering follows the edit.

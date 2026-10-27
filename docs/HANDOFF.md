@@ -5,7 +5,7 @@ For whoever picks this up next, person or agent. [`ARCHITECTURE.md`](ARCHITECTUR
 checked), [`ROADMAP.md`](ROADMAP.md) what's known to be missing. This page is the state of play; update it when
 you stop.
 
-*Last updated 2026-10-26.*
+*Last updated 2026-10-27.*
 
 ## Where it stands, 2026-10-22
 
@@ -75,13 +75,18 @@ truth to compare with.
 **Then two more asks, same branch:** **the phone runs the one editor** — `/m` imports into the editing folder and
 opens `/edit/<key>`, which develops the phone's own copy on the phone and says so; the module's small editor is
 gone (MOBILE.md) — and **Apple's ProRAW white balance** (`AnalogBalance`, the review's D2), which read 2,786 K and
-tint −158 on a daylight frame and now reads 6,880 K +32. Neither has run on a real iPhone yet.
+tint −158 on a daylight frame and now reads 6,880 K +32. The owner has since run the editor on an iPhone; ProRAW's
+white balance there has not been reported on.
 
 **And then the interface:** the page no longer zooms itself on a phone, the camera's rendering follows the edit's
 zoom and position (and drives it), and the loupe reaches 150 % and 200 %. A wider look at the interface, with
 seventeen suggestions in order of how often they are met, is
 [`research/ui-review-2026-10.md`](research/ui-review-2026-10.md). The owner answered nine of them and those are
-built (the table at its top); the rest are open.
+built (the table at its top); the rest are open. On an iPhone (2026-10-27) the owner confirmed the page-zoom guard,
+the panel handle and the camera's rendering following the edit, and found two faults, fixed since #44 merged on
+`claude/sweet-maxwell-s67it6` and not yet in a pull request: hiding the tools left the chosen panel height as an
+empty grey panel, and "Bring it up to date now" left Highlights' reach behind, so the offer came back (the session
+record's §10).
 
 **Before those, on the owner's word, three more on the same branch** (DESIGN.md's build log has each):
 - **D11:** a camera's Adobe RGB JPEG, marked only in EXIF, decodes in Adobe RGB on the server and on the phone
