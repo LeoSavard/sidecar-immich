@@ -819,6 +819,24 @@ fn levels(input: &std::path::Path) -> Result<()> {
         }
     }
     let got = sidecar_raw::levels::clip_threshold(&tops);
+    // How much of the frame actually reached saturation: what says whether a file can demonstrate anything
+    // about highlights at all.
+    let mut clipped = [0u64; 4];
+    for y in 0..m.height {
+        for x in 0..m.width {
+            let c = m.color_at(y, x) as usize;
+            let v = m.data[(y * m.width + x) as usize] as f32;
+            if (v - m.black[c]) / (m.white - m.black[c]) >= got[c] {
+                clipped[c] += 1;
+            }
+        }
+    }
+    let total: u64 = seen.iter().sum();
+    let blown: u64 = clipped.iter().sum();
+    println!(
+        "  clipped: {:.4} % of samples",
+        100.0 * blown as f64 / total.max(1) as f64
+    );
     for c in 0..4 {
         if seen[c] == 0 {
             continue;
