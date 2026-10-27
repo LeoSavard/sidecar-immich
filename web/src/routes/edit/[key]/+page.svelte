@@ -257,7 +257,7 @@
 	 * The references this edit had before it was brought up to date, so "keep the old rendering" can put
 	 * them back. Set only when the port happened on its own, under the person's first change.
 	 */
-	let oldRendering = $state<{ processVersion: number; baselineEv: number; whiteEv: number; whiteZeroEv: number; shoulderOrder: number; highlightBleach: number } | null>(null);
+	let oldRendering = $state<ReturnType<typeof referencesOf> | null>(null);
 	/**
 	 * They asked to keep the old rendering on this photo. Held for as long as it is open and no longer: an
 	 * edit that keeps old references is the thing this is trying to stop, so the next session asks again.
@@ -924,15 +924,16 @@
 		}
 	}
 
-	/** The references as they stand, for putting back. */
+	/** The references as they stand, for putting back: every field `adopt_current_rendering` sets. One left out
+	 *  is never taken up, so the edit stays behind and the offer comes back the moment it was taken. */
 	function referencesOf(e: EditParams) {
-		return { processVersion: e.processVersion, baselineEv: e.exposure.baselineEv, whiteEv: e.tone.whiteEv, whiteZeroEv: e.tone.whiteZeroEv, shoulderOrder: e.tone.shoulderOrder, highlightBleach: e.tone.highlightBleach };
+		return { processVersion: e.processVersion, baselineEv: e.exposure.baselineEv, whiteEv: e.tone.whiteEv, whiteZeroEv: e.tone.whiteZeroEv, shoulderOrder: e.tone.shoulderOrder, highlightBleach: e.tone.highlightBleach, highlightReachEv: e.tone.highlightReachEv };
 	}
 
 	function setReferences(e: EditParams, r: ReturnType<typeof referencesOf>) {
 		e.processVersion = r.processVersion;
 		e.exposure = { ...e.exposure, baselineEv: r.baselineEv };
-		e.tone = { ...e.tone, whiteEv: r.whiteEv, whiteZeroEv: r.whiteZeroEv, shoulderOrder: r.shoulderOrder, highlightBleach: r.highlightBleach };
+		e.tone = { ...e.tone, whiteEv: r.whiteEv, whiteZeroEv: r.whiteZeroEv, shoulderOrder: r.shoulderOrder, highlightBleach: r.highlightBleach, highlightReachEv: r.highlightReachEv };
 	}
 
 	/**
@@ -1223,6 +1224,7 @@
 		void edit?.tone.whiteZeroEv;
 		void edit?.tone.shoulderOrder;
 		void edit?.tone.highlightBleach;
+		void edit?.tone.highlightReachEv;
 		if (packerReady && edit && meta) checkRendering();
 	});
 
