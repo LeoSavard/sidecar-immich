@@ -837,13 +837,28 @@ fn levels(input: &std::path::Path) -> Result<()> {
         "  clipped: {:.4} % of samples",
         100.0 * blown as f64 / total.max(1) as f64
     );
+    // What `Ingest::demosaic` actually uses: *one* number for every colour, from the brightest sample
+    // anywhere in the mosaic. The per-colour "old heuristic" below is the same formula asked per channel,
+    // which is what the other two decode paths do — it is not what the GPU path feeds the shaders.
+    {
+        let blk = m.black.iter().copied().fold(f32::MAX, f32::min);
+        let max = m.data.iter().copied().max().unwrap_or(0) as f32;
+        let white_obs = ((max - blk) / (m.white - blk)).min(1.0);
+        let scalar = if white_obs > 0.5 {
+            (white_obs * 0.98).min(0.985)
+        } else {
+            0.985
+        };
+        println!("  one threshold for all four colours, as the GPU path uses it: {scalar:.4}");
+    }
     for c in 0..4 {
         if seen[c] == 0 {
             continue;
         }
         let span = m.white - m.black[c];
         let observed = (brightest[c] as f32 - m.black[c]) / span;
-        // What `Ingest::demosaic` would have used: 98 % of the observed maximum, capped at 98.5 %.
+        // The same formula asked per channel, as `LinearImage::rgba` and the linear-DNG path ask it:
+        // 98 % of this colour's observed maximum, capped at 98.5 %.
         let old = if observed > 0.5 {
             (observed * 0.98).min(0.985)
         } else {
