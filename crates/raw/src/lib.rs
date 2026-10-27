@@ -14,6 +14,7 @@ pub mod gain_map;
 pub mod heif_aux;
 pub mod lens;
 pub mod lensfun;
+pub mod levels;
 pub mod linear_dng;
 pub mod portrait_depth;
 pub use af::AfPoint;
