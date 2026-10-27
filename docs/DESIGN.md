@@ -7,24 +7,6 @@ Source: the architecture plan (PWA entry, XMP sidecars, server-side demosaic, We
 
 Where the code differs from the text below, the code and these notes win.
 
-- **D1: the black level's repeat pattern is mapped per CFA position, not averaged**
-  (docs/research/pipeline-review-2026-10.md). DNG's `BlackLevelRepeatDim` states a repeat — LibRaw keeps it at
-  `cblack[4]`/`cblack[5]` with the values from `cblack[6]` on — and `sc_get_mosaic` added the *mean* of it to
-  every colour, which is wrong for any file whose pattern is uneven: each colour is off by up to half the
-  spread, in the shadows, where it shows. Where the repeat is 2×2 or smaller and the CFA is Bayer the mapping
-  is now exact, because the CFA's period is 2, so each position of the block carries one colour and the
-  shader's `black[]` is already indexed by colour with G2 as 3. A 6×6 X-Trans pattern cannot be said in four
-  numbers and keeps the average; every Fujifilm file here states one value repeated 36 times, for which the
-  average is exact anyway.
-
-  **Byte-identical for every file whose pattern is uniform**, checked on `DSC01899.ARW` (Bayer),
-  `IMG_1768.CR2` (Bayer) and `DSCF5152.RAF` (X-Trans): the rendered proxies compare equal before and after.
-  **Unverified against a file that exercises it**, because none exists to hand — every camera model in the
-  owner's library writes a uniform black in the raw IFD (D7000 `0`, EOS M3 `2048`, VTR-L09 `0`, X100F `1022`,
-  ZV-1 `800`, D5 `400`). An earlier search appeared to find eleven files with uneven patterns; all eleven were
-  `exiftool -T` reporting a *preview pyramid's* sub-IFD rather than the raw image, which the group-qualified
-  tags (`-G1`) show plainly. A Leica, Pentax or Ricoh DNG is still wanted before this is called proven.
-
 - **D5 is held on its own branch** (`xtrans-highlight-gate`), not in this line. Gating highlight
   reconstruction off for X-Trans proxies — so the preview clips where `export::full_source` already clips —
   waits on the owner's re-evaluation of whether highlight reconstruction earns its place at all (2026-10-27).
