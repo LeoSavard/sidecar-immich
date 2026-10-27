@@ -72,6 +72,10 @@
 	let zoomPercent = $state(0);
 	/** The loupe over the photo, reached from the toggles beside Focus rather than three taps deep (item 8). */
 	let loupeOver = $state(false);
+	/** The proxy as it was uploaded, and the focus mask: what a rebuilt device needs (`useSource`). */
+	let gpuSource: { width: number; height: number; f16: ArrayBuffer | ArrayBufferView } | null = null;
+	let focusMaskBytes: ArrayBuffer | null = null;
+	let recovering = false;
 	/**
 	 * The colour model the proxy is in when it isn't the server's: a developed photo the browser decoded into
 	 * Display P3. Everything that packs or samples the proxy reads `cameraColor()`.
@@ -735,6 +739,27 @@
 		return entry;
 	}
 
+	/**
+	 * Drop everything cached from a device that has gone away. The textures are not destroyed: the device took
+	 * its memory with it, and each is derived from the proxy, the worker's masks or strokes the edit still
+	 * holds, so the next frame makes them again.
+	 *
+	 * The memos matter as much as the textures. `correctLens` and `depthEffects` return early when nothing in
+	 * the edit changed, so after a rebuild they would go on handing the new device views it rejects — which
+	 * shows up as a frame that never arrives and no error anywhere, not as a failure.
+	 */
+	function forgetGpuCaches() {
+		layerTextures.clear();
+		correctedMasks.clear();
+		corrected = undefined;
+		lensOut = undefined;
+		correctedMask = undefined;
+		lensMadeFrom = '';
+		depthMadeFrom = undefined;
+		refinedFrom = undefined;
+		maskSet = null;
+	}
+
 	function forgetLayers() {
 		for (const e of layerTextures.values()) {
 			e.painted.destroy();
@@ -1245,10 +1270,25 @@
 		const [proxyResp, focusResp] = await Promise.all([api(`/api/assets/${key}/proxy?long_edge=${longEdge}`), api(`/api/assets/${key}/focus?edge=${longEdge}`)]);
 		const w = Number(proxyResp.headers.get('x-width'));
 		const h = Number(proxyResp.headers.get('x-height'));
-		develop.setSource(w, h, await proxyResp.arrayBuffer());
-		proxyLoaded = true;
-		await view.loadFocusMask(await focusResp.arrayBuffer());
+		useSource(w, h, await proxyResp.arrayBuffer());
+		useFocusMask(await focusResp.arrayBuffer());
 		schedule(true);
+	}
+
+	/**
+	 * Give the develop pass its source, keeping the bytes. A lost device is then rebuilt from what is already
+	 * here rather than fetching a 35 MB proxy again or decoding the original a second time — which is the whole
+	 * difference between recovering and asking for a reload (the pipeline review, §6).
+	 */
+	function useSource(width: number, height: number, f16: ArrayBuffer | ArrayBufferView) {
+		gpuSource = { width, height, f16 };
+		develop.setSource(width, height, f16);
+		proxyLoaded = true;
+	}
+
+	function useFocusMask(png: ArrayBuffer) {
+		focusMaskBytes = png;
+		return view.loadFocusMask(png);
 	}
 
 	/**
@@ -1273,7 +1313,7 @@
 			const asShot = packer.pack(defaults, cameraColor(), meta!.info.sourceKind ?? 'raw', display);
 			asShotWb = { temperatureK: asShot.temperatureK, tint: asShot.tint };
 		}
-		develop.setSource(local.proxy.width, local.proxy.height, local.proxy.f16);
+		useSource(local.proxy.width, local.proxy.height, local.proxy.f16);
 		proxyLoaded = true;
 		onDevice = true;
 		status = '';
@@ -1283,9 +1323,86 @@
 		// Focus peaking's mask is the server's to compute; it arrives when it does, and nothing waits for it.
 		api(`/api/assets/${key}/focus?edge=${edge}`)
 			.then((r) => r.arrayBuffer())
-			.then((b) => view.loadFocusMask(b))
+			.then((b) => useFocusMask(b))
 			.catch(() => {});
 		return true;
+	}
+
+	/**
+	 * Every GPU pass, built against `device`, and the watch for that device being lost. Separate from `start`
+	 * because it is run again on recovery.
+	 */
+	async function buildPasses(device: GPUDevice) {
+		[develop, view, hist, lensPass, painter] = await Promise.all([
+			DevelopPass.create(device),
+			ViewPass.create(device, canvas, display === 'display-p3'),
+			HistogramPass.create(device),
+			LensPass.create(device),
+			MaskPainter.create(device)
+		]);
+		depthPass = await DepthPass.create(device);
+		maskLibrary = new MaskLibrary(device, key);
+		// For tests and for looking, as `?inspect` already leaves the proxy on the window: a real device loss
+		// followed by the real recovery. Destroying it invalidates every pipeline and texture built above, so
+		// what runs afterwards is the rebuild and nothing else.
+		if (page.url.searchParams.has('inspect')) {
+			Object.assign(window, {
+				__sidecarGpu: {
+					device,
+					lose: () => {
+						device.destroy();
+						return recoverDevice('test');
+					}
+				}
+			});
+		}
+		device.lost.then((info) => {
+			// `destroyed` is this page taking the device down itself; anything else is the browser doing it.
+			if (info.reason === 'destroyed' || recovering) return;
+			void recoverDevice(info.reason || 'unknown');
+		});
+	}
+
+	/**
+	 * Rebuild after the browser takes the GPU device away, instead of asking for a reload. iOS drops the device
+	 * when Safari is backgrounded, which made a phone session cost a reload every time one answered a message.
+	 * The proxy bytes are still here (`useSource`), so this is a few pipelines and an upload, not a fetch or a
+	 * decode. A device lost while the page is hidden is rebuilt when it comes back: asking for one while
+	 * backgrounded is how iOS loses it again.
+	 */
+	async function recoverDevice(why: string) {
+		const giveUp = (detail: string) =>
+			(error = `The GPU was reset (${detail}). Reload to continue — your edits are kept as a draft.`);
+		if (recovering || !gpuSource) return giveUp(why);
+		recovering = true;
+		try {
+			if (document.visibilityState === 'hidden') {
+				await new Promise<void>((resolve) => {
+					const back = () => {
+						if (document.visibilityState !== 'visible') return;
+						document.removeEventListener('visibilitychange', back);
+						resolve();
+					};
+					document.addEventListener('visibilitychange', back);
+				});
+			}
+			status = 'The GPU was reset; rebuilding…';
+			const device = await requestDevice();
+			if (!device) throw new Error('no device');
+			forgetGpuCaches();
+			await buildPasses(device);
+			useSource(gpuSource.width, gpuSource.height, gpuSource.f16);
+			if (focusMaskBytes) await useFocusMask(focusMaskBytes);
+			if (section === 'masks' || wide || (edit?.masks?.length ?? 0) > 0) loadMaskSet();
+			status = '';
+			error = '';
+			schedule(true);
+		} catch (e) {
+			giveUp(`${why}; rebuilding it failed: ${e instanceof Error ? e.message : e}`);
+			status = '';
+		} finally {
+			recovering = false;
+		}
 	}
 
 	async function start() {
@@ -1329,17 +1446,8 @@
 				status = '';
 				return;
 			}
-			[develop, view, hist, lensPass, painter] = await Promise.all([
-				DevelopPass.create(device),
-				ViewPass.create(device, canvas, display === 'display-p3'),
-				HistogramPass.create(device),
-				LensPass.create(device),
-				MaskPainter.create(device)
-			]);
-			depthPass = await DepthPass.create(device);
-			maskLibrary = new MaskLibrary(device, key);
+			await buildPasses(device);
 			if (section === 'masks' || wide || (edit?.masks?.length ?? 0) > 0) loadMaskSet();
-			device.lost.then((info) => (error = `The GPU was reset (${info.reason}). Reload to continue — your edits are kept as a draft.`));
 			const phone = matchMedia('(pointer: coarse)').matches;
 			histStride = phone ? 2 : 1;
 			const wanted = Math.round(Math.max(innerWidth, innerHeight) * devicePixelRatio * 1.25);

@@ -7,6 +7,27 @@ Source: the architecture plan (PWA entry, XMP sidecars, server-side demosaic, We
 
 Where the code differs from the text below, the code and these notes win.
 
+- **The decode review's stage 1: three guards and a recovery, no pixel changed**
+  (docs/research/pipeline-review-2026-10.md §9). **D4:** `RawFile::mosaic()` refuses levels that cannot
+  normalize — an empty mosaic, a maximum that is not a number, or a maximum at or below black for a colour the
+  CFA pattern actually names. `normalize.wgsl` divides by `white - black[c]`, so those produced a black frame
+  and no error at all; an `Err` is useful because both callers already fall back to LibRaw's own demosaic on
+  one. The check is a free function so it is tested without a camera file, and only the colours the pattern
+  names are checked (a Bayer file leaves `black[3]` at whatever LibRaw left there). **D12, two halves:** the
+  JPEG decoder's output colour space is now pinned to RGB rather than inherited from a default, and anything
+  that comes back as something else is refused — a four-component CMYK or Adobe YCCK JPEG would otherwise
+  reach `to_linear_rgba` as three colours plus an alpha, reading cyan, magenta and yellow as red, green and
+  blue; and PNM is scaled by the maximum its own header states instead of by the width of the sample type,
+  which rendered a 10-bit PGM 64× dark. A maxval of 0 or above 65535 is refused, and a sample above the stated
+  maximum is clamped rather than indexing past the table. **`device.lost` recovery:** the editor rebuilds its
+  passes and re-uploads the proxy it kept (`useSource`) instead of asking for a reload, which is what iOS cost
+  every time Safari was backgrounded. The subtle half is `forgetGpuCaches`: the lens, depth, mask and layer
+  textures all belong to the device that went away, and `correctLens` and `depthEffects` memoise, so without
+  dropping both the rebuilt device is handed views it rejects — a frame that never arrives and no error
+  anywhere. Checked by `web/scripts/gpu-recovery-smoke.mjs`, which destroys the device through `?inspect` and
+  compares the photo pane before and after: identical, 99.9 % lit, no validation complaint. Removing the cache
+  reset makes it fail, so the test is not vacuous.
+
 - **Six more from the UI review, after the owner's answers of 2026-10-27**
   (docs/research/ui-review-2026-10.md has the table). The button that hides the tools wears a panel glyph, not an
   ⓘ, which people read as "details about this photo"; White balance's picker is a pipette, not a pencil; "Reset to
