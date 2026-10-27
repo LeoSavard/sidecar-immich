@@ -1897,7 +1897,7 @@
 		     the phone keeps its tab row, the desktop a strip of tabs over the photo. -->
 		<aside
 			class="flex max-h-[48dvh] shrink-0 flex-col bg-panel pb-[max(0.75rem,env(safe-area-inset-bottom))] lg:max-h-none lg:w-80 lg:pb-3"
-			style={!wide && sheet.vh ? `height: ${sheet.vh}dvh; max-height: ${sheet.vh}dvh` : undefined}
+			style={!wide && !toolsHidden && sheet.vh ? `height: ${sheet.vh}dvh; max-height: ${sheet.vh}dvh` : undefined}
 		>
 			{#if !wide && !toolsHidden}
 				<!-- Hold, then drag: a press on the handle arms it (it lights up), and only then does moving resize the
