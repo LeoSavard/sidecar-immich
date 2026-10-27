@@ -24,7 +24,7 @@ The short version:
 
 | # | Finding | Where | Effect | Changes pixels when fixed | Effort |
 |---|---|---|---|---|---|
-| D1 | Black-level pattern averaged instead of mapped per CFA position | `shim.cpp` `sc_get_mosaic` | Shadow colour cast on DNGs with a 2×2 `BlackLevelRepeatDim` whose values differ | Yes, affected files only | S |
+| D1 | Black-level pattern averaged instead of mapped per CFA position | `shim.cpp` `sc_get_mosaic` | Shadow colour cast on DNGs with a 2×2 `BlackLevelRepeatDim` whose values differ | **Fixed** 2026-10-27, within `INGEST_GENERATION` 6; **unverified** — no file with an uneven pattern could be found (see below) | — |
 | D2 | DNG `CameraCalibration` / `AnalogBalance` dropped | `shim.cpp` `sc_get_info`, `raw/src/lib.rs` `camera_color` | Colour cast on camera-native DNGs whose calibration isn't identity; on Apple's ProRAW, a white balance read as 2,786 K and tint −158 | **Fixed here**, on both DNG paths (`camera::dng_xyz_to_camera`) | — |
 | D3 | Row stride from `raw_width`, not `raw_pitch` | `shim.cpp` | Sheared or garbage mosaic wherever a decoder pads rows | **Fixed here**; identical for every file that worked | — |
 | D4 | No sanity check on `white > black` | `sc_get_mosaic`, `ingest.rs` | Division by ≤0, all-black frame instead of an error or fallback | **Fixed** 2026-10-27, in `RawFile::mosaic` | — |

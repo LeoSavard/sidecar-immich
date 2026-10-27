@@ -49,7 +49,10 @@ pub const DEFAULT_EDGE: u32 = 2560;
 /// filled to agree with them, and no NaN from a damaged file. 5 decodes a camera's Adobe RGB JPEG, marked only in
 /// its EXIF, in Adobe RGB's primaries and curve instead of as sRGB (the review's D11). 6 stops reconstructing
 /// highlights for X-Trans proxies (the review's D5), so the preview clips where the export already clipped;
-/// only X-Trans files change, and only where they were blown.
+/// only X-Trans files change, and only where they were blown. 6 also carries D1, the black level's repeat
+/// pattern mapped per CFA position instead of averaged: that is byte-identical for every file whose pattern
+/// is uniform, which is every file tested, so it shares this generation rather than costing a second rebuild
+/// of proxies that cannot have changed.
 pub const INGEST_GENERATION: u32 = 6;
 
 /// What cached metadata was *read* by, apart from the pixels: bump when `Meta` gains something a re-read of

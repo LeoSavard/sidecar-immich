@@ -107,13 +107,34 @@ int sc_get_mosaic(void *raw, sc_mosaic *out) {
   out->width = w;
   out->height = h;
   out->data = buf;
-  float pattern_mean = 0;
+  /* The black level's own repeat pattern (DNG's BlackLevelRepeatDim, which LibRaw keeps at cblack[4] and
+     cblack[5] with the values from cblack[6] on, row-major over that repeat).
+
+     It used to be averaged into every colour, which is wrong for any file whose pattern is uneven: each
+     colour was off by up to half the spread, in the shadows, where it shows (D1 in
+     docs/research/pipeline-review-2026-10.md). Where the repeat is 2x2 or smaller and the CFA is Bayer, the
+     mapping is exact instead — the CFA's period is 2, so each position of the block carries one colour, and
+     the shader's black[] is already indexed by colour with G2 as 3.
+
+     A 6x6 X-Trans pattern cannot be said in four numbers, so that keeps the average. Every Fujifilm file
+     seen here states one value repeated 36 times, for which the average is exact anyway; an X-Trans file
+     with a genuinely uneven pattern would need a per-position black texture. */
+  float pattern[4] = {0, 0, 0, 0};
   unsigned pr = d.color.cblack[4], pc = d.color.cblack[5];
-  if (pr && pc && pr * pc < LIBRAW_CBLACK_SIZE - 6) {
-    for (unsigned i = 0; i < pr * pc; i++) pattern_mean += d.color.cblack[6 + i];
-    pattern_mean /= (float)(pr * pc);
+  const bool have_pattern = pr && pc && pr * pc <= (unsigned)(LIBRAW_CBLACK_SIZE - 6);
+  if (have_pattern && pr <= 2 && pc <= 2 && d.idata.filters != 9) {
+    for (unsigned y = 0; y < 2; y++)
+      for (unsigned x = 0; x < 2; x++) {
+        const int c = r->COLOR(y, x);
+        if (c >= 0 && c < 4) pattern[c] = (float)d.color.cblack[6 + (y % pr) * pc + (x % pc)];
+      }
+  } else if (have_pattern) {
+    float mean = 0;
+    for (unsigned i = 0; i < pr * pc; i++) mean += d.color.cblack[6 + i];
+    mean /= (float)(pr * pc);
+    for (int c = 0; c < 4; c++) pattern[c] = mean;
   }
-  for (int c = 0; c < 4; c++) out->black[c] = (float)d.color.black + (float)d.color.cblack[c] + pattern_mean;
+  for (int c = 0; c < 4; c++) out->black[c] = (float)d.color.black + (float)d.color.cblack[c] + pattern[c];
   out->white = (float)d.color.maximum;
   out->period = d.idata.filters == 9 ? 6 : 2;
   for (int y = 0; y < 6; y++)
