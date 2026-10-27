@@ -135,7 +135,15 @@ what a filesystem *editor* needs. The filesystem flavour itself stays, for use c
 an editor, never a second library. #28 (`find_by_name`, searching a folder library) was closed under that
 decision; its branch keeps the code and its six tests.
 
-**As of 2026-10-27 the only open pull request is this branch's** (the two fixes after #44, and these docs).
+**As of 2026-10-27 there are two open pull requests, and they are split on one rule:** what is merged and
+deployed is what has been tested. **This branch (#45)** carries the two fixes after #44, the six interface items
+from the owner's answers, the decode review's stage 1 (D4, D12 and `device.lost` recovery), the histogram that
+defines where a channel saturates (D6/D7, built and not yet wired in) and `sidecar-dev levels`. It changes no
+pixel any cache holds, so `INGEST_GENERATION` stays at 5 and the deployment that follows reuses every cached
+file. **#46 holds what is written but not demonstrated:** D5, the X-Trans highlight gate, waiting on the
+owner's re-evaluation of highlight reconstruction itself; and D1, the black-level repeat pattern mapped per CFA
+position, which nothing in the library can exercise because every camera model here writes a uniform black in
+the raw IFD. Both were taken out of this line on 2026-10-27 so #45 could be merged and deployed clean.
 #21 (the straight segment above middle grey, order 3) merged on 2026-10-22 and #25 (this page) on 2026-10-20;
 #43, a first take on an imported photo's staging name, was closed for #42's version of the same fix.
 

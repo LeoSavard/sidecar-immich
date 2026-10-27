@@ -7,12 +7,21 @@ Source: the architecture plan (PWA entry, XMP sidecars, server-side demosaic, We
 
 Where the code differs from the text below, the code and these notes win.
 
-- **D5 is held on its own branch** (`xtrans-highlight-gate`), not in this line. Gating highlight
-  reconstruction off for X-Trans proxies — so the preview clips where `export::full_source` already clips —
-  waits on the owner's re-evaluation of whether highlight reconstruction earns its place at all (2026-10-27).
-  Recovery already defaults to 0 because the feature has proven problematic, and on `_D5N3075.NEF` it does
-  measurably worse than simply pulling the highlights down. That branch has the measurement on a blown
-  X-Trans frame.
+- **D1 and D5 are held on their own branch** (`xtrans-highlight-gate`, pull request #46), not in this line.
+  The owner's rule, 2026-10-27: what is merged and deployed should be what has been tested, so a change that
+  is written but not demonstrated waits there rather than riding along.
+  - **D5** gates highlight reconstruction off for X-Trans proxies, so the preview clips where
+    `export::full_source` already clips. It waits on the owner's re-evaluation of whether highlight
+    reconstruction earns its place at all. Recovery already defaults to 0 because the feature has proven
+    problematic, and on `_D5N3075.NEF` it does measurably worse than simply pulling the highlights down. That
+    branch has the measurement on a blown X-Trans frame.
+  - **D1** maps the black level's repeat pattern per CFA position instead of averaging it, which is what DNG's
+    `BlackLevelRepeatDim` means and what LibRaw's own `adjust_bl` does for a 2×2. Nothing here exercises it:
+    every camera model in the owner's library writes a uniform black in the raw IFD, so the change is
+    byte-identical on every file to hand and unproven on the files it is for.
+
+  Because both left, this line's `INGEST_GENERATION` stays at **5** — not one cached proxy or focus mask is
+  invalidated by anything in it.
 
 - **The decode review's stage 1: three guards and a recovery, no pixel changed**
   (docs/research/pipeline-review-2026-10.md §9). **D4:** `RawFile::mosaic()` refuses levels that cannot
