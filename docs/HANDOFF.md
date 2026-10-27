@@ -75,8 +75,8 @@ truth to compare with.
 **Then two more asks, same branch:** **the phone runs the one editor** — `/m` imports into the editing folder and
 opens `/edit/<key>`, which develops the phone's own copy on the phone and says so; the module's small editor is
 gone (MOBILE.md) — and **Apple's ProRAW white balance** (`AnalogBalance`, the review's D2), which read 2,786 K and
-tint −158 on a daylight frame and now reads 6,880 K +32. The owner has since run the editor on an iPhone; ProRAW's
-white balance there has not been reported on.
+tint −158 on a daylight frame and now reads 6,880 K +32. The owner has since run the editor on an iPhone and
+confirmed ProRAW's white balance fixed.
 
 **And then the interface:** the page no longer zooms itself on a phone, the camera's rendering follows the edit's
 zoom and position (and drives it), and the loupe reaches 150 % and 200 %. A wider look at the interface, with
@@ -95,7 +95,8 @@ record's §10).
   `PROCESS_VERSION` bump (the review's §3 says why none is needed).
 - **A half-float view canvas** where the display reports more than 8 bits a channel, with the dither scaled to
   a 10-bit step; `?canvas=8` / `?canvas=16` compares the two. It can't be checked headless (Chromium can't present
-  a WebGPU canvas there), so the first look is on a real iPhone or Mac.
+  a WebGPU canvas there). On the owner's iPhone it has made no difference they have noticed, which an already
+  dithered 8-bit canvas makes likely; `?canvas=8` against `?canvas=16` on a smooth gradient is the comparison.
 
 **Stage 1 of the mobile module followed** (a RAW's embedded preview on the phone; MOBILE.md), with real RAW
 files for the first time in this work: CR2s and NEFs from rawpy's test set, under `testdata/cache/samples/`
