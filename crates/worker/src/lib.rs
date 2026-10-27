@@ -47,8 +47,10 @@ pub const DEFAULT_EDGE: u32 = 2560;
 /// mirrored EXIF orientations (2, 4, 5, 7), which every earlier generation left upright. 4 is the bounded
 /// highlight fill (D14 in docs/research/pipeline-review-2026-10.md): measured channels kept, clipped ones
 /// filled to agree with them, and no NaN from a damaged file. 5 decodes a camera's Adobe RGB JPEG, marked only in
-/// its EXIF, in Adobe RGB's primaries and curve instead of as sRGB (the review's D11).
-pub const INGEST_GENERATION: u32 = 5;
+/// its EXIF, in Adobe RGB's primaries and curve instead of as sRGB (the review's D11). 6 stops reconstructing
+/// highlights for X-Trans proxies (the review's D5), so the preview clips where the export already clipped;
+/// only X-Trans files change, and only where they were blown.
+pub const INGEST_GENERATION: u32 = 6;
 
 /// What cached metadata was *read* by, apart from the pixels: bump when `Meta` gains something a re-read of
 /// the same file would now fill in, so it is read again without rebuilding a single proxy. 1 adds the lens
