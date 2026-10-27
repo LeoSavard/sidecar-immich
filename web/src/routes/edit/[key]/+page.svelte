@@ -17,6 +17,7 @@
 	import { EditSession, type EditState } from '$lib/state/edit-session.svelte';
 	import { copyLook, pasteLook, readLookClipboard, type LookClipboard } from '$lib/state/look-clipboard';
 	import Histogram from '$lib/ui/Histogram.svelte';
+	import Loupe from '$lib/ui/Loupe.svelte';
 	import Readout from '$lib/ui/Readout.svelte';
 	import ExportSheet from '$lib/ui/ExportSheet.svelte';
 	import HistoryPanel from '$lib/ui/HistoryPanel.svelte';
@@ -62,6 +63,15 @@
 	 */
 	let onDevice = $state(false);
 	let onDeviceNoticeDismissed = $state(false);
+	/**
+	 * The installed app (the manifest's `display: standalone`), which is the only place the "developed on this
+	 * device" note is shown: in a browser tab it was noise on every photo (the October interface review, item 11).
+	 */
+	let installedApp = $state(false);
+	/** Device pixels per output pixel, as a percentage, or 0 at fit — the readout over the photo (item 2). */
+	let zoomPercent = $state(0);
+	/** The loupe over the photo, reached from the toggles beside Focus rather than three taps deep (item 8). */
+	let loupeOver = $state(false);
 	/**
 	 * The colour model the proxy is in when it isn't the server's: a developed photo the browser decoded into
 	 * Display P3. Everything that packs or samples the proxy reads `cameraColor()`.
@@ -374,6 +384,9 @@
 		const geometry: ViewGeometry | undefined = shown ? { toPicture: shown.frame.toPicture, size: shown.frame.size } : undefined;
 		view.render(develop.output, canvas, viewport, (clipHigh ? CLIP_HIGHS : 0) | (clipLow ? CLIP_LOWS : 0) | (peaking ? PEAKING : 0) | maskFlags, geometry);
 		markerPos = cropping ? null : imageToScreen(afPoint());
+		// The zoom readout: device pixels per output pixel, which is what the double tap's 100 % means. 0 at fit,
+		// where there is nothing to say and nothing to go back to.
+		zoomPercent = viewport.zoom > 1.001 ? Math.round(imageRect().fit * viewport.zoom * 100) : 0;
 		if (cropping) layoutTick++;
 		placeCamera();
 	}
@@ -1519,7 +1532,7 @@
 			// What is shown is the edit's output: the loupe is centred in it.
 			const u = (px(e).x - r.x) / r.w;
 			const v = (px(e).y - r.y) / r.h;
-			if (u >= 0 && u <= 1 && v >= 0 && v <= 1 && (section === 'detail' || detailOpen)) loupeCenter = [u, v];
+			if (u >= 0 && u <= 1 && v >= 0 && v <= 1 && (section === 'detail' || detailOpen || loupeOver)) loupeCenter = [u, v];
 			if (now - lastTapAt < 320) {
 				zoomAt(px(e), viewport.zoom > 1.01 ? 1 : Math.max(2, 1 / r.fit));
 				lastTapAt = 0;
@@ -1573,6 +1586,12 @@
 		wide = mq.matches;
 		const onWide = () => (wide = mq.matches);
 		mq.addEventListener('change', onWide);
+		// Installed, so launched from /m rather than opened in a tab. iOS Safari answered `navigator.standalone`
+		// before it understood the media query, and still does from a home-screen icon.
+		const app = matchMedia('(display-mode: standalone)');
+		const onApp = () => (installedApp = app.matches || (navigator as { standalone?: boolean }).standalone === true);
+		onApp();
+		app.addEventListener('change', onApp);
 		const ro = new ResizeObserver(() => {
 			canvas.width = Math.round(canvas.clientWidth * devicePixelRatio);
 			canvas.height = Math.round(canvas.clientHeight * devicePixelRatio);
@@ -1586,6 +1605,7 @@
 		return () => {
 			ro.disconnect();
 			mq.removeEventListener('change', onWide);
+			app.removeEventListener('change', onApp);
 			document.removeEventListener('visibilitychange', onHide);
 			canvas.removeEventListener('wheel', wheel);
 		};
@@ -1832,7 +1852,7 @@
 		{/if}
 		{#if status || error}
 			<p class="absolute inset-x-4 top-[max(1rem,env(safe-area-inset-top))] text-center text-sm {error ? 'text-danger' : 'text-fg-2'}">{error || status}</p>
-		{:else if onDevice && !onDeviceNoticeDismissed}
+		{:else if onDevice && installedApp && !onDeviceNoticeDismissed}
 			<div role="note" class="absolute inset-x-4 bottom-[max(1rem,env(safe-area-inset-bottom))] mx-auto flex max-w-md items-start gap-2 rounded bg-ground/85 px-3 py-2 text-xs text-fg-2">
 				<p class="flex-1">
 					Developed on this device, so some advanced features might be missing.
@@ -1859,7 +1879,7 @@
 			title={toolsHidden ? 'Show the editing tools (H)' : 'Hide the editing tools (H)'}
 			onclick={() => setToolsHidden(!toolsHidden)}
 		>
-			<svg viewBox="0 0 16 16" class="size-4" aria-hidden="true"><circle cx="8" cy="8" r="6.75" fill="none" stroke="currentColor" stroke-width="1.5" /><path d="M8 7.25v4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" /><circle cx="8" cy="4.9" r="0.95" fill="currentColor" /></svg>
+			<svg viewBox="0 0 16 16" class="size-4" aria-hidden="true"><rect x="1.75" y="2.25" width="12.5" height="11.5" rx="1.75" fill="none" stroke="currentColor" stroke-width="1.5" /><path d="M2 10h12" stroke="currentColor" stroke-width="1.5" /></svg>
 		</button>
 		{#if wide && toolsHidden && edit && meta}
 			<nav class="absolute bottom-3 left-1/2 flex max-w-[calc(100%-1.5rem)] -translate-x-1/2 gap-1 overflow-x-auto rounded-full bg-panel/90 p-1" aria-label="Tools">
@@ -1879,6 +1899,9 @@
 				<!-- With the photo's other toggles, above them: in the tool row it was pushed off a 390-pixel screen. -->
 				<button type="button" aria-pressed={showPhoneHistogram} class="rounded-full px-2.5 py-1 text-[0.6875rem] {showPhoneHistogram ? 'bg-fg text-ground' : 'bg-ground/80 text-fg-2'}" onclick={() => (showPhoneHistogram = !showPhoneHistogram)}>Histogram</button>
 				<button type="button" aria-pressed={peaking} class="rounded-full px-2.5 py-1 text-[0.6875rem] {peaking ? 'bg-fg text-ground' : 'bg-ground/80 text-fg-2'}" onclick={() => { peaking = !peaking; schedule(); }}>Focus</button>
+				<!-- Beside Focus, because checking detail is something one does at any time, not only while sharpening
+				     (the October interface review, item 8). Detail keeps its own loupe. -->
+				<button type="button" aria-pressed={loupeOver} class="rounded-full px-2.5 py-1 text-[0.6875rem] {loupeOver ? 'bg-fg text-ground' : 'bg-ground/80 text-fg-2'}" onclick={() => (loupeOver = !loupeOver)}>Loupe</button>
 				{#if cameraOffered}
 					<button type="button" aria-pressed={showCamera} class="rounded-full px-2.5 py-1 text-[0.6875rem] {showCamera ? 'bg-fg text-ground' : 'bg-ground/80 text-fg-2'}" onclick={() => (showCamera = !showCamera)}>Camera</button>
 				{/if}
@@ -1892,6 +1915,28 @@
 				{/if}
 			{/if}
 		</div>
+		<!-- The loupe over a corner of the photo, from the toggle beside Focus. A tap on the photo moves it, as it
+		     does for Detail's. Opposite the toggles, so neither covers the other. -->
+		{#if loupeOver && edit && !cropping && !fallback}
+			<div class="absolute bottom-[max(0.75rem,env(safe-area-inset-bottom))] left-3 w-40 lg:w-56">
+				<Loupe assetKey={key} edit={$state.snapshot(edit)} center={loupeCenter} colorSpace={displaySpace} />
+			</div>
+		{/if}
+		<!-- How far in, and the way back out. Only while zoomed: at fit there is nothing to say. On a desktop it is
+		     the button that fits, since a wheel is easy to overshoot with; a phone pinches back and only reads the
+		     number (the owner's call on the October interface review, item 2). -->
+		{#if zoomPercent && !cropping && !fallback}
+			{#if wide}
+				<button
+					type="button"
+					class="absolute right-3 bottom-3 rounded-full bg-ground/80 px-2.5 py-1 text-[0.6875rem] text-fg-2 hover:bg-raised"
+					title="Fit the photo (double click it for 100 %)"
+					onclick={() => { viewport = { zoom: 1, panX: 0, panY: 0 }; schedule(); }}
+				>Fit · {zoomPercent} %</button>
+			{:else}
+				<span class="pointer-events-none absolute right-3 bottom-[max(0.75rem,env(safe-area-inset-bottom))] rounded-full bg-ground/80 px-2.5 py-1 text-[0.6875rem] text-fg-2" role="status">{zoomPercent} %</span>
+			{/if}
+		{/if}
 	</div>
 
 	{#if edit && meta && !(wide && toolsHidden)}
@@ -2016,6 +2061,7 @@
 					<div class="flex items-center gap-2">
 						{#if !fallback}
 						<button type="button" aria-pressed={peaking} class="rounded-full px-2 py-0.5 {peaking ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" onclick={() => { peaking = !peaking; schedule(); }}>Focus peaking</button>
+							<button type="button" aria-pressed={loupeOver} class="rounded-full px-2 py-0.5 {loupeOver ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" title="The detail at full resolution, over the photo (Z opens Detail's own)" onclick={() => (loupeOver = !loupeOver)}>Loupe</button>
 							{#if cameraOffered}
 								<button type="button" aria-pressed={showCamera} class="rounded-full px-2 py-0.5 {showCamera ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" title="The camera's own rendering beside the edit" onclick={() => (showCamera = !showCamera)}>Camera</button>
 							{/if}

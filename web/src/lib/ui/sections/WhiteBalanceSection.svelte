@@ -40,10 +40,12 @@ White balance (DESIGN.md §7, module 1). The sliders read as-shot until moved; m
 		<span class="flex-1"></span>
 		{#if picking !== undefined}
 			<button type="button" class="rounded p-1 {picking ? 'bg-fg text-ground' : 'text-fg-2 hover:bg-raised'}" aria-pressed={picking} aria-label="Pick a neutral" title="Pick something grey or white in the photo" onclick={() => onpick?.(!picking)}>
-				<svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.5 4.5l5 5M17 2.5a2.1 2.1 0 013 3l-2.5 2.5-3-3zM14.5 5.5L5 15l-1 5 5-1 9.5-9.5" /></svg>
+				<svg viewBox="0 0 24 24" class="h-4 w-4" fill="currentColor" aria-hidden="true"><rect x="8" y="2.4" width="8" height="5.2" rx="1.6" /><path d="M10.2 8.8h3.6l-.9 7.5L12 21.6l-.9-5.3z" /></svg>
 			</button>
 		{/if}
-		<button type="button" class="rounded px-2 py-1 text-fg-2 hover:bg-raised disabled:opacity-40" disabled={edit.whiteBalance.mode === 'asShot'} onclick={() => { onchange((e) => { e.whiteBalance.mode = 'asShot'; }); oncommit(); }}>Reset to {asShotLabel}</button>
+		<!-- Normal text colour while it can do something, muted when there is nothing to reset: grey either way read as
+		     permanently disabled (the October interface review, item 16). -->
+		<button type="button" class="rounded px-2 py-1 hover:bg-raised disabled:opacity-40 {edit.whiteBalance.mode === 'asShot' ? 'text-fg-2' : 'text-fg'}" disabled={edit.whiteBalance.mode === 'asShot'} onclick={() => { onchange((e) => { e.whiteBalance.mode = 'asShot'; }); oncommit(); }}>Reset to {asShotLabel}</button>
 	</div>
 	{#if picking}<p class="text-xs text-fg-2">Tap something in the photo that should be grey or white. Esc cancels.</p>{/if}
 	<Slider id="wb-temp" label="Temperature" value={edit.whiteBalance.mode === 'asShot' ? Math.round(asShot.temperatureK) : edit.whiteBalance.temperatureK} min={2000} max={12000} step={10} defaultValue={Math.round(asShot.temperatureK)} trackGradient={TEMP_TRACK} format={(v) => `${decimals(v)} K`} onchange={(v) => set('temperatureK', v)} {oncommit} />

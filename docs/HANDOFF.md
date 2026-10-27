@@ -83,7 +83,14 @@ confirmed ProRAW's white balance fixed.
 zoom and position (and drives it), and the loupe reaches 150 % and 200 %. A wider look at the interface, with
 seventeen suggestions in order of how often they are met, is
 [`research/ui-review-2026-10.md`](research/ui-review-2026-10.md). The owner answered nine of them and those are
-built (the table at its top); the rest are open. On an iPhone (2026-10-27) the owner confirmed the page-zoom guard,
+built (the table at its top); **on 2026-10-27 they answered the rest**, and six more are built on this branch: the
+hide-tools button's panel glyph in place of the ⓘ (1), a zoom readout in the photo's corner that fits on a desktop
+and only reads the number on a phone (2), a **Loupe** toggle beside Focus in both quick-access rows (8), the
+"developed on this device" note only in the installed app (11), a pipette instead of a pencil for the white-balance
+picker (15), and "Reset to as shot" in the normal text colour while it can do something (16). Item 17 is left as it
+is. **Item 7 is the one still open:** the owner thought the phone header's truncation might have been an artefact of
+the cloud session, and it was not — it reproduces on the current local build at 390 × 844, where `IMG_1768.CR2`
+truncates mid-extension and the four buttons take 230 of the 390 px. On an iPhone (2026-10-27) the owner confirmed the page-zoom guard,
 the panel handle and the camera's rendering following the edit, and found two faults, fixed since #44 merged on
 `claude/sweet-maxwell-s67it6` and not yet in a pull request: hiding the tools left the chosen panel height as an
 empty grey panel, and "Bring it up to date now" left Highlights' reach behind, so the offer came back (the session

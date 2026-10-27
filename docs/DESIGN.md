@@ -7,6 +7,22 @@ Source: the architecture plan (PWA entry, XMP sidecars, server-side demosaic, We
 
 Where the code differs from the text below, the code and these notes win.
 
+- **Six more from the UI review, after the owner's answers of 2026-10-27**
+  (docs/research/ui-review-2026-10.md has the table). The button that hides the tools wears a panel glyph, not an
+  ⓘ, which people read as "details about this photo"; White balance's picker is a pipette, not a pencil; "Reset to
+  as shot" takes the normal text colour while it can do something and stays muted when it can't. A zoom readout
+  sits in the photo's bottom-right corner, shown only while zoomed and carrying the device pixels per output pixel
+  the double tap's 100 % means: on a desktop it is the button that fits, on a phone the number alone, since a
+  pinch back is easy (owner's call). A **Loupe** toggle sits beside Focus in both quick-access rows and puts the
+  loupe over the photo's bottom-left corner, where it was three taps deep under Processing → Detail; a tap on the
+  photo moves it, as it does for Detail's own, which is unchanged. The "developed on this device" note now shows
+  only in the installed app (`display-mode: standalone`, or iOS's `navigator.standalone`), because in a browser
+  tab it was noise on every photo. Checked in Chromium at 1440 × 900 and 390 × 844 against a real server: the
+  readout reads "Fit · 207 %" zoomed and nothing at fit, "123 %" on the phone; the Loupe toggle renders its tile
+  at both sizes; the reset button measures rgb(198,198,198) with nothing to reset and rgb(244,244,244) with
+  something. Not yet on a phone. Item 17 the owner left as it is; item 7 (the phone header truncated to nothing,
+  and "Saved" as a disabled button) reproduces on the current build and is still open.
+
 - **The interface, after the owner's answers to the UI review** (docs/research/ui-review-2026-10.md has the table).
   "Color" is **Mixer**; the phone's Histogram toggle sits with the photo's toggles; tools the worker can't run are
   hidden (`GET /api/capabilities`: no Depth without the models, no Detail without a GPU, no model-mask sentence);

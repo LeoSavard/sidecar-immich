@@ -31,7 +31,23 @@ person something, and what would fix it. They are ordered by how often someone r
 | 10 | Agreed; the iPhone's *Edit in Sidecar* shortcut still goes straight to the photo | The home page is the way in on a phone too: it imports into the editing folder by default there, shows a RAW's own preview while uploading, and has lost its "On this phone" link. `/m` now only sends the installed app to it, and the module's manifest covers the whole app (`scope: "/"`), so opening the editor from it stays inside the app |
 | 12–14 | Agreed | One level of folding, each section's state remembered; the sRGB / P3 switch is labelled **Output** (it decides the export as well as the screen, so "Display" would mislead); `?` lists the shortcuts, a link at the foot of the sidebar opens the list, and Undo, Redo and Export carry theirs in their titles |
 
-Items 1, 2, 7, 8, 11 and 15–17 had no answer and are not built.
+## The owner's answers of 2026-10-27, and what was built
+
+| # | Answer | Built |
+|---|---|---|
+| 1 | Agreed | A panel glyph (a rounded frame with its lower band divided) in place of the ⓘ, the H shortcut still in its title |
+| 2 | A small indicator in the bottom-right corner: on a desktop it fits the photo and shows the zoom percentage; on a phone the number alone, since a pinch back is easy | Shown only while zoomed, reading device pixels per output pixel — what the double tap's 100 % means. A desktop's is the button that fits ("Fit · 207 %"); a phone's is a readout ("123 %") |
+| 7 | Possibly only yesterday's cloud session; test it again | **Tested, still open.** It reproduces on the current local build at 390 × 844: `IMG_1768.CR2` truncates mid-extension, the camera line keeps only "Canon EOS", and the four buttons take 230 of the 390 px. Not a cloud-session artefact |
+| 8 | Put the loupe beside the Focus button in the quick access | A **Loupe** toggle beside Focus in both quick-access rows — the phone's pill column and the desktop's toggle row — showing the loupe over the photo's bottom-left corner. A tap on the photo moves it. Detail keeps its own, unchanged |
+| 11 | Show it only on a phone, in the installed `/m` application | `display-mode: standalone`, or iOS's `navigator.standalone` from a home-screen icon. In a browser tab the note never appears |
+| 15 | Agreed | A filled pipette: a bulb over a tapering tube. The stroked outline collapsed at 16 px and was tried first |
+| 16 | Normal colour when resetting is a possible action | `text-fg` while white balance is custom, `text-fg-2` (and disabled) when it is already as shot. Measured: rgb(244,244,244) against rgb(198,198,198) |
+| 17 | Leave it as is | — |
+
+Checked in Chromium at 1440 × 900 and 390 × 844 against a real server, each item by a scripted check. Not yet on a
+phone.
+
+Item 7 is the one still open.
 
 ## Worth doing next
 
