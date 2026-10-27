@@ -26,10 +26,11 @@ branches written the same day: the build log is append-at-the-top, so it collide
 `deploy/sidecar.dev.toml` gained an editing folder at `testdata/cache/editing`, so `./dev/serve` exercises
 the folder path out of the box (it has no Immich, so that is the only destination it offers).
 
-**Still owed from 2026-10-20:** the merged *remote* branches are not deleted — 37 of them as of 2026-10-22,
-everything `git branch -r --merged origin/main` lists except `main`. That needs `git push origin --delete`
-run by the owner; it is blocked here. `worktree-depth-spike` and `worktree-lens-correction` are not in that
-list and are kept on purpose.
+**Remote branches, 2026-10-27:** most of the 37 merged ones are gone. Four merged ones are left
+(`highlight-reach`, `local-intake`, `measure-readout`, `standalone-folder`), plus `claude/pensive-edison-xnk4wl`,
+#43's branch, closed for #42's version of the same fix. Kept on purpose: `worktree-depth-spike` (the
+Depth Anything spike) and `library-name-search` (#28's code and tests, closed under the Immich-stays-the-library
+decision).
 
 ## 2026-10-26: a review of the decode pipeline
 
@@ -127,12 +128,9 @@ what a filesystem *editor* needs. The filesystem flavour itself stays, for use c
 an editor, never a second library. #28 (`find_by_name`, searching a folder library) was closed under that
 decision; its branch keeps the code and its six tests.
 
-Two pull requests are open, and **neither changes a pixel**:
-
-| # | Branch | What | State |
-|---|---|---|---|
-| 21 | `worktree-tone-curve` | The log-log straight segment above middle grey, built and measured, rendering nothing | Needs the owner: which shoulder order, and what Contrast should mean above grey (see Open questions) |
-| 25 | `handoff-state` | This page | — |
+**As of 2026-10-27 the only open pull request is this branch's** (the two fixes after #44, and these docs).
+#21 (the straight segment above middle grey, order 3) merged on 2026-10-22 and #25 (this page) on 2026-10-20;
+#43, a first take on an imported photo's staging name, was closed for #42's version of the same fix.
 
 **The formatter is a gate now.** `cargo fmt --all --check` runs in CI beside clippy and `rustfmt.toml` fixes
 `max_width = 100`. A branch open when #29 landed pays for it once: `git merge main`, keep the branch's own
