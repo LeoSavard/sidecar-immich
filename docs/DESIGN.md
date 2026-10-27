@@ -25,22 +25,12 @@ Where the code differs from the text below, the code and these notes win.
   `exiftool -T` reporting a *preview pyramid's* sub-IFD rather than the raw image, which the group-qualified
   tags (`-G1`) show plainly. A Leica, Pentax or Ricoh DNG is still wanted before this is called proven.
 
-- **D5: X-Trans proxies stop reconstructing highlights, so the preview clips where the export already did**
-  (the owner's call, 2026-10-27; docs/research/pipeline-review-2026-10.md). `export::full_source` sends
-  X-Trans to LibRaw's Markesteijn with `highlight = 0`, which clips, while `Ingest::proxy` ran the highlight
-  pyramid — so the two disagreed in exactly the blown region reconstruction exists for, which is the one place
-  ARCHITECTURE's "one rule" has to hold. The pyramid is now skipped entirely for X-Trans rather than computed
-  and discarded, so a RAF proxy also costs less memory and one less pass. `INGEST_GENERATION` 6: only X-Trans
-  files change, and only where they were blown. The alternative — the GPU front half read back and handed to
-  LibRaw for the demosaic — stays available for when a Markesteijn port lets both sides share this pass; at
-  that point the gate goes away rather than being inverted.
-
-  Checked on `DSCF5152.RAF` (X100F, 6048 × 4038): the proxy is now byte-identical with and without
-  `SIDECAR_NO_HILITE`, which is what "reconstruction is off" means, while `DSC01899.ARW` still differs between
-  the two, so Bayer is untouched. **Not yet checked on a blown X-Trans frame:** that RAF turns out to have no
-  clipped highlights — its render is identical before and after this change, largest difference 1 of 255 —
-  so it proves the gate is skipped but not what the gate does to a picture. A blown Fujifilm frame is still
-  owed.
+- **D5 is held on its own branch** (`xtrans-highlight-gate`), not in this line. Gating highlight
+  reconstruction off for X-Trans proxies — so the preview clips where `export::full_source` already clips —
+  waits on the owner's re-evaluation of whether highlight reconstruction earns its place at all (2026-10-27).
+  Recovery already defaults to 0 because the feature has proven problematic, and on `_D5N3075.NEF` it does
+  measurably worse than simply pulling the highlights down. That branch has the measurement on a blown
+  X-Trans frame.
 
 - **The decode review's stage 1: three guards and a recovery, no pixel changed**
   (docs/research/pipeline-review-2026-10.md §9). **D4:** `RawFile::mosaic()` refuses levels that cannot

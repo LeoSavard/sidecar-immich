@@ -276,16 +276,14 @@ impl Ingest {
         let (hw, hh) = (w / block, h / block);
         // Highlight reconstruction, where it is done at all.
         //
-        // X-Trans is excluded (D5, the owner's call on 2026-10-27). `export::full_source` sends X-Trans to
-        // LibRaw's Markesteijn with `highlight = 0`, which clips, so reconstructing here made the preview
-        // disagree with the export in exactly the blown region reconstruction exists for — the one place
-        // ARCHITECTURE's "one rule" has to hold. Both clip until a Markesteijn port lets the export share
-        // this pass, at which point this goes away rather than being inverted.
-        //
         // SIDECAR_NO_HILITE is diagnostic only, for `sidecar-dev hilite` (ROADMAP, "Highlight
         // reconstruction"): it keeps the clipped mosaic, which is the A/B that says whether something in a
         // blown area was invented here or was already in the picture. Never set in a deployment.
-        let reconstruct = sensor != 1 && std::env::var_os("SIDECAR_NO_HILITE").is_none();
+        //
+        // X-Trans is *not* excluded here. Gating it off — so the preview clips where `export::full_source`
+        // already clips (D5) — is held on branch `xtrans-highlight-gate`, pending the owner's
+        // re-evaluation of whether highlight reconstruction earns its place at all.
+        let reconstruct = std::env::var_os("SIDECAR_NO_HILITE").is_none();
         let cfa = if !reconstruct {
             norm.clone()
         } else {
