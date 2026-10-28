@@ -51,7 +51,8 @@ fn main() -> Result<()> {
                 .collect::<Result<Vec<f32>, _>>()?,
         ),
         ["radial", list] => radial(list.as_ref()),
-        ["levels", input] => levels(input.as_ref()),
+        ["levels", input] => levels(input.as_ref(), false),
+        ["levels", input, "--bins"] => levels(input.as_ref(), true),
         ["linear-dng", input, out, rest @ ..] => {
             let input: &std::path::Path = input.as_ref();
             let edge: u32 = rest.first().map_or(Ok(1600), |v| v.parse())?;
@@ -255,7 +256,11 @@ fn hilite_truth(input: &std::path::Path, evs: &[f32]) -> Result<()> {
             white: m.white,
             pattern: m.pattern,
             period: m.period,
-            clip: m.clip,
+            // Measured on *these* samples, not the file's: raising the mosaic and cutting it at white moves
+            // where every colour saturates, which is the whole point of the exercise.
+            clip: sidecar_raw::levels::mosaic_clip(
+                data, m.width, m.white, &m.black, &m.pattern, m.period,
+            ),
         };
         ing.proxy(&gpu, &input_m, [mul[0] as f32, 1.0, mul[2] as f32], 1600)
     };
@@ -795,7 +800,7 @@ fn camera_jpeg(list: &std::path::Path) -> Result<()> {
 /// brightest sample the old heuristics keyed off (D6/D7 in docs/research/pipeline-review-2026-10.md). On a
 /// frame with blown highlights the two should agree; where they don't, the histogram is the one that
 /// survives a stuck pixel.
-fn levels(input: &std::path::Path) -> Result<()> {
+fn levels(input: &std::path::Path, bins: bool) -> Result<()> {
     let raw = sidecar_raw::RawFile::open(input)?;
     let info = raw.info();
     let m = raw.mosaic()?;
@@ -881,6 +886,32 @@ fn levels(input: &std::path::Path) -> Result<()> {
             "  colour {c}: {:>11} samples \u{b7} brightest {:.4} \u{b7} histogram {:.4} \u{b7} old heuristic {:.4}",
             seen[c], observed, got[c], old
         );
+    }
+    // The top of each histogram, for when the answer is surprising. The shapes are unmistakable once seen: a
+    // saturated channel is flat and then one bin tens or hundreds of times taller, with nothing above it,
+    // because the sensor could not record higher; an unsaturated one rises to a mode and falls away again.
+    if bins {
+        let hist = sidecar_raw::levels::mosaic_histograms(
+            &m.data, m.width, m.white, &m.black, &m.pattern, m.period,
+        );
+        for (c, h) in hist.iter().enumerate() {
+            let (b, counted, total) = h.bins();
+            if counted == 0 {
+                continue;
+            }
+            let last = b.iter().rposition(|&n| n > 0).unwrap_or(0);
+            let from = last.saturating_sub(15);
+            println!(
+                "  colour {c}: {counted} of {total} samples above half scale, top bins {from}..={last}:"
+            );
+            for (i, &n) in b.iter().enumerate().take(last + 1).skip(from) {
+                let t = 0.5 + (i as f32 / 256.0) * 0.5;
+                println!(
+                    "    bin {i:>3} at {t:.4}: {n:>9}  {:.4} % of the channel",
+                    100.0 * n as f64 / total.max(1) as f64
+                );
+            }
+        }
     }
     Ok(())
 }
