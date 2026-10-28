@@ -160,6 +160,22 @@ Where the code differs from the text below, the code and these notes win.
   service worker against a stand-in api, for both the no-match and the name-match case — the upload carried
   the shared bytes unchanged and the phone's copy was gone afterwards.
 
+- **The camera's preview is labelled with the space it was written in** (§4): reported from the editor — the
+  same photograph looked like four different pictures across Immich, Gwenview, the camera's screen and
+  Sidecar, when it should have been two. Measured first, and the measurement said the pipeline was not the
+  problem: the editor's canvas and its export agree to **1.1 % against 1.11 % at white, 0.00 % against
+  0.03 % at black** on the reported frame, so Sidecar renders one picture, not two. What differed was the
+  *camera's* preview, which carries no ICC profile, no `ColorSpace` and no `InteropIndex` — verified on the
+  file — while the RAW carries Nikon's `ColorSpace: Adobe RGB` and the DCF filename convention says the same.
+  Sidecar copied only the orientation onto that preview and so passed the camera's omission on; the browser
+  guessed sRGB and under-saturated it. An Adobe RGB profile now goes on when the RAW says that is what it is,
+  without re-encoding (546 bytes on that file). Checked: the served preview carries `A98C` with its
+  orientation intact, and as the browser decodes it the mean saturation goes **62.46 % → 75.33 %** (mean RGB
+  58.2/43.0/23.1 → 59.0/37.8/16.6) — confirmed correct by eye on the owner's calibrated display, which is
+  the only instrument that settles it. Unit tests for the APP2 identifier and for what the RAW's tags mean.
+  *What this does not fix:* Gwenview and Immich still guess, so Sidecar now differs from them **more**, and
+  correctly. Whether a viewer applies the display's own profile is a separate question and outside Sidecar.
+
 - **Highlights could not reach a highlight** (§7): reported from the editor — bringing Exposure down
   recovered a blown sky, so the data was plainly there, but Highlights at −100 left it exactly as it was.
   It was structural. The tone map sends everything at or above `white_ev` to display white before the LUT
@@ -427,6 +443,13 @@ Where the code differs from the text below, the code and these notes win.
   caches it (`GET /api/assets/{key}/camera`). The editor's Camera toggle splits the view — the canvas keeps the
   left half (top on a phone) so everything drawn over it keeps its place — and is off while cropping or
   painting. Developed files have none: they are their own rendering.
+  **The space that preview is in is attached on the way out.** A camera set to Adobe RGB writes its JPEGs in
+  Adobe RGB and says so only in the RAW: the preview itself carries no profile, no `ColorSpace` and no
+  `InteropIndex`, so every viewer guesses, and the guess is sRGB — which renders it under-saturated. The RAW
+  does say it (`SourceSpace::from_tags`, D11), so an Adobe RGB profile goes on when it says so and the
+  preview carries none of its own; a profile the camera wrote always wins. The pixels are not touched. The
+  cache has its own `CAMERA_GENERATION` for this, since what invalidates it is the labelling rather than how
+  a RAW decodes.
 - **Mask edges (§15):** a layer's optional `edge` (width, feather, shift) blurs its finished mask — after the
   range and the strokes — over up to 5 % of the long edge and thresholds it again: the threshold moves the edge
   out or in (0.5 ± 0.45), the ramp around it sets how soft it is (feather 0 keeps it crisp, only moved and
