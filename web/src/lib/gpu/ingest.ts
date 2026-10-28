@@ -43,8 +43,9 @@ type Params = {
 	outSize: [number, number];
 	black: number[];
 	wb: number[];
+	/** Where each CFA colour saturates, normalized; see `clip_levels` in crates/engine/src/ingest.rs. */
+	clip: number[];
 	white: number;
-	clip: number;
 	desat: number;
 	sensor: number;
 	pattern: Uint32Array;
@@ -58,10 +59,10 @@ function packParams(p: Params): ArrayBuffer {
 	u.set(p.outSize, 2);
 	f.set(p.black, 4);
 	f.set(p.wb, 8);
-	f[12] = p.white;
-	f[13] = p.clip;
-	f[14] = p.desat;
-	u[16] = p.sensor;
+	f.set(p.clip, 12);
+	f[16] = p.white;
+	f[17] = p.desat;
+	u[19] = p.sensor;
 	u.set(p.pattern, 20);
 	return buf;
 }
@@ -207,18 +208,21 @@ export class IngestPass {
 		const { ox, oy, w, h, sensor } = phase(m);
 		const pattern = new Uint32Array(36);
 		for (let i = 0; i < 36; i++) pattern[i] = m.pattern[((Math.floor(i / 6) + oy) % m.period) * 6 + ((i % 6) + ox) % m.period];
-		// Sensors that saturate below their declared white: `white_obs` in ingest.rs.
+		// Sensors that saturate below their declared white: `clip_levels` in ingest.rs, the heuristic branch.
+		// One number for all four colours, from the single brightest sample; the phone keeps it while the
+		// server's measured alternative is still a switch, so a proxy made here matches one made there.
 		let max = 0;
 		for (let i = 0; i < m.data.length; i++) if (m.data[i] > max) max = m.data[i];
 		const blk = Math.min(...m.black);
 		const whiteObs = Math.min(1, (max - blk) / (m.white - blk));
+		const one = whiteObs > 0.5 ? Math.min(whiteObs * 0.98, 0.985) : 0.985;
 		const base: Params = {
 			inSize: [w, h],
 			outSize: [w, h],
 			black: m.black,
 			wb: [wb[0], wb[1], wb[2], wb[1]],
+			clip: [one, one, one, one],
 			white: m.white,
-			clip: whiteObs > 0.5 ? Math.min(whiteObs * 0.98, 0.985) : 0.985,
 			desat: 0.3,
 			sensor,
 			pattern
@@ -280,7 +284,7 @@ export class IngestPass {
 
 	/** Box-reduce then bilinear-resample to `longEdge`: `downsample_and_read` in ingest.rs, before the read. */
 	private downsample(rgb: GPUTexture, longEdge: number, t: (w: number, h: number, f: GPUTextureFormat) => GPUTexture): GPUTexture {
-		const zero: Params = { inSize: [0, 0], outSize: [0, 0], black: [0, 0, 0, 0], wb: [0, 0, 0, 0], white: 0, clip: 0, desat: 0, sensor: 0, pattern: new Uint32Array(36) };
+		const zero: Params = { inSize: [0, 0], outSize: [0, 0], black: [0, 0, 0, 0], wb: [0, 0, 0, 0], clip: [0, 0, 0, 0], white: 0, desat: 0, sensor: 0, pattern: new Uint32Array(36) };
 		const sized = (inSize: [number, number], outSize: [number, number]): Params => ({ ...zero, inSize, outSize });
 		const [sw, sh] = [rgb.width, rgb.height];
 		const scale = Math.min(1, longEdge / Math.max(sw, sh));

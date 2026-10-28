@@ -59,11 +59,13 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     }
     rgb = vec3f(out.x, sg(0, 0), out.y);
   }
-  // Clip coverage: any original sample in this pixel's 2×2 neighbourhood at saturation.
+  // Clip coverage: any original sample in this pixel's 2×2 neighbourhood at saturation, each colour against
+  // its own threshold.
   var clip = 0.0;
   for (var j = 0; j <= 1; j++) {
     for (var i = 0; i <= 1; i++) {
-      if (textureLoad(norm_tex, px(i, j), 0).r >= P.clip) { clip = 1.0; }
+      let q = px(i, j);
+      if (textureLoad(norm_tex, q, 0).r >= clip_for(vec2u(q), P.pattern, P.clip)) { clip = 1.0; }
     }
   }
   textureStore(rgb_out, ipos, vec4f(rgb / P.wb.rgb, clip));

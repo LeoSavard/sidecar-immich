@@ -427,6 +427,7 @@ pub fn full_source(kit: &Kit, raw: &mut RawFile) -> Result<(wgpu::Texture, i32)>
                 white: m.white,
                 pattern: m.pattern,
                 period: m.period,
+                clip: m.clip,
             };
             (kit.ingest.demosaic(&kit.gpu, &input, wb, true)?, m.flip)
         }

@@ -24,7 +24,8 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   var clip = 0.0;
   for (var j = 0; j < 3; j++) {
     for (var i = 0; i < 3; i++) {
-      if (at(norm_tex, o + vec2i(i, j)) >= P.clip) { clip = 1.0; }
+      let q = clamp_px(o + vec2i(i, j), P.in_size);
+      if (at(norm_tex, q) >= clip_for(vec2u(q), P.pattern, P.clip)) { clip = 1.0; }
     }
   }
   textureStore(dst, ipos, vec4f(rgb, clip));

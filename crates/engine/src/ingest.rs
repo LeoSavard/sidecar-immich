@@ -16,12 +16,11 @@ pub struct IngestParams {
     pub out_size: [u32; 2],
     pub black: [f32; 4],
     pub wb: [f32; 4],
+    pub clip: [f32; 4],
     pub white: f32,
-    pub clip: f32,
     pub desat: f32,
     pub _unused: f32,
     pub sensor: u32,
-    pub _p: [u32; 3],
     pub pattern: [[u32; 4]; 9],
 }
 
@@ -35,9 +34,38 @@ pub struct MosaicInput<'a> {
     /// Colour index (0 R, 1 G, 2 B, 3 G2) of `(row % period, col % period)`.
     pub pattern: [[u8; 6]; 6],
     pub period: u32,
+    /// Where each colour saturates, as a fraction of `white` above its own black: `Mosaic::clip`, measured
+    /// from the samples. Only read when `SIDECAR_CLIP_HISTOGRAM` is set; see [`clip_levels`].
+    pub clip: [f32; 4],
 }
 
 use wgpu::TextureFormat as F;
+
+/// The thresholds the shaders compare a normalized sample against, one per CFA colour.
+///
+/// The default is the heuristic the pipeline has always used: *one* number for all four colours, 98 % of the
+/// brightest sample anywhere in the mosaic, capped at 98.5 %. A single sample decides it, so one stuck pixel
+/// pins it to the declared maximum and defeats it, while a frame with no bright highlights at all has
+/// everything above 98 % of its brightest pixel declared saturated — on `IMG_1768.CR2`, nothing clipped and
+/// the threshold 0.6047 (D6 and D7 in docs/research/pipeline-review-2026-10.md).
+///
+/// `SIDECAR_CLIP_HISTOGRAM=1` uses what the decode measured instead (`sidecar_raw::levels::mosaic_clip`):
+/// per colour, from where that colour's samples pile up. It is a switch and not yet the default because every
+/// cached proxy and focus mask was built with the heuristic, and the answer changes the alpha of every blown
+/// photo. `sidecar-dev levels` prints both; `sidecar-dev hilite` and `hilite-truth` honour the switch.
+pub fn clip_levels(m: &MosaicInput) -> [f32; 4] {
+    if std::env::var_os("SIDECAR_CLIP_HISTOGRAM").is_some() {
+        return m.clip;
+    }
+    let max = m.data.iter().copied().max().unwrap_or(0) as f32;
+    let blk = m.black.iter().copied().fold(f32::MAX, f32::min);
+    let white_obs = ((max - blk) / (m.white - blk)).min(1.0);
+    [if white_obs > 0.5 {
+        (white_obs * 0.98).min(0.985)
+    } else {
+        0.985
+    }; 4]
+}
 
 pub struct Ingest {
     normalize: Kernel,
@@ -199,6 +227,19 @@ impl Ingest {
         wb: [f32; 3],
         full_xtrans: bool,
     ) -> Result<wgpu::Texture> {
+        self.demosaic_at(gpu, m, wb, full_xtrans, clip_levels(m))
+    }
+
+    /// [`Self::demosaic`] with the saturation thresholds given rather than chosen, one per CFA colour.
+    /// [`clip_levels`] decides which the pipeline uses; tests pin them.
+    pub fn demosaic_at(
+        &self,
+        gpu: &Gpu,
+        m: &MosaicInput,
+        wb: [f32; 3],
+        full_xtrans: bool,
+        clip: [f32; 4],
+    ) -> Result<wgpu::Texture> {
         let _ = full_xtrans;
         let (ox, oy, w, h, sensor) = phase(m)?;
         let mut pattern = [[0u32; 4]; 9];
@@ -207,26 +248,16 @@ impl Ingest {
                 m.pattern[((i / 6 + oy) % m.period) as usize][((i % 6 + ox) % m.period) as usize];
             pattern[(i / 4) as usize][(i % 4) as usize] = c as u32;
         }
-        let white_obs = {
-            let max = m.data.iter().copied().max().unwrap_or(0) as f32;
-            let blk = m.black.iter().copied().fold(f32::MAX, f32::min);
-            ((max - blk) / (m.white - blk)).min(1.0)
-        };
         let base = IngestParams {
             in_size: [w, h],
             out_size: [w, h],
             black: m.black,
             wb: [wb[0], wb[1], wb[2], wb[1]],
+            clip,
             white: m.white,
-            clip: if white_obs > 0.5 {
-                (white_obs * 0.98).min(0.985)
-            } else {
-                0.985
-            },
             desat: 0.3,
             _unused: 0.0,
             sensor,
-            _p: [0; 3],
             pattern,
         };
         let with = |in_size: [u32; 2], out_size: [u32; 2]| IngestParams {
@@ -497,6 +528,8 @@ mod tests {
                 .offset as usize
         };
         assert_eq!(off("wb"), std::mem::offset_of!(IngestParams, wb));
+        assert_eq!(off("clip"), std::mem::offset_of!(IngestParams, clip));
+        assert_eq!(off("white"), std::mem::offset_of!(IngestParams, white));
         assert_eq!(off("sensor"), std::mem::offset_of!(IngestParams, sensor));
         assert_eq!(off("pattern"), std::mem::offset_of!(IngestParams, pattern));
     }
@@ -506,6 +539,11 @@ mod tests {
     /// frame. Every value must now be finite and bounded (16× clip on the mosaic, which the demosaic overshoots
     /// by up to half again on the step between the halves), the blown half no darker than what the sensor
     /// recorded there, and the measured half left exactly as it was. On Bayer and on X-Trans.
+    ///
+    /// Run twice: with one threshold for every colour, as the heuristic gives, and with blue saturating far
+    /// below the others, as a measurement often says (D6/D7). Uneven thresholds are the new way to break the
+    /// fill — blue is then "clipped" over most of the frame while red and green are measurements — and the
+    /// bound has to hold either way.
     #[test]
     fn highlight_fill_stays_bounded_beside_a_channel_the_estimate_lacks() {
         let Ok(gpu) = crate::test_gpu() else {
@@ -557,30 +595,40 @@ mod tests {
                 white,
                 pattern,
                 period,
+                clip: [0.98; 4],
             };
-            let out = ing.demosaic(gpu, &m, [2.0, 1.0, 1.5], false).unwrap();
-            let img = crate::read_rgba16(gpu, &out).unwrap();
-            let (ow, oh) = (img.width, img.height);
-            let edge = ow / 32;
-            for (i, p) in img.data.chunks(4).enumerate() {
-                let (x, y) = (i as u32 % ow, i as u32 / ow);
-                assert!(
-                    p[..3].iter().all(|v| v.is_finite() && *v <= 32.0),
-                    "{name} ({x}, {y}): {p:?}"
-                );
-                let inside = (edge..ow - edge).contains(&x);
-                if inside && (edge..oh / 2 - edge).contains(&y) {
+            // 1200 of 4000 is 0.3, so a blue threshold of 0.25 declares the measured half's blue saturated
+            // too — every pixel of the frame then has a clipped channel and nothing is left to scale against.
+            for clip in [[0.98; 4], [0.995, 0.98, 0.25, 0.98]] {
+                let out = ing
+                    .demosaic_at(gpu, &m, [2.0, 1.0, 1.5], false, clip)
+                    .unwrap();
+                let img = crate::read_rgba16(gpu, &out).unwrap();
+                let (ow, oh) = (img.width, img.height);
+                let edge = ow / 32;
+                let even = clip[0] == clip[2];
+                for (i, p) in img.data.chunks(4).enumerate() {
+                    let (x, y) = (i as u32 % ow, i as u32 / ow);
                     assert!(
-                        p[..3].iter().all(|v| *v >= 0.99),
-                        "{name} blown ({x}, {y}): {p:?}"
+                        p[..3].iter().all(|v| v.is_finite() && *v <= 32.0),
+                        "{name} {clip:?} ({x}, {y}): {p:?}"
                     );
-                }
-                if inside && (oh / 2 + edge..oh - edge).contains(&y) {
-                    let want = [0.3, 0.3, 0.0];
-                    assert!(
-                        (0..3).all(|c| (p[c] - want[c]).abs() < 1e-3),
-                        "{name} measured ({x}, {y}): {p:?}"
-                    );
+                    let inside = (edge..ow - edge).contains(&x);
+                    if inside && (edge..oh / 2 - edge).contains(&y) {
+                        assert!(
+                            p[..3].iter().all(|v| *v >= 0.99),
+                            "{name} {clip:?} blown ({x}, {y}): {p:?}"
+                        );
+                    }
+                    // With blue declared saturated at 0.25 the measured half is no longer measured, so only
+                    // the even-threshold run can ask for it back untouched.
+                    if even && inside && (oh / 2 + edge..oh - edge).contains(&y) {
+                        let want = [0.3, 0.3, 0.0];
+                        assert!(
+                            (0..3).all(|c| (p[c] - want[c]).abs() < 1e-3),
+                            "{name} measured ({x}, {y}): {p:?}"
+                        );
+                    }
                 }
             }
         }
@@ -596,6 +644,7 @@ mod tests {
             data: &data,
             black: [0.0; 4],
             white: 1.0,
+            clip: [0.995; 4],
             pattern: [
                 [1, 0, 1, 0, 1, 0],
                 [2, 3, 2, 3, 2, 3],

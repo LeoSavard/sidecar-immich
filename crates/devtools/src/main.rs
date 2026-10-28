@@ -255,6 +255,7 @@ fn hilite_truth(input: &std::path::Path, evs: &[f32]) -> Result<()> {
             white: m.white,
             pattern: m.pattern,
             period: m.period,
+            clip: m.clip,
         };
         ing.proxy(&gpu, &input_m, [mul[0] as f32, 1.0, mul[2] as f32], 1600)
     };
@@ -380,6 +381,7 @@ fn hilite(input: &std::path::Path, out_dir: &std::path::Path, crop: bool) -> Res
         white: m.white,
         pattern: m.pattern,
         period: m.period,
+        clip: m.clip,
     };
     let proxy = ing
         .proxy(&gpu, &input_m, [mul[0] as f32, 1.0, mul[2] as f32], 1600)?
@@ -390,31 +392,27 @@ fn hilite(input: &std::path::Path, out_dir: &std::path::Path, crop: bool) -> Res
     // blown area still holds a usable measurement: where only one colour has clipped, the other two are real
     // and reconstruction has something honest to hold on to; where all three have gone, it is inventing.
     {
-        let blk = m.black.iter().copied().fold(f32::MAX, f32::min);
-        let white_obs =
-            ((m.data.iter().copied().max().unwrap_or(0) as f32 - blk) / (m.white - blk)).min(1.0);
-        let clip = if white_obs > 0.5 {
-            (white_obs * 0.98).min(0.985)
-        } else {
-            0.985
-        };
+        // Counted at the thresholds the ingest just used, whichever branch of `clip_levels` is live, so the
+        // coverage below and the proxy above are answering the same question.
+        let clip = sidecar_engine::clip_levels(&input_m);
         let mut hit = [0u64; 3];
         let mut seen = [0u64; 3];
         for (i, &v) in m.data.iter().enumerate() {
             let (x, y) = ((i as u32) % m.width, (i as u32) / m.width);
-            let c = match m.pattern[(y % m.period) as usize][(x % m.period) as usize] {
-                3 => 1,
-                c => c,
-            } as usize;
+            let raw_c = m.pattern[(y % m.period) as usize][(x % m.period) as usize] as usize;
+            let c = if raw_c == 3 { 1 } else { raw_c };
             let n = (v as f32 - m.black[c]) / (m.white - m.black[c]);
             seen[c] += 1;
-            if n >= clip {
+            if n >= clip[raw_c] {
                 hit[c] += 1;
             }
         }
         let pct = |c: usize| 100.0 * hit[c] as f64 / seen[c].max(1) as f64;
         println!(
-            "  mosaic at clip {clip:.3}: R {:.3} %, G {:.3} %, B {:.3} %",
+            "  mosaic at clip R {:.4} G {:.4} B {:.4}: R {:.3} %, G {:.3} %, B {:.3} %",
+            clip[0],
+            clip[1].min(clip[3]),
+            clip[2],
             pct(0),
             pct(1),
             pct(2)
@@ -798,7 +796,6 @@ fn camera_jpeg(list: &std::path::Path) -> Result<()> {
 /// frame with blown highlights the two should agree; where they don't, the histogram is the one that
 /// survives a stuck pixel.
 fn levels(input: &std::path::Path) -> Result<()> {
-    use sidecar_raw::levels::TopOfRange;
     let raw = sidecar_raw::RawFile::open(input)?;
     let info = raw.info();
     let m = raw.mosaic()?;
@@ -806,19 +803,19 @@ fn levels(input: &std::path::Path) -> Result<()> {
         "{} {} \u{b7} {}\u{d7}{} \u{b7} declared maximum {} \u{b7} black {:?}",
         info.make, info.model, m.width, m.height, m.white, m.black
     );
-    let mut tops: [TopOfRange; 4] = std::array::from_fn(|c| TopOfRange::new(m.white, m.black[c]));
     let mut seen = [0u64; 4];
     let mut brightest = [0u16; 4];
     for y in 0..m.height {
         for x in 0..m.width {
             let c = m.color_at(y, x) as usize;
             let v = m.data[(y * m.width + x) as usize];
-            tops[c].add(v as f32);
             seen[c] += 1;
             brightest[c] = brightest[c].max(v);
         }
     }
-    let got = sidecar_raw::levels::clip_threshold(&tops);
+    // The decode's own measurement, not a second copy of it: `Mosaic::clip`, which is what the ingest reads
+    // when the switch is on.
+    let got = m.clip;
     // How much of the frame actually reached saturation: what says whether a file can demonstrate anything
     // about highlights at all.
     let mut clipped = [0u64; 4];
@@ -837,19 +834,35 @@ fn levels(input: &std::path::Path) -> Result<()> {
         "  clipped: {:.4} % of samples",
         100.0 * blown as f64 / total.max(1) as f64
     );
-    // What `Ingest::demosaic` actually uses: *one* number for every colour, from the brightest sample
-    // anywhere in the mosaic. The per-colour "old heuristic" below is the same formula asked per channel,
-    // which is what the other two decode paths do — it is not what the GPU path feeds the shaders.
+    // What `Ingest::demosaic` feeds the shaders, which is the heuristic unless the switch is set: *one*
+    // number for every colour, from the brightest sample anywhere in the mosaic. The per-colour "old
+    // heuristic" below is the same formula asked per channel, which is what the other two decode paths do.
     {
-        let blk = m.black.iter().copied().fold(f32::MAX, f32::min);
-        let max = m.data.iter().copied().max().unwrap_or(0) as f32;
-        let white_obs = ((max - blk) / (m.white - blk)).min(1.0);
-        let scalar = if white_obs > 0.5 {
-            (white_obs * 0.98).min(0.985)
-        } else {
-            0.985
+        let input_m = sidecar_engine::MosaicInput {
+            width: m.width,
+            height: m.height,
+            data: &m.data,
+            black: m.black,
+            white: m.white,
+            pattern: m.pattern,
+            period: m.period,
+            clip: m.clip,
         };
-        println!("  one threshold for all four colours, as the GPU path uses it: {scalar:.4}");
+        let live = sidecar_engine::clip_levels(&input_m);
+        let histogram = std::env::var_os("SIDECAR_CLIP_HISTOGRAM").is_some();
+        println!(
+            "  the shaders are being fed R {:.4} G {:.4} B {:.4} G2 {:.4}, the {} (SIDECAR_CLIP_HISTOGRAM is {})",
+            live[0],
+            live[1],
+            live[2],
+            live[3],
+            if histogram {
+                "histogram"
+            } else {
+                "one-sample heuristic"
+            },
+            if histogram { "set" } else { "unset" },
+        );
     }
     for c in 0..4 {
         if seen[c] == 0 {
@@ -892,6 +905,7 @@ fn ingest(input: &std::path::Path, out: &std::path::Path, long_edge: u32) -> Res
         white: m.white,
         pattern: m.pattern,
         period: m.period,
+        clip: m.clip,
     };
     let mut proxy = ingest
         .proxy(

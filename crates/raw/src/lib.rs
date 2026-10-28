@@ -161,6 +161,9 @@ pub struct Mosaic {
     pub pattern: [[u8; 6]; 6],
     pub period: u32,
     pub flip: i32,
+    /// Where each CFA colour actually saturates, as a fraction of `white` above its own black: measured from
+    /// these samples by [`levels::mosaic_clip`], not guessed from the single brightest one (D6 and D7).
+    pub clip: [f32; 4],
 }
 
 impl Mosaic {
@@ -296,6 +299,14 @@ impl RawFile {
         }
         let data = unsafe { std::slice::from_raw_parts(m.data, n) }.to_vec();
         unsafe { sys::sc_mosaic_free(&mut m) };
+        let clip = levels::mosaic_clip(
+            &data,
+            m.width as u32,
+            m.white,
+            &m.black,
+            &m.pattern,
+            m.period as u32,
+        );
         Ok(Mosaic {
             width: m.width as u32,
             height: m.height as u32,
@@ -305,6 +316,7 @@ impl RawFile {
             pattern: m.pattern,
             period: m.period as u32,
             flip: self.info.flip,
+            clip,
         })
     }
 }

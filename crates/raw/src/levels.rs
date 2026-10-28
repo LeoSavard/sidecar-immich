@@ -113,6 +113,37 @@ pub fn clip_threshold(channels: &[TopOfRange; 4]) -> [f32; 4] {
     std::array::from_fn(|c| channels[c].threshold())
 }
 
+/// Where each CFA colour of a mosaic saturates, as fractions of the declared maximum above that colour's
+/// black — the four numbers `normalize.wgsl` and the highlight passes compare a normalized sample against.
+///
+/// `pattern[y % period][x % period]` names the colour, as `Mosaic` states it. A colour the pattern never
+/// names is counted into nothing and answers "declared", so a Bayer file's unused G2 lane is harmless.
+pub fn mosaic_clip(
+    data: &[u16],
+    width: u32,
+    white: f32,
+    black: &[f32; 4],
+    pattern: &[[u8; 6]; 6],
+    period: u32,
+) -> [f32; 4] {
+    let period = (period as usize).clamp(1, 6);
+    let w = width as usize;
+    let mut ch = std::array::from_fn(|c| TopOfRange::new(white, black[c]));
+    if w == 0 {
+        return clip_threshold(&ch);
+    }
+    for (y, row) in data.chunks(w).enumerate() {
+        let colours = &pattern[y % period];
+        for (x, &s) in row.iter().enumerate() {
+            let c = colours[x % period] as usize;
+            if let Some(t) = ch.get_mut(c) {
+                t.add(s as f32);
+            }
+        }
+    }
+    clip_threshold(&ch)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,6 +224,42 @@ mod tests {
         let mut bad = TopOfRange::new(100.0, 100.0);
         bad.add_all([50.0, 100.0, 200.0]);
         assert!(bad.threshold() > 0.99);
+    }
+
+    /// A mosaic, walked as the decode hands it over: a Bayer frame whose blue saturates at 12,000 while red
+    /// and green reach the declared maximum. The pattern never names G2, so that lane answers "declared"
+    /// rather than zero — the lane LibRaw leaves uninitialized on a Bayer file.
+    #[test]
+    fn a_bayer_mosaic_is_measured_per_colour() {
+        // RGGB: colour 0 at (0,0), 1 at (0,1) and (1,0), 2 at (1,1).
+        let mut pattern = [[0u8; 6]; 6];
+        pattern[0][1] = 1;
+        pattern[1][0] = 1;
+        pattern[1][1] = 2;
+        let (w, h) = (256usize, 256usize);
+        let mut data = vec![0u16; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                let top = if pattern[y % 2][x % 2] == 2 {
+                    12000.0
+                } else {
+                    16383.0
+                };
+                // A ramp across the row, with the last eighth of it pinned at the colour's saturation.
+                let t = (x as f32 / w as f32 * 1.14).min(1.0);
+                data[y * w + x] = (512.0 + t * (top - 512.0)) as u16;
+            }
+        }
+        let got = mosaic_clip(&data, w as u32, 16383.0, &[512.0; 4], &pattern, 2);
+        let blue = (12000.0 - 512.0) / (16383.0 - 512.0);
+        assert!(got[0] > 0.98, "red {}", got[0]);
+        assert!(got[1] > 0.98, "green {}", got[1]);
+        assert!(
+            (got[2] - blue).abs() < 0.03,
+            "blue {} should be near {blue}",
+            got[2]
+        );
+        assert!(got[3] > 0.98, "unused G2 {}", got[3]);
     }
 
     /// Channels are answered separately: blue clipping first is the usual case under tungsten, and it must

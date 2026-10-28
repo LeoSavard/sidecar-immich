@@ -502,6 +502,7 @@ fn decode_full(
                 white: m.white,
                 pattern: m.pattern,
                 period: m.period,
+                clip: m.clip,
             };
             ingest
                 .proxy(g, &input, [mul[0] as f32, 1.0, mul[2] as f32], largest)?

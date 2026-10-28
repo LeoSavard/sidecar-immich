@@ -25,7 +25,10 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     let c = norm(p + vec2i(0, 2));
     let d = norm(p - vec2i(0, 2));
     let m = max(max(a, b), max(c, d));
-    if (v > 4.0 * m && v > 0.05 && v < P.clip) {
+    // A saturated sample is left alone: it is not hot, it is clipped, and the neighbours it stands above are
+    // simply darker subject. Its own colour's threshold says which it is.
+    let white = clip_for(vec2u(clamp_px(p, P.in_size)), P.pattern, P.clip);
+    if (v > 4.0 * m && v > 0.05 && v < white) {
       v = 0.25 * (a + b + c + d);
     }
   }
