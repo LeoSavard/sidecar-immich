@@ -855,19 +855,19 @@ fn levels(input: &std::path::Path, bins: bool, dump: Option<&std::path::Path>) -
             clip: m.clip,
         };
         let live = sidecar_engine::clip_levels(&input_m);
-        let histogram = std::env::var_os("SIDECAR_CLIP_HISTOGRAM").is_some();
+        let legacy = std::env::var_os("SIDECAR_CLIP_LEGACY").is_some();
         println!(
-            "  the shaders are being fed R {:.4} G {:.4} B {:.4} G2 {:.4}, the {} (SIDECAR_CLIP_HISTOGRAM is {})",
+            "  the shaders are being fed R {:.4} G {:.4} B {:.4} G2 {:.4}, the {} (SIDECAR_CLIP_LEGACY is {})",
             live[0],
             live[1],
             live[2],
             live[3],
-            if histogram {
-                "histogram"
-            } else {
+            if legacy {
                 "one-sample heuristic"
+            } else {
+                "histogram"
             },
-            if histogram { "set" } else { "unset" },
+            if legacy { "set" } else { "unset" },
         );
     }
     for c in 0..4 {

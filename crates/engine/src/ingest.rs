@@ -35,26 +35,28 @@ pub struct MosaicInput<'a> {
     pub pattern: [[u8; 6]; 6],
     pub period: u32,
     /// Where each colour saturates, as a fraction of `white` above its own black: `Mosaic::clip`, measured
-    /// from the samples. Only read when `SIDECAR_CLIP_HISTOGRAM` is set; see [`clip_levels`].
+    /// from the samples; see [`clip_levels`].
     pub clip: [f32; 4],
 }
 
 use wgpu::TextureFormat as F;
 
-/// The thresholds the shaders compare a normalized sample against, one per CFA colour.
+/// The thresholds the shaders compare a normalized sample against, one per CFA colour: what the decode
+/// measured, `Mosaic::clip`.
 ///
-/// The default is the heuristic the pipeline has always used: *one* number for all four colours, 98 % of the
-/// brightest sample anywhere in the mosaic, capped at 98.5 %. A single sample decides it, so one stuck pixel
-/// pins it to the declared maximum and defeats it, while a frame with no bright highlights at all has
-/// everything above 98 % of its brightest pixel declared saturated — on `IMG_1768.CR2`, nothing clipped and
-/// the threshold 0.6047 (D6 and D7 in docs/research/pipeline-review-2026-10.md).
+/// What it replaces, and what `SIDECAR_CLIP_LEGACY=1` brings back for comparison, is the heuristic the
+/// pipeline used until 2026-10-28: *one* number for all four colours, 98 % of the brightest sample anywhere
+/// in the mosaic, capped at 98.5 % (D6 and D7 in docs/research/pipeline-review-2026-10.md). A single sample
+/// decided it, and both ways it was wrong. On `IMG_0735.CR2` one stuck green pixel at 83.27 % of the range
+/// put the threshold at 0.8161, above every channel's real maximum, so a frame with 0.68 % of its samples at
+/// saturation had exactly one pixel of its proxy flagged and highlight reconstruction did nothing. On
+/// `IMG_1768.CR2`, which clips nowhere, the brightest sample reaches 61.70 % and the threshold was 0.6047.
 ///
-/// `SIDECAR_CLIP_HISTOGRAM=1` uses what the decode measured instead (`sidecar_raw::levels::mosaic_clip`):
-/// per colour, from where that colour's samples pile up. It is a switch and not yet the default because every
-/// cached proxy and focus mask was built with the heuristic, and the answer changes the alpha of every blown
-/// photo. `sidecar-dev levels` prints both; `sidecar-dev hilite` and `hilite-truth` honour the switch.
+/// Measured over 222 raws from seven formats and thirteen camera models, the measurement is stricter than
+/// the heuristic in 822 of 827 channels and looser in 5, and those 5 are channels that genuinely saturate
+/// early. `sidecar-dev levels` prints both.
 pub fn clip_levels(m: &MosaicInput) -> [f32; 4] {
-    if std::env::var_os("SIDECAR_CLIP_HISTOGRAM").is_some() {
+    if std::env::var_os("SIDECAR_CLIP_LEGACY").is_none() {
         return m.clip;
     }
     let max = m.data.iter().copied().max().unwrap_or(0) as f32;

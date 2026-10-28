@@ -169,6 +169,18 @@ pub fn mosaic_clip(
     ))
 }
 
+/// Where each of three interleaved channels saturates, for an image that is already demosaiced: the same
+/// question [`mosaic_clip`] asks, of RGB rather than a CFA. `declared` and `black` are in the samples' units.
+pub fn rgb_clip(rgb: &[u16], declared: f32, black: f32) -> [f32; 3] {
+    let mut ch: [TopOfRange; 3] = std::array::from_fn(|_| TopOfRange::new(declared, black));
+    for p in rgb.as_chunks::<3>().0 {
+        for (c, &v) in p.iter().enumerate() {
+            ch[c].add(v as f32);
+        }
+    }
+    std::array::from_fn(|c| ch[c].threshold())
+}
+
 /// The four histograms [`mosaic_clip`] asks, for a caller that wants to look at them.
 pub fn mosaic_histograms(
     data: &[u16],

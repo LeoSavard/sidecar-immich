@@ -17,6 +17,7 @@ import xtransBinWgsl from './wgsl/ingest_xtrans_bin.wgsl?raw';
 import downsampleWgsl from './wgsl/ingest_downsample.wgsl?raw';
 import resampleWgsl from './wgsl/ingest_resample.wgsl?raw';
 import { kernel, type Binding } from './depth';
+import { mosaicClip } from './levels';
 
 /** A raw mosaic as LibRaw's shim hands it over (`sc_mosaic`; `sidecar_engine::MosaicInput`). */
 export type Mosaic = {
@@ -208,20 +209,15 @@ export class IngestPass {
 		const { ox, oy, w, h, sensor } = phase(m);
 		const pattern = new Uint32Array(36);
 		for (let i = 0; i < 36; i++) pattern[i] = m.pattern[((Math.floor(i / 6) + oy) % m.period) * 6 + ((i % 6) + ox) % m.period];
-		// Sensors that saturate below their declared white: `clip_levels` in ingest.rs, the heuristic branch.
-		// One number for all four colours, from the single brightest sample; the phone keeps it while the
-		// server's measured alternative is still a switch, so a proxy made here matches one made there.
-		let max = 0;
-		for (let i = 0; i < m.data.length; i++) if (m.data[i] > max) max = m.data[i];
-		const blk = Math.min(...m.black);
-		const whiteObs = Math.min(1, (max - blk) / (m.white - blk));
-		const one = whiteObs > 0.5 ? Math.min(whiteObs * 0.98, 0.985) : 0.985;
+		// Where each colour saturates, measured from these samples as `Mosaic::clip` measures them on the
+		// server: the same detector, so a proxy made here is the one the server would have sent.
+		const clip = mosaicClip(m.data, m.width, m.white, m.black, m.pattern, m.period);
 		const base: Params = {
 			inSize: [w, h],
 			outSize: [w, h],
 			black: m.black,
 			wb: [wb[0], wb[1], wb[2], wb[1]],
-			clip: [one, one, one, one],
+			clip,
 			white: m.white,
 			desat: 0.3,
 			sensor,
