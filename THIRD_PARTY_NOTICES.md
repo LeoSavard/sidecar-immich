@@ -39,7 +39,7 @@ WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWIS
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ## Compact-ICC-Profiles — CC0-1.0
-Clinton Ingram. `assets/icc/sRGB-v4.icc`, `assets/icc/DisplayP3-v4.icc`.
+Clinton Ingram. `assets/icc/sRGB-v4.icc`, `assets/icc/DisplayP3-v4.icc`, `assets/icc/AdobeCompat-v4.icc`.
 
 ## jpeg-encoder — (MIT OR Apache-2.0) AND IJG
 This software is based in part on the work of the Independent JPEG Group.
