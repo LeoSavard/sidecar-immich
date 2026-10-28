@@ -51,8 +51,9 @@ fn main() -> Result<()> {
                 .collect::<Result<Vec<f32>, _>>()?,
         ),
         ["radial", list] => radial(list.as_ref()),
-        ["levels", input] => levels(input.as_ref(), false),
-        ["levels", input, "--bins"] => levels(input.as_ref(), true),
+        ["levels", input] => levels(input.as_ref(), false, None),
+        ["levels", input, "--bins"] => levels(input.as_ref(), true, None),
+        ["levels", input, "--dump", at] => levels(input.as_ref(), false, Some(at.as_ref())),
         ["linear-dng", input, out, rest @ ..] => {
             let input: &std::path::Path = input.as_ref();
             let edge: u32 = rest.first().map_or(Ok(1600), |v| v.parse())?;
@@ -800,7 +801,7 @@ fn camera_jpeg(list: &std::path::Path) -> Result<()> {
 /// brightest sample the old heuristics keyed off (D6/D7 in docs/research/pipeline-review-2026-10.md). On a
 /// frame with blown highlights the two should agree; where they don't, the histogram is the one that
 /// survives a stuck pixel.
-fn levels(input: &std::path::Path, bins: bool) -> Result<()> {
+fn levels(input: &std::path::Path, bins: bool, dump: Option<&std::path::Path>) -> Result<()> {
     let raw = sidecar_raw::RawFile::open(input)?;
     let info = raw.info();
     let m = raw.mosaic()?;
@@ -886,6 +887,24 @@ fn levels(input: &std::path::Path, bins: bool) -> Result<()> {
             "  colour {c}: {:>11} samples \u{b7} brightest {:.4} \u{b7} histogram {:.4} \u{b7} old heuristic {:.4}",
             seen[c], observed, got[c], old
         );
+    }
+    // The mosaic as the phone's port gets it, so `web/src/lib/gpu/levels.ts` can be asked the same question
+    // about the same samples: a JSON header, then the samples as little-endian u16.
+    if let Some(at) = dump {
+        let head = format!(
+            "{{\"width\":{},\"height\":{},\"white\":{},\"black\":{:?},\"period\":{},\"pattern\":{:?},\"clip\":{:?}}}\n",
+            m.width,
+            m.height,
+            m.white,
+            m.black,
+            m.period,
+            m.pattern.iter().flatten().collect::<Vec<_>>(),
+            m.clip,
+        );
+        let mut bytes = head.into_bytes();
+        bytes.extend(m.data.iter().flat_map(|v| v.to_le_bytes()));
+        std::fs::write(at, bytes)?;
+        println!("  wrote {} ({} samples)", at.display(), m.data.len());
     }
     // The top of each histogram, for when the answer is surprising. The shapes are unmistakable once seen: a
     // saturated channel is flat and then one bin tens or hundreds of times taller, with nothing above it,

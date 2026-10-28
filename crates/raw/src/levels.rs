@@ -29,9 +29,15 @@ const FLOOR: f32 = 0.5;
 /// the top of the range, and a share of *that* is a share of a handful. A 4-megapixel channel of an Olympus
 /// E-PL5 frame shot at dusk had five samples above half scale, and two of them in one bin read as a sensor
 /// running out of range at 54.88 %.
-const SHARE: f32 = 0.0005;
+const SHARE: f32 = 0.00002;
 /// And never fewer than this many samples, however small the frame: saturation is a region of a picture.
-const MIN_SPIKE: f32 = 512.0;
+/// 256 samples of one colour is a thousand pixels, a patch some thirty across — a small blown specular, and
+/// the least that is worth acting on. A dark frame's whole top-of-range population is a handful, so this
+/// alone ends the mistake that [`SHARE`] describes; the bar is low because the shape tests below are what
+/// actually tell saturation from subject, and a bar high enough to matter threw away real ceilings. On one
+/// Canon EOS M3 frame blue piled 730 samples into a single bin, standing 24× above its neighbours with
+/// nothing whatever above it, and a bar of 0.05 % of the channel called that noise.
+const MIN_SPIKE: f32 = 256.0;
 const RELIEF: f32 = 8.0;
 /// How much may sit above the spike and still leave it saturation, as a share of the spike itself. A stuck
 /// pixel or a few is the point of all this (D6); a real population above it means the sensor goes higher and
@@ -199,9 +205,10 @@ mod tests {
     #[test]
     fn a_sensor_that_reaches_its_declared_maximum() {
         let mut t = TopOfRange::new(16383.0, 512.0);
-        // A smooth ramp over the whole range, as an ordinary picture gives.
-        for i in 0..100_000 {
-            t.add(512.0 + (i as f32 / 100_000.0) * (16383.0 - 512.0));
+        // A smooth ramp over the whole range, as an ordinary picture gives. Big enough that every bin clears
+        // the floor, so what rejects it is the shape — no bin stands above its neighbours — and not a count.
+        for i in 0..1_000_000 {
+            t.add(512.0 + (i as f32 / 1_000_000.0) * (16383.0 - 512.0));
         }
         assert!(t.threshold() > 0.98, "got {}", t.threshold());
     }
@@ -280,13 +287,19 @@ mod tests {
     /// bin is a bright subject and the channel is not clipped there.
     #[test]
     fn a_bin_with_plenty_above_it_is_not_a_ceiling() {
+        let span = 16383.0 - 512.0;
         let mut t = TopOfRange::new(16383.0, 512.0);
-        for i in 0..1_000_000 {
-            t.add(512.0 + (i as f32 / 1_000_000.0) * (16383.0 - 512.0));
+        // A picture reaching 60 % of the range, with a flat subject piled up at the top of it.
+        for i in 0..200_000 {
+            t.add(512.0 + (i as f32 / 200_000.0) * 0.6 * span);
         }
-        // A flat subject at 60 % of the range, and the picture carrying on well above it.
         for _ in 0..20_000 {
-            t.add(512.0 + 0.6 * (16383.0 - 512.0));
+            t.add(512.0 + 0.6 * span);
+        }
+        // And a thin tail carrying on above — too thin for any bin of its own to clear the floor, but far
+        // more than a stuck pixel or two in total. The pile-up is a subject, not a limit.
+        for i in 0..4_000 {
+            t.add(512.0 + (0.6 + 0.4 * (i as f32 / 4_000.0)) * span);
         }
         assert!(t.threshold() > 0.99, "got {}", t.threshold());
     }
