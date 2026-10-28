@@ -17,6 +17,7 @@
 	import { EditSession, type EditState } from '$lib/state/edit-session.svelte';
 	import { copyLook, pasteLook, readLookClipboard, type LookClipboard } from '$lib/state/look-clipboard';
 	import Histogram from '$lib/ui/Histogram.svelte';
+	import Loupe from '$lib/ui/Loupe.svelte';
 	import Readout from '$lib/ui/Readout.svelte';
 	import ExportSheet from '$lib/ui/ExportSheet.svelte';
 	import HistoryPanel from '$lib/ui/HistoryPanel.svelte';
@@ -62,6 +63,19 @@
 	 */
 	let onDevice = $state(false);
 	let onDeviceNoticeDismissed = $state(false);
+	/**
+	 * The installed app (the manifest's `display: standalone`), which is the only place the "developed on this
+	 * device" note is shown: in a browser tab it was noise on every photo (the October interface review, item 11).
+	 */
+	let installedApp = $state(false);
+	/** Device pixels per output pixel, as a percentage, or 0 at fit — the readout over the photo (item 2). */
+	let zoomPercent = $state(0);
+	/** The loupe over the photo, reached from the toggles beside Focus rather than three taps deep (item 8). */
+	let loupeOver = $state(false);
+	/** The proxy as it was uploaded, and the focus mask: what a rebuilt device needs (`useSource`). */
+	let gpuSource: { width: number; height: number; f16: ArrayBuffer | ArrayBufferView } | null = null;
+	let focusMaskBytes: ArrayBuffer | null = null;
+	let recovering = false;
 	/**
 	 * The colour model the proxy is in when it isn't the server's: a developed photo the browser decoded into
 	 * Display P3. Everything that packs or samples the proxy reads `cameraColor()`.
@@ -257,7 +271,7 @@
 	 * The references this edit had before it was brought up to date, so "keep the old rendering" can put
 	 * them back. Set only when the port happened on its own, under the person's first change.
 	 */
-	let oldRendering = $state<{ processVersion: number; baselineEv: number; whiteEv: number; whiteZeroEv: number; shoulderOrder: number; highlightBleach: number } | null>(null);
+	let oldRendering = $state<ReturnType<typeof referencesOf> | null>(null);
 	/**
 	 * They asked to keep the old rendering on this photo. Held for as long as it is open and no longer: an
 	 * edit that keeps old references is the thing this is trying to stop, so the next session asks again.
@@ -374,6 +388,9 @@
 		const geometry: ViewGeometry | undefined = shown ? { toPicture: shown.frame.toPicture, size: shown.frame.size } : undefined;
 		view.render(develop.output, canvas, viewport, (clipHigh ? CLIP_HIGHS : 0) | (clipLow ? CLIP_LOWS : 0) | (peaking ? PEAKING : 0) | maskFlags, geometry);
 		markerPos = cropping ? null : imageToScreen(afPoint());
+		// The zoom readout: device pixels per output pixel, which is what the double tap's 100 % means. 0 at fit,
+		// where there is nothing to say and nothing to go back to.
+		zoomPercent = viewport.zoom > 1.001 ? Math.round(imageRect().fit * viewport.zoom * 100) : 0;
 		if (cropping) layoutTick++;
 		placeCamera();
 	}
@@ -722,6 +739,27 @@
 		return entry;
 	}
 
+	/**
+	 * Drop everything cached from a device that has gone away. The textures are not destroyed: the device took
+	 * its memory with it, and each is derived from the proxy, the worker's masks or strokes the edit still
+	 * holds, so the next frame makes them again.
+	 *
+	 * The memos matter as much as the textures. `correctLens` and `depthEffects` return early when nothing in
+	 * the edit changed, so after a rebuild they would go on handing the new device views it rejects — which
+	 * shows up as a frame that never arrives and no error anywhere, not as a failure.
+	 */
+	function forgetGpuCaches() {
+		layerTextures.clear();
+		correctedMasks.clear();
+		corrected = undefined;
+		lensOut = undefined;
+		correctedMask = undefined;
+		lensMadeFrom = '';
+		depthMadeFrom = undefined;
+		refinedFrom = undefined;
+		maskSet = null;
+	}
+
 	function forgetLayers() {
 		for (const e of layerTextures.values()) {
 			e.painted.destroy();
@@ -924,15 +962,16 @@
 		}
 	}
 
-	/** The references as they stand, for putting back. */
+	/** The references as they stand, for putting back: every field `adopt_current_rendering` sets. One left out
+	 *  is never taken up, so the edit stays behind and the offer comes back the moment it was taken. */
 	function referencesOf(e: EditParams) {
-		return { processVersion: e.processVersion, baselineEv: e.exposure.baselineEv, whiteEv: e.tone.whiteEv, whiteZeroEv: e.tone.whiteZeroEv, shoulderOrder: e.tone.shoulderOrder, highlightBleach: e.tone.highlightBleach };
+		return { processVersion: e.processVersion, baselineEv: e.exposure.baselineEv, whiteEv: e.tone.whiteEv, whiteZeroEv: e.tone.whiteZeroEv, shoulderOrder: e.tone.shoulderOrder, highlightBleach: e.tone.highlightBleach, highlightReachEv: e.tone.highlightReachEv };
 	}
 
 	function setReferences(e: EditParams, r: ReturnType<typeof referencesOf>) {
 		e.processVersion = r.processVersion;
 		e.exposure = { ...e.exposure, baselineEv: r.baselineEv };
-		e.tone = { ...e.tone, whiteEv: r.whiteEv, whiteZeroEv: r.whiteZeroEv, shoulderOrder: r.shoulderOrder, highlightBleach: r.highlightBleach };
+		e.tone = { ...e.tone, whiteEv: r.whiteEv, whiteZeroEv: r.whiteZeroEv, shoulderOrder: r.shoulderOrder, highlightBleach: r.highlightBleach, highlightReachEv: r.highlightReachEv };
 	}
 
 	/**
@@ -1223,6 +1262,7 @@
 		void edit?.tone.whiteZeroEv;
 		void edit?.tone.shoulderOrder;
 		void edit?.tone.highlightBleach;
+		void edit?.tone.highlightReachEv;
 		if (packerReady && edit && meta) checkRendering();
 	});
 
@@ -1230,10 +1270,25 @@
 		const [proxyResp, focusResp] = await Promise.all([api(`/api/assets/${key}/proxy?long_edge=${longEdge}`), api(`/api/assets/${key}/focus?edge=${longEdge}`)]);
 		const w = Number(proxyResp.headers.get('x-width'));
 		const h = Number(proxyResp.headers.get('x-height'));
-		develop.setSource(w, h, await proxyResp.arrayBuffer());
-		proxyLoaded = true;
-		await view.loadFocusMask(await focusResp.arrayBuffer());
+		useSource(w, h, await proxyResp.arrayBuffer());
+		useFocusMask(await focusResp.arrayBuffer());
 		schedule(true);
+	}
+
+	/**
+	 * Give the develop pass its source, keeping the bytes. A lost device is then rebuilt from what is already
+	 * here rather than fetching a 35 MB proxy again or decoding the original a second time — which is the whole
+	 * difference between recovering and asking for a reload (the pipeline review, §6).
+	 */
+	function useSource(width: number, height: number, f16: ArrayBuffer | ArrayBufferView) {
+		gpuSource = { width, height, f16 };
+		develop.setSource(width, height, f16);
+		proxyLoaded = true;
+	}
+
+	function useFocusMask(png: ArrayBuffer) {
+		focusMaskBytes = png;
+		return view.loadFocusMask(png);
 	}
 
 	/**
@@ -1258,7 +1313,7 @@
 			const asShot = packer.pack(defaults, cameraColor(), meta!.info.sourceKind ?? 'raw', display);
 			asShotWb = { temperatureK: asShot.temperatureK, tint: asShot.tint };
 		}
-		develop.setSource(local.proxy.width, local.proxy.height, local.proxy.f16);
+		useSource(local.proxy.width, local.proxy.height, local.proxy.f16);
 		proxyLoaded = true;
 		onDevice = true;
 		status = '';
@@ -1268,9 +1323,86 @@
 		// Focus peaking's mask is the server's to compute; it arrives when it does, and nothing waits for it.
 		api(`/api/assets/${key}/focus?edge=${edge}`)
 			.then((r) => r.arrayBuffer())
-			.then((b) => view.loadFocusMask(b))
+			.then((b) => useFocusMask(b))
 			.catch(() => {});
 		return true;
+	}
+
+	/**
+	 * Every GPU pass, built against `device`, and the watch for that device being lost. Separate from `start`
+	 * because it is run again on recovery.
+	 */
+	async function buildPasses(device: GPUDevice) {
+		[develop, view, hist, lensPass, painter] = await Promise.all([
+			DevelopPass.create(device),
+			ViewPass.create(device, canvas, display === 'display-p3'),
+			HistogramPass.create(device),
+			LensPass.create(device),
+			MaskPainter.create(device)
+		]);
+		depthPass = await DepthPass.create(device);
+		maskLibrary = new MaskLibrary(device, key);
+		// For tests and for looking, as `?inspect` already leaves the proxy on the window: a real device loss
+		// followed by the real recovery. Destroying it invalidates every pipeline and texture built above, so
+		// what runs afterwards is the rebuild and nothing else.
+		if (page.url.searchParams.has('inspect')) {
+			Object.assign(window, {
+				__sidecarGpu: {
+					device,
+					lose: () => {
+						device.destroy();
+						return recoverDevice('test');
+					}
+				}
+			});
+		}
+		device.lost.then((info) => {
+			// `destroyed` is this page taking the device down itself; anything else is the browser doing it.
+			if (info.reason === 'destroyed' || recovering) return;
+			void recoverDevice(info.reason || 'unknown');
+		});
+	}
+
+	/**
+	 * Rebuild after the browser takes the GPU device away, instead of asking for a reload. iOS drops the device
+	 * when Safari is backgrounded, which made a phone session cost a reload every time one answered a message.
+	 * The proxy bytes are still here (`useSource`), so this is a few pipelines and an upload, not a fetch or a
+	 * decode. A device lost while the page is hidden is rebuilt when it comes back: asking for one while
+	 * backgrounded is how iOS loses it again.
+	 */
+	async function recoverDevice(why: string) {
+		const giveUp = (detail: string) =>
+			(error = `The GPU was reset (${detail}). Reload to continue — your edits are kept as a draft.`);
+		if (recovering || !gpuSource) return giveUp(why);
+		recovering = true;
+		try {
+			if (document.visibilityState === 'hidden') {
+				await new Promise<void>((resolve) => {
+					const back = () => {
+						if (document.visibilityState !== 'visible') return;
+						document.removeEventListener('visibilitychange', back);
+						resolve();
+					};
+					document.addEventListener('visibilitychange', back);
+				});
+			}
+			status = 'The GPU was reset; rebuilding…';
+			const device = await requestDevice();
+			if (!device) throw new Error('no device');
+			forgetGpuCaches();
+			await buildPasses(device);
+			useSource(gpuSource.width, gpuSource.height, gpuSource.f16);
+			if (focusMaskBytes) await useFocusMask(focusMaskBytes);
+			if (section === 'masks' || wide || (edit?.masks?.length ?? 0) > 0) loadMaskSet();
+			status = '';
+			error = '';
+			schedule(true);
+		} catch (e) {
+			giveUp(`${why}; rebuilding it failed: ${e instanceof Error ? e.message : e}`);
+			status = '';
+		} finally {
+			recovering = false;
+		}
 	}
 
 	async function start() {
@@ -1314,17 +1446,8 @@
 				status = '';
 				return;
 			}
-			[develop, view, hist, lensPass, painter] = await Promise.all([
-				DevelopPass.create(device),
-				ViewPass.create(device, canvas, display === 'display-p3'),
-				HistogramPass.create(device),
-				LensPass.create(device),
-				MaskPainter.create(device)
-			]);
-			depthPass = await DepthPass.create(device);
-			maskLibrary = new MaskLibrary(device, key);
+			await buildPasses(device);
 			if (section === 'masks' || wide || (edit?.masks?.length ?? 0) > 0) loadMaskSet();
-			device.lost.then((info) => (error = `The GPU was reset (${info.reason}). Reload to continue — your edits are kept as a draft.`));
 			const phone = matchMedia('(pointer: coarse)').matches;
 			histStride = phone ? 2 : 1;
 			const wanted = Math.round(Math.max(innerWidth, innerHeight) * devicePixelRatio * 1.25);
@@ -1517,7 +1640,7 @@
 			// What is shown is the edit's output: the loupe is centred in it.
 			const u = (px(e).x - r.x) / r.w;
 			const v = (px(e).y - r.y) / r.h;
-			if (u >= 0 && u <= 1 && v >= 0 && v <= 1 && (section === 'detail' || detailOpen)) loupeCenter = [u, v];
+			if (u >= 0 && u <= 1 && v >= 0 && v <= 1 && (section === 'detail' || detailOpen || loupeOver)) loupeCenter = [u, v];
 			if (now - lastTapAt < 320) {
 				zoomAt(px(e), viewport.zoom > 1.01 ? 1 : Math.max(2, 1 / r.fit));
 				lastTapAt = 0;
@@ -1571,6 +1694,12 @@
 		wide = mq.matches;
 		const onWide = () => (wide = mq.matches);
 		mq.addEventListener('change', onWide);
+		// Installed, so launched from /m rather than opened in a tab. iOS Safari answered `navigator.standalone`
+		// before it understood the media query, and still does from a home-screen icon.
+		const app = matchMedia('(display-mode: standalone)');
+		const onApp = () => (installedApp = app.matches || (navigator as { standalone?: boolean }).standalone === true);
+		onApp();
+		app.addEventListener('change', onApp);
 		const ro = new ResizeObserver(() => {
 			canvas.width = Math.round(canvas.clientWidth * devicePixelRatio);
 			canvas.height = Math.round(canvas.clientHeight * devicePixelRatio);
@@ -1584,6 +1713,7 @@
 		return () => {
 			ro.disconnect();
 			mq.removeEventListener('change', onWide);
+			app.removeEventListener('change', onApp);
 			document.removeEventListener('visibilitychange', onHide);
 			canvas.removeEventListener('wheel', wheel);
 		};
@@ -1830,7 +1960,7 @@
 		{/if}
 		{#if status || error}
 			<p class="absolute inset-x-4 top-[max(1rem,env(safe-area-inset-top))] text-center text-sm {error ? 'text-danger' : 'text-fg-2'}">{error || status}</p>
-		{:else if onDevice && !onDeviceNoticeDismissed}
+		{:else if onDevice && installedApp && !onDeviceNoticeDismissed}
 			<div role="note" class="absolute inset-x-4 bottom-[max(1rem,env(safe-area-inset-bottom))] mx-auto flex max-w-md items-start gap-2 rounded bg-ground/85 px-3 py-2 text-xs text-fg-2">
 				<p class="flex-1">
 					Developed on this device, so some advanced features might be missing.
@@ -1857,7 +1987,7 @@
 			title={toolsHidden ? 'Show the editing tools (H)' : 'Hide the editing tools (H)'}
 			onclick={() => setToolsHidden(!toolsHidden)}
 		>
-			<svg viewBox="0 0 16 16" class="size-4" aria-hidden="true"><circle cx="8" cy="8" r="6.75" fill="none" stroke="currentColor" stroke-width="1.5" /><path d="M8 7.25v4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" /><circle cx="8" cy="4.9" r="0.95" fill="currentColor" /></svg>
+			<svg viewBox="0 0 16 16" class="size-4" aria-hidden="true"><rect x="1.75" y="2.25" width="12.5" height="11.5" rx="1.75" fill="none" stroke="currentColor" stroke-width="1.5" /><path d="M2 10h12" stroke="currentColor" stroke-width="1.5" /></svg>
 		</button>
 		{#if wide && toolsHidden && edit && meta}
 			<nav class="absolute bottom-3 left-1/2 flex max-w-[calc(100%-1.5rem)] -translate-x-1/2 gap-1 overflow-x-auto rounded-full bg-panel/90 p-1" aria-label="Tools">
@@ -1877,6 +2007,9 @@
 				<!-- With the photo's other toggles, above them: in the tool row it was pushed off a 390-pixel screen. -->
 				<button type="button" aria-pressed={showPhoneHistogram} class="rounded-full px-2.5 py-1 text-[0.6875rem] {showPhoneHistogram ? 'bg-fg text-ground' : 'bg-ground/80 text-fg-2'}" onclick={() => (showPhoneHistogram = !showPhoneHistogram)}>Histogram</button>
 				<button type="button" aria-pressed={peaking} class="rounded-full px-2.5 py-1 text-[0.6875rem] {peaking ? 'bg-fg text-ground' : 'bg-ground/80 text-fg-2'}" onclick={() => { peaking = !peaking; schedule(); }}>Focus</button>
+				<!-- Beside Focus, because checking detail is something one does at any time, not only while sharpening
+				     (the October interface review, item 8). Detail keeps its own loupe. -->
+				<button type="button" aria-pressed={loupeOver} class="rounded-full px-2.5 py-1 text-[0.6875rem] {loupeOver ? 'bg-fg text-ground' : 'bg-ground/80 text-fg-2'}" onclick={() => (loupeOver = !loupeOver)}>Loupe</button>
 				{#if cameraOffered}
 					<button type="button" aria-pressed={showCamera} class="rounded-full px-2.5 py-1 text-[0.6875rem] {showCamera ? 'bg-fg text-ground' : 'bg-ground/80 text-fg-2'}" onclick={() => (showCamera = !showCamera)}>Camera</button>
 				{/if}
@@ -1890,6 +2023,28 @@
 				{/if}
 			{/if}
 		</div>
+		<!-- The loupe over a corner of the photo, from the toggle beside Focus. A tap on the photo moves it, as it
+		     does for Detail's. Opposite the toggles, so neither covers the other. -->
+		{#if loupeOver && edit && !cropping && !fallback}
+			<div class="absolute bottom-[max(0.75rem,env(safe-area-inset-bottom))] left-3 w-40 lg:w-56">
+				<Loupe assetKey={key} edit={$state.snapshot(edit)} center={loupeCenter} colorSpace={displaySpace} />
+			</div>
+		{/if}
+		<!-- How far in, and the way back out. Only while zoomed: at fit there is nothing to say. On a desktop it is
+		     the button that fits, since a wheel is easy to overshoot with; a phone pinches back and only reads the
+		     number (the owner's call on the October interface review, item 2). -->
+		{#if zoomPercent && !cropping && !fallback}
+			{#if wide}
+				<button
+					type="button"
+					class="absolute right-3 bottom-3 rounded-full bg-ground/80 px-2.5 py-1 text-[0.6875rem] text-fg-2 hover:bg-raised"
+					title="Fit the photo (double click it for 100 %)"
+					onclick={() => { viewport = { zoom: 1, panX: 0, panY: 0 }; schedule(); }}
+				>Fit · {zoomPercent} %</button>
+			{:else}
+				<span class="pointer-events-none absolute right-3 bottom-[max(0.75rem,env(safe-area-inset-bottom))] rounded-full bg-ground/80 px-2.5 py-1 text-[0.6875rem] text-fg-2" role="status">{zoomPercent} %</span>
+			{/if}
+		{/if}
 	</div>
 
 	{#if edit && meta && !(wide && toolsHidden)}
@@ -1897,7 +2052,7 @@
 		     the phone keeps its tab row, the desktop a strip of tabs over the photo. -->
 		<aside
 			class="flex max-h-[48dvh] shrink-0 flex-col bg-panel pb-[max(0.75rem,env(safe-area-inset-bottom))] lg:max-h-none lg:w-80 lg:pb-3"
-			style={!wide && sheet.vh ? `height: ${sheet.vh}dvh; max-height: ${sheet.vh}dvh` : undefined}
+			style={!wide && !toolsHidden && sheet.vh ? `height: ${sheet.vh}dvh; max-height: ${sheet.vh}dvh` : undefined}
 		>
 			{#if !wide && !toolsHidden}
 				<!-- Hold, then drag: a press on the handle arms it (it lights up), and only then does moving resize the
@@ -2014,6 +2169,7 @@
 					<div class="flex items-center gap-2">
 						{#if !fallback}
 						<button type="button" aria-pressed={peaking} class="rounded-full px-2 py-0.5 {peaking ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" onclick={() => { peaking = !peaking; schedule(); }}>Focus peaking</button>
+							<button type="button" aria-pressed={loupeOver} class="rounded-full px-2 py-0.5 {loupeOver ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" title="The detail at full resolution, over the photo (Z opens Detail's own)" onclick={() => (loupeOver = !loupeOver)}>Loupe</button>
 							{#if cameraOffered}
 								<button type="button" aria-pressed={showCamera} class="rounded-full px-2 py-0.5 {showCamera ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" title="The camera's own rendering beside the edit" onclick={() => (showCamera = !showCamera)}>Camera</button>
 							{/if}

@@ -7,6 +7,59 @@ Source: the architecture plan (PWA entry, XMP sidecars, server-side demosaic, We
 
 Where the code differs from the text below, the code and these notes win.
 
+- **D1 and D5 are held on their own branch** (`xtrans-highlight-gate`, pull request #46), not in this line.
+  The owner's rule, 2026-10-27: what is merged and deployed should be what has been tested, so a change that
+  is written but not demonstrated waits there rather than riding along.
+  - **D5** gates highlight reconstruction off for X-Trans proxies, so the preview clips where
+    `export::full_source` already clips. It waits on the owner's re-evaluation of whether highlight
+    reconstruction earns its place at all. Recovery already defaults to 0 because the feature has proven
+    problematic, and on `_D5N3075.NEF` it does measurably worse than simply pulling the highlights down. That
+    branch has the measurement on a blown X-Trans frame.
+  - **D1** maps the black level's repeat pattern per CFA position instead of averaging it, which is what DNG's
+    `BlackLevelRepeatDim` means and what LibRaw's own `adjust_bl` does for a 2×2. Nothing here exercises it:
+    every camera model in the owner's library writes a uniform black in the raw IFD, so the change is
+    byte-identical on every file to hand and unproven on the files it is for.
+
+  Because both left, this line's `INGEST_GENERATION` stays at **5** — not one cached proxy or focus mask is
+  invalidated by anything in it.
+
+- **The decode review's stage 1: three guards and a recovery, no pixel changed**
+  (docs/research/pipeline-review-2026-10.md §9). **D4:** `RawFile::mosaic()` refuses levels that cannot
+  normalize — an empty mosaic, a maximum that is not a number, or a maximum at or below black for a colour the
+  CFA pattern actually names. `normalize.wgsl` divides by `white - black[c]`, so those produced a black frame
+  and no error at all; an `Err` is useful because both callers already fall back to LibRaw's own demosaic on
+  one. The check is a free function so it is tested without a camera file, and only the colours the pattern
+  names are checked (a Bayer file leaves `black[3]` at whatever LibRaw left there). **D12, two halves:** the
+  JPEG decoder's output colour space is now pinned to RGB rather than inherited from a default, and anything
+  that comes back as something else is refused — a four-component CMYK or Adobe YCCK JPEG would otherwise
+  reach `to_linear_rgba` as three colours plus an alpha, reading cyan, magenta and yellow as red, green and
+  blue; and PNM is scaled by the maximum its own header states instead of by the width of the sample type,
+  which rendered a 10-bit PGM 64× dark. A maxval of 0 or above 65535 is refused, and a sample above the stated
+  maximum is clamped rather than indexing past the table. **`device.lost` recovery:** the editor rebuilds its
+  passes and re-uploads the proxy it kept (`useSource`) instead of asking for a reload, which is what iOS cost
+  every time Safari was backgrounded. The subtle half is `forgetGpuCaches`: the lens, depth, mask and layer
+  textures all belong to the device that went away, and `correctLens` and `depthEffects` memoise, so without
+  dropping both the rebuilt device is handed views it rejects — a frame that never arrives and no error
+  anywhere. Checked by `web/scripts/gpu-recovery-smoke.mjs`, which destroys the device through `?inspect` and
+  compares the photo pane before and after: identical, 99.9 % lit, no validation complaint. Removing the cache
+  reset makes it fail, so the test is not vacuous.
+
+- **Six more from the UI review, after the owner's answers of 2026-10-27**
+  (docs/research/ui-review-2026-10.md has the table). The button that hides the tools wears a panel glyph, not an
+  ⓘ, which people read as "details about this photo"; White balance's picker is a pipette, not a pencil; "Reset to
+  as shot" takes the normal text colour while it can do something and stays muted when it can't. A zoom readout
+  sits in the photo's bottom-right corner, shown only while zoomed and carrying the device pixels per output pixel
+  the double tap's 100 % means: on a desktop it is the button that fits, on a phone the number alone, since a
+  pinch back is easy (owner's call). A **Loupe** toggle sits beside Focus in both quick-access rows and puts the
+  loupe over the photo's bottom-left corner, where it was three taps deep under Processing → Detail; a tap on the
+  photo moves it, as it does for Detail's own, which is unchanged. The "developed on this device" note now shows
+  only in the installed app (`display-mode: standalone`, or iOS's `navigator.standalone`), because in a browser
+  tab it was noise on every photo. Checked in Chromium at 1440 × 900 and 390 × 844 against a real server: the
+  readout reads "Fit · 207 %" zoomed and nothing at fit, "123 %" on the phone; the Loupe toggle renders its tile
+  at both sizes; the reset button measures rgb(198,198,198) with nothing to reset and rgb(244,244,244) with
+  something. Not yet on a phone. Item 17 the owner left as it is; item 7 (the phone header truncated to nothing,
+  and "Saved" as a disabled button) reproduces on the current build and is still open.
+
 - **The interface, after the owner's answers to the UI review** (docs/research/ui-review-2026-10.md has the table).
   "Color" is **Mixer**; the phone's Histogram toggle sits with the photo's toggles; tools the worker can't run are
   hidden (`GET /api/capabilities`: no Depth without the models, no Detail without a GPU, no model-mask sentence);

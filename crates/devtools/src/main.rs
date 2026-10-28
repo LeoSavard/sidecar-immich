@@ -51,6 +51,7 @@ fn main() -> Result<()> {
                 .collect::<Result<Vec<f32>, _>>()?,
         ),
         ["radial", list] => radial(list.as_ref()),
+        ["levels", input] => levels(input.as_ref()),
         ["linear-dng", input, out, rest @ ..] => {
             let input: &std::path::Path = input.as_ref();
             let edge: u32 = rest.first().map_or(Ok(1600), |v| v.parse())?;
@@ -787,6 +788,85 @@ fn camera_jpeg(list: &std::path::Path) -> Result<()> {
         println!(
             "{}",
             serde_json::json!({ "path": path, "profile": profile.id, "ncc": with, "nccWithout": without, "zoom": zoom, "stretch": stretch, "gainEv": gain })
+        );
+    }
+    Ok(())
+}
+
+/// Where each CFA colour actually saturates, by the histogram of the top of its range, beside the single
+/// brightest sample the old heuristics keyed off (D6/D7 in docs/research/pipeline-review-2026-10.md). On a
+/// frame with blown highlights the two should agree; where they don't, the histogram is the one that
+/// survives a stuck pixel.
+fn levels(input: &std::path::Path) -> Result<()> {
+    use sidecar_raw::levels::TopOfRange;
+    let raw = sidecar_raw::RawFile::open(input)?;
+    let info = raw.info();
+    let m = raw.mosaic()?;
+    println!(
+        "{} {} \u{b7} {}\u{d7}{} \u{b7} declared maximum {} \u{b7} black {:?}",
+        info.make, info.model, m.width, m.height, m.white, m.black
+    );
+    let mut tops: [TopOfRange; 4] = std::array::from_fn(|c| TopOfRange::new(m.white, m.black[c]));
+    let mut seen = [0u64; 4];
+    let mut brightest = [0u16; 4];
+    for y in 0..m.height {
+        for x in 0..m.width {
+            let c = m.color_at(y, x) as usize;
+            let v = m.data[(y * m.width + x) as usize];
+            tops[c].add(v as f32);
+            seen[c] += 1;
+            brightest[c] = brightest[c].max(v);
+        }
+    }
+    let got = sidecar_raw::levels::clip_threshold(&tops);
+    // How much of the frame actually reached saturation: what says whether a file can demonstrate anything
+    // about highlights at all.
+    let mut clipped = [0u64; 4];
+    for y in 0..m.height {
+        for x in 0..m.width {
+            let c = m.color_at(y, x) as usize;
+            let v = m.data[(y * m.width + x) as usize] as f32;
+            if (v - m.black[c]) / (m.white - m.black[c]) >= got[c] {
+                clipped[c] += 1;
+            }
+        }
+    }
+    let total: u64 = seen.iter().sum();
+    let blown: u64 = clipped.iter().sum();
+    println!(
+        "  clipped: {:.4} % of samples",
+        100.0 * blown as f64 / total.max(1) as f64
+    );
+    // What `Ingest::demosaic` actually uses: *one* number for every colour, from the brightest sample
+    // anywhere in the mosaic. The per-colour "old heuristic" below is the same formula asked per channel,
+    // which is what the other two decode paths do — it is not what the GPU path feeds the shaders.
+    {
+        let blk = m.black.iter().copied().fold(f32::MAX, f32::min);
+        let max = m.data.iter().copied().max().unwrap_or(0) as f32;
+        let white_obs = ((max - blk) / (m.white - blk)).min(1.0);
+        let scalar = if white_obs > 0.5 {
+            (white_obs * 0.98).min(0.985)
+        } else {
+            0.985
+        };
+        println!("  one threshold for all four colours, as the GPU path uses it: {scalar:.4}");
+    }
+    for c in 0..4 {
+        if seen[c] == 0 {
+            continue;
+        }
+        let span = m.white - m.black[c];
+        let observed = (brightest[c] as f32 - m.black[c]) / span;
+        // The same formula asked per channel, as `LinearImage::rgba` and the linear-DNG path ask it:
+        // 98 % of this colour's observed maximum, capped at 98.5 %.
+        let old = if observed > 0.5 {
+            (observed * 0.98).min(0.985)
+        } else {
+            0.985
+        };
+        println!(
+            "  colour {c}: {:>11} samples \u{b7} brightest {:.4} \u{b7} histogram {:.4} \u{b7} old heuristic {:.4}",
+            seen[c], observed, got[c], old
         );
     }
     Ok(())
