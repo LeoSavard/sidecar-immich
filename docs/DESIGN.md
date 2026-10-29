@@ -7,6 +7,33 @@ Source: the architecture plan (PWA entry, XMP sidecars, server-side demosaic, We
 
 Where the code differs from the text below, the code and these notes win.
 
+- **Where a sensor saturates is measured, not guessed** (D6 and D7; `crates/raw/src/levels.rs`, and
+  `web/src/lib/gpu/levels.ts` for the phone). The pipeline used to take the brightest sample anywhere in the
+  mosaic, multiply by 0.98 and cap at 0.985 — one number for all four CFA colours, decided by one sample.
+  Both ways round it was wrong. On `IMG_0735.CR2` a single stuck green pixel at 83.27 % of the range put the
+  threshold at 0.8161, above every channel's real maximum: 0.68 % of that frame's samples are at saturation
+  and the proxy flagged **one pixel**, so highlight reconstruction and the Highlights control did nothing at
+  all. On `IMG_1768.CR2`, which clips nowhere, the threshold was 0.6047.
+
+  What replaces it is a histogram of the top of each colour's range. Saturation is a *pile-up*: every pixel
+  that reached the ceiling lands in one bin, because the sensor could not record anything higher. A bin
+  counts as a ceiling when it holds at least 256 samples, stands eight times above the bins below it, and has
+  next to nothing above it; nothing qualifying means the sensor reaches what the file declares. A stuck pixel
+  is one sample and never forms a spike. No per-camera table is needed, which matters because the level
+  moves: three Canon EOS M3 frames in the owner's library answer 0.7812, 0.8398 and 0.9180, Canon's raw white
+  level varying with ISO.
+
+  Measured over 222 raws across seven formats and thirteen camera models, it is stricter than the heuristic
+  in 822 of 827 channels and looser in 5, and those five are channels that genuinely saturate early — a
+  Nikon D7000 whose green tops out at 0.9629 with 3.9 % of its greens pinned there, which the old heuristic
+  reported as no green clipping at all. Both the first two calibrations of the spike test were wrong in the
+  owner's library and both were caught by running it over that library; see the branch's commits.
+
+  `IngestParams.clip` is a `vec4f` and every ingest shader compares a sample against its own colour's
+  threshold. `SIDECAR_CLIP_LEGACY=1` brings the old heuristic back for comparison. **`INGEST_GENERATION` is
+  6:** every cached proxy and focus mask is rebuilt, because the clipped-pixel alpha changes on any photo
+  whose sensor saturates below its declared maximum.
+
 - **D1 and D5 are held on their own branch** (`xtrans-highlight-gate`, pull request #46), not in this line.
   The owner's rule, 2026-10-27: what is merged and deployed should be what has been tested, so a change that
   is written but not demonstrated waits there rather than riding along.
@@ -20,8 +47,8 @@ Where the code differs from the text below, the code and these notes win.
     every camera model in the owner's library writes a uniform black in the raw IFD, so the change is
     byte-identical on every file to hand and unproven on the files it is for.
 
-  Because both left, this line's `INGEST_GENERATION` stays at **5** — not one cached proxy or focus mask is
-  invalidated by anything in it.
+  Because both left, *that* line's `INGEST_GENERATION` stays at **5** — not one cached proxy or focus mask is
+  invalidated by anything in it. This branch is the one that moves it to 6, above.
 
 - **The decode review's stage 1: three guards and a recovery, no pixel changed**
   (docs/research/pipeline-review-2026-10.md §9). **D4:** `RawFile::mosaic()` refuses levels that cannot

@@ -15,7 +15,7 @@ pub mod lens;
 pub mod warp;
 pub use develop::{DevelopPass, Masks, needs_density_map};
 pub use focus::focus_energy;
-pub use ingest::{Ingest, MosaicInput};
+pub use ingest::{Ingest, MosaicInput, clip_levels};
 
 /// Linear RGBA image in f32, row-major, top-left origin.
 #[derive(Clone, Debug)]

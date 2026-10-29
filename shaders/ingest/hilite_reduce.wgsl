@@ -18,8 +18,8 @@ const W = array<f32, 5>(1.0 / 16.0, 4.0 / 16.0, 6.0 / 16.0, 4.0 / 16.0, 1.0 / 16
 fn main(@builtin(global_invocation_id) id: vec3u) {
   if (id.x >= P.out_size.x || id.y >= P.out_size.y) { return; }
   let opos = vec2i(id.xy);
-  var white = P.clip;
-  if (!(white > 0.0)) { white = 1.0; }
+  var white = clip_rgb(P.clip);
+  white = select(vec3f(1.0), white, white > vec3f(0.0));
   let w = W;
   var col = vec3f(0.0);
   var wb = P.wb.rgb;
@@ -33,8 +33,9 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
       let cmax = max(rgbw.r, max(rgbw.g, rgbw.b));
       let cmin = min(rgbw.r, min(rgbw.g, rgbw.b));
       let sat = (cmax - cmin) / max(1e-3, cmax);
-      if (all(rgb < vec3f(white))) {
-        let s = smoothstep(0.2, 1.0, max(rgb.r, max(rgb.g, rgb.b)) / white);
+      if (all(rgb < white)) {
+        let q = rgb / white;
+        let s = smoothstep(0.2, 1.0, max(q.r, max(q.g, q.b)));
         var t = smoothstep(0.15, 0.9, sat);
         let ds = P.desat * P.desat;
         t = clamp(5.0 * ds * ds * s * t, 0.0, 1.0);

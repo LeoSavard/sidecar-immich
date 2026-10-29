@@ -128,26 +128,16 @@ impl LinearImage {
     /// Linear RGBA f32, alpha 1 where any channel reached sensor saturation — the shape every proxy has,
     /// ready for `RgbaF32::downsampled`, whose area filter turns the flags into clip coverage.
     pub fn rgba(&self) -> Vec<f32> {
-        let saturated = saturation_threshold(&self.rgb);
+        // Per channel, measured from these samples: the same question the mosaic path asks (D6 and D7), so
+        // a file that comes through LibRaw's own demosaic is answered as one that comes through the GPU's.
+        let saturated = levels::rgb_clip(&self.rgb, 65535.0, 0.0).map(|t| t * 65535.0);
         let mut out = Vec::with_capacity(self.rgb.len() / 3 * 4);
         for p in self.rgb.as_chunks::<3>().0 {
-            let clip = p.iter().any(|&v| v >= saturated);
+            let clip = p.iter().zip(saturated).any(|(&v, t)| v as f32 >= t);
             out.extend(p.iter().map(|&v| v as f32 / 65535.0));
             out.push(clip as u8 as f32);
         }
         out
-    }
-}
-
-/// Saturation threshold. LibRaw scales the declared white level to 65535, but some cameras saturate below
-/// it; when the brightest sample is well up the range, treat anything within 2 % of it as clipped too.
-fn saturation_threshold(rgb: &[u16]) -> u16 {
-    let max = rgb.iter().copied().max().unwrap_or(0);
-    let declared = (65535u32 * 99 / 100) as u16;
-    if max >= 32768 {
-        declared.min((max as u32 * 98 / 100) as u16)
-    } else {
-        declared
     }
 }
 
@@ -161,6 +151,9 @@ pub struct Mosaic {
     pub pattern: [[u8; 6]; 6],
     pub period: u32,
     pub flip: i32,
+    /// Where each CFA colour actually saturates, as a fraction of `white` above its own black: measured from
+    /// these samples by [`levels::mosaic_clip`], not guessed from the single brightest one (D6 and D7).
+    pub clip: [f32; 4],
 }
 
 impl Mosaic {
@@ -296,6 +289,14 @@ impl RawFile {
         }
         let data = unsafe { std::slice::from_raw_parts(m.data, n) }.to_vec();
         unsafe { sys::sc_mosaic_free(&mut m) };
+        let clip = levels::mosaic_clip(
+            &data,
+            m.width as u32,
+            m.white,
+            &m.black,
+            &m.pattern,
+            m.period as u32,
+        );
         Ok(Mosaic {
             width: m.width as u32,
             height: m.height as u32,
@@ -305,6 +306,7 @@ impl RawFile {
             pattern: m.pattern,
             period: m.period as u32,
             flip: self.info.flip,
+            clip,
         })
     }
 }

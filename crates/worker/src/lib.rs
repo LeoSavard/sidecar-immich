@@ -47,8 +47,11 @@ pub const DEFAULT_EDGE: u32 = 2560;
 /// mirrored EXIF orientations (2, 4, 5, 7), which every earlier generation left upright. 4 is the bounded
 /// highlight fill (D14 in docs/research/pipeline-review-2026-10.md): measured channels kept, clipped ones
 /// filled to agree with them, and no NaN from a damaged file. 5 decodes a camera's Adobe RGB JPEG, marked only in
-/// its EXIF, in Adobe RGB's primaries and curve instead of as sRGB (the review's D11).
-pub const INGEST_GENERATION: u32 = 5;
+/// its EXIF, in Adobe RGB's primaries and curve instead of as sRGB (the review's D11). 6 measures where each
+/// CFA colour saturates instead of guessing it from the single brightest sample in the frame (D6 and D7), so
+/// the clipped-pixel alpha changes on any photo whose sensor saturates below its declared maximum — and, on
+/// frames where a stuck pixel used to pin the threshold above every real maximum, appears at all.
+pub const INGEST_GENERATION: u32 = 6;
 
 /// What cached metadata was *read* by, apart from the pixels: bump when `Meta` gains something a re-read of
 /// the same file would now fill in, so it is read again without rebuilding a single proxy. 1 adds the lens
@@ -502,6 +505,7 @@ fn decode_full(
                 white: m.white,
                 pattern: m.pattern,
                 period: m.period,
+                clip: m.clip,
             };
             ingest
                 .proxy(g, &input, [mul[0] as f32, 1.0, mul[2] as f32], largest)?

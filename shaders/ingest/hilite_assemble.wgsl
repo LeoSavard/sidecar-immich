@@ -74,7 +74,8 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let opos = vec2i(id.xy);
   let upsm = gauss_expand(opos);
   let fine = textureLoad(fine_tex, opos, 0).rgb;
-  let clipped = fine >= vec3f(P.clip);
+  let white = clip_rgb(P.clip);
+  let clipped = fine >= white;
   var o = fine;
   if (all(clipped)) {
     // Nothing measured (or a reduce level's "no unclipped tap" fallback): the estimate whole. Only its hue
@@ -83,7 +84,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   } else if (any(clipped)) {
     // Measured channels stay; clipped ones come from the estimate, scaled to agree with the measured ones.
     let m = select(vec3f(1.0), vec3f(0.0), clipped);
-    let est = hilite_estimate(upsm, hilite_scale(upsm, fine * m, m, fine), P.clip);
+    let est = hilite_estimate(upsm, hilite_scale(upsm, fine * m, m, fine), white);
     o = select(fine, max(est, fine), clipped);
   }
   textureStore(dst, opos, vec4f(o, 1.0));

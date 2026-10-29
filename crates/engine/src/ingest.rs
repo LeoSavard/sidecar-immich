@@ -16,12 +16,11 @@ pub struct IngestParams {
     pub out_size: [u32; 2],
     pub black: [f32; 4],
     pub wb: [f32; 4],
+    pub clip: [f32; 4],
     pub white: f32,
-    pub clip: f32,
     pub desat: f32,
     pub _unused: f32,
     pub sensor: u32,
-    pub _p: [u32; 3],
     pub pattern: [[u32; 4]; 9],
 }
 
@@ -35,9 +34,80 @@ pub struct MosaicInput<'a> {
     /// Colour index (0 R, 1 G, 2 B, 3 G2) of `(row % period, col % period)`.
     pub pattern: [[u8; 6]; 6],
     pub period: u32,
+    /// Where each colour saturates, as a fraction of `white` above its own black: `Mosaic::clip`, measured
+    /// from the samples; see [`clip_levels`].
+    pub clip: [f32; 4],
 }
 
 use wgpu::TextureFormat as F;
+
+/// The thresholds the shaders compare a normalized sample against, one per CFA colour: what the decode
+/// measured, `Mosaic::clip`.
+///
+/// What it replaces, and what `SIDECAR_CLIP_LEGACY=1` brings back for comparison, is the heuristic the
+/// pipeline used until 2026-10-28: *one* number for all four colours, 98 % of the brightest sample anywhere
+/// in the mosaic, capped at 98.5 % (D6 and D7 in docs/research/pipeline-review-2026-10.md). A single sample
+/// decided it, and both ways it was wrong. On `IMG_0735.CR2` one stuck green pixel at 83.27 % of the range
+/// put the threshold at 0.8161, above every channel's real maximum, so a frame with 0.68 % of its samples at
+/// saturation had exactly one pixel of its proxy flagged and highlight reconstruction did nothing. On
+/// `IMG_1768.CR2`, which clips nowhere, the brightest sample reaches 61.70 % and the threshold was 0.6047.
+///
+/// Measured over 222 raws from seven formats and thirteen camera models, the measurement is stricter than
+/// the heuristic in 822 of 827 channels and looser in 5, and those 5 are channels that genuinely saturate
+/// early. `sidecar-dev levels` prints both.
+/// Does any sample in the frame actually reach its own colour's saturation? Highlight reconstruction has
+/// one job — estimate the channels a pixel lost from the one it kept — so a frame that lost nothing has
+/// nothing for it to do, and the whole pyramid is skipped rather than run to produce a no-op.
+///
+/// Worth asking only because the thresholds are now measured. The heuristic this replaced set them at 98 %
+/// of the brightest sample *present*, so the brightest sample always cleared its own threshold and every
+/// frame had "clipped" pixels by construction — reconstruction ran on all of them, and on a frame with
+/// nothing blown it replaced the real top of the picture with an estimate. Measured instead, **46 % of a
+/// 217-file sample reach saturation nowhere at all** (`sidecar-dev levels`).
+///
+/// Stops at the first saturated sample, so a frame that does need the pass pays almost nothing to find out.
+pub fn any_saturated(m: &MosaicInput, clip: [f32; 4]) -> bool {
+    // In the samples' own units, so the inner loop is an integer compare: a frame is tens of millions of
+    // them, and asking this must cost much less than the pass it saves.
+    let level = |c: usize| -> u32 {
+        let span = m.white - m.black[c];
+        if span <= 0.0 {
+            return u32::MAX;
+        }
+        (m.black[c] + clip[c] * span).ceil().max(0.0) as u32
+    };
+    let levels: [u32; 4] = std::array::from_fn(level);
+    // One threshold per column for each of the pattern's distinct rows, so the period's arithmetic is paid
+    // `period` times rather than once per sample.
+    let rows: Vec<Vec<u32>> = (0..m.period as usize)
+        .map(|py| {
+            (0..m.width as usize)
+                .map(|x| levels[m.pattern[py][x % m.period as usize] as usize])
+                .collect()
+        })
+        .collect();
+    m.data
+        .chunks_exact(m.width as usize)
+        .enumerate()
+        .any(|(y, row)| {
+            let want = &rows[y % m.period as usize];
+            row.iter().zip(want).any(|(&v, &t)| v as u32 >= t)
+        })
+}
+
+pub fn clip_levels(m: &MosaicInput) -> [f32; 4] {
+    if std::env::var_os("SIDECAR_CLIP_LEGACY").is_none() {
+        return m.clip;
+    }
+    let max = m.data.iter().copied().max().unwrap_or(0) as f32;
+    let blk = m.black.iter().copied().fold(f32::MAX, f32::min);
+    let white_obs = ((max - blk) / (m.white - blk)).min(1.0);
+    [if white_obs > 0.5 {
+        (white_obs * 0.98).min(0.985)
+    } else {
+        0.985
+    }; 4]
+}
 
 pub struct Ingest {
     normalize: Kernel,
@@ -199,6 +269,19 @@ impl Ingest {
         wb: [f32; 3],
         full_xtrans: bool,
     ) -> Result<wgpu::Texture> {
+        self.demosaic_at(gpu, m, wb, full_xtrans, clip_levels(m))
+    }
+
+    /// [`Self::demosaic`] with the saturation thresholds given rather than chosen, one per CFA colour.
+    /// [`clip_levels`] decides which the pipeline uses; tests pin them.
+    pub fn demosaic_at(
+        &self,
+        gpu: &Gpu,
+        m: &MosaicInput,
+        wb: [f32; 3],
+        full_xtrans: bool,
+        clip: [f32; 4],
+    ) -> Result<wgpu::Texture> {
         let _ = full_xtrans;
         let (ox, oy, w, h, sensor) = phase(m)?;
         let mut pattern = [[0u32; 4]; 9];
@@ -207,26 +290,16 @@ impl Ingest {
                 m.pattern[((i / 6 + oy) % m.period) as usize][((i % 6 + ox) % m.period) as usize];
             pattern[(i / 4) as usize][(i % 4) as usize] = c as u32;
         }
-        let white_obs = {
-            let max = m.data.iter().copied().max().unwrap_or(0) as f32;
-            let blk = m.black.iter().copied().fold(f32::MAX, f32::min);
-            ((max - blk) / (m.white - blk)).min(1.0)
-        };
         let base = IngestParams {
             in_size: [w, h],
             out_size: [w, h],
             black: m.black,
             wb: [wb[0], wb[1], wb[2], wb[1]],
+            clip,
             white: m.white,
-            clip: if white_obs > 0.5 {
-                (white_obs * 0.98).min(0.985)
-            } else {
-                0.985
-            },
             desat: 0.3,
             _unused: 0.0,
             sensor,
-            _p: [0; 3],
             pattern,
         };
         let with = |in_size: [u32; 2], out_size: [u32; 2]| IngestParams {
@@ -272,72 +345,73 @@ impl Ingest {
             &[Res::View(&view(&raw)), Res::View(&view(&norm))],
         );
 
-        // Highlight reconstruction pyramid.
+        // Highlight reconstruction, for a frame that has something to reconstruct. `SIDECAR_NO_HILITE` is
+        // diagnostic only, for `sidecar-dev hilite` (ROADMAP, "Highlight reconstruction"): it keeps the
+        // clipped mosaic, which is the A/B that says whether something in a blown area was invented here or
+        // was already in the picture. Never set in a deployment.
+        let reconstruct = std::env::var_os("SIDECAR_NO_HILITE").is_none() && any_saturated(m, clip);
         let block = if sensor == 1 { 3 } else { 2 };
         let (hw, hh) = (w / block, h / block);
-        let half = texture(gpu, hw, hh, F::Rgba32Float);
-        self.half.run(
-            gpu,
-            &mut enc,
-            &with([w, h], [hw, hh]),
-            [hw, hh],
-            &[Res::View(&view(&norm)), Res::View(&view(&half))],
-        );
-        let mut levels = vec![half];
-        loop {
-            let prev = levels.last().unwrap();
-            let (pw, ph) = (prev.width(), prev.height());
-            if pw <= 1 || ph <= 1 || levels.len() >= 15 {
-                break;
-            }
-            let (cw, ch) = ((pw - 1) / 2 + 1, (ph - 1) / 2 + 1);
-            let t = texture(gpu, cw, ch, F::Rgba32Float);
-            self.reduce.run(
-                gpu,
-                &mut enc,
-                &with([pw, ph], [cw, ch]),
-                [cw, ch],
-                &[Res::View(&view(prev)), Res::View(&view(&t))],
-            );
-            levels.push(t);
-        }
-        let mut coarse = levels.pop().unwrap();
-        while let Some(fine) = levels.pop() {
-            let out = texture(gpu, fine.width(), fine.height(), F::Rgba32Float);
-            self.assemble.run(
-                gpu,
-                &mut enc,
-                &with(
-                    [coarse.width(), coarse.height()],
-                    [fine.width(), fine.height()],
-                ),
-                [fine.width(), fine.height()],
-                &[
-                    Res::View(&view(&fine)),
-                    Res::View(&view(&coarse)),
-                    Res::View(&view(&out)),
-                ],
-            );
-            coarse = out;
-        }
-        let cfa = texture(gpu, w, h, F::R32Float);
-        self.doub.run(
-            gpu,
-            &mut enc,
-            &with([w, h], [hw, hh]),
-            [hw, hh],
-            &[
-                Res::View(&view(&norm)),
-                Res::View(&view(&coarse)),
-                Res::View(&view(&cfa)),
-            ],
-        );
-        // Diagnostic only, for `sidecar-dev hilite` (ROADMAP, "Highlight reconstruction"): keep the clipped
-        // mosaic instead of the reconstructed one, which is the A/B that says whether something in a blown
-        // area was invented here or was already in the picture. Never set in a deployment.
-        let cfa = if std::env::var_os("SIDECAR_NO_HILITE").is_some() {
+        let cfa = if !reconstruct {
             norm.clone()
         } else {
+            let half = texture(gpu, hw, hh, F::Rgba32Float);
+            self.half.run(
+                gpu,
+                &mut enc,
+                &with([w, h], [hw, hh]),
+                [hw, hh],
+                &[Res::View(&view(&norm)), Res::View(&view(&half))],
+            );
+            let mut levels = vec![half];
+            loop {
+                let prev = levels.last().unwrap();
+                let (pw, ph) = (prev.width(), prev.height());
+                if pw <= 1 || ph <= 1 || levels.len() >= 15 {
+                    break;
+                }
+                let (cw, ch) = ((pw - 1) / 2 + 1, (ph - 1) / 2 + 1);
+                let t = texture(gpu, cw, ch, F::Rgba32Float);
+                self.reduce.run(
+                    gpu,
+                    &mut enc,
+                    &with([pw, ph], [cw, ch]),
+                    [cw, ch],
+                    &[Res::View(&view(prev)), Res::View(&view(&t))],
+                );
+                levels.push(t);
+            }
+            let mut coarse = levels.pop().unwrap();
+            while let Some(fine) = levels.pop() {
+                let out = texture(gpu, fine.width(), fine.height(), F::Rgba32Float);
+                self.assemble.run(
+                    gpu,
+                    &mut enc,
+                    &with(
+                        [coarse.width(), coarse.height()],
+                        [fine.width(), fine.height()],
+                    ),
+                    [fine.width(), fine.height()],
+                    &[
+                        Res::View(&view(&fine)),
+                        Res::View(&view(&coarse)),
+                        Res::View(&view(&out)),
+                    ],
+                );
+                coarse = out;
+            }
+            let cfa = texture(gpu, w, h, F::R32Float);
+            self.doub.run(
+                gpu,
+                &mut enc,
+                &with([w, h], [hw, hh]),
+                [hw, hh],
+                &[
+                    Res::View(&view(&norm)),
+                    Res::View(&view(&coarse)),
+                    Res::View(&view(&cfa)),
+                ],
+            );
             cfa
         };
 
@@ -497,6 +571,8 @@ mod tests {
                 .offset as usize
         };
         assert_eq!(off("wb"), std::mem::offset_of!(IngestParams, wb));
+        assert_eq!(off("clip"), std::mem::offset_of!(IngestParams, clip));
+        assert_eq!(off("white"), std::mem::offset_of!(IngestParams, white));
         assert_eq!(off("sensor"), std::mem::offset_of!(IngestParams, sensor));
         assert_eq!(off("pattern"), std::mem::offset_of!(IngestParams, pattern));
     }
@@ -506,6 +582,11 @@ mod tests {
     /// frame. Every value must now be finite and bounded (16× clip on the mosaic, which the demosaic overshoots
     /// by up to half again on the step between the halves), the blown half no darker than what the sensor
     /// recorded there, and the measured half left exactly as it was. On Bayer and on X-Trans.
+    ///
+    /// Run twice: with one threshold for every colour, as the heuristic gives, and with blue saturating far
+    /// below the others, as a measurement often says (D6/D7). Uneven thresholds are the new way to break the
+    /// fill — blue is then "clipped" over most of the frame while red and green are measurements — and the
+    /// bound has to hold either way.
     #[test]
     fn highlight_fill_stays_bounded_beside_a_channel_the_estimate_lacks() {
         let Ok(gpu) = crate::test_gpu() else {
@@ -557,33 +638,111 @@ mod tests {
                 white,
                 pattern,
                 period,
+                clip: [0.98; 4],
             };
-            let out = ing.demosaic(gpu, &m, [2.0, 1.0, 1.5], false).unwrap();
-            let img = crate::read_rgba16(gpu, &out).unwrap();
-            let (ow, oh) = (img.width, img.height);
-            let edge = ow / 32;
-            for (i, p) in img.data.chunks(4).enumerate() {
-                let (x, y) = (i as u32 % ow, i as u32 / ow);
-                assert!(
-                    p[..3].iter().all(|v| v.is_finite() && *v <= 32.0),
-                    "{name} ({x}, {y}): {p:?}"
-                );
-                let inside = (edge..ow - edge).contains(&x);
-                if inside && (edge..oh / 2 - edge).contains(&y) {
+            // Three threshold sets: even, a measured uneven one, and an extreme one kept for the bound
+            // alone. `reaches_white` says whether the blown half is also asserted to render at white.
+            //
+            // The extreme set is excluded from that second property because it **diverges by GPU**, which
+            // is worth writing down rather than rediscovering. On lavapipe (what CI uses, and reproducible
+            // here with `VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json`) exactly one texel of some
+            // 34,000 comes back at 0.67 where an NVIDIA card gives 1.0. What triggers it is **red's
+            // threshold sitting above green's**, not blue and not the size of the spread: `[0.98, 0.98,
+            // 0.25, 0.98]` passes with blue wildly uneven, while `[0.995, 0.98, 0.98, 0.98]` fails, and
+            // `[0.995, 0.918, …]` (a wider gap) passes where `[0.995, 0.98, …]` (a narrower one) fails. It
+            // is a knife-edge, not a systematic break. In the failing texel red and green sit exactly on
+            // their per-channel caps (`HILITE_HEADROOM * clip`) on *both* GPUs and only the unclamped
+            // channel differs, so whatever diverges is upstream in the estimate or its scale and the clamp
+            // merely hides it in the other two.
+            //
+            // The bound is what this test is named for (D14) and it holds on both: the divergent value is
+            // finite and well inside the headroom. The measurement cannot produce that set in any case —
+            // over 217 files the widest spread between the four thresholds is 0.077 and 86 % have none at
+            // all — so the second set below is `IMG_4197.CR2`'s own, which is the widest really measured.
+            for (clip, reaches_white) in [
+                ([0.98; 4], true),
+                ([0.995, 0.918, 0.995, 0.995], true),
+                ([0.995, 0.98, 0.25, 0.98], false),
+            ] {
+                let out = ing
+                    .demosaic_at(gpu, &m, [2.0, 1.0, 1.5], false, clip)
+                    .unwrap();
+                let img = crate::read_rgba16(gpu, &out).unwrap();
+                let (ow, oh) = (img.width, img.height);
+                let edge = ow / 32;
+                let even = clip[0] == clip[2];
+                for (i, p) in img.data.chunks(4).enumerate() {
+                    let (x, y) = (i as u32 % ow, i as u32 / ow);
                     assert!(
-                        p[..3].iter().all(|v| *v >= 0.99),
-                        "{name} blown ({x}, {y}): {p:?}"
+                        p[..3].iter().all(|v| v.is_finite() && *v <= 32.0),
+                        "{name} {clip:?} ({x}, {y}): {p:?}"
                     );
-                }
-                if inside && (oh / 2 + edge..oh - edge).contains(&y) {
-                    let want = [0.3, 0.3, 0.0];
-                    assert!(
-                        (0..3).all(|c| (p[c] - want[c]).abs() < 1e-3),
-                        "{name} measured ({x}, {y}): {p:?}"
-                    );
+                    let inside = (edge..ow - edge).contains(&x);
+                    if reaches_white && inside && (edge..oh / 2 - edge).contains(&y) {
+                        assert!(
+                            p[..3].iter().all(|v| *v >= 0.99),
+                            "{name} {clip:?} blown ({x}, {y}): {p:?}"
+                        );
+                    }
+                    // With blue declared saturated at 0.25 the measured half is no longer measured, so only
+                    // the even-threshold run can ask for it back untouched.
+                    if even && inside && (oh / 2 + edge..oh - edge).contains(&y) {
+                        let want = [0.3, 0.3, 0.0];
+                        assert!(
+                            (0..3).all(|c| (p[c] - want[c]).abs() < 1e-3),
+                            "{name} measured ({x}, {y}): {p:?}"
+                        );
+                    }
                 }
             }
         }
+    }
+
+    /// A frame that reaches saturation nowhere has nothing for the fill to estimate, so the pass is skipped
+    /// rather than run to produce a no-op. The heuristic this replaced could not tell the difference: it put
+    /// the threshold just under the brightest sample present, so every frame cleared its own.
+    #[test]
+    fn a_frame_that_clips_nowhere_has_nothing_to_reconstruct() {
+        const BAYER: [[u8; 6]; 6] = [
+            [0, 1, 0, 1, 0, 1],
+            [3, 2, 3, 2, 3, 2],
+            [0, 1, 0, 1, 0, 1],
+            [3, 2, 3, 2, 3, 2],
+            [0, 1, 0, 1, 0, 1],
+            [3, 2, 3, 2, 3, 2],
+        ];
+        let frame = |data: &'static [u16]| MosaicInput {
+            width: 4,
+            height: 4,
+            data,
+            black: [0.0; 4],
+            white: 1000.0,
+            pattern: BAYER,
+            period: 2,
+            clip: [0.98; 4],
+        };
+        static AT_SATURATION: [u16; 16] = [980; 16];
+        static WELL_UNDER: [u16; 16] = [300; 16];
+        assert!(
+            any_saturated(&frame(&AT_SATURATION), [0.98; 4]),
+            "980 of 1000 is at the threshold"
+        );
+        assert!(
+            !any_saturated(&frame(&WELL_UNDER), [0.98; 4]),
+            "a frame whose brightest sample is a third of the range lost nothing"
+        );
+
+        // Each sample is measured against its own colour's threshold, and a threshold it does not reach
+        // leaves it a measurement. The high sample sits at (1, 1), which this pattern makes colour 2.
+        static ONE_HIGH: [u16; 16] = [
+            300, 300, 300, 300, 300, 990, 300, 300, 300, 300, 300, 300, 300, 300, 300, 300,
+        ];
+        assert!(any_saturated(&frame(&ONE_HIGH), [0.98; 4]));
+        assert!(!any_saturated(&frame(&ONE_HIGH), [0.995; 4]));
+        assert!(
+            !any_saturated(&frame(&ONE_HIGH), [0.98, 0.98, 0.995, 0.98]),
+            "raising only that colour's threshold is enough to leave the frame unsaturated"
+        );
     }
 
     #[test]
@@ -596,6 +755,7 @@ mod tests {
             data: &data,
             black: [0.0; 4],
             white: 1.0,
+            clip: [0.995; 4],
             pattern: [
                 [1, 0, 1, 0, 1, 0],
                 [2, 3, 2, 3, 2, 3],

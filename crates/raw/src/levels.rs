@@ -21,11 +21,28 @@ pub const BINS: usize = 256;
 /// subject — a wall, a sky, a studio backdrop — not the sensor running out of range.
 const FLOOR: f32 = 0.5;
 
-/// How much of a channel's own counted samples a bin must hold to count as saturation, and how many times
-/// the neighbouring bins it must stand above. A clipped sky is percent of the frame; sensor noise spread
-/// over the top half of the range is not.
-const SHARE: f32 = 0.0005;
+/// How much of the **channel** a bin must hold to count as saturation, and how many times the neighbouring
+/// bins it must stand above. A clipped sky is percent of the frame; sensor noise spread over the top half of
+/// the range is not.
+///
+/// A share of the whole channel, not of the samples above `FLOOR`: on a dark frame almost nothing reaches
+/// the top of the range, and a share of *that* is a share of a handful. A 4-megapixel channel of an Olympus
+/// E-PL5 frame shot at dusk had five samples above half scale, and two of them in one bin read as a sensor
+/// running out of range at 54.88 %.
+const SHARE: f32 = 0.00002;
+/// And never fewer than this many samples, however small the frame: saturation is a region of a picture.
+/// 256 samples of one colour is a thousand pixels, a patch some thirty across — a small blown specular, and
+/// the least that is worth acting on. A dark frame's whole top-of-range population is a handful, so this
+/// alone ends the mistake that [`SHARE`] describes; the bar is low because the shape tests below are what
+/// actually tell saturation from subject, and a bar high enough to matter threw away real ceilings. On one
+/// Canon EOS M3 frame blue piled 730 samples into a single bin, standing 24× above its neighbours with
+/// nothing whatever above it, and a bar of 0.05 % of the channel called that noise.
+const MIN_SPIKE: f32 = 256.0;
 const RELIEF: f32 = 8.0;
+/// How much may sit above the spike and still leave it saturation, as a share of the spike itself. A stuck
+/// pixel or a few is the point of all this (D6); a real population above it means the sensor goes higher and
+/// whatever the bin holds is subject, not a ceiling.
+const OVERSHOOT: f32 = 0.1;
 
 /// The top of the range for one channel, counted into [`BINS`] bins between `FLOOR` of declared and
 /// declared itself. Build one per colour, then ask [`clip_threshold`].
@@ -33,6 +50,7 @@ const RELIEF: f32 = 8.0;
 pub struct TopOfRange {
     bins: [u32; BINS],
     counted: u64,
+    total: u64,
     declared: f32,
     black: f32,
 }
@@ -43,6 +61,7 @@ impl TopOfRange {
         Self {
             bins: [0; BINS],
             counted: 0,
+            total: 0,
             declared,
             black,
         }
@@ -57,7 +76,11 @@ impl TopOfRange {
         }
         let t = (sample - self.black) / span;
         // A sample that is not a number counts for nothing; the comparison is written out so that is plain.
-        if t.is_nan() || t < FLOOR {
+        if t.is_nan() {
+            return;
+        }
+        self.total += 1;
+        if t < FLOOR {
             return;
         }
         let at = ((t - FLOOR) / (1.0 - FLOOR) * BINS as f32) as usize;
@@ -71,20 +94,29 @@ impl TopOfRange {
         }
     }
 
+    /// The bins themselves, lowest first, with how many samples reached them and how many the channel holds
+    /// altogether, for diagnostics (`sidecar-dev levels --bins`).
+    pub fn bins(&self) -> (&[u32; BINS], u64, u64) {
+        (&self.bins, self.counted, self.total)
+    }
+
     /// Where this channel saturates, as a fraction of the declared maximum above black — the number the
     /// shaders and `LinearImage::rgba` compare a normalized sample against.
     ///
-    /// The lowest bin that is a spike: it holds at least [`SHARE`] of what was counted and stands
-    /// [`RELIEF`]× above the bins below it. Nothing qualifying means the sensor reaches its declared
-    /// maximum, and the answer is 1.0 less a hair for rounding.
+    /// The highest bin that is a ceiling: it holds at least [`SHARE`] of the channel (and [`MIN_SPIKE`]
+    /// samples), stands [`RELIEF`]× above the bins below it, and has next to nothing above it
+    /// ([`OVERSHOOT`]). Nothing qualifying means the sensor reaches its declared maximum, and the answer is
+    /// 1.0 less a hair for rounding — deliberately the safe way round, since declaring saturation where
+    /// there is none hands good pixels to highlight reconstruction, while missing a small blown patch only
+    /// leaves it as the sensor recorded it.
     pub fn threshold(&self) -> f32 {
         const DECLARED: f32 = 0.995;
         if self.counted == 0 {
             return DECLARED;
         }
-        // Where the data ends: the highest bin holding a real share of the samples. A stuck pixel or two sits
+        // Where the data ends: the highest bin holding a real share of the channel. A stuck pixel or two sits
         // above this and is ignored, which is the whole point (D6).
-        let floor_count = (self.counted as f32 * SHARE).max(2.0);
+        let floor_count = (self.total as f32 * SHARE).max(MIN_SPIKE);
         let Some(top) = (0..BINS)
             .rev()
             .find(|&at| self.bins[at] as f32 >= floor_count)
@@ -102,6 +134,12 @@ impl TopOfRange {
         if top == 0 || self.bins[top] as f32 <= below * RELIEF {
             return DECLARED;
         }
+        // And a ceiling has nothing above it. Samples that got past the spike are the stuck pixels D6 is
+        // about, so a few are expected; a population of them says the sensor was never at its limit here.
+        let above: u64 = self.bins[top + 1..].iter().map(|&b| b as u64).sum();
+        if above as f32 > OVERSHOOT * self.bins[top] as f32 {
+            return DECLARED;
+        }
         // The spike's lower edge: samples that reached it are saturated.
         let t = FLOOR + (top as f32 / BINS as f32) * (1.0 - FLOOR);
         t.clamp(FLOOR, DECLARED)
@@ -113,6 +151,63 @@ pub fn clip_threshold(channels: &[TopOfRange; 4]) -> [f32; 4] {
     std::array::from_fn(|c| channels[c].threshold())
 }
 
+/// Where each CFA colour of a mosaic saturates, as fractions of the declared maximum above that colour's
+/// black — the four numbers `normalize.wgsl` and the highlight passes compare a normalized sample against.
+///
+/// `pattern[y % period][x % period]` names the colour, as `Mosaic` states it. A colour the pattern never
+/// names is counted into nothing and answers "declared", so a Bayer file's unused G2 lane is harmless.
+pub fn mosaic_clip(
+    data: &[u16],
+    width: u32,
+    white: f32,
+    black: &[f32; 4],
+    pattern: &[[u8; 6]; 6],
+    period: u32,
+) -> [f32; 4] {
+    clip_threshold(&mosaic_histograms(
+        data, width, white, black, pattern, period,
+    ))
+}
+
+/// Where each of three interleaved channels saturates, for an image that is already demosaiced: the same
+/// question [`mosaic_clip`] asks, of RGB rather than a CFA. `declared` and `black` are in the samples' units.
+pub fn rgb_clip(rgb: &[u16], declared: f32, black: f32) -> [f32; 3] {
+    let mut ch: [TopOfRange; 3] = std::array::from_fn(|_| TopOfRange::new(declared, black));
+    for p in rgb.as_chunks::<3>().0 {
+        for (c, &v) in p.iter().enumerate() {
+            ch[c].add(v as f32);
+        }
+    }
+    std::array::from_fn(|c| ch[c].threshold())
+}
+
+/// The four histograms [`mosaic_clip`] asks, for a caller that wants to look at them.
+pub fn mosaic_histograms(
+    data: &[u16],
+    width: u32,
+    white: f32,
+    black: &[f32; 4],
+    pattern: &[[u8; 6]; 6],
+    period: u32,
+) -> [TopOfRange; 4] {
+    let period = (period as usize).clamp(1, 6);
+    let w = width as usize;
+    let mut ch = std::array::from_fn(|c| TopOfRange::new(white, black[c]));
+    if w == 0 {
+        return ch;
+    }
+    for (y, row) in data.chunks(w).enumerate() {
+        let colours = &pattern[y % period];
+        for (x, &s) in row.iter().enumerate() {
+            let c = colours[x % period] as usize;
+            if let Some(t) = ch.get_mut(c) {
+                t.add(s as f32);
+            }
+        }
+    }
+    ch
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -122,9 +217,10 @@ mod tests {
     #[test]
     fn a_sensor_that_reaches_its_declared_maximum() {
         let mut t = TopOfRange::new(16383.0, 512.0);
-        // A smooth ramp over the whole range, as an ordinary picture gives.
-        for i in 0..100_000 {
-            t.add(512.0 + (i as f32 / 100_000.0) * (16383.0 - 512.0));
+        // A smooth ramp over the whole range, as an ordinary picture gives. Big enough that every bin clears
+        // the floor, so what rejects it is the shape — no bin stands above its neighbours — and not a count.
+        for i in 0..1_000_000 {
+            t.add(512.0 + (i as f32 / 1_000_000.0) * (16383.0 - 512.0));
         }
         assert!(t.threshold() > 0.98, "got {}", t.threshold());
     }
@@ -182,6 +278,44 @@ mod tests {
         assert_eq!(build(0), build(5));
     }
 
+    /// The detector's own failure mode, found by running it over 222 frames from the owner's library: a dark
+    /// frame has almost nothing above `FLOOR`, so a share of what *is* up there is a share of a handful. One
+    /// Olympus E-PL5 frame had five samples above half scale in a four-megapixel channel, two of them in one
+    /// bin, and that read as the sensor running out of range at 54.88 % — which would have handed a third of
+    /// the picture to highlight reconstruction. Saturation is a region of a photograph, not two pixels.
+    #[test]
+    fn a_handful_of_samples_at_the_top_of_a_dark_frame_is_not_saturation() {
+        let mut t = TopOfRange::new(4043.0, 255.0);
+        for _ in 0..4_000_000 {
+            t.add(600.0);
+        }
+        for s in [2300.0, 2300.0, 2600.0, 3400.0, 4042.0] {
+            t.add(s);
+        }
+        assert!(t.threshold() > 0.99, "got {}", t.threshold());
+    }
+
+    /// A spike with a real population above it is not a ceiling: the sensor plainly records higher, so the
+    /// bin is a bright subject and the channel is not clipped there.
+    #[test]
+    fn a_bin_with_plenty_above_it_is_not_a_ceiling() {
+        let span = 16383.0 - 512.0;
+        let mut t = TopOfRange::new(16383.0, 512.0);
+        // A picture reaching 60 % of the range, with a flat subject piled up at the top of it.
+        for i in 0..200_000 {
+            t.add(512.0 + (i as f32 / 200_000.0) * 0.6 * span);
+        }
+        for _ in 0..20_000 {
+            t.add(512.0 + 0.6 * span);
+        }
+        // And a thin tail carrying on above — too thin for any bin of its own to clear the floor, but far
+        // more than a stuck pixel or two in total. The pile-up is a subject, not a limit.
+        for i in 0..4_000 {
+            t.add(512.0 + (0.6 + 0.4 * (i as f32 / 4_000.0)) * span);
+        }
+        assert!(t.threshold() > 0.99, "got {}", t.threshold());
+    }
+
     /// A channel nothing was counted into — a frame with no highlights at all — answers "declared" rather
     /// than dividing by zero or picking bin 0.
     #[test]
@@ -193,6 +327,42 @@ mod tests {
         let mut bad = TopOfRange::new(100.0, 100.0);
         bad.add_all([50.0, 100.0, 200.0]);
         assert!(bad.threshold() > 0.99);
+    }
+
+    /// A mosaic, walked as the decode hands it over: a Bayer frame whose blue saturates at 12,000 while red
+    /// and green reach the declared maximum. The pattern never names G2, so that lane answers "declared"
+    /// rather than zero — the lane LibRaw leaves uninitialized on a Bayer file.
+    #[test]
+    fn a_bayer_mosaic_is_measured_per_colour() {
+        // RGGB: colour 0 at (0,0), 1 at (0,1) and (1,0), 2 at (1,1).
+        let mut pattern = [[0u8; 6]; 6];
+        pattern[0][1] = 1;
+        pattern[1][0] = 1;
+        pattern[1][1] = 2;
+        let (w, h) = (256usize, 256usize);
+        let mut data = vec![0u16; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                let top = if pattern[y % 2][x % 2] == 2 {
+                    12000.0
+                } else {
+                    16383.0
+                };
+                // A ramp across the row, with the last eighth of it pinned at the colour's saturation.
+                let t = (x as f32 / w as f32 * 1.14).min(1.0);
+                data[y * w + x] = (512.0 + t * (top - 512.0)) as u16;
+            }
+        }
+        let got = mosaic_clip(&data, w as u32, 16383.0, &[512.0; 4], &pattern, 2);
+        let blue = (12000.0 - 512.0) / (16383.0 - 512.0);
+        assert!(got[0] > 0.98, "red {}", got[0]);
+        assert!(got[1] > 0.98, "green {}", got[1]);
+        assert!(
+            (got[2] - blue).abs() < 0.03,
+            "blue {} should be near {blue}",
+            got[2]
+        );
+        assert!(got[3] > 0.98, "unused G2 {}", got[3]);
     }
 
     /// Channels are answered separately: blue clipping first is the usual case under tungsten, and it must

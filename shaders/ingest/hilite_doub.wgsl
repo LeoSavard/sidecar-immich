@@ -31,10 +31,11 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   if (id.x >= P.out_size.x || id.y >= P.out_size.y) { return; }
   let ipos = vec2i(id.xy);
   var upsm = textureLoad(coarse, ipos, 0).rgb;
-  let white = P.clip;
-  let softw = 0.97 * white;
+  var white = clip_rgb(P.clip);
   if (P.sensor == 1u) {
-    if (((ipos.x + ipos.y) & 1) == 0) { upsm = upsm.bgr; }
+    // The block's two chroma samples are red on one parity and blue on the other; vkdt swizzles the estimate
+    // rather than the indices, so the thresholds swizzle with it.
+    if (((ipos.x + ipos.y) & 1) == 0) { upsm = upsm.bgr; white = white.bgr; }
     let o = 3 * ipos;
     // c1, c7 red; c3, c5 blue; the rest green.
     var c = array<f32, 9>(
@@ -42,21 +43,23 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
       at(o + vec2i(1, 0)), at(o + vec2i(1, 1)), at(o + vec2i(1, 2)),
       at(o + vec2i(2, 0)), at(o + vec2i(2, 1)), at(o + vec2i(2, 2)));
     var ch = array<u32, 9>(1u, 0u, 1u, 2u, 1u, 2u, 1u, 0u, 1u);
+    let softw = 0.97 * white;
     var sum = vec3f(0.0);
     var n = vec3f(0.0);
     var top = vec3f(0.0);
     for (var i = 0; i < 9; i++) {
       let k = ch[i];
       top[k] = max(top[k], c[i]);
-      if (c[i] < softw) {
+      if (c[i] < softw[k]) {
         sum[k] += c[i];
         n[k] += 1.0;
       }
     }
-    if (max(top.r, max(top.g, top.b)) > softw) {
+    if (any(top > softw)) {
       let est = hilite_estimate(upsm, hilite_scale(upsm, sum, n, top), white);
       for (var i = 0; i < 9; i++) {
-        c[i] = mix(c[i], max(est[ch[i]], c[i]), smoothstep(softw, white, c[i]));
+        let k = ch[i];
+        c[i] = mix(c[i], max(est[k], c[i]), smoothstep(softw[k], white[k], c[i]));
       }
     }
     put(o, c[0]);
@@ -72,14 +75,16 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     let o = 2 * ipos;
     // gather order as in vkdt: w = (0,0) R, z = (1,0) G, x = (0,1) G, y = (1,1) B
     var c = vec4f(at(o + vec2i(0, 1)), at(o + vec2i(1, 1)), at(o + vec2i(1, 0)), at(o));
-    let maxrgb = max(max(c.x, c.y), max(c.z, c.w));
-    if (maxrgb > softw) {
-      let m = select(vec4f(0.0), vec4f(1.0), c < vec4f(softw));
+    // The thresholds in that same order, so each sample is measured against its own colour.
+    let w4 = vec4f(white.g, white.b, white.g, white.r);
+    let sw4 = 0.97 * w4;
+    if (any(c > sw4)) {
+      let m = select(vec4f(0.0), vec4f(1.0), c < sw4);
       let sum = vec3f(c.w * m.w, c.x * m.x + c.z * m.z, c.y * m.y);
       let n = vec3f(m.w, m.x + m.z, m.y);
       let top = vec3f(c.w, max(c.x, c.z), c.y);
       let est = hilite_estimate(upsm, hilite_scale(upsm, sum, n, top), white);
-      let t = smoothstep(vec4f(softw), vec4f(white), c);
+      let t = smoothstep(sw4, w4, c);
       c = mix(c, max(vec4f(est.g, est.b, est.g, est.r), c), t);
     }
     put(o, c.w);

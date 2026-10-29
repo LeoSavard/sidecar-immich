@@ -24,6 +24,21 @@ What's known to be missing or wrong, roughly in the order it's worth doing. The 
 
 ## Correctness and quality
 
+**The highlight fill is not bit-identical across GPUs.** With red's measured clip threshold above green's,
+one texel of some 34,000 comes back at 0.67 on lavapipe where an NVIDIA card gives 1.0
+(`ingest::tests::highlight_fill_stays_bounded_beside_a_channel_the_estimate_lacks`, which records the
+reproduction). Deterministic, and not a question of how uneven the thresholds are: a wider gap passes where
+a narrower one fails. In the failing texel red and green sit exactly on their per-channel caps on both GPUs
+and only the unclamped channel differs, so the divergence is upstream in the estimate or its scale and the
+clamp hides it in the other two — the next step is dumping the coarse estimate at that texel on both.
+
+The bound holds either way, and the thresholds the measurement actually produces do not trip it (over 217
+files the widest spread is 0.077, and 86 % have none). What it means in practice is that a proxy can differ
+by which machine ingested it; ingest is server-side only, so browser/server parity is unaffected. Worth
+fixing because reproducibility across machines should be deliberate rather than accidental.
+
+
+
 **Is `DEFAULT_WHITE_EV` still right, now that the baseline is under it?** The white point was lowered from
 4.5 to 3.63 so that white could be reached, and the baseline (+1.15) was decided separately, one version
 earlier. Together they moved the scene level that renders as flat white from **+4.50 to +2.48 stops above
