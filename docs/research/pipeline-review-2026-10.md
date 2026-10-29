@@ -24,11 +24,11 @@ The short version:
 
 | # | Finding | Where | Effect | Changes pixels when fixed | Effort |
 |---|---|---|---|---|---|
-| D1 | Black-level pattern averaged instead of mapped per CFA position | `shim.cpp` `sc_get_mosaic` | Shadow colour cast on DNGs with a 2×2 `BlackLevelRepeatDim` whose values differ | **Written here**, on branch `xtrans-highlight-gate`; **held** because it is unverified — no file with an uneven pattern exists in the owner's library to exercise it (owner, 2026-10-27; see below) | — |
+| D1 | Black-level pattern averaged instead of mapped per CFA position | `shim.cpp` `sc_get_mosaic` | Shadow colour cast on DNGs with a 2×2 `BlackLevelRepeatDim` whose values differ | **Closed unverifiable** (below) | S |
 | D2 | DNG `CameraCalibration` / `AnalogBalance` dropped | `shim.cpp` `sc_get_info`, `raw/src/lib.rs` `camera_color` | Colour cast on camera-native DNGs whose calibration isn't identity; on Apple's ProRAW, a white balance read as 2,786 K and tint −158 | **Fixed here**, on both DNG paths (`camera::dng_xyz_to_camera`) | — |
 | D3 | Row stride from `raw_width`, not `raw_pitch` | `shim.cpp` | Sheared or garbage mosaic wherever a decoder pads rows | **Fixed here**; identical for every file that worked | — |
 | D4 | No sanity check on `white > black` | `sc_get_mosaic`, `ingest.rs` | Division by ≤0, all-black frame instead of an error or fallback | No | XS |
-| D5 | X-Trans: proxy reconstructs highlights, export clips them | `ingest.rs` vs `export.rs` `full_source` | Preview ≠ export in blown areas, breaking ARCHITECTURE's "one rule" | **Written here**, on branch `xtrans-highlight-gate`; **held** pending a re-evaluation of highlight reconstruction itself (owner, 2026-10-27). `INGEST_GENERATION` 6 covers both changes on this branch | — |
+| D5 | X-Trans: proxy reconstructs highlights, export clips them | `ingest.rs` vs `export.rs` `full_source` | Preview ≠ export in blown areas, breaking ARCHITECTURE's "one rule" | **Fixed** 2026-10-27 by gating reconstruction off for X-Trans (owner's call); `INGEST_GENERATION` 6 | — |
 | D6 | Observed white from a single maximum sample | `ingest.rs` `white_obs`, `lib.rs` `saturation_threshold` | One hot pixel defeats the "saturates below declared" heuristic | Rarely | S |
 | D7 | Three clip thresholds for one concept | `lib.rs` (99 % / 98 %), `ingest.rs` (98.5 % / 98 %), `linear_dng.rs` (99 %) | Clip coverage, and so highlight blending, differs by decode path | Marginally | S |
 | D8 | Linear DNG reads one black and one white for all channels; ignores `BlackLevelDeltaH/V`, `DefaultCrop`, `ForwardMatrix` (`CameraCalibration` and `AnalogBalance` now read, with D2) | `linear_dng.rs` | Small casts; uncropped edges | Yes | M |
@@ -586,3 +586,35 @@ above. They are all fields of `libraw_data_t` already in memory after `open_file
 - Mobile pickers: [WebKit bug 303803](https://bugs.webkit.org/show_bug.cgi?id=303803), [WebKit bug 292350](https://bugs.webkit.org/show_bug.cgi?id=292350), [Apple forums 743037](https://developer.apple.com/forums/thread/743037), [Android photo picker and location](https://www.androidauthority.com/android-photo-picker-location-3683074/).
 - LibRaw in the browser: [@colorhythm/libraw-wasm](https://github.com/colorhythm/libraw-wasm).
 - EXIF in Rust: [kamadak-exif](https://www.lib.rs/crates/kamadak-exif).
+
+## D1, closed unverifiable — 2026-10-28
+
+The change was written and is almost certainly right: DNG's `BlackLevelRepeatDim` states a repeat, mapping it
+per CFA position is what the specification says and what LibRaw's own `adjust_bl` does for a 2×2, and the mean
+it replaces is off by up to half the spread — in the shadows, where it shows.
+
+It is closed anyway, because **nothing in this library can exercise it**, and that was established rather than
+assumed. All 8,149 DNGs were inventoried and resolved to the cameras that wrote them; one file per model was
+then read **group-qualified**, with the real CFA image identified by its width, to avoid the preview sub-IFD
+that produced an earlier false positive:
+
+| camera | raw-IFD `BlackLevel` | repeat | CFA width |
+|---|---|---|---|
+| Fujifilm X100F | `1023` ×36 | 6×6 | 6048 |
+| Canon EOS M3 | `2048` ×4 | 2×2 | 6096 |
+| Nikon D7000 | `0` | 1×1 | 4948 |
+| Huawei VTR-L09 | `0` ×4 | 2×2 | 3968 (IFD0) |
+| Huawei ELE-L04 | `256` ×4 | 2×2 | 7296 (IFD0) |
+| Nikon D3200 | `0` | 1×1 | 6034 |
+
+Every one uniform, and there is no Leica, Pentax or Ricoh DNG — no other maker's at all. So "a file with a
+genuinely uneven raw-IFD pattern is wanted before this is called proven" has no end condition here: not now,
+and not by looking harder.
+
+Holding an unverifiable change indefinitely costs more than it protects — it keeps a branch alive, and the
+code drifts from the line around it. The reasoning is kept here instead, and the implementation stays in
+history at `7b894b5`.
+
+**What would reopen it:** one file with an uneven raw-IFD black pattern. A published sample is enough, since
+the check is byte-level rather than aesthetic — render it before and after and compare the shadows. If that
+file ever turns up, the revert is a revert.
