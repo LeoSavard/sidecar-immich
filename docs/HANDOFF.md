@@ -135,15 +135,18 @@ what a filesystem *editor* needs. The filesystem flavour itself stays, for use c
 an editor, never a second library. #28 (`find_by_name`, searching a folder library) was closed under that
 decision; its branch keeps the code and its six tests.
 
-**As of 2026-10-27 there are two open pull requests, and they are split on one rule:** what is merged and
-deployed is what has been tested. **This branch (#45)** carries the two fixes after #44, the six interface items
-from the owner's answers, the decode review's stage 1 (D4, D12 and `device.lost` recovery), the histogram that
-defines where a channel saturates (D6/D7, built and not yet wired in) and `sidecar-dev levels`. It changes no
-pixel any cache holds, so `INGEST_GENERATION` stays at 5 and the deployment that follows reuses every cached
-file. **#46 holds what is written but not demonstrated:** D5, the X-Trans highlight gate, waiting on the
-owner's re-evaluation of highlight reconstruction itself; and D1, the black-level repeat pattern mapped per CFA
-position, which nothing in the library can exercise because every camera model here writes a uniform black in
-the raw IFD. Both were taken out of this line on 2026-10-27 so #45 could be merged and deployed clean.
+**As of 2026-10-29 there are no open pull requests.** #45 (the two fixes after #44, the six interface items
+from the owner's answers, the decode review's stage 1 — D4, D12 and `device.lost` recovery — the histogram
+that defines where a channel saturates, and `sidecar-dev levels`), #47 (that histogram wired in, plus the
+skip gate that drops the highlight pass on a frame that lost nothing) and #48 (the camera's embedded JPEG
+decoded in the Adobe RGB its EXIF claims) are all merged. **#46 was closed on 2026-10-29 with neither of its
+two changes merged**, under the rule that what is merged and deployed is what has been tested: D1, the
+black-level repeat pattern per CFA position, because every camera in the library writes a uniform raw-IFD
+black and so nothing here can exercise it; and D5, the X-Trans highlight gate, because the comparison showed
+it fixes the preview-versus-export split at the worse end — Fuji would lose recovery Bayer keeps — where the
+Markesteijn port can fix it at the better end. Both are written up in
+`docs/research/pipeline-review-2026-10.md`, and both implementations stay in history (`7b894b5`, branch
+`xtrans-highlight-gate`). `INGEST_GENERATION` stays at 5 and no cached file is invalidated.
 #21 (the straight segment above middle grey, order 3) merged on 2026-10-22 and #25 (this page) on 2026-10-20;
 #43, a first take on an imported photo's staging name, was closed for #42's version of the same fix.
 
