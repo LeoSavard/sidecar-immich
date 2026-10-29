@@ -106,6 +106,13 @@ pub struct Worker {
     ml: Option<Arc<ml::Ml>>,
 }
 
+/// The camera's own rendering is cached under its own marker, because what invalidates it is how the JPEG
+/// is labelled rather than how a RAW decodes: it has no reason to be thrown away when `INGEST_GENERATION`
+/// moves, and every reason to be when this does.
+///
+/// 2: the Adobe RGB profile a camera set to that space never wrote into the preview (`camera.rs`).
+pub const CAMERA_GENERATION: u32 = 2;
+
 /// The marker every cached proxy and focus mask carries in its name. Both numbers are in it because they
 /// invalidate for different reasons: `ProcessVersion` decides whether a cached file still means what the
 /// client will ask for, and `INGEST_GENERATION` whether this code would have decoded it that way.
@@ -117,15 +124,21 @@ fn cache_generation() -> String {
 /// again, so they are unreadable rather than stale — without this, a bump would leave them on disk for good.
 /// Cached metadata is left alone: it comes from EXIF, which no ingest change rewrites.
 fn sweep_stale_cache(cache: &std::path::Path) {
-    let marker = format!("-{}-", cache_generation());
+    let generation = format!("-{}-", cache_generation());
+    let camera = format!("-c{CAMERA_GENERATION}.");
     let (mut removed, mut bytes) = (0u64, 0u64);
-    for dir in ["proxies", "focus", "masks"] {
+    for (dir, marker) in [
+        ("proxies", &generation),
+        ("focus", &generation),
+        ("masks", &generation),
+        ("camera", &camera),
+    ] {
         let Ok(entries) = std::fs::read_dir(cache.join(dir)) else {
             continue;
         };
         for entry in entries.flatten() {
             let name = entry.file_name();
-            if name.to_str().is_some_and(|n| n.contains(&marker)) {
+            if name.to_str().is_some_and(|n| n.contains(marker.as_str())) {
                 continue;
             }
             let size = entry.metadata().map(|m| m.len()).unwrap_or(0);

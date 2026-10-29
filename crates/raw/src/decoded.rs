@@ -95,6 +95,23 @@ enum Samples {
 /// fraction of the pixel clipped at the sensor, which only a RAW has. (The develop pass also turns highlight
 /// blending off for developed files, so this is the honest value rather than a load-bearing one.)
 fn to_linear_rgba(samples: &Samples, channels: usize, space: SourceSpace) -> Vec<f32> {
+    let full = match samples {
+        Samples::Eight(_) => 255,
+        Samples::Sixteen(_) => 65535,
+    };
+    to_linear_rgba_scaled(samples, channels, space, full)
+}
+
+/// `to_linear_rgba` where full scale is `maxval` rather than the width of the sample type — PNM's header names
+/// its own maximum, and anything other than 255 or 65535 was being read against the full width of the type
+/// instead, which renders a 10-bit PGM 64× dark (D12). Samples above `maxval` are clamped: a malformed file
+/// would otherwise index past the table.
+fn to_linear_rgba_scaled(
+    samples: &Samples,
+    channels: usize,
+    space: SourceSpace,
+    maxval: usize,
+) -> Vec<f32> {
     fn convert<T: Copy>(
         samples: &[T],
         channels: usize,
@@ -103,6 +120,7 @@ fn to_linear_rgba(samples: &Samples, channels: usize, space: SourceSpace) -> Vec
         index: impl Fn(T) -> usize,
     ) -> Vec<f32> {
         let lut = linear_lut(levels, space);
+        let index = |s: T| index(s).min(levels - 1);
         let mut out = Vec::with_capacity(samples.len() / channels * 4);
         for p in samples.chunks_exact(channels) {
             let (r, g, b) = if channels < 3 {
@@ -117,9 +135,10 @@ fn to_linear_rgba(samples: &Samples, channels: usize, space: SourceSpace) -> Vec
         }
         out
     }
+    let levels = maxval.clamp(1, 65535) + 1;
     match samples {
-        Samples::Eight(v) => convert(v, channels, 256, space, |s| s as usize),
-        Samples::Sixteen(v) => convert(v, channels, 65536, space, |s| s as usize),
+        Samples::Eight(v) => convert(v, channels, levels, space, |s| s as usize),
+        Samples::Sixteen(v) => convert(v, channels, levels, space, |s| s as usize),
     }
 }
 
@@ -167,6 +186,17 @@ fn decode_pnm(bytes: &[u8], space: SourceSpace) -> Result<(u32, u32, Vec<f32>), 
     let [width, height, maxval] = fields[..] else {
         return Err(bad("truncated header"));
     };
+    // The header's own maximum, which the samples are scaled against. 255 and 65535 are what Sidecar's own
+    // HEIF conversion writes; anything else was read against the full width of the sample type instead, so a
+    // 10-bit PGM came out 64× dark with no error (D12).
+    if maxval == 0 || maxval > 65535 {
+        return Err(bad(&format!(
+            "maximum value {maxval} is out of range (1…65535)"
+        )));
+    }
+    if width == 0 || height == 0 {
+        return Err(bad(&format!("empty image ({width}x{height})")));
+    }
     // Exactly one whitespace byte separates the header from the samples.
     let data = bytes.get(at + 1..).ok_or_else(|| bad("no sample data"))?;
     let count = (width as usize) * (height as usize) * channels;
@@ -192,22 +222,50 @@ fn decode_pnm(bytes: &[u8], space: SourceSpace) -> Result<(u32, u32, Vec<f32>), 
     Ok((
         width as u32,
         height as u32,
-        to_linear_rgba(&samples, channels, space),
+        to_linear_rgba_scaled(&samples, channels, space, maxval as usize),
     ))
 }
 
 fn decode_jpeg(bytes: &[u8], space: SourceSpace) -> Result<(u32, u32, Vec<f32>), DecodeError> {
     let mut decoder = zune_jpeg::JpegDecoder::new(std::io::Cursor::new(bytes));
+    // Pinned, not inherited. `output_colorspace()` reports this option rather than anything about the file, and
+    // a four-component JPEG — CMYK, or Adobe's YCCK — would otherwise reach `to_linear_rgba` as three colours
+    // plus an alpha, which reads cyan, magenta and yellow as red, green and blue (D12). zune converts both to
+    // RGB when RGB is asked for; asking is what makes that true rather than a default that may move.
+    decoder.set_options(
+        zune_jpeg::zune_core::options::DecoderOptions::default()
+            .jpeg_set_out_colorspace(zune_jpeg::zune_core::colorspace::ColorSpace::RGB),
+    );
     let pixels = decoder
         .decode()
         .map_err(|e| DecodeError::Decode(format!("JPEG: {e}")))?;
     let info = decoder
         .info()
         .ok_or_else(|| DecodeError::Decode("JPEG has no frame header".into()))?;
-    let channels = decoder
+    let out = decoder
         .output_colorspace()
-        .map(|c| c.num_components())
-        .unwrap_or(3);
+        .ok_or_else(|| DecodeError::Decode("JPEG has no colour space".into()))?;
+    let channels = out.num_components();
+    // Having asked for RGB, anything else means a conversion zune declined to make. Say so rather than
+    // rendering whatever the channels happen to hold.
+    if !matches!(
+        out,
+        zune_jpeg::zune_core::colorspace::ColorSpace::RGB
+            | zune_jpeg::zune_core::colorspace::ColorSpace::Luma
+    ) {
+        return Err(DecodeError::Decode(format!(
+            "JPEG: {out:?} isn't converted to RGB"
+        )));
+    }
+    let wanted = (info.width as usize) * (info.height as usize) * channels;
+    if pixels.len() < wanted {
+        return Err(DecodeError::Decode(format!(
+            "JPEG: {} samples for a {}x{} image in {channels} channels",
+            pixels.len(),
+            info.width,
+            info.height
+        )));
+    }
     Ok((
         info.width as u32,
         info.height as u32,
@@ -655,6 +713,77 @@ mod tests {
         assert_eq!(rgba.len(), 8);
         assert_eq!(rgba[3], 0.0);
         assert_eq!(rgba[7], 0.0);
+    }
+    /// D12: PNM's header names full scale, and it is not always the width of the sample type. A 10-bit PGM
+    /// (maxval 1023) read against 65535 came out 64× dark with no error; the same file read against its own
+    /// maximum is white where it says white.
+    #[test]
+    fn a_pnm_is_scaled_by_the_maximum_its_header_states() {
+        // maxval 1023: the top sample is white, the middle is mid grey.
+        let ten_bit = to_linear_rgba_scaled(
+            &Samples::Sixteen(vec![0, 0, 0, 1023, 1023, 1023]),
+            3,
+            SourceSpace::Srgb,
+            1023,
+        );
+        assert_eq!(ten_bit[0], 0.0);
+        assert!((ten_bit[4] - 1.0).abs() < 1e-6);
+        // What it used to do: the same samples against the full width of a u16.
+        let against_full_width = to_linear_rgba(
+            &Samples::Sixteen(vec![1023, 1023, 1023]),
+            3,
+            SourceSpace::Srgb,
+        );
+        assert!(against_full_width[0] < 0.002);
+
+        // 255 and 65535 are unchanged, which is what Sidecar's own HEIF conversion writes.
+        for (max, samples) in [
+            (255usize, vec![128u16, 128, 128]),
+            (65535, vec![32896, 32896, 32896]),
+        ] {
+            let scaled = to_linear_rgba_scaled(
+                &Samples::Sixteen(samples.clone()),
+                3,
+                SourceSpace::Srgb,
+                max,
+            );
+            let plain = to_linear_rgba(&Samples::Sixteen(samples), 3, SourceSpace::Srgb);
+            if max == 65535 {
+                assert_eq!(scaled[0], plain[0]);
+            }
+            assert!((scaled[0] - 0.2158).abs() < 1e-3);
+        }
+    }
+
+    /// A sample above the stated maximum is clamped rather than indexing past the table. A malformed file is a
+    /// wrong picture at worst, never a panic in the worker.
+    #[test]
+    fn a_sample_above_the_stated_maximum_is_clamped() {
+        let out = to_linear_rgba_scaled(
+            &Samples::Sixteen(vec![4095, 4095, 4095]),
+            3,
+            SourceSpace::Srgb,
+            1023,
+        );
+        assert!((out[0] - 1.0).abs() < 1e-6);
+    }
+
+    /// A PNM header that cannot describe an image is refused, not guessed at.
+    #[test]
+    fn a_pnm_with_an_impossible_header_is_refused() {
+        let header = |max: &str| format!("P6 2 2 {max}\n").into_bytes();
+        for bad in ["0", "70000"] {
+            let mut bytes = header(bad);
+            bytes.extend(std::iter::repeat_n(0u8, 64));
+            assert!(
+                decode_pnm(&bytes, SourceSpace::Srgb).is_err(),
+                "maxval {bad} should be refused"
+            );
+        }
+        // A good one still decodes, so the guard isn't refusing everything.
+        let mut good = header("255");
+        good.extend(std::iter::repeat_n(0u8, 12));
+        assert!(decode_pnm(&good, SourceSpace::Srgb).is_ok());
     }
 
     #[test]

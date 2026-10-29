@@ -14,6 +14,7 @@ pub mod gain_map;
 pub mod heif_aux;
 pub mod lens;
 pub mod lensfun;
+pub mod levels;
 pub mod linear_dng;
 pub mod portrait_depth;
 pub use af::AfPoint;
@@ -279,10 +280,20 @@ impl RawFile {
     }
 
     /// The raw mosaic for GPU processing, or an error for files without a single-channel CFA.
+    ///
+    /// The levels are checked here because nothing downstream can: `normalize.wgsl` divides by
+    /// `white - black[c]`, so a zero or bogus maximum yields a black frame and no error at all (the October
+    /// 2026 pipeline review, D4; ProRAW's black in #34 was the same failure on the linear-DNG path). An `Err`
+    /// is the useful answer: both callers already fall back to LibRaw's own demosaic on one.
     pub fn mosaic(&self) -> Result<Mosaic, RawError> {
         let mut m: sys::sc_mosaic = unsafe { std::mem::zeroed() };
         check(unsafe { sys::sc_get_mosaic(self.ptr, &mut m) })?;
         let n = (m.width as usize) * (m.height as usize);
+        if let Err(e) = usable_mosaic(n, m.data.is_null(), m.white, &m.black, &m.pattern, m.period)
+        {
+            unsafe { sys::sc_mosaic_free(&mut m) };
+            return Err(e);
+        }
         let data = unsafe { std::slice::from_raw_parts(m.data, n) }.to_vec();
         unsafe { sys::sc_mosaic_free(&mut m) };
         Ok(Mosaic {
@@ -298,6 +309,51 @@ impl RawFile {
     }
 }
 
+/// Is this mosaic usable at all? Separate from `mosaic()` so it can be tested without a camera file.
+///
+/// `normalize.wgsl` reads `(sample - black[c]) / (white - black[c])`, so a maximum at or below black divides by
+/// zero or flips the sign and the whole frame comes out black with no error anywhere (D4). Only the colours the
+/// pattern actually names are checked: a Bayer file leaves `black[3]` (G2) at whatever LibRaw left there, and an
+/// X-Trans one never names colour 3.
+fn usable_mosaic(
+    n: usize,
+    data_is_null: bool,
+    white: f32,
+    black: &[f32; 4],
+    pattern: &[[u8; 6]; 6],
+    period: i32,
+) -> Result<(), RawError> {
+    if n == 0 || data_is_null {
+        return Err(RawError(format!(
+            "mosaic is empty ({n} samples{})",
+            if data_is_null { ", no data" } else { "" }
+        )));
+    }
+    if !white.is_finite() {
+        return Err(RawError(format!("maximum is not a number ({white})")));
+    }
+    let period = (period as usize).clamp(1, 6);
+    let mut used = [false; 4];
+    for row in pattern.iter().take(period) {
+        for &c in row.iter().take(period) {
+            if let Some(u) = used.get_mut(c as usize) {
+                *u = true;
+            }
+        }
+    }
+    for (c, _) in used.iter().enumerate().filter(|(_, u)| **u) {
+        // One step of headroom: a white equal to black divides by zero, and a gap under one unit cannot carry a
+        // 16-bit sample anyway.
+        if !black[c].is_finite() || white - black[c] < 1.0 {
+            return Err(RawError(format!(
+                "levels make no sense: maximum {white} is not above black {} for colour {c}",
+                black[c]
+            )));
+        }
+    }
+    Ok(())
+}
+
 impl Drop for RawFile {
     fn drop(&mut self) {
         unsafe { sys::sc_free(self.ptr) }
@@ -307,6 +363,57 @@ impl Drop for RawFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Bayer pattern (RGGB) and an X-Trans one, for the level checks below.
+    fn bayer() -> [[u8; 6]; 6] {
+        let mut p = [[0u8; 6]; 6];
+        for (y, row) in p.iter_mut().enumerate() {
+            for (x, c) in row.iter_mut().enumerate() {
+                *c = match (y % 2, x % 2) {
+                    (0, 0) => 0,
+                    (0, 1) | (1, 0) => 1,
+                    _ => 2,
+                };
+            }
+        }
+        p
+    }
+
+    /// D4: a maximum that is not above black makes `normalize.wgsl` divide by zero or by a negative, and the
+    /// frame comes out black with nothing reported. `mosaic()` refuses instead, and both callers fall back to
+    /// LibRaw's own demosaic.
+    #[test]
+    fn levels_that_cannot_normalize_are_refused() {
+        let p = bayer();
+        let ok = [512.0, 512.0, 512.0, 512.0];
+        assert!(usable_mosaic(24, false, 16383.0, &ok, &p, 2).is_ok());
+
+        // No samples, or no buffer to read them from.
+        assert!(usable_mosaic(0, false, 16383.0, &ok, &p, 2).is_err());
+        assert!(usable_mosaic(24, true, 16383.0, &ok, &p, 2).is_err());
+
+        // A maximum of zero: the shape of the failure this guard exists for.
+        assert!(usable_mosaic(24, false, 0.0, &ok, &p, 2).is_err());
+        // Maximum equal to black, and below it.
+        assert!(usable_mosaic(24, false, 512.0, &ok, &p, 2).is_err());
+        assert!(usable_mosaic(24, false, 300.0, &ok, &p, 2).is_err());
+        // Not numbers.
+        assert!(usable_mosaic(24, false, f32::NAN, &ok, &p, 2).is_err());
+        assert!(usable_mosaic(24, false, 16383.0, &[f32::NAN; 4], &p, 2).is_err());
+    }
+
+    /// Only the colours the pattern names: a nonsense `black[3]` is no reason to refuse a Bayer file, where
+    /// colour 3 never appears, but it is for a four-colour pattern that uses it.
+    #[test]
+    fn unused_colours_do_not_condemn_a_file() {
+        let mut four = bayer();
+        four[1][1] = 3;
+        four[3][3] = 3;
+        four[5][5] = 3;
+        let black = [512.0, 512.0, 512.0, 1.0e9];
+        assert!(usable_mosaic(24, false, 16383.0, &black, &bayer(), 2).is_ok());
+        assert!(usable_mosaic(24, false, 16383.0, &black, &four, 6).is_err());
+    }
 
     #[test]
     fn saturated_samples_are_flagged_in_alpha() {

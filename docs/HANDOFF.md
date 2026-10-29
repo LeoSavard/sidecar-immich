@@ -5,7 +5,7 @@ For whoever picks this up next, person or agent. [`ARCHITECTURE.md`](ARCHITECTUR
 checked), [`ROADMAP.md`](ROADMAP.md) what's known to be missing. This page is the state of play; update it when
 you stop.
 
-*Last updated 2026-10-26.*
+*Last updated 2026-10-27.*
 
 ## Where it stands, 2026-10-22
 
@@ -26,10 +26,11 @@ branches written the same day: the build log is append-at-the-top, so it collide
 `deploy/sidecar.dev.toml` gained an editing folder at `testdata/cache/editing`, so `./dev/serve` exercises
 the folder path out of the box (it has no Immich, so that is the only destination it offers).
 
-**Still owed from 2026-10-20:** the merged *remote* branches are not deleted — 37 of them as of 2026-10-22,
-everything `git branch -r --merged origin/main` lists except `main`. That needs `git push origin --delete`
-run by the owner; it is blocked here. `worktree-depth-spike` and `worktree-lens-correction` are not in that
-list and are kept on purpose.
+**Remote branches, 2026-10-27:** most of the 37 merged ones are gone. Four merged ones are left
+(`highlight-reach`, `local-intake`, `measure-readout`, `standalone-folder`), plus `claude/pensive-edison-xnk4wl`,
+#43's branch, closed for #42's version of the same fix. Kept on purpose: `worktree-depth-spike` (the
+Depth Anything spike) and `library-name-search` (#28's code and tests, closed under the Immich-stays-the-library
+decision).
 
 ## 2026-10-26: a review of the decode pipeline
 
@@ -75,13 +76,25 @@ truth to compare with.
 **Then two more asks, same branch:** **the phone runs the one editor** — `/m` imports into the editing folder and
 opens `/edit/<key>`, which develops the phone's own copy on the phone and says so; the module's small editor is
 gone (MOBILE.md) — and **Apple's ProRAW white balance** (`AnalogBalance`, the review's D2), which read 2,786 K and
-tint −158 on a daylight frame and now reads 6,880 K +32. Neither has run on a real iPhone yet.
+tint −158 on a daylight frame and now reads 6,880 K +32. The owner has since run the editor on an iPhone and
+confirmed ProRAW's white balance fixed.
 
 **And then the interface:** the page no longer zooms itself on a phone, the camera's rendering follows the edit's
 zoom and position (and drives it), and the loupe reaches 150 % and 200 %. A wider look at the interface, with
 seventeen suggestions in order of how often they are met, is
 [`research/ui-review-2026-10.md`](research/ui-review-2026-10.md). The owner answered nine of them and those are
-built (the table at its top); the rest are open.
+built (the table at its top); **on 2026-10-27 they answered the rest**, and six more are built on this branch: the
+hide-tools button's panel glyph in place of the ⓘ (1), a zoom readout in the photo's corner that fits on a desktop
+and only reads the number on a phone (2), a **Loupe** toggle beside Focus in both quick-access rows (8), the
+"developed on this device" note only in the installed app (11), a pipette instead of a pencil for the white-balance
+picker (15), and "Reset to as shot" in the normal text colour while it can do something (16). Item 17 is left as it
+is. **Item 7 is the one still open:** the owner thought the phone header's truncation might have been an artefact of
+the cloud session, and it was not — it reproduces on the current local build at 390 × 844, where `IMG_1768.CR2`
+truncates mid-extension and the four buttons take 230 of the 390 px. On an iPhone (2026-10-27) the owner confirmed the page-zoom guard,
+the panel handle and the camera's rendering following the edit, and found two faults, fixed since #44 merged on
+`claude/sweet-maxwell-s67it6` and not yet in a pull request: hiding the tools left the chosen panel height as an
+empty grey panel, and "Bring it up to date now" left Highlights' reach behind, so the offer came back (the session
+record's §10).
 
 **Before those, on the owner's word, three more on the same branch** (DESIGN.md's build log has each):
 - **D11:** a camera's Adobe RGB JPEG, marked only in EXIF, decodes in Adobe RGB on the server and on the phone
@@ -90,7 +103,8 @@ built (the table at its top); the rest are open.
   `PROCESS_VERSION` bump (the review's §3 says why none is needed).
 - **A half-float view canvas** where the display reports more than 8 bits a channel, with the dither scaled to
   a 10-bit step; `?canvas=8` / `?canvas=16` compares the two. It can't be checked headless (Chromium can't present
-  a WebGPU canvas there), so the first look is on a real iPhone or Mac.
+  a WebGPU canvas there). On the owner's iPhone it has made no difference they have noticed, which an already
+  dithered 8-bit canvas makes likely; `?canvas=8` against `?canvas=16` on a smooth gradient is the comparison.
 
 **Stage 1 of the mobile module followed** (a RAW's embedded preview on the phone; MOBILE.md), with real RAW
 files for the first time in this work: CR2s and NEFs from rawpy's test set, under `testdata/cache/samples/`
@@ -121,12 +135,17 @@ what a filesystem *editor* needs. The filesystem flavour itself stays, for use c
 an editor, never a second library. #28 (`find_by_name`, searching a folder library) was closed under that
 decision; its branch keeps the code and its six tests.
 
-Two pull requests are open, and **neither changes a pixel**:
-
-| # | Branch | What | State |
-|---|---|---|---|
-| 21 | `worktree-tone-curve` | The log-log straight segment above middle grey, built and measured, rendering nothing | Needs the owner: which shoulder order, and what Contrast should mean above grey (see Open questions) |
-| 25 | `handoff-state` | This page | — |
+**As of 2026-10-27 there are two open pull requests, and they are split on one rule:** what is merged and
+deployed is what has been tested. **This branch (#45)** carries the two fixes after #44, the six interface items
+from the owner's answers, the decode review's stage 1 (D4, D12 and `device.lost` recovery), the histogram that
+defines where a channel saturates (D6/D7, built and not yet wired in) and `sidecar-dev levels`. It changes no
+pixel any cache holds, so `INGEST_GENERATION` stays at 5 and the deployment that follows reuses every cached
+file. **#46 holds what is written but not demonstrated:** D5, the X-Trans highlight gate, waiting on the
+owner's re-evaluation of highlight reconstruction itself; and D1, the black-level repeat pattern mapped per CFA
+position, which nothing in the library can exercise because every camera model here writes a uniform black in
+the raw IFD. Both were taken out of this line on 2026-10-27 so #45 could be merged and deployed clean.
+#21 (the straight segment above middle grey, order 3) merged on 2026-10-22 and #25 (this page) on 2026-10-20;
+#43, a first take on an imported photo's staging name, was closed for #42's version of the same fix.
 
 **The formatter is a gate now.** `cargo fmt --all --check` runs in CI beside clippy and `rustfmt.toml` fixes
 `max_width = 100`. A branch open when #29 landed pays for it once: `git merge main`, keep the branch's own

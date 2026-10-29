@@ -27,15 +27,15 @@ The short version:
 | D1 | Black-level pattern averaged instead of mapped per CFA position | `shim.cpp` `sc_get_mosaic` | Shadow colour cast on DNGs with a 2×2 `BlackLevelRepeatDim` whose values differ | **Closed unverifiable** (below) | S |
 | D2 | DNG `CameraCalibration` / `AnalogBalance` dropped | `shim.cpp` `sc_get_info`, `raw/src/lib.rs` `camera_color` | Colour cast on camera-native DNGs whose calibration isn't identity; on Apple's ProRAW, a white balance read as 2,786 K and tint −158 | **Fixed here**, on both DNG paths (`camera::dng_xyz_to_camera`) | — |
 | D3 | Row stride from `raw_width`, not `raw_pitch` | `shim.cpp` | Sheared or garbage mosaic wherever a decoder pads rows | **Fixed here**; identical for every file that worked | — |
-| D4 | No sanity check on `white > black` | `sc_get_mosaic`, `ingest.rs` | Division by ≤0, all-black frame instead of an error or fallback | No | XS |
-| D5 | X-Trans: proxy reconstructs highlights, export clips them | `ingest.rs` vs `export.rs` `full_source` | Preview ≠ export in blown areas, breaking ARCHITECTURE's "one rule" | **Fixed** 2026-10-27 by gating reconstruction off for X-Trans (owner's call); `INGEST_GENERATION` 6 | — |
+| D4 | No sanity check on `white > black` | `sc_get_mosaic`, `ingest.rs` | Division by ≤0, all-black frame instead of an error or fallback | **Fixed** 2026-10-27, in `RawFile::mosaic` | — |
+| D5 | X-Trans: proxy reconstructs highlights, export clips them | `ingest.rs` vs `export.rs` `full_source` | Preview ≠ export in blown areas, breaking ARCHITECTURE's "one rule" | **Held** on branch `xtrans-highlight-gate`, pending a re-evaluation of highlight reconstruction itself (owner, 2026-10-27) | M |
 | D6 | Observed white from a single maximum sample | `ingest.rs` `white_obs`, `lib.rs` `saturation_threshold` | One hot pixel defeats the "saturates below declared" heuristic | Rarely | S |
 | D7 | Three clip thresholds for one concept | `lib.rs` (99 % / 98 %), `ingest.rs` (98.5 % / 98 %), `linear_dng.rs` (99 %) | Clip coverage, and so highlight blending, differs by decode path | Marginally | S |
 | D8 | Linear DNG reads one black and one white for all channels; ignores `BlackLevelDeltaH/V`, `DefaultCrop`, `ForwardMatrix` (`CameraCalibration` and `AnalogBalance` now read, with D2) | `linear_dng.rs` | Small casts; uncropped edges | Yes | M |
 | D9 | No colour matrix → `panic!` | `color/src/camera.rs` | Worker task fails; in the browser the wasm packer traps | **Fixed here** | — |
 | D10 | ICC detection is `contains("P3")`, and no ICC means sRGB | `decoded.rs` `SourceSpace::from_profile` | Adobe RGB / ProPhoto / Rec.2020 sources desaturated, with the wrong tone curve | Yes, those files | M |
 | D11 | Camera Adobe RGB JPEGs carry no ICC, only `InteropIndex = R03` | `decoded.rs` `exif` | Same as D10, for the most common case of it | **Fixed here**, on the server and the phone (§2.4) | — |
-| D12 | CMYK/YCCK JPEG, float TIFF and PNM `maxval` ≠ 255/65535 are unchecked | `decoded.rs` | Wrong colours or 64× dark instead of a clear refusal | No (refuse) / yes (support) | S |
+| D12 | CMYK/YCCK JPEG, float TIFF and PNM `maxval` ≠ 255/65535 are unchecked | `decoded.rs` | Wrong colours or 64× dark instead of a clear refusal | **Fixed** 2026-10-27 for JPEG and PNM; float TIFF still refused, not supported | — |
 | D13 | ProRAW `ProfileGainTableMap` not read | `linear_dng.rs` | ProRAW looks flatter than Apple's rendering (DNG 1.6 local tone map) | Optional stage | L |
 | D14 | Highlight reconstruction turns a damaged RAW into NaN | `shaders/ingest/hilite_*.wgsl` | A quarter of a truncated CR2's proxy is NaN, across nearly every row | **Fixed here**, with the rest of the fill (§3, "The highlight stack, end to end"): every clipped photo changes, measurably for the better | — |
 
@@ -535,8 +535,9 @@ above. They are all fields of `libraw_data_t` already in memory after `open_file
 
 ## 9. Proposed order of work
 
-1. **Small, no pixel change:** D4 guard; D12 refusals; the extension lists generated from Rust (§5.6);
-   `device.lost` recovery. (Share-target keep-and-import, §7 gap 1, is done.)
+1. **Small, no pixel change:** ~~D4 guard; D12 refusals; the extension lists generated from Rust (§5.6);
+   `device.lost` recovery~~ — **all done** (2026-10-27; share-target keep-and-import, §7 gap 1, was already).
+   What is left of D12 is supporting float TIFF rather than refusing it, which is a feature, not a guard.
 2. **The fixed highlight set** (§3), before anything below changes a pixel, so each step is measured on it.
    `sidecar-dev hilite-truth` is its ground-truth half; the pictures are the other. The fill itself (D14) is done.
 3. **Decode correctness and links 1–3 of the highlight path, one `INGEST_GENERATION` bump for the lot:** D1, D2
