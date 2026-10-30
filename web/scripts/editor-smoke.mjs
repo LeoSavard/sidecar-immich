@@ -47,9 +47,13 @@ try {
 	if (mode === 'fallback' && !fallback) throw new Error('no WebGPU adapter: run on the GPU host, or pass --fallback');
 
 	/** The group each section sits in (the editor's `groups`). */
-	const GROUP = { 'White balance': 'Colour', Film: 'Colour', Color: 'Colour', Light: 'Light', Curve: 'Light', 'Crop and straighten': 'Crop and straighten', Depth: 'Processing', Masks: 'Processing', Detail: 'Processing', Lens: 'Processing', History: 'History' };
+	// Keyed by the section's label in `allSections`, not by its id: 'Mixer' is the section the panel calls
+	// 'color'. An unknown label used to click an arbitrary button and then wait out the timeout on a tab that
+	// was never coming, so a renamed section cost thirty silent seconds; say so instead.
+	const GROUP = { 'White balance': 'Colour', Film: 'Colour', Mixer: 'Colour', Light: 'Light', Curve: 'Light', 'Crop and straighten': 'Crop and straighten', Depth: 'Processing', Masks: 'Processing', Detail: 'Processing', Lens: 'Processing', History: 'History' };
 	async function section(label) {
 		if (narrow) {
+			if (!GROUP[label]) throw new Error(`no group for section "${label}" — has it been renamed?`);
 			// The group's tab, then — in a group of several — the section's tab in the row below.
 			await page.getByRole('button', { name: GROUP[label], exact: true }).first().click();
 			if (GROUP[label] !== label || label === 'Light') await page.getByRole('tab', { name: label, exact: true }).click();
@@ -95,7 +99,18 @@ try {
 			for (let i = 0; ; i++) {
 				await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
 				if (await custom()) break;
-				if (i === 5) throw new Error('the eyedropper never set a white balance');
+				if (i === 5) {
+					// Say what the page said, and what was under the tap. The failure this replaces was silent for
+					// a while: the autofocus marker is a button over the middle of the frame and it swallowed every
+					// click, so the picker stayed armed and the retries all landed on the same blocked spot.
+					const [x, y] = [box.x + box.width / 2, box.y + box.height / 2];
+					const hit = await page.evaluate(([x, y]) => {
+						const el = document.elementFromPoint(x, y);
+						return el ? `${el.tagName.toLowerCase()}${el.getAttribute('aria-label') ? ` "${el.getAttribute('aria-label')}"` : ''}` : 'nothing';
+					}, [x, y]);
+					const said = (await page.locator('[role="status"], p.text-fg-2').allTextContents()).find((s) => /spot/i.test(s));
+					throw new Error(`the eyedropper never set a white balance (tap at ${Math.round(x)},${Math.round(y)} hit ${hit}${said ? `; the page said "${said}"` : ''})`);
+				}
 			}
 			const temp = await (await visible(page.getByRole('slider', { name: 'Temperature' }))).getAttribute('aria-valuenow');
 			log('eyedropper:', temp, 'K');
