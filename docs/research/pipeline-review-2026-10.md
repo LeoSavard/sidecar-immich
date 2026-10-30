@@ -24,11 +24,11 @@ The short version:
 
 | # | Finding | Where | Effect | Changes pixels when fixed | Effort |
 |---|---|---|---|---|---|
-| D1 | Black-level pattern averaged instead of mapped per CFA position | `shim.cpp` `sc_get_mosaic` | Shadow colour cast on DNGs with a 2×2 `BlackLevelRepeatDim` whose values differ | **Written** on branch `xtrans-highlight-gate`, held there because no file exercising it could be found (owner, 2026-10-27) | S |
+| D1 | Black-level pattern averaged instead of mapped per CFA position | `shim.cpp` `sc_get_mosaic` | Shadow colour cast on DNGs with a 2×2 `BlackLevelRepeatDim` whose values differ | **Closed unverifiable** 2026-10-28 (below); implementation in history at `7b894b5` | S |
 | D2 | DNG `CameraCalibration` / `AnalogBalance` dropped | `shim.cpp` `sc_get_info`, `raw/src/lib.rs` `camera_color` | Colour cast on camera-native DNGs whose calibration isn't identity; on Apple's ProRAW, a white balance read as 2,786 K and tint −158 | **Fixed here**, on both DNG paths (`camera::dng_xyz_to_camera`) | — |
 | D3 | Row stride from `raw_width`, not `raw_pitch` | `shim.cpp` | Sheared or garbage mosaic wherever a decoder pads rows | **Fixed here**; identical for every file that worked | — |
 | D4 | No sanity check on `white > black` | `sc_get_mosaic`, `ingest.rs` | Division by ≤0, all-black frame instead of an error or fallback | **Fixed** 2026-10-27, in `RawFile::mosaic` | — |
-| D5 | X-Trans: proxy reconstructs highlights, export clips them | `ingest.rs` vs `export.rs` `full_source` | Preview ≠ export in blown areas, breaking ARCHITECTURE's "one rule" | **Held** on branch `xtrans-highlight-gate`, pending a re-evaluation of highlight reconstruction itself (owner, 2026-10-27) | M |
+| D5 | X-Trans: proxy reconstructs highlights, export clips them | `ingest.rs` vs `export.rs` `full_source` | Preview ≠ export in blown areas, breaking ARCHITECTURE's "one rule" | **Measured and left as is** 2026-10-29 (below); the Markesteijn port should carry the export-side fix. Gate in history on branch `xtrans-highlight-gate` | M |
 | D6 | Observed white from a single maximum sample | `ingest.rs` `white_obs`, `lib.rs` `saturation_threshold` | One hot pixel defeats the "saturates below declared" heuristic | Rarely | S |
 | D7 | Three clip thresholds for one concept | `lib.rs` (99 % / 98 %), `ingest.rs` (98.5 % / 98 %), `linear_dng.rs` (99 %) | Clip coverage, and so highlight blending, differs by decode path | Marginally | S |
 | D8 | Linear DNG reads one black and one white for all channels; ignores `BlackLevelDeltaH/V`, `DefaultCrop`, `ForwardMatrix` (`CameraCalibration` and `AnalogBalance` now read, with D2) | `linear_dng.rs` | Small casts; uncropped edges | Yes | M |
@@ -587,6 +587,132 @@ above. They are all fields of `libraw_data_t` already in memory after `open_file
 - Mobile pickers: [WebKit bug 303803](https://bugs.webkit.org/show_bug.cgi?id=303803), [WebKit bug 292350](https://bugs.webkit.org/show_bug.cgi?id=292350), [Apple forums 743037](https://developer.apple.com/forums/thread/743037), [Android photo picker and location](https://www.androidauthority.com/android-photo-picker-location-3683074/).
 - LibRaw in the browser: [@colorhythm/libraw-wasm](https://github.com/colorhythm/libraw-wasm).
 - EXIF in Rust: [kamadak-exif](https://www.lib.rs/crates/kamadak-exif).
+## D1, closed unverifiable — 2026-10-28
+
+The change was written and is almost certainly right: DNG's `BlackLevelRepeatDim` states a repeat, mapping it
+per CFA position is what the specification says and what LibRaw's own `adjust_bl` does for a 2×2, and the mean
+it replaces is off by up to half the spread — in the shadows, where it shows.
+
+It is closed anyway, because **nothing in this library can exercise it**, and that was established rather than
+assumed. All 8,149 DNGs were inventoried and resolved to the cameras that wrote them; one file per model was
+then read **group-qualified**, with the real CFA image identified by its width, to avoid the preview sub-IFD
+that produced an earlier false positive:
+
+| camera | raw-IFD `BlackLevel` | repeat | CFA width |
+|---|---|---|---|
+| Fujifilm X100F | `1023` ×36 | 6×6 | 6048 |
+| Canon EOS M3 | `2048` ×4 | 2×2 | 6096 |
+| Nikon D7000 | `0` | 1×1 | 4948 |
+| Huawei VTR-L09 | `0` ×4 | 2×2 | 3968 (IFD0) |
+| Huawei ELE-L04 | `256` ×4 | 2×2 | 7296 (IFD0) |
+| Nikon D3200 | `0` | 1×1 | 6034 |
+
+Every one uniform, and there is no Leica, Pentax or Ricoh DNG — no other maker's at all. So "a file with a
+genuinely uneven raw-IFD pattern is wanted before this is called proven" has no end condition here: not now,
+and not by looking harder.
+
+Holding an unverifiable change indefinitely costs more than it protects — it keeps a branch alive, and the
+code drifts from the line around it. The reasoning is kept here instead, and the implementation stays in
+history at `7b894b5`.
+
+**What would reopen it:** one file with an uneven raw-IFD black pattern. A published sample is enough, since
+the check is byte-level rather than aesthetic — render it before and after and compare the shadows. If that
+file ever turns up, the revert is a revert.
+
+## D5, measured and left as is — 2026-10-29
+
+The gate was written, the discrepancy was measured, and the owner's call on the comparison is to **keep both
+sides as they are** and let the Markesteijn port close the gap from the better end rather than close it now
+from the worse one. Pull request #46 is closed; the implementation stays in history on branch
+`xtrans-highlight-gate`.
+
+### What was measured
+
+All 13,194 Fuji RAFs in the library were screened by the blown share of each file's embedded preview, then
+confirmed on the sensor with `sidecar-dev levels` — the preview clips well before the sensor, so the screen
+only narrows the field. Seven frames were taken spanning **4 % to 23 % of raw samples genuinely clipped** and
+rendered through `sidecar-dev ingest` — the same `Ingest::proxy` → `DevelopPass` path the editor uses — with
+reconstruction on and gated off.
+
+**As shot the two are the same picture.** On the most clipped of the seven, 20 pixels of 1,710,400 differ;
+RMSE 1.3 × 10⁻⁵. Everything the pyramid does lives above display white, so none of it is visible until
+something pulls the highlights back down.
+
+Once something does, the difference is large and scales cleanly with the clipped fraction (1200 px renders,
+956,400 pixels each):
+
+| frame | raw clipped | Exposure −2 EV | Highlights −100 |
+|---|---|---|---|
+| `DSCF0554` | 4.0 % | 71,463 px · RMSE 0.032 | 68,128 px · 0.0052 |
+| `DSCF9863` | 5.2 % | 74,286 px · 0.047 | 72,826 px · 0.0069 |
+| `1105` | 6.1 % | 100,330 px · 0.048 | 96,623 px · 0.0074 |
+| `DSCF1987` | 9.2 % | 140,167 px · 0.061 | 137,868 px · 0.0092 |
+| `DSCF1990` | 11.6 % | 181,565 px · 0.068 | 178,830 px · 0.0104 |
+| `0729` | 12.7 % | 189,205 px · 0.071 | 184,551 px · 0.0107 |
+| `DSCF0492` | 23.2 % | 349,645 px · 0.093 | 343,663 px · 0.0141 |
+
+7 % to 37 % of the frame, monotone in the clipped fraction across all seven files. The X-Trans pyramid costs
+**13 ms of a 116 ms GPU ingest** (4 runs each, 6032 × 4028 → 1600 px: 115/116/117/117 ms with it,
+103/103/103/102 ms without), so performance argues neither way. X-Trans is **13,194 of 97,608 raw files**
+here, 13.5 %.
+
+### Why it is left
+
+The discrepancy is real and not a corner case, but gating the proxy off fixes it at the worse end: it would
+take recovery away from Fuji while Bayer keeps it, trading the preview-versus-export split for a split
+between sensor families. The export-side fix — the shared front half on the GPU, the reconstructed CFA read
+back, LibRaw doing only the Markesteijn demosaic — closes it at the better end, and the Markesteijn port
+should carry it.
+
+That is conditional on reconstruction being worth having at all, which this measurement does **not** settle:
+it shows the two renderings differ, not that the reconstructed one is better. Nothing on record yet shows it
+makes a picture better. Against it: Recovery defaults to 0 because the feature proved problematic; on
+`_D5N3075.NEF` it did measurably worse than simply pulling the highlights down; and it produced D14's NaN.
+The decisive test is `sidecar-dev hilite-truth` — take an unclipped frame, clip it artificially by raising its
+mosaic some stops, reconstruct, and compare against the frame's own known values. If reconstruction cannot
+recover what was demonstrably there, D5 resolves by deletion rather than by either fix.
+
+Note also that #47 narrowed the ground under this: reconstruction no longer fires on highlights that were
+never clipped, and `any_saturated` skips the pass entirely on the 46 % of frames that saturate nowhere.
+
+**What would reopen it:** the Markesteijn port, which should carry the fix; or an export that visibly
+contradicts its own preview badly enough to be reported as a bug in its own right.
+
+### What the owner saw, and what it was — 2026-10-30
+
+Looking at the A/B, the owner reported two things: a **magenta/pink cast** in blown areas, and **highlight
+edges going visibly grey** "instead of just blending in with some discolouration". They are two independent
+mechanisms, and only one of them is on the shipping path.
+
+**The magenta is the gate's.** Pulling Highlights down extends the white point — `highlight_reach_ev`, 2 EV
+at −100 — which is what brings above-white data into the picture, so the deep end of that slider is exactly
+where a cast can surface. Sweeping it on `d5_23pc_DSCF0492`, measuring the green deficit
+(`(R+B)/2 − G`, 8-bit) over a blown crop:
+
+| Highlights | `main` | gated (#46) |
+|---|---|---|
+| 0 | 0 | 0 |
+| −50 | 0 | 0 |
+| −75 | 0 | 3 |
+| −90 | 0 | 7 |
+| −95 | 0 | 9 |
+| −100 | 1 | 11 |
+
+Green clips first on this sensor; the pyramid is what holds it up. With the pyramid gated off and the bleach
+also off, so nothing neutralises, the same crop reads R 250 **G 197** B 254 against R 245 **G 234** B 254 with
+the pyramid on — a 37-level collapse in green. So reconstruction is not merely accurate here (§ the
+ground-truth runs); it is what keeps a blown highlight from going magenta as the Highlights slider reaches
+into it. That is a second, independent argument for the D5 decision, and it came from the owner's eye before
+it was measured.
+
+**The greying is `highlight_bleach`**, default 1.0, which fades chroma to neutral over the last stop before
+white, and runs whether or not reconstruction does. It is not subtle: switching it off changes 1.68 M of
+2.7 M pixels on this frame, and the near-white band goes from R 250 G 249 B 251 to R 245 G 234 B 254. It
+exists to kill "a coloured band beside anything that reached white" (DESIGN, `Tone::highlight_bleach`), and
+the owner's complaint is that it overshoots — a blown edge should blend with some discolouration rather than
+turn neutral. **Open**, and the one real item of the two.
+
+Note `highlight_blend` ("Highlight recovery") is **0** for a new edit and is implicated in neither.
 
 ## The slider that outlived its problem — 2026-10-30
 

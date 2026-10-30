@@ -7,21 +7,23 @@ Source: the architecture plan (PWA entry, XMP sidecars, server-side demosaic, We
 
 Where the code differs from the text below, the code and these notes win.
 
-- **D1 and D5 are held on their own branch** (`xtrans-highlight-gate`, pull request #46), not in this line.
-  The owner's rule, 2026-10-27: what is merged and deployed should be what has been tested, so a change that
-  is written but not demonstrated waits there rather than riding along.
-  - **D5** gates highlight reconstruction off for X-Trans proxies, so the preview clips where
-    `export::full_source` already clips. It waits on the owner's re-evaluation of whether highlight
-    reconstruction earns its place at all. Recovery already defaults to 0 because the feature has proven
-    problematic, and on `_D5N3075.NEF` it does measurably worse than simply pulling the highlights down. That
-    branch has the measurement on a blown X-Trans frame.
-  - **D1** maps the black level's repeat pattern per CFA position instead of averaging it, which is what DNG's
-    `BlackLevelRepeatDim` means and what LibRaw's own `adjust_bl` does for a 2×2. Nothing here exercises it:
-    every camera model in the owner's library writes a uniform black in the raw IFD, so the change is
-    byte-identical on every file to hand and unproven on the files it is for.
+- **D1 and D5 are both closed, neither merged** (pull request #46, closed 2026-10-29). The owner's rule,
+  2026-10-27: what is merged and deployed should be what has been tested. Both were written, and neither
+  earned its way in.
+  - **D5** would have gated highlight reconstruction off for X-Trans proxies, so the preview clipped where
+    `export::full_source` already clips. The discrepancy was measured across seven frames spanning 4 % to
+    23 % raw clipping: identical as shot (20 pixels of 1,710,400), then 7 % to 37 % of the frame once
+    Exposure or Highlights comes down. Left as it is because gating the proxy fixes that at the worse end —
+    Fuji would lose recovery that Bayer keeps — while the Markesteijn port can fix it at the better end by
+    letting the export share the pass. See `docs/research/pipeline-review-2026-10.md`, "D5, measured and
+    left as is".
+  - **D1** maps the black level's repeat pattern per CFA position instead of averaging it, which is what
+    DNG's `BlackLevelRepeatDim` means and what LibRaw's own `adjust_bl` does for a 2×2. Closed unverifiable:
+    all 8,149 DNGs in the library were inventoried and every camera writes a uniform raw-IFD black, so the
+    evidence it was waiting for has no end condition here. One file with an uneven pattern reopens it.
 
-  Because both left, this line's `INGEST_GENERATION` stays at **5** — not one cached proxy or focus mask is
-  invalidated by anything in it.
+  Because neither landed, this line's `INGEST_GENERATION` stays at **5** — not one cached proxy or focus
+  mask is invalidated by anything in it.
 
 - **The decode review's stage 1: three guards and a recovery, no pixel changed**
   (docs/research/pipeline-review-2026-10.md §9). **D4:** `RawFile::mosaic()` refuses levels that cannot
