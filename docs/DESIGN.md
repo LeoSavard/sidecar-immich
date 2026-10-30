@@ -122,10 +122,15 @@ Where the code differs from the text below, the code and these notes win.
   phone's colour model equals it to the last digit (proxies within the two JPEG decoders' 0.9 %); an sRGB
   `R98` file, a file with an ICC profile and an unmarked one stay as they were.
 
-- **Highlight recovery starts at 0.** `Exposure::highlight_blend` defaults to 0 for a new edit (the slider's
-  reset too): against ground truth the blend only adds colour error now that the fill keeps measured colour
-  (the review's §3). No `PROCESS_VERSION` bump: every stored edit carries the field, so an existing edit keeps
-  its 0.5; a test holds that.
+- **Highlight recovery is retired as a control** (2026-10-30). `Exposure::highlight_blend` had defaulted to 0
+  for a new edit; now nothing in the interface can set it. It existed to hide the magenta cast a clipped
+  highlight leaves, and the highlight pyramid prevents that cast rather than covering it: swept across the
+  Highlights slider on a 23 %-clipped frame the green deficit stays within one 8-bit level, where gating the
+  pyramid off reaches eleven (the review, "The slider that outlived its problem"). Against ground truth the
+  blend only adds colour error besides. The field and the shader path stay, so an edit that stored 0.5 renders
+  exactly as it did — every stored edit carries the field, so no `PROCESS_VERSION` bump and no migration; a
+  test holds that. If reconstruction is ever gated off (D5) the cast returns, and the control comes back with
+  that change.
 
 - **A half-float view canvas on deeper displays** (`canvasFormat` in `web/src/lib/gpu/view.ts`). Where the
   display reports 10 bits a channel or HDR (`(min-color: 10)`, `(dynamic-range: high)`), the canvas is
@@ -1053,7 +1058,7 @@ Module functions take their values as arguments and never read the uniform buffe
    pixels across there, leaves out pixels the ingest flagged as clipped, and sets the temperature and tint under
    which that average is grey. Needs WebGPU (the source lives on the GPU); without it the button is hidden.
 2. **Exposure.** `2^EV`, computed on the CPU. Values above 1.0 pass through untouched.
-   **Highlight blend.** Where alpha > 0, blend toward the pixel's luminance-preserving neutral by `alpha × strength`, suppressing the magenta cast WB multipliers put on reconstructed highlights. Since the bounded highlight fill (build log) there is no such cast to suppress and the blend only adds colour error, so a new edit starts at strength 0 ("Highlight recovery" 0 %); an existing edit keeps the 0.5 it stored.
+   **Highlight blend.** Where alpha > 0, blend toward the pixel's luminance-preserving neutral by `alpha × strength`, suppressing the magenta cast WB multipliers put on reconstructed highlights. Since the bounded highlight fill (build log) there is no such cast to suppress and the blend only adds colour error, so strength is 0 and **no control sets it** (build log, 2026-10-30); an existing edit keeps the 0.5 it stored and renders as it did.
 3. **Color space.** Camera → XYZ (inverse of the interpolated XYZ → camera matrix, normalized so camera white lands on D65) then XYZ → Rec.2020, recomputed whenever WB changes. Gamut compression (distance-based, in the style of the ACES reference gamut compression) keeps saturated lights from producing negative channels.
 #### Highlights, and what it can reach
 
@@ -1093,7 +1098,7 @@ only engages once exposure is positive (knee `1 − 0.3·EV`, floor 0.4) → lev
 and Whites (±0.2) → a power S-curve through encoded middle grey for Contrast (exponent = the stored
 contrast) → the same user-curve LUT → `rgb × Y′ / Y`, with black lifted to neutral grey. The stored fields
 are the RAW ones (`whiteEv`, `blackEv`, `contrast`), read through the slider mapping, so the editor and the
-sidecar format need no second meaning; the editor limits Exposure to ±2 EV and hides Highlight recovery.
+sidecar format need no second meaning; the editor limits Exposure to ±2 EV.
 Whites is read as the difference from `tone.whiteZeroEv`, the white point the edit was made against, rather
 than from today's constant — a developed file has no white point to place, so its Whites would otherwise move
 whenever the RAW default did. `baselineEv` is a RAW's alone and is not applied here at all.

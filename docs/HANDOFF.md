@@ -99,8 +99,9 @@ record's §10).
 **Before those, on the owner's word, three more on the same branch** (DESIGN.md's build log has each):
 - **D11:** a camera's Adobe RGB JPEG, marked only in EXIF, decodes in Adobe RGB on the server and on the phone
   (`INGEST_GENERATION` 5, `META_REVISION` 2, so cached metadata and proxies are read again once).
-- **Highlight recovery starts at 0** for new edits; existing edits keep the 0.5 they stored, with no
-  `PROCESS_VERSION` bump (the review's §3 says why none is needed).
+- **Highlight recovery is gone as a control** (2026-10-30): the pyramid prevents the magenta cast the blend
+  was covering, so the slider answered a problem the shipped app no longer has. The field and the shader path
+  stay, so an edit that stored 0.5 renders as it did — no `PROCESS_VERSION` bump, no migration.
 - **A half-float view canvas** where the display reports more than 8 bits a channel, with the dither scaled to
   a 10-bit step; `?canvas=8` / `?canvas=16` compares the two. It can't be checked headless (Chromium can't present
   a WebGPU canvas there). On the owner's iPhone it has made no difference they have noticed, which an already
@@ -135,7 +136,15 @@ what a filesystem *editor* needs. The filesystem flavour itself stays, for use c
 an editor, never a second library. #28 (`find_by_name`, searching a folder library) was closed under that
 decision; its branch keeps the code and its six tests.
 
-**As of 2026-10-29 there are no open pull requests.** #45 (the two fixes after #44, the six interface items
+**As of 2026-10-30 two pull requests are open.** **#50** retires the Highlight recovery slider: it existed to
+suppress the magenta cast on a clipped highlight, and the pyramid now prevents that cast rather than covering
+it, so the control answered a problem the shipped app no longer has (the review, "The slider that outlived
+its problem"). The field and the shader path stay, so an edit that stored 0.5 renders as it did. **#51** fixes
+the autofocus marker swallowing every tap aimed at it — a 28 px button over the middle of the frame that made
+the eyedropper, tap-to-focus and the measure probe do nothing, silently, and had been failing `editor-smoke`
+for some time.
+
+#45 (the two fixes after #44, the six interface items
 from the owner's answers, the decode review's stage 1 — D4, D12 and `device.lost` recovery — the histogram
 that defines where a channel saturates, and `sidecar-dev levels`), #47 (that histogram wired in, plus the
 skip gate that drops the highlight pass on a frame that lost nothing) and #48 (the camera's embedded JPEG

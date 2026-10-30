@@ -111,7 +111,6 @@ try {
 		await set('shadows', 25);
 		await set('whites', 10);
 		await set('blacks', -5);
-		await set('hl-blend', 70);
 	});
 	await step('film', async () => {
 		await section('Film');
