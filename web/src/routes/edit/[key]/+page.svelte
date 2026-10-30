@@ -834,7 +834,6 @@
 	 * clipped pixels left out) becomes the neutral the temperature and tint are solved for.
 	 */
 	async function pickWhite(e: PointerEvent) {
-		pickingWhite = false;
 		const proxy = develop?.proxy;
 		const p = screenToSource(px(e));
 		if (!p || !proxy || !packer || !meta || p.some((v) => v < 0 || v > 1)) return;
@@ -844,11 +843,14 @@
 		const perCanvasPx = outW / imageRect().w;
 		const radius = Math.min(16, Math.max(1, Math.round(4 * devicePixelRatio * perCanvasPx)));
 		const rgb = await develop.sampleSource(p, radius);
+		// Stay armed when the spot is no good: the message asks for another one, so taking the tool away would
+		// make that impossible without reaching for the button again.
 		if (!rgb || rgb.some((v) => v <= 0)) {
 			status = rgb ? 'That spot has no colour to balance. Pick a grey with some light in it.' : 'That spot is clipped. Pick a grey that isn\'t.';
 			setTimeout(() => (status = ''), 3000);
 			return;
 		}
+		pickingWhite = false;
 		const wb = packer.whiteFromNeutral(cameraColor(), rgb);
 		const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, Math.round(v)));
 		update((ed) => {
@@ -1945,9 +1947,12 @@
 			<div class="pointer-events-none absolute rounded-full border border-white/80 shadow-[0_0_0_1px_rgba(0,0,0,0.5)]" style="left: {brushCursor.x - brushCursor.r}px; top: {brushCursor.y - brushCursor.r}px; width: {brushCursor.r * 2}px; height: {brushCursor.r * 2}px;"></div>
 		{/if}
 		{#if markerPos && showAfPoint}
+			<!-- While a tool is armed the marker steps aside: it is 28 px over the autofocus point, which on most
+			     cameras is the middle of the frame, and that is exactly where someone aims to sample a neutral.
+			     As a button it swallowed the tap, leaving the tool armed and nothing happening. -->
 			<button
 				type="button"
-				class="absolute h-7 w-7 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-[#fadb26] shadow-[0_0_0_1px_rgba(0,0,0,0.4)]"
+				class="absolute h-7 w-7 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-[#fadb26] shadow-[0_0_0_1px_rgba(0,0,0,0.4)] {pickingWhite || pickingFocus || probing ? 'pointer-events-none' : ''}"
 				style="left: {markerPos.x}px; top: {markerPos.y}px;"
 				aria-label="Autofocus point — tap to check in the loupe"
 				onclick={jumpToAfPoint}
