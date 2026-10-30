@@ -677,3 +677,39 @@ never clipped, and `any_saturated` skips the pass entirely on the 46 % of frames
 
 **What would reopen it:** the Markesteijn port, which should carry the fix; or an export that visibly
 contradicts its own preview badly enough to be reported as a bug in its own right.
+
+### What the owner saw, and what it was — 2026-10-30
+
+Looking at the A/B, the owner reported two things: a **magenta/pink cast** in blown areas, and **highlight
+edges going visibly grey** "instead of just blending in with some discolouration". They are two independent
+mechanisms, and only one of them is on the shipping path.
+
+**The magenta is the gate's.** Pulling Highlights down extends the white point — `highlight_reach_ev`, 2 EV
+at −100 — which is what brings above-white data into the picture, so the deep end of that slider is exactly
+where a cast can surface. Sweeping it on `d5_23pc_DSCF0492`, measuring the green deficit
+(`(R+B)/2 − G`, 8-bit) over a blown crop:
+
+| Highlights | `main` | gated (#46) |
+|---|---|---|
+| 0 | 0 | 0 |
+| −50 | 0 | 0 |
+| −75 | 0 | 3 |
+| −90 | 0 | 7 |
+| −95 | 0 | 9 |
+| −100 | 1 | 11 |
+
+Green clips first on this sensor; the pyramid is what holds it up. With the pyramid gated off and the bleach
+also off, so nothing neutralises, the same crop reads R 250 **G 197** B 254 against R 245 **G 234** B 254 with
+the pyramid on — a 37-level collapse in green. So reconstruction is not merely accurate here (§ the
+ground-truth runs); it is what keeps a blown highlight from going magenta as the Highlights slider reaches
+into it. That is a second, independent argument for the D5 decision, and it came from the owner's eye before
+it was measured.
+
+**The greying is `highlight_bleach`**, default 1.0, which fades chroma to neutral over the last stop before
+white, and runs whether or not reconstruction does. It is not subtle: switching it off changes 1.68 M of
+2.7 M pixels on this frame, and the near-white band goes from R 250 G 249 B 251 to R 245 G 234 B 254. It
+exists to kill "a coloured band beside anything that reached white" (DESIGN, `Tone::highlight_bleach`), and
+the owner's complaint is that it overshoots — a blown edge should blend with some discolouration rather than
+turn neutral. **Open**, and the one real item of the two.
+
+Note `highlight_blend` ("Highlight recovery") is **0** for a new edit and is implicated in neither.
