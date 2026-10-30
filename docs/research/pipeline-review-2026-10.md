@@ -587,3 +587,37 @@ above. They are all fields of `libraw_data_t` already in memory after `open_file
 - Mobile pickers: [WebKit bug 303803](https://bugs.webkit.org/show_bug.cgi?id=303803), [WebKit bug 292350](https://bugs.webkit.org/show_bug.cgi?id=292350), [Apple forums 743037](https://developer.apple.com/forums/thread/743037), [Android photo picker and location](https://www.androidauthority.com/android-photo-picker-location-3683074/).
 - LibRaw in the browser: [@colorhythm/libraw-wasm](https://github.com/colorhythm/libraw-wasm).
 - EXIF in Rust: [kamadak-exif](https://www.lib.rs/crates/kamadak-exif).
+
+## The slider that outlived its problem — 2026-10-30
+
+"Highlight recovery" (`Exposure::highlight_blend`, `hl_strength` in `exposure.wgsl`) is removed from the
+interface. The field stays and the shader still reads it, so an edit that stored 0.5 renders exactly as it
+did; nothing in the editor can set it, and a new edit is 0 as it already was.
+
+It was added to suppress the magenta cast white-balance multipliers leave on a clipped highlight. The
+question the owner put was whether that cast still exists. It does not, on the shipped path — the highlight
+pyramid prevents it rather than covering it. Pulling the Highlights slider down extends the white point
+(`highlight_reach_ev`, 2 EV at −100), which is what brings above-white data into the picture, so the deep end
+of that slider is where such a cast would show. Swept on `d5_23pc_DSCF0492` (23 % of raw samples clipped),
+green deficit `(R+B)/2 − G` over a blown crop, 8-bit:
+
+| Highlights | reconstruction on (shipped) | reconstruction gated off |
+|---|---|---|
+| 0 | 0 | 0 |
+| −50 | 0 | 0 |
+| −75 | 0 | 3 |
+| −90 | 0 | 7 |
+| −95 | 0 | 9 |
+| −100 | 1 | 11 |
+
+Green clips first on this sensor, and the pyramid is what holds it up: with the pyramid gated off and
+`highlight_bleach` also off, so nothing neutralises, the same crop reads R 250 **G 197** B 254 against
+R 245 **G 234** B 254 with the pyramid on.
+
+So the blend has nothing left to suppress, and the ground-truth runs show it is not harmless: on a blown core
+it takes the pyramid's own chromaticity error from 0.0046 to 0.0620 at +2 EV, a factor of thirteen. A control
+that can only make an accurate reconstruction worse, against a cast that no longer occurs, is one the editor
+is better without.
+
+**What would bring it back:** gating highlight reconstruction off (D5). The cast returns with that change,
+and this is the control that answers it — it belongs with that change rather than ahead of it.

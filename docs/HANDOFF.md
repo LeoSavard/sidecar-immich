@@ -99,8 +99,9 @@ record's §10).
 **Before those, on the owner's word, three more on the same branch** (DESIGN.md's build log has each):
 - **D11:** a camera's Adobe RGB JPEG, marked only in EXIF, decodes in Adobe RGB on the server and on the phone
   (`INGEST_GENERATION` 5, `META_REVISION` 2, so cached metadata and proxies are read again once).
-- **Highlight recovery starts at 0** for new edits; existing edits keep the 0.5 they stored, with no
-  `PROCESS_VERSION` bump (the review's §3 says why none is needed).
+- **Highlight recovery is gone as a control** (2026-10-30): the pyramid prevents the magenta cast the blend
+  was covering, so the slider answered a problem the shipped app no longer has. The field and the shader path
+  stay, so an edit that stored 0.5 renders as it did — no `PROCESS_VERSION` bump, no migration.
 - **A half-float view canvas** where the display reports more than 8 bits a channel, with the dither scaled to
   a 10-bit step; `?canvas=8` / `?canvas=16` compares the two. It can't be checked headless (Chromium can't present
   a WebGPU canvas there). On the owner's iPhone it has made no difference they have noticed, which an already

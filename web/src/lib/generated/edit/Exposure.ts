@@ -14,10 +14,17 @@ export type Exposure = { ev: number,
 baselineEv: number, 
 /**
  * "Highlight recovery": how far a sensor-clipped pixel moves toward a neutral of its own level, by its
- * clip coverage (`highlight_blend` in `exposure.wgsl`). **0 for a new edit**: it was added to hide the cast
- * the old highlight fill left, and against ground truth it now only adds colour error, on the order of 0.06
- * → 0.22 in a blown core (docs/research/pipeline-review-2026-10.md §3). An existing edit keeps the 0.5 it
- * was approved with without a migration, because every stored edit carries the field: the history's root
- * holds the complete parameters and `sc:Edit` the complete current edit.
+ * clip coverage (`highlight_blend` in `exposure.wgsl`). **No longer a control** (2026-10-30, the owner's
+ * call): it was added to hide the magenta cast that a clipped highlight leaves, and the highlight pyramid
+ * now prevents that cast rather than covering it — swept across the Highlights slider on a 23 %-clipped
+ * frame, the green deficit stays within one 8-bit level, where gating the pyramid off reaches eleven
+ * (docs/research/pipeline-review-2026-10.md, "The slider that outlived its problem"). Against ground
+ * truth it only adds colour error, on the order of 0.06 → 0.22 in a blown core.
+ *
+ * The field stays, and the shader still reads it, so that **an edit which stored 0.5 renders exactly as
+ * it did** — every stored edit carries the field, the history's root holding the complete parameters and
+ * `sc:Edit` the complete current edit, so no migration is involved. It is 0 for a new edit and nothing in
+ * the interface can set it. If highlight reconstruction is ever gated off (D5), the cast returns and this
+ * is the control that answers it; it comes back with that change, not before.
  */
 highlightBlend: number, };
