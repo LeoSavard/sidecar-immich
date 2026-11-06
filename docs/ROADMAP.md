@@ -307,9 +307,7 @@ flight at a time and changes arriving mid-render coalesce into a single follow-u
 not one per frame. The colour packer is wasm, so the white-balance readout and the curve stay live without a
 GPU. The loupe and export already ran on the server and are unaffected.
 
-What's hidden in fallback, because it lives in the view shader rather than the develop pass: the histogram,
-the clipping overlays, focus peaking and the AF marker. Moving those server-side would mean returning the
-histogram alongside the JPEG and drawing the overlays into it.
+**The histogram and overlays in fallback — done** (2026-11-06; DESIGN.md build log, "The histogram and overlays without WebGPU"): the server's preview returns `histogram.wgsl`'s counts in `x-histogram` and paints highlight and shadow clipping and focus peaking in, as the view pass would. Still hidden in fallback: the AF marker, the Measure readout and the loupe overlay, which need the picture's geometry on this side.
 
 **Wide gamut and HDR.** These are separate: Rec.2020 is a gamut, HDR is a transfer function plus headroom.
 

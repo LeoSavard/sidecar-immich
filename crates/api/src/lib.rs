@@ -1051,7 +1051,13 @@ pub(crate) async fn relay(resp: reqwest::Result<reqwest::Response>) -> Response 
         }
     };
     let mut out = Response::builder().status(resp.status().as_u16());
-    for name in ["content-type", "x-width", "x-height", "x-process-version"] {
+    for name in [
+        "content-type",
+        "x-width",
+        "x-height",
+        "x-process-version",
+        "x-histogram",
+    ] {
         if let Some(v) = resp.headers().get(name) {
             out = out.header(name, v.as_bytes());
         }
@@ -1626,6 +1632,9 @@ struct PreviewBody {
     #[serde(default)]
     color_space: sidecar_color::DisplaySpace,
     long_edge: Option<u32>,
+    /// Overlays the worker paints in, as the view would draw them (`sidecar_worker::overlays`).
+    #[serde(default)]
+    overlays: u32,
 }
 
 /// `POST /api/assets/{key}/preview` — the whole photo developed on the server, as JPEG, for browsers that
@@ -1639,7 +1648,7 @@ async fn preview(
     let Some(rec) = asset_for(&app, &user, &key).await else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let req = serde_json::json!({ "key": key, "path": rec.path, "edit": body.edit, "colorSpace": body.color_space, "longEdge": body.long_edge });
+    let req = serde_json::json!({ "key": key, "path": rec.path, "edit": body.edit, "colorSpace": body.color_space, "longEdge": body.long_edge, "overlays": body.overlays });
     relay(
         app.http
             .post(app.worker("/v1/preview"))
