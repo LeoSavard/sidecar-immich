@@ -167,6 +167,7 @@ export function describeChanges(from: EditParams, to: EditParams): string[] {
 	if (!!from.lens !== !!to.lens) out.push(to.lens ? 'Lens correction on' : 'Lens correction off');
 	else if (from.lens && to.lens && JSON.stringify(from.lens) !== JSON.stringify(to.lens)) out.push('Lens correction adjusted');
 	out.push(...describeMasks(from.masks ?? [], to.masks ?? []));
+	if ((from.cameraProfile ?? null) !== (to.cameraProfile ?? null)) out.push(to.cameraProfile ? "The file's camera profile" : 'Camera matrix');
 	return out;
 }
 
@@ -234,7 +235,15 @@ export const PICKS: { id: string; label: string; take: (into: EditParams, from: 
 			else delete e.geometry;
 		}
 	},
-	{ id: 'wb', label: 'White balance', take: (e, f) => (e.whiteBalance = structuredClone(f.whiteBalance)) },
+	{
+		id: 'wb',
+		label: 'White balance',
+		take: (e, f) => {
+			e.whiteBalance = structuredClone(f.whiteBalance);
+			if (f.cameraProfile) e.cameraProfile = f.cameraProfile;
+			else delete e.cameraProfile;
+		}
+	},
 	{
 		id: 'light',
 		label: 'Light',

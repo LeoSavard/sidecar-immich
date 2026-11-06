@@ -356,6 +356,7 @@ pub fn masks_for<'a>(
         curves: &packed.mask_curves,
         mono: &packed.mono_lut,
         density: None,
+        profile: packed.profile.as_ref(),
         slide_exposure: &packed.slide_exposure,
         slide_response,
     }

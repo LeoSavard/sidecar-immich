@@ -4,6 +4,7 @@
 
 pub mod camera;
 pub mod cct;
+pub mod dcp;
 pub mod depth;
 pub mod developer;
 mod film_data;
@@ -34,6 +35,7 @@ mod uniforms {
                 R::of::<crate::params::DevelopParams>(),
                 R::of::<crate::params::MaskLayer>(),
                 R::of::<crate::params::MaskParams>(),
+                R::of::<crate::params::ProfileParams>(),
                 R::of::<crate::params::EdgeParams>(),
                 R::of::<crate::depth::DepthParams>(),
                 R::of::<crate::depth::DepthRefineParams>(),
