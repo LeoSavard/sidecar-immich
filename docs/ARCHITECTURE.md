@@ -155,18 +155,13 @@ The global Saturation slider (PR #4: one commit for the core, one for the UI) is
 
 ### Traps that cost a session
 
-- **A new `shaders/client/*.wgsl` must be added to `WEB_ENTRIES`** (`crates/shaders/src/lib.rs`). Nothing else
-  points at it: the browser's copy is generated from that list, so without the entry `npm run generate` writes
-  no file, the Vite build fails on an unresolved import — and naga never validates the shader either, because
-  that test walks the same list.
-- **A wasm request struct needs `#[serde(rename_all = "camelCase")]`.** The browser sends camelCase; a field
-  named `slide_profile` with `#[serde(default)]` and no rename silently reads as absent, so the feature just
-  does nothing, everywhere, with no error. They now also carry `deny_unknown_fields`, which turns the next
-  such mistake into a parse error instead of a quiet default. This was invisible to every test: parity feeds
-  the browser fixture uniforms and never calls the packer.
-- **Changing `sidecar-color` or any shader means `npm run generate`** before the browser sees it. The wasm and
-  the composed WGSL are build products; `npm run check` passes against stale ones, and the editor then runs
-  old code against new TypeScript. `./dev/serve` regenerates on start, `npm run build` does not.
+- **Three traps that used to be silent are now loud** (V2's A3, 2026-11-05), recorded so nobody undoes them:
+  every file in `shaders/client/` is a browser entry because it is in that directory (`build.rs` lists it;
+  only the ingest passes the browser also runs are kept by hand, in `WEB_INGEST`); every wasm request struct
+  carries `#[serde(rename_all = "camelCase", deny_unknown_fields)]`, and a test in `sidecar-color-wasm`
+  fails on one that doesn't — without it a two-word field silently reads as absent; and `npm run check`
+  runs `npm run generate` first, so it can no longer pass against a stale wasm or stale WGSL. `npm run build`
+  and `npm run dev` still don't regenerate (the image builds the artefacts in Rust first); `./dev/serve` does.
 - **In the editor, `developDirty = true` schedules nothing.** Work that lands in a promise — a fetch's
   `then`, a mask loading — must call `schedule(true)`, or the change only appears on the next unrelated
   interaction, which looks exactly like a broken feature.

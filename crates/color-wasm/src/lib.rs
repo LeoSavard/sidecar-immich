@@ -29,7 +29,7 @@ struct Request {
 
 /// The profile numbers the uniform needs (`slide::SlideProfile`).
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct SlideHeader {
     offsets: [f32; 3],
     scale: f32,
@@ -134,7 +134,7 @@ pub unsafe extern "C" fn sc_pack(ptr: *const u8, len: usize) -> *const u8 {
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct AdoptRequest {
     edit: EditParams,
     /// A developed file has no baseline, shoulder or bleach to take up (`adopt_current_rendering`).
@@ -165,6 +165,7 @@ pub unsafe extern "C" fn sc_adopt_rendering(ptr: *const u8, len: usize) -> *cons
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct GeometryRequest {
     geometry: sidecar_color::geometry::Geometry,
     /// The picture's size in pixels (its proportions are what matter).
@@ -211,7 +212,7 @@ pub unsafe extern "C" fn sc_geometry_fit(ptr: *const u8, len: usize) -> *const u
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct LensRequest {
     profile: sidecar_color::lens::LensProfile,
     lens: sidecar_color::params::Lens,
@@ -252,7 +253,7 @@ pub unsafe extern "C" fn sc_pack_lens(ptr: *const u8, len: usize) -> *const u8 {
 }
 
 #[derive(Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ToneCurveRequest {
     #[serde(default)]
     curve: Vec<[f64; 2]>,
@@ -291,6 +292,7 @@ pub unsafe extern "C" fn sc_tone_curve_lut(ptr: *const u8, len: usize) -> *const
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct NeutralRequest {
     camera: CameraColor,
     /// The camera RGB of the patch to make grey.
@@ -352,6 +354,7 @@ pub unsafe extern "C" fn sc_camera_color(ptr: *const u8, len: usize) -> *const u
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct DepthRequest {
     edit: EditParams,
     /// The photo's airlight, camera RGB (from the mask set).
@@ -380,6 +383,7 @@ pub unsafe extern "C" fn sc_pack_depth(ptr: *const u8, len: usize) -> *const u8 
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct EdgeRequest {
     edge: sidecar_color::params::MaskEdge,
     size: [u32; 2],
@@ -410,4 +414,32 @@ pub extern "C" fn sc_default_edit() -> *const u8 {
 #[unsafe(no_mangle)]
 pub extern "C" fn sc_last_error() -> *const u8 {
     ERROR.with(|e| e.borrow().as_ptr())
+}
+
+#[cfg(test)]
+mod tests {
+    /// The browser sends camelCase. A request struct without the rename reads a two-word field as absent, and
+    /// without `deny_unknown_fields` that is a quiet default rather than an error, so the feature does nothing
+    /// with no message anywhere. Every struct the browser's JSON lands in carries both.
+    #[test]
+    fn every_request_struct_is_camel_case_and_strict() {
+        let src = include_str!("lib.rs");
+        let lines: Vec<&str> = src.lines().collect();
+        let mut seen = 0;
+        for (i, line) in lines.iter().enumerate() {
+            if line.starts_with("#[derive(") && line.contains("Deserialize") {
+                seen += 1;
+                assert_eq!(
+                    lines[i + 1],
+                    r#"#[serde(rename_all = "camelCase", deny_unknown_fields)]"#,
+                    "the struct after line {} needs camelCase and deny_unknown_fields",
+                    i + 1
+                );
+            }
+        }
+        assert!(
+            seen >= 9,
+            "found {seen} request structs; has the source layout changed?"
+        );
+    }
 }

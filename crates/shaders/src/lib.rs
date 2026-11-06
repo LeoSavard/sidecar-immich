@@ -7,25 +7,9 @@ use anyhow::{Context, Result, bail};
 
 include!(concat!(env!("OUT_DIR"), "/files.rs"));
 
-/// Entry points that the browser needs, composed into `web/src/lib/gpu/wgsl/`.
-pub const WEB_ENTRIES: &[&str] = &[
-    "client/develop.wgsl",
-    "client/view.wgsl",
-    "client/histogram.wgsl",
-    "client/lens.wgsl",
-    "client/lens_mask.wgsl",
-    "client/brush.wgsl",
-    "client/brush_composite.wgsl",
-    "client/mask_preview.wgsl",
-    "client/depth_refine.wgsl",
-    "client/depth_down.wgsl",
-    "client/depth_gather.wgsl",
-    "client/depth_compose.wgsl",
-    "client/mask_edge.wgsl",
-    "client/density_down.wgsl",
-    "client/density_blur.wgsl",
-    // The ingest passes, for decoding a RAW in the browser (docs/MOBILE.md, stage 2): the same files the worker
-    // runs, so a phone's proxy is the server's.
+/// The ingest passes the browser runs too, for decoding a RAW there (docs/MOBILE.md, stage 2): the same files
+/// the worker runs, so a phone's proxy is the server's. Every `client/` file is an entry without being listed.
+const WEB_INGEST: &[&str] = &[
     "ingest/normalize.wgsl",
     "ingest/hilite_half.wgsl",
     "ingest/hilite_reduce.wgsl",
@@ -39,6 +23,12 @@ pub const WEB_ENTRIES: &[&str] = &[
     "ingest/downsample.wgsl",
     "ingest/resample.wgsl",
 ];
+
+/// Entry points that the browser needs, composed into `web/src/lib/gpu/wgsl/`: all of `client/`, then
+/// [`WEB_INGEST`].
+pub fn web_entries() -> impl Iterator<Item = &'static str> {
+    CLIENT_ENTRIES.iter().chain(WEB_INGEST).copied()
+}
 
 pub fn source(path: &str) -> Result<&'static str> {
     FILES
@@ -135,7 +125,7 @@ mod tests {
 
     #[test]
     fn web_entries_parse_and_validate() {
-        for entry in WEB_ENTRIES.iter().chain(SERVER_ENTRIES) {
+        for entry in web_entries().chain(SERVER_ENTRIES.iter().copied()) {
             let src = compose(entry).unwrap();
             let module = naga::front::wgsl::parse_str(&src)
                 .unwrap_or_else(|e| panic!("{entry}: {}", e.emit_to_string(&src)));
