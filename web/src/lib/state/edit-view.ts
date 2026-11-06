@@ -111,6 +111,8 @@ const CONTROLS: Control[] = [
 	{ label: 'Shadows', get: (e) => e.tone.shadows ?? 0, show: (v) => signed(v) },
 	{ label: 'Whites', get: view.whites, show: (v) => signed(v) },
 	{ label: 'Blacks', get: view.blacks, show: (v) => signed(v) },
+	{ label: 'Texture', get: (e) => e.presence?.texture ?? 0, show: (v) => signed(v) },
+	{ label: 'Clarity', get: (e) => e.presence?.clarity ?? 0, show: (v) => signed(v) },
 	{ label: 'Highlight recovery', get: view.highlightRecovery, show: (v) => `${decimals(v)} %` },
 	{ label: 'Saturation', get: (e) => e.saturation ?? 0, show: (v) => signed(v) },
 	...BANDS.flatMap((b) => FIELDS.map((f): Control => ({ label: `${cap(b)} ${f}`, get: (e) => e.mixer[b][f], show: (v) => signed(v) }))),
@@ -258,6 +260,8 @@ export const PICKS: { id: string; label: string; take: (into: EditParams, from: 
 			e.tone.blackEv = f.tone.blackEv;
 			e.tone.highlights = f.tone.highlights ?? 0;
 			e.tone.shadows = f.tone.shadows ?? 0;
+			if (f.presence) e.presence = structuredClone(f.presence);
+			else delete e.presence;
 		}
 	},
 	{

@@ -603,6 +603,11 @@ remapping buys clarity, texture, local contrast, shadow/highlight recovery and t
 guided filter buys dehaze refinement, mask feathering and better depth upsampling. Everything below is
 implementable from published papers — none of it requires reading GPL code.
 
+**The guided filter — the primitive is built** (2026-11-06, `sidecar_engine::guided`, `client/guided_*.wgsl`):
+the fast subsampled form, linear or log₂ luminance guide, checked against an f64 implementation of the paper.
+Its users come next — dehaze, the sky mask, mask edges. The depth refinement stays joint bilateral until an
+A/B on real edges says otherwise; its own comment explains why that was chosen. The original entry:
+
 **The guided filter** (He, Sun and Tang, ECCV 2010 / TPAMI 2013) is the highest-leverage single item in the
 survey: four box filters over I, p, I·p and I², then per-pixel algebra, in linear time regardless of kernel
 size, which is an ideal WGSL shape. It is edge-preserving with better behaviour near edges than the
@@ -679,7 +684,8 @@ order:
   for portrait work, since the skin, hair and face masks can constrain a source region automatically. Red-eye
   is a small adjacent tool. *Generative* fill is a trap for a self-hosted Apache-2.0 project: every
   commercial one is a paid cloud service needing an internet connection.
-- **Clarity, texture and local contrast.** Front-panel sliders everywhere; their absence is immediately
+- **Clarity, texture and local contrast — built** (2026-11-06, `EditParams::presence`; DESIGN.md's build log).
+  Front-panel sliders everywhere; their absence is immediately
   visible. Falls out of the local Laplacian or guided filter above, which is why those come first.
 - **Dehaze.** Present in all of Lightroom, darktable and RawTherapee.
 - **A scene-to-display tone transform.** This is becoming the consensus default rather than an option:
