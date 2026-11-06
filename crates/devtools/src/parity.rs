@@ -369,6 +369,16 @@ fn cases() -> Vec<Fixture> {
     };
     lens.lens.as_mut().unwrap().lateral_ca = 150.0;
 
+    // A colour range's uniformity on the first synthetic mask: hue and saturation pulled toward its centre.
+    let mut uniformity = masked.clone();
+    uniformity.masks[0].mask = sidecar_color::color_range::COLOR.into();
+    uniformity.masks[0].color = Some(sidecar_color::color_range::ColorRange {
+        hue: 40.0,
+        uniformity_hue: 80.0,
+        uniformity_saturation: 60.0,
+        ..Default::default()
+    });
+
     let mut cases: Vec<Fixture> = vec![
         (
             "as-shot-srgb".into(),
@@ -417,6 +427,14 @@ fn cases() -> Vec<Fixture> {
             lens,
             DisplaySpace::Srgb,
             Some(zv1()),
+        ),
+        (
+            "uniformity".into(),
+            nikon_d850(),
+            SourceKind::Raw,
+            uniformity,
+            DisplaySpace::Srgb,
+            None,
         ),
         (
             "masks".into(),

@@ -9,7 +9,7 @@ import { fromHalf } from '$lib/color/transfer';
 import { kernel } from './depth';
 
 /** `MaskParams` (shaders/develop/masks.wgsl), and the texture slots it describes. */
-const MASK_UNIFORM_BYTES = 1568;
+const MASK_UNIFORM_BYTES = 1696;
 const MAX_MASKS = 8;
 /** Each layer's curve: a row of this many entries. */
 const LUT = 4096;
