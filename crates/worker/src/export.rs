@@ -357,6 +357,7 @@ pub fn masks_for<'a>(
         mono: &packed.mono_lut,
         density: None,
         local: None,
+        haze: None,
         slide_exposure: &packed.slide_exposure,
         slide_response,
     }

@@ -10,6 +10,9 @@ use crate::{Gpu, RgbaF32};
 use sidecar_color::params::{DevelopParams, MAX_MASKS};
 use sidecar_color::spline::LUT_SIZE;
 
+/// Layers of develop's whole-frame maps: local contrast, Dehaze's transmission, the airlight.
+pub const MAP_LAYERS: u32 = 3;
+
 pub struct DevelopPass {
     pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
@@ -26,7 +29,10 @@ pub struct DevelopPass {
     /// what binds when there is none (1×1, RGBA32F).
     guided: crate::guided::GuidedFilter,
     local_pack: Kernel,
-    no_local: wgpu::Texture,
+    /// What the maps' binding holds when none is needed: 1×1, `MAP_LAYERS` layers of zero.
+    no_maps: wgpu::Texture,
+    /// Dehaze's passes (`crate::haze`).
+    haze: crate::haze::Haze,
 }
 
 /// What one develop takes beside its uniform and tone curve: the masks' uniforms, a texture per layer in the
@@ -43,6 +49,8 @@ pub struct Masks<'a> {
     /// Texture and Clarity's map over the whole frame (`DevelopPass::local_map`); like the adjacency map, a
     /// develop of the whole frame makes its own and a tile has to be given it.
     pub local: Option<&'a wgpu::Texture>,
+    /// Dehaze's map and airlight over the whole frame (`DevelopPass::haze_map`); the same rule.
+    pub haze: Option<(&'a wgpu::Texture, &'a wgpu::Texture)>,
     /// A spectral colour stock's two tables (`Packed::slide_exposure` and the stock profile's response table);
     /// both empty unless one is being rendered.
     pub slide_exposure: &'a [f32],
@@ -58,10 +66,17 @@ impl Masks<'_> {
             mono: &[],
             density: None,
             local: None,
+            haze: None,
             slide_exposure: &[],
             slide_response: &[],
         }
     }
+}
+
+/// Whether a develop with this uniform reads the haze map: Dehaze is not 0.
+pub fn needs_haze_map(uniform: &[u8]) -> bool {
+    let p: &DevelopParams = bytemuck::from_bytes(uniform);
+    p.local[3] != 0.0
 }
 
 /// Whether a develop with this uniform reads the local-contrast map: Texture or Clarity is on.
@@ -235,13 +250,13 @@ impl DevelopPass {
                         },
                         count: None,
                     },
-                    // Texture and Clarity's map.
+                    // The whole-frame maps (`MAP_LAYERS`): Texture and Clarity's, Dehaze's, the airlight.
                     wgpu::BindGroupLayoutEntry {
                         binding: 7,
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Texture {
                             sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                            view_dimension: wgpu::TextureViewDimension::D2,
+                            view_dimension: wgpu::TextureViewDimension::D2Array,
                             multisampled: false,
                         },
                         count: None,
@@ -367,14 +382,14 @@ impl DevelopPass {
                 B::Store(wgpu::TextureFormat::Rgba32Float),
             ],
         )?;
-        let no_local = gpu.device.create_texture_with_data(
+        let no_maps = gpu.device.create_texture_with_data(
             &gpu.queue,
             &wgpu::TextureDescriptor {
-                label: Some("no local map"),
+                label: Some("no maps"),
                 size: wgpu::Extent3d {
                     width: 1,
                     height: 1,
-                    depth_or_array_layers: 1,
+                    depth_or_array_layers: MAP_LAYERS,
                 },
                 mip_level_count: 1,
                 sample_count: 1,
@@ -384,7 +399,7 @@ impl DevelopPass {
                 view_formats: &[],
             },
             wgpu::util::TextureDataOrder::LayerMajor,
-            bytemuck::cast_slice(&[0.0f32; 4]),
+            bytemuck::cast_slice(&[0.0f32; 4 * MAP_LAYERS as usize]),
         );
         Ok(Self {
             pipeline,
@@ -397,7 +412,8 @@ impl DevelopPass {
             identity_curves,
             guided: crate::guided::GuidedFilter::new(gpu)?,
             local_pack,
-            no_local,
+            no_maps,
+            haze: crate::haze::Haze::new(gpu)?,
         })
     }
 
@@ -441,7 +457,7 @@ impl DevelopPass {
     ) -> Result<wgpu::Texture> {
         let mut own: DevelopParams = *bytemuck::from_bytes(uniform);
         own.mono[2] = 1.0;
-        // The film's exposure, without Texture and Clarity: the browser's map is made the same way.
+        // The film's exposure, without Texture, Clarity or Dehaze: the browser's map is made the same way.
         own.local = [0.0; 4];
         let mut whole = masks.params;
         whole.frame = [0.0; 4];
@@ -529,6 +545,75 @@ impl DevelopPass {
         map
     }
 
+    /// Dehaze's map for a frame `frame` pixels across from `small` (`density_source`'s), under this uniform's
+    /// white balance and camera matrix: the transmission's guided coefficients and the airlight (`crate::haze`).
+    pub fn haze_map(
+        &self,
+        gpu: &Gpu,
+        small: &wgpu::Texture,
+        frame: [u32; 2],
+        uniform: &[u8],
+    ) -> (wgpu::Texture, wgpu::Texture) {
+        let p: &DevelopParams = bytemuck::from_bytes(uniform);
+        self.haze
+            .map(gpu, &self.guided, small, frame, p.cam_to_work, p.wb_mul)
+    }
+
+    /// The whole-frame maps as develop binds them: one array of `MAP_LAYERS` (the fragment stage allows sixteen
+    /// sampled textures, and develop is at that), layer 0 the local-contrast map, 1 Dehaze's, and the airlight in
+    /// texel (0, 0) of layer 2. `None` when neither is wanted.
+    fn maps(
+        gpu: &Gpu,
+        local: Option<&wgpu::Texture>,
+        haze: Option<(&wgpu::Texture, &wgpu::Texture)>,
+    ) -> Option<wgpu::Texture> {
+        let any = local.or(haze.map(|h| h.0))?;
+        let array = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("develop maps"),
+            size: wgpu::Extent3d {
+                width: any.width(),
+                height: any.height(),
+                depth_or_array_layers: MAP_LAYERS,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let mut enc = gpu.device.create_command_encoder(&Default::default());
+        let mut copy = |from: &wgpu::Texture, layer: u32| {
+            enc.copy_texture_to_texture(
+                from.as_image_copy(),
+                wgpu::TexelCopyTextureInfo {
+                    texture: &array,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d {
+                        x: 0,
+                        y: 0,
+                        z: layer,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::Extent3d {
+                    width: from.width().min(any.width()),
+                    height: from.height().min(any.height()),
+                    depth_or_array_layers: 1,
+                },
+            );
+        };
+        if let Some(l) = local {
+            copy(l, 0);
+        }
+        if let Some((m, a)) = haze {
+            copy(m, 1);
+            copy(a, 2);
+        }
+        gpu.queue.submit([enc.finish()]);
+        Some(array)
+    }
+
     /// Develop a source texture into a new RGBA16F texture (display-linear).
     pub fn render(
         &self,
@@ -570,7 +655,19 @@ impl DevelopPass {
                     let small = self.density_source(gpu, src_tex);
                     self.local_map(gpu, &small, [src_tex.width(), src_tex.height()])
                 });
-        let local = masks.local.or(own_local.as_ref()).unwrap_or(&self.no_local);
+        let own_haze = (masks.haze.is_none()
+            && needs_haze_map(uniform)
+            && masks.params.frame[2] == 0.0)
+            .then(|| {
+                let small = self.density_source(gpu, src_tex);
+                self.haze_map(gpu, &small, [src_tex.width(), src_tex.height()], uniform)
+            });
+        let own_maps = Self::maps(
+            gpu,
+            masks.local.or(own_local.as_ref()),
+            masks.haze.or(own_haze.as_ref().map(|(m, a)| (m, a))),
+        );
+        let maps = own_maps.as_ref().unwrap_or(&self.no_maps);
         let (w, h) = (src_tex.width(), src_tex.height());
         let size = wgpu::Extent3d {
             width: w,
@@ -663,9 +760,12 @@ impl DevelopPass {
                 },
                 wgpu::BindGroupEntry {
                     binding: 7,
-                    resource: wgpu::BindingResource::TextureView(
-                        &local.create_view(&Default::default()),
-                    ),
+                    resource: wgpu::BindingResource::TextureView(&maps.create_view(
+                        &wgpu::TextureViewDescriptor {
+                            dimension: Some(wgpu::TextureViewDimension::D2Array),
+                            ..Default::default()
+                        },
+                    )),
                 },
             ],
         });
@@ -1051,6 +1151,164 @@ mod tests {
         .unwrap();
         let worst = (0..256)
             .map(|x| (at(&tile, x) - at(&clear, 1300 + x)).abs())
+            .fold(0.0, f32::max);
+        assert!(worst < 1e-3, "worst difference {worst}");
+    }
+
+    /// A scene hazed by Koschmieder's model over a depth ramp under a sky, with a known airlight: Dehaze finds the airlight,
+    /// and its develop is much nearer the haze-free scene's than the hazy one's is; −100 takes it further away; a
+    /// tile given the whole frame's map develops as that part of the whole does.
+    #[test]
+    fn dehaze_recovers_a_hazed_scene() {
+        let Ok(gpu) = crate::test_gpu() else {
+            return eprintln!("skipping: no GPU");
+        };
+        let pass = DevelopPass::new(gpu).unwrap();
+        let (w, h) = (1024u32, 512u32);
+        let air = [0.55f32, 0.6, 0.65];
+        let hash = |mut s: u64| {
+            s = s.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            (s % 10_000) as f32 / 10_000.0
+        };
+        // Coloured cells 32 px square, each with one channel near black, as outdoor scenes have (the prior).
+        let clear = |x: u32, y: u32| -> [f32; 3] {
+            let k = ((y / 32) * 64 + x / 32) as u64;
+            let mut c = [
+                0.05 + 0.4 * hash(k * 3),
+                0.05 + 0.4 * hash(k * 3 + 1),
+                0.05 + 0.4 * hash(k * 3 + 2),
+            ];
+            c[(hash(k * 7) * 3.0) as usize % 3] = 0.01;
+            c
+        };
+        // Depth grows left to right: transmission from 0.95 to 0.25.
+        let t_at = |x: u32| (-(0.05 + 1.33 * x as f32 / w as f32)).exp();
+        let image = |hazy: bool| RgbaF32 {
+            width: w,
+            height: h,
+            data: (0..w * h)
+                .flat_map(|i| {
+                    let (x, y) = (i % w, i / w);
+                    // The top eighth is sky: nothing but air, hazy or not.
+                    let t = if y < h / 8 {
+                        0.0
+                    } else if hazy {
+                        t_at(x)
+                    } else {
+                        1.0
+                    };
+                    let j = clear(x, y);
+                    [0, 1, 2]
+                        .map(|c| j[c] * t + air[c] * (1.0 - t))
+                        .into_iter()
+                        .chain([0.0])
+                        .collect::<Vec<_>>()
+                })
+                .collect(),
+        };
+        let uniform = |dehaze: f32| {
+            let mut p: DevelopParams = bytemuck::Zeroable::zeroed();
+            p.wb_mul = [1.0; 3];
+            p.exposure = 1.0;
+            p.cam_to_work = [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+            ];
+            p.work_to_disp = p.cam_to_work;
+            p.tone = [-10.0, 6.5, 7.0, 0.5];
+            p.local = [0.0, 0.0, 0.0, dehaze];
+            bytemuck::bytes_of(&p).to_vec()
+        };
+        let lut: Vec<f32> = (0..4096).map(|i| i as f32 / 4095.0).collect();
+        let (hazy, truth) = (
+            crate::upload_rgba16(gpu, &image(true)),
+            crate::upload_rgba16(gpu, &image(false)),
+        );
+        let develop = |tex: &wgpu::Texture, u: &[u8]| {
+            crate::read_rgba16(
+                gpu,
+                &pass.render(gpu, tex, u, &lut, &Masks::none()).unwrap(),
+            )
+            .unwrap()
+        };
+        let reference = develop(&truth, &uniform(0.0));
+        // Mean absolute difference from the haze-free render, away from the frame's edges.
+        let err = |img: &RgbaF32| {
+            let mut e = 0.0;
+            let mut n = 0.0;
+            for y in (40..h - 40).step_by(4) {
+                for x in (40..w - 40).step_by(4) {
+                    for c in 0..3 {
+                        let i = ((y * w + x) * 4 + c) as usize;
+                        e += (img.data[i] - reference.data[i]).abs() as f64;
+                        n += 1.0;
+                    }
+                }
+            }
+            e / n
+        };
+        let as_is = err(&develop(&hazy, &uniform(0.0)));
+        let removed = err(&develop(&hazy, &uniform(1.0)));
+        let added = err(&develop(&hazy, &uniform(-1.0)));
+        let small = pass.density_source(gpu, &hazy);
+        let (map, found) = pass.haze_map(gpu, &small, [w, h], &uniform(1.0));
+        let found = crate::read_rgba32(gpu, &found).unwrap();
+        eprintln!(
+            "airlight {:?} (truth {air:?}); error from the clear scene: hazy {as_is:.4}, dehazed {removed:.4}, doubled {added:.4}",
+            &found.data[..3]
+        );
+        for (got, want) in found.data.iter().zip(air) {
+            assert!(
+                (got / want - 1.0).abs() < 0.1,
+                "airlight {:?}",
+                &found.data[..3]
+            );
+        }
+        assert!(
+            removed < 0.5 * as_is,
+            "dehazed {removed} against hazy {as_is}"
+        );
+        assert!(added > 1.2 * as_is, "doubled {added} against hazy {as_is}");
+        // A tile at 600, 200 wide, given the whole frame's map.
+        let whole = develop(&hazy, &uniform(1.0));
+        let src = image(true);
+        let cut = RgbaF32 {
+            width: 200,
+            height: h,
+            data: (0..h)
+                .flat_map(|y| {
+                    src.data[((y * w + 600) * 4) as usize..((y * w + 800) * 4) as usize].to_vec()
+                })
+                .collect(),
+        };
+        let mut params: sidecar_color::params::MaskParams = bytemuck::Zeroable::zeroed();
+        params.frame = [600.0, 0.0, w as f32, h as f32];
+        let found_tex =
+            crate::haze::one_texel(gpu, [found.data[0], found.data[1], found.data[2], 1.0]);
+        let tile = crate::read_rgba16(
+            gpu,
+            &pass
+                .render(
+                    gpu,
+                    &crate::upload_rgba16(gpu, &cut),
+                    &uniform(1.0),
+                    &lut,
+                    &Masks {
+                        params,
+                        haze: Some((&map, &found_tex)),
+                        ..Masks::none()
+                    },
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        let at = |img: &RgbaF32, x: u32| img.data[((256 * img.width + x) * 4 + 1) as usize];
+        let worst = (0..200)
+            .map(|x| (at(&tile, x) - at(&whole, 600 + x)).abs())
             .fold(0.0, f32::max);
         assert!(worst < 1e-3, "worst difference {worst}");
     }

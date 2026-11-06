@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
-// Texture and Clarity end to end (DESIGN.md §7, "Local contrast"): Clarity raised in the editor, and the picture
-// checked in both renderers — the browser's canvas and the worker's `/preview` — for more local contrast at the
-// same overall brightness; then Clarity and Texture lowered for less; and the saved edit for its `presence`.
+// Texture, Clarity and Dehaze end to end (DESIGN.md §7, "Local contrast", "Dehaze"): Clarity raised in the editor,
+// and the picture checked in both renderers — the browser's canvas and the worker's `/preview` — for more local
+// contrast at the same overall brightness; then Clarity and Texture lowered for less; Dehaze raised for more; and
+// the saved edit for its `presence`.
 //
 //   node web/scripts/local-smoke.mjs <base-url> <photo path on the server>
 //
@@ -101,9 +102,20 @@ try {
 	check(softer.contrast < before.contrast * 0.9, `Clarity and Texture at −80 lower it (${before.contrast.toFixed(4)} → ${softer.contrast.toFixed(4)})`);
 	await set('clarity', 0);
 	await set('texture', 0);
+	// Dehaze takes the air's veil off: more local contrast in the canvas and in the worker's preview alike.
+	await set('dehaze', 80);
+	const clearer = await measure(page, await canvas.screenshot(), 'image/png');
+	console.log('dehaze', JSON.stringify(clearer));
+	check(clearer.contrast > before.contrast * 1.05, `Dehaze +80 raises the browser's local contrast (${before.contrast.toFixed(4)} → ${clearer.contrast.toFixed(4)})`);
+	await page.waitForTimeout(5500);
+	const hazeSaved = (await (await page.request.get(`${base}/api/assets/${key}/edit`)).json()).edit;
+	check(hazeSaved.presence?.dehaze === 80, `the saved edit holds it (${JSON.stringify(hazeSaved.presence)})`);
+	const workerHaze = await preview(hazeSaved);
+	check(workerHaze.contrast > workerBefore.contrast * 1.05, `the worker's preview agrees (${workerBefore.contrast.toFixed(4)} → ${workerHaze.contrast.toFixed(4)})`);
+	await set('dehaze', 0);
 	await page.waitForTimeout(5500);
 	const rest = (await (await page.request.get(`${base}/api/assets/${key}/edit`)).json()).edit;
-	check(rest.presence === undefined, `both back at 0 leaves no presence in the edit (${JSON.stringify(rest.presence)})`);
+	check(rest.presence === undefined, `all back at 0 leaves no presence in the edit (${JSON.stringify(rest.presence)})`);
 	console.log(steps.map((s) => `ok  ${s}`).join('\n'));
 } finally {
 	await browser.close();

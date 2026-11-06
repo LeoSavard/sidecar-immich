@@ -1,6 +1,6 @@
 <!-- SPDX-License-Identifier: Apache-2.0
 Light: exposure and the tone map's controls (DESIGN.md §7, modules 2 and 4), then local contrast — Texture and
-Clarity (§7, "Local contrast"). -->
+Clarity (§7, "Local contrast") and Dehaze (§7, "Dehaze"). -->
 <script lang="ts">
 	import Slider from '$lib/ui/Slider.svelte';
 	import { signed } from '$lib/ui/format';
@@ -9,11 +9,11 @@ Clarity (§7, "Local contrast"). -->
 
 	let { edit, onchange, oncommit, developed }: SectionProps & { developed: boolean } = $props();
 
-	/** Set one band; both back at 0 leaves no `presence` in the edit at all. */
-	function presence(band: 'texture' | 'clarity', v: number) {
+	/** Set one control; all three back at 0 leaves no `presence` in the edit at all. */
+	function presence(control: 'texture' | 'clarity' | 'dehaze', v: number) {
 		onchange((e) => {
-			const p = { texture: 0, clarity: 0, ...e.presence, [band]: v };
-			if (p.texture === 0 && p.clarity === 0) delete e.presence;
+			const p = { texture: 0, clarity: 0, dehaze: 0, ...e.presence, [control]: v };
+			if (p.texture === 0 && p.clarity === 0 && p.dehaze === 0) delete e.presence;
 			else e.presence = p;
 		});
 	}
@@ -29,4 +29,5 @@ Clarity (§7, "Local contrast"). -->
 	<Slider id="blacks" label="Blacks" value={sliders.blacks(edit)} min={-100} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => onchange((e) => { e.tone.blackEv = -8 - (v / 100) * 3; })} {oncommit} />
 	<Slider id="texture" label="Texture" value={edit.presence?.texture ?? 0} min={-100} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => presence('texture', v)} {oncommit} />
 	<Slider id="clarity" label="Clarity" value={edit.presence?.clarity ?? 0} min={-100} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => presence('clarity', v)} {oncommit} />
+	<Slider id="dehaze" label="Dehaze" value={edit.presence?.dehaze ?? 0} min={-100} max={100} defaultValue={0} bipolar format={(v) => signed(v)} onchange={(v) => presence('dehaze', v)} {oncommit} />
 </div>
