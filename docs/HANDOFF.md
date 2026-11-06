@@ -43,7 +43,7 @@ primitives first, because several features stand on each:
 | 22 | Histogram and overlays in the no-WebGPU fallback | — | #89 (AF marker and Measure still hidden) |
 | 23 | Models on demand (Settings → Models) | which model goes on demand first | #90 (registry, scan, Settings; download with the first on-demand model) |
 | 24 | Parametric auto-edit (grey-world/edge WB, percentile tone anchoring, face-aware exposure) | whether an Auto is wanted despite the measurements | #91 (measured; nothing beats the defaults, so not wired) |
-| 25 | Colour ranges and skin; hair-edge refinement; subject- and depth-weighted peaking | a portrait for the skin A/B | #92 colour ranges (uniformity, hair edges, peaking to come) |
+| 25 | Colour ranges and skin; hair-edge refinement; subject- and depth-weighted peaking | a portrait for the skin A/B | #92 colour ranges, #93 subject peaking and eyes (uniformity, hair edges to come) |
 | 26 | Apple's own disparity as a second depth source | an A/B on a Portrait capture | |
 | 27 | iPhone parity: the harness runs on the phone and posts back | the owner opens one URL on the iPhone | |
 | **Multi-frame** ||||
