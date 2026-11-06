@@ -44,6 +44,12 @@ fn main() -> Result<()> {
         ["hilite", input, out_dir, rest @ ..] => {
             hilite(input.as_ref(), out_dir.as_ref(), rest.contains(&"--crop"))
         }
+        ["hilite-truth", "--full", input, evs @ ..] if !evs.is_empty() => hilite_edge(
+            input.as_ref(),
+            &evs.iter()
+                .map(|v| v.parse())
+                .collect::<Result<Vec<f32>, _>>()?,
+        ),
         ["hilite-truth", input, evs @ ..] if !evs.is_empty() => hilite_truth(
             input.as_ref(),
             &evs.iter()
@@ -358,6 +364,114 @@ fn hilite_truth(input: &std::path::Path, evs: &[f32]) -> Result<()> {
                 q(0.5),
                 q(0.9),
                 bad[b]
+            );
+        }
+    }
+    Ok(())
+}
+
+/// `hilite-truth --full <raw> <ev>…`: `hilite-truth` at full resolution, where a demosaic fringe would live.
+/// The frame is raised and clipped on purpose as there, both are demosaiced at full size, and the colour error
+/// against the truth is reported by distance from the nearest clipped pixel: the pixels right beside a
+/// clipped area are the ones a demosaic mixing clipped and measured samples would tint.
+fn hilite_edge(input: &std::path::Path, evs: &[f32]) -> Result<()> {
+    let gpu = sidecar_engine::Gpu::new_headless()?;
+    let ing = sidecar_engine::Ingest::new(&gpu)?;
+    let raw = sidecar_raw::RawFile::open(input)?;
+    let info = raw.info();
+    let m = raw.mosaic()?;
+    let mul = info.color.as_shot_mul;
+    let wb = sidecar_color::camera::resolve(&info.color, info.color.as_shot_xy());
+    let run = |data: &[u16]| -> Result<sidecar_engine::RgbaF32> {
+        let input_m = sidecar_engine::MosaicInput {
+            width: m.width,
+            height: m.height,
+            data,
+            black: m.black,
+            white: m.white,
+            pattern: m.pattern,
+            period: m.period,
+        };
+        let tex = ing.demosaic(&gpu, &input_m, [mul[0] as f32, 1.0, mul[2] as f32], true)?;
+        sidecar_engine::read_rgba16(&gpu, &tex)
+    };
+    let truth = run(&m.data)?;
+    let (w, h) = (truth.width as usize, truth.height as usize);
+    println!("{} {} · full resolution {w}×{h}", info.make, info.model);
+    let blk = m.black.iter().copied().fold(f32::MAX, f32::min);
+    for &ev in evs {
+        let k = 2f32.powf(ev);
+        let raised: Vec<u16> = m
+            .data
+            .iter()
+            .map(|&v| (blk + (v as f32 - blk).max(0.0) * k).min(m.white) as u16)
+            .collect();
+        let got = run(&raised)?;
+        // Distance (Chebyshev, capped at 4) from the nearest pixel the raised frame clipped.
+        let clipped: Vec<bool> = got.data.chunks(4).map(|p| p[3] > 0.0).collect();
+        let mut dist = vec![4u8; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                if !clipped[y * w + x] {
+                    continue;
+                }
+                for dy in -3i64..=3 {
+                    for dx in -3i64..=3 {
+                        let (xx, yy) = (x as i64 + dx, y as i64 + dy);
+                        if xx < 0 || yy < 0 || xx >= w as i64 || yy >= h as i64 {
+                            continue;
+                        }
+                        let d = dx.unsigned_abs().max(dy.unsigned_abs()) as u8;
+                        let cell = &mut dist[yy as usize * w + xx as usize];
+                        *cell = (*cell).min(d);
+                    }
+                }
+            }
+        }
+        let names = ["clipped", "1 px from it", "2–3 px", "farther"];
+        let mut acc = [(0f64, 0f64, 0f64, 0u64); 4];
+        for ((t, g), &d) in truth.data.chunks(4).zip(got.data.chunks(4)).zip(&dist) {
+            if t[3] > 0.0 {
+                continue;
+            }
+            let bal = |p: &[f32], s: f64| {
+                [
+                    p[0] as f64 * wb.mul[0] * s,
+                    p[1] as f64 * s,
+                    p[2] as f64 * wb.mul[2] * s,
+                ]
+            };
+            let (tc, gc) = (bal(t, k as f64), bal(g, 1.0));
+            let (ts, gs) = (tc.iter().sum::<f64>(), gc.iter().sum::<f64>());
+            if ts <= 1e-4 || !gs.is_finite() || gs <= 1e-9 {
+                continue;
+            }
+            let class = match d {
+                0 => 0,
+                1 => 1,
+                2 | 3 => 2,
+                _ => 3,
+            };
+            let d = [gc[0] / gs - tc[0] / ts, gc[2] / gs - tc[2] / ts];
+            let a = &mut acc[class];
+            a.0 += (d[0] * d[0] + d[1] * d[1]).sqrt();
+            a.1 += d[0];
+            a.2 += d[1];
+            a.3 += 1;
+        }
+        println!("  +{ev} EV     pixels    colour error    bias r     bias b");
+        for (c, a) in acc.iter().enumerate() {
+            if a.3 == 0 {
+                continue;
+            }
+            let n = a.3 as f64;
+            println!(
+                "  {:<12} {:>9}    {:>10.4}    {:>+8.4}   {:>+8.4}",
+                names[c],
+                a.3,
+                a.0 / n,
+                a.1 / n,
+                a.2 / n
             );
         }
     }

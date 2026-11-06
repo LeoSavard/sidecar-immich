@@ -631,6 +631,19 @@ what controls bias) is two per-pixel scalar functions plus a small LUT wrapped a
 exists. Caveats worth carrying: the transform is inaccurate below about one count per pixel, and vkdt's own
 noise-profile fitting has had integer-overflow failures, so guard rails are required.
 
+**A highlight-aware demosaic — measured, and closed** (2026-11-06). The mechanism this entry describes doesn't
+occur here: highlight reconstruction replaces every sample near white before RCD runs, so the demosaic never
+sees a clipped sample. What does remain was measured at full resolution with `sidecar-dev hilite-truth --full`
+(a clean frame raised and clipped on purpose, colour error against the truth by distance from the nearest
+clipped pixel): a fringe exactly one pixel wide — D5 0.0093 chromaticity error there against 0.0010
+background, ZV-1 0.0048 against 0.0003, Canon M3 none — gone at two pixels, and *smaller* with reconstruction
+than without it (D5 0.0114 without). Two repairs were built and measured: re-interpolating those pixels from
+measured samples only (bilinear green, colour differences for red and blue) made the ring 2.7× worse (0.0248),
+and keeping RCD's edge-directed green while repairing only the colour differences still doubled it (0.0185).
+RCD on the reconstructed mosaic is the best of the three: its directional weighting matters more at a blown
+edge than whether a neighbour is a measurement or a bounded estimate. Nothing to build; the tool stays for
+whoever returns to it. The original entry:
+
 **A highlight-aware demosaic.** Standard interpolators mix clipped and unclipped neighbours, which makes
 magenta and green fringes at highlight edges *before* highlight reconstruction ever runs. The fix is a
 per-channel clip mask and a renormalised weight sum inside the existing RCD kernel — cheap, and no new
