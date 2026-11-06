@@ -2,7 +2,12 @@
 //! From what a share gives us (hash, name, capture date, size) to an original on disk, in this order:
 //! Immich checksum search → storage template by date and name → Immich filename search → picker.
 
-use crate::{App, config::Root, immich::ImmichAsset, session::User};
+use crate::{
+    App,
+    config::Root,
+    immich::{Immich, ImmichAsset},
+    session::User,
+};
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -68,6 +73,7 @@ pub(crate) fn from_asset(app: &App, a: &ImmichAsset) -> Option<Candidate> {
 /// `sha1("path:" + originalPath)` as their checksum instead of hashing the file.
 pub async fn immich_asset_at(
     app: &App,
+    immich: &Immich,
     user: &User,
     path: &std::path::Path,
 ) -> Result<Option<ImmichAsset>> {
@@ -77,8 +83,7 @@ pub async fn immich_asset_at(
     let Some(original_path) = app.config.immich_path(root, path) else {
         return Ok(None);
     };
-    let assets = app
-        .immich
+    let assets = immich
         .search(&user.api_key, json!({ "originalPath": original_path }))
         .await?;
     Ok(assets
@@ -110,7 +115,7 @@ pub(crate) async fn sha1_of(path: PathBuf) -> Option<String> {
 }
 
 pub async fn resolve(app: &App, user: &User, q: &OpenQuery) -> Result<Resolved> {
-    let immich = app.immich.enabled();
+    let immich = app.immich.as_ref();
 
     if let Some(path) = &q.path {
         if !app.config.server.allow_path_open {
@@ -132,8 +137,8 @@ pub async fn resolve(app: &App, user: &User, q: &OpenQuery) -> Result<Resolved> 
     }
 
     // A pasted Immich link: the asset id gives the original path directly (and proves access).
-    if let (true, Some(id)) = (immich, q.immich.as_deref().filter(|s| s.len() == 36)) {
-        let asset = app.immich.asset(&user.api_key, id).await?;
+    if let (Some(immich), Some(id)) = (immich, q.immich.as_deref().filter(|s| s.len() == 36)) {
+        let asset = immich.asset(&user.api_key, id).await?;
         return Ok(match from_asset(app, &asset) {
             Some(c) => Resolved::Found(c),
             None => bail!(
@@ -144,9 +149,8 @@ pub async fn resolve(app: &App, user: &User, q: &OpenQuery) -> Result<Resolved> 
     }
 
     // 1. Checksum: exact bytes, and proof that this user can see the asset. Finds internal-library assets only.
-    if let (true, Some(sha1)) = (immich, q.sha1.as_deref().filter(|s| s.len() == 40)) {
-        let assets = app
-            .immich
+    if let (Some(immich), Some(sha1)) = (immich, q.sha1.as_deref().filter(|s| s.len() == 40)) {
+        let assets = immich
             .search(&user.api_key, json!({ "checksum": sha1 }))
             .await?;
         if let Some(found) = assets.iter().find_map(|a| from_asset(app, a)) {
@@ -201,7 +205,7 @@ pub async fn resolve(app: &App, user: &User, q: &OpenQuery) -> Result<Resolved> 
                     .file_name()
                     .map(|f| f.to_string_lossy().into_owned())
                     .unwrap_or_default();
-                if !immich {
+                let Some(immich) = immich else {
                     confirmed.push(Candidate {
                         path: c.path,
                         file_name,
@@ -209,12 +213,11 @@ pub async fn resolve(app: &App, user: &User, q: &OpenQuery) -> Result<Resolved> 
                         taken: None,
                     });
                     continue;
-                }
+                };
                 let Some(original_path) = app.config.immich_path(root, &c.path) else {
                     continue;
                 };
-                let assets = app
-                    .immich
+                let assets = immich
                     .search(&user.api_key, json!({ "originalPath": original_path }))
                     .await?;
                 if let Some(a) = assets.iter().find(|a| a.original_path == original_path) {
@@ -235,10 +238,9 @@ pub async fn resolve(app: &App, user: &User, q: &OpenQuery) -> Result<Resolved> 
     }
 
     // 3. Filename search in Immich.
-    if let (true, Some(name)) = (immich, q.name.as_deref()) {
+    if let (Some(immich), Some(name)) = (immich, q.name.as_deref()) {
         let want = stem(name);
-        let assets = app
-            .immich
+        let assets = immich
             .search(&user.api_key, json!({ "originalFileName": want }))
             .await?;
         let mut list: Vec<Candidate> = assets
@@ -260,11 +262,10 @@ pub async fn resolve(app: &App, user: &User, q: &OpenQuery) -> Result<Resolved> 
 
 /// Picker search: filename search in Immich (or nothing without Immich).
 pub async fn search_by_name(app: &App, user: &User, name: &str) -> Result<Vec<Candidate>> {
-    if !app.immich.enabled() || name.trim().is_empty() {
+    let Some(immich) = app.immich.as_ref().filter(|_| !name.trim().is_empty()) else {
         return Ok(Vec::new());
-    }
-    let assets = app
-        .immich
+    };
+    let assets = immich
         .search(&user.api_key, json!({ "originalFileName": name.trim() }))
         .await?;
     Ok(assets.iter().filter_map(|a| from_asset(app, a)).collect())

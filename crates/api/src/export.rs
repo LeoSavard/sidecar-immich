@@ -374,7 +374,11 @@ async fn run(
     // an export that only ever went to the device, and this is the upload it never had.
     let mut immich_asset_id: Option<String> = None;
     let in_library = recorded.as_ref().is_some_and(in_immich);
-    if app.immich.enabled() && req.destination != Destination::Device && !in_library {
+    if let Some(immich) = app
+        .immich
+        .as_ref()
+        .filter(|_| req.destination != Destination::Device && !in_library)
+    {
         job.push("progress", json!({ "stage": "upload", "overall": 0.88 }));
         let file = app
             .http
@@ -396,19 +400,18 @@ async fn run(
             .filter(|&t| t > 0)
             .map(sidecar_xmp::rfc3339)
             .unwrap_or_else(sidecar_xmp::utc_now);
-        let id = app
-            .immich
+        let id = immich
             .upload(&user.api_key, file_name, file.to_vec(), &captured)
             .await?;
         job.push("progress", json!({ "stage": "stack", "overall": 0.95 }));
         let raw_id = match &rec.immich_asset_id {
             Some(id) => Some(id.clone()),
-            None => crate::resolve::immich_asset_at(app, user, &rec.path)
+            None => crate::resolve::immich_asset_at(app, immich, user, &rec.path)
                 .await?
                 .map(|a| a.id),
         };
         if let Some(raw_id) = raw_id {
-            app.immich
+            immich
                 .stack_export(&user.api_key, &raw_id, &id, req.format == "jpeg")
                 .await?;
         }
