@@ -7,6 +7,20 @@ Source: the architecture plan (PWA entry, XMP sidecars, server-side demosaic, We
 
 Where the code differs from the text below, the code and these notes win.
 
+- **Colour grading** (§7, `develop/grading.wgsl`, `EditParams::color_grading`): four wheels — shadows,
+  midtones, highlights, global — each a hue, a saturation and a luminance, plus Blending and Balance. It runs
+  after the tone map and the mixer, on the picture as it will be seen, in OKLab: a wheel adds a fixed (a, b)
+  toward its hue — chroma only, up to 0.06 — and its luminance shifts L only, up to ±0.15, so a colour can't
+  change brightness by accident and lightness can't tint. The ranges are smooth weights over OKLab L that sum to
+  one: shadows fall from black to a crossover at L = 0.5 (Balance moves it from 0.25 to 0.75), highlights rise
+  from it to white, midtones are the rest; Blending sets the exponent that widens or narrows them. Lightness
+  is applied before colour, so a darkened shadow is tinted as the tone it becomes. Absent, the edit carries no
+  field and the pass doesn't run, so no `PROCESS_VERSION` bump. The uniform grew to 512 bytes, the new fields at
+  its end so the browser's float offsets are unchanged. The wheel draws its ring in CSS `oklch()`, so the colour
+  under a point is the hue it pushes toward. Checked: packing (at rest is off; a wheel moves only chroma),
+  a `grading` parity case (ΔE 0.0000 against native), and in Chromium on the GPU — dragging the shadows wheel
+  to upper left gives hue 153°, saturation 67, changes the picture and saves.
+
 - **D1 and D5 are both closed, neither merged** (pull request #46, closed 2026-10-29). The owner's rule,
   2026-10-27: what is merged and deployed should be what has been tested. Both were written, and neither
   earned its way in.

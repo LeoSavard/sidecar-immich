@@ -691,7 +691,8 @@ order:
   choice; without one, Sidecar's colours differ from every other tool on the same file and users read that
   as a bug. The incremental piece is DCP's forward matrix plus HueSatMap/LookTable — data plumbing and a
   small 3D-LUT sampler, not an algorithm, since camera matrices are already interpolated by illuminant.
-- **Colour grading wheels.** The OKLCh mixer does *not* substitute: wheels act on tonal ranges, the mixer on
+- **Colour grading wheels — done** (2026-11-06; DESIGN.md §7, "Colour grading"). The original entry:
+  The OKLCh mixer does *not* substitute: wheels act on tonal ranges, the mixer on
   hue bands, and they are orthogonal. A shadows/midtones/highlights lift-gamma-gain operator is a handful of
   lines of WGSL on top of what is already computed — the best cost/benefit of any "pro" feature surveyed.
 - **Presets and styles, copy-paste, and sync across a selection.** Presets are not a feature so much as a

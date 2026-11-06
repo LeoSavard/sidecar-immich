@@ -58,4 +58,9 @@ struct DevelopParams {
   // `PROCESS_VERSION` 6), y Contrast as an exponent for the S-curve that grades the straight segment,
   // since a fixed segment has no steepness of its own for Contrast to set. z, w unused.
   tone_shape: vec4f,
+  // Colour grading (`ColorGrading::uniform`): per wheel — shadows, midtones, highlights, global — the OKLab a
+  // and b to add and the lightness shift.
+  grade: array<vec4f, 4>,
+  // Colour grading: x 1 on, y the shadows/highlights crossover in OKLab lightness, z the overlap exponent.
+  grade_split: vec4f,
 }
