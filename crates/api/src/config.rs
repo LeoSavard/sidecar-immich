@@ -15,6 +15,23 @@ pub struct Config {
     pub roots: Vec<Root>,
     #[serde(default)]
     pub lensfun: Lensfun,
+    #[serde(default)]
+    pub sign_in: SignIn,
+}
+
+/// Local accounts (`accounts.rs`), for a Sidecar with no Immich: with an Immich configured, signing in is
+/// signing in to Immich and this is not read.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+pub struct SignIn {
+    /// Off only for development on a loopback address, where everyone is "Developer" and nothing asks.
+    pub enabled: bool,
+}
+
+impl Default for SignIn {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 /// The lensfun database, fetched for lenses whose files carry no correction (DESIGN.md §15). Not shipped in
@@ -206,6 +223,7 @@ mod tests {
             immich: Immich::default(),
             roots: vec![root.clone()],
             lensfun: Lensfun::default(),
+            sign_in: SignIn::default(),
         };
         assert_eq!(
             config

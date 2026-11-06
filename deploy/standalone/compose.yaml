@@ -2,9 +2,10 @@
 # folder Sidecar owns -- a named volume at /photos -- and edited there; the XMP lands beside each original.
 # To use it, copy this directory to deploy/local/ (git-ignored) and edit it for your machine.
 #
-# Read `Standing on its own` in docs/INSTALL.md before putting this anywhere other people can reach: with no
-# Immich there is no sign-in, so every request is the same user. That is fine on a private network and fine
-# behind a proxy that authenticates; it is not fine on the open internet.
+# Read `Standing on its own` in docs/INSTALL.md before putting this anywhere other people can reach. With no
+# Immich, people sign in with Sidecar's own accounts: the first is made in the browser with the setup code
+# the api prints on first start (`docker logs sidecar-sidecar-api-1`). Serve it over HTTPS before it leaves
+# your network.
 #
 # If you import HEIC, build the image with a HEIF decoder:
 #   docker build --build-arg HEIF=1 -t sidecar:local .

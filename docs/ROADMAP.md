@@ -21,6 +21,9 @@ What's known to be missing or wrong, roughly in the order it's worth doing. The 
 > `find_by_name` for that, and it is the single most valuable missing piece). **Sign-in**: authentication
 > *is* the Immich API key, so a deployment without Immich has none at all, and is only safe behind something
 > that does. Neither is hard; both are load-bearing before "standalone" means more than "runs".
+>
+> **Sign-in is done** (2026-11-05): local accounts for one person or a household, the owner's scope — see
+> DESIGN.md §10, "Without Immich". Browsing is what remains.
 
 ## Correctness and quality
 
