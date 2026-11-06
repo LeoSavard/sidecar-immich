@@ -11,6 +11,7 @@ pub mod export;
 pub mod lensfun;
 pub mod masks;
 pub mod ml;
+pub mod models;
 pub mod stocks;
 
 use anyhow::{Context, Result};
@@ -1109,6 +1110,7 @@ pub fn router(worker: Arc<Worker>) -> Router {
     Router::new()
         .route("/v1/health", get(|| async { "ok" }))
         .route("/v1/capabilities", get(capabilities))
+        .route("/v1/models", get(models_status))
         .route("/v1/render", post(render))
         .route("/v1/loupe", post(loupe))
         .route("/v1/preview", post(preview))
@@ -1131,6 +1133,13 @@ pub fn router(worker: Arc<Worker>) -> Router {
 
 /// What this worker can do beyond decoding, so the editor shows only the tools that will work: the models'
 /// masks and depth (`sidecar-ml`, in the `-ml` image, and a GPU), and the loupe and full-resolution renders (a GPU).
+/// Each model Sidecar can run and where this server stands with it (`models::status`).
+async fn models_status(State(w): State<Arc<Worker>>) -> Response {
+    let image = w.ml.as_ref().map(|m| m.models_dir().to_path_buf());
+    let user = models::user_dir(&w.cache);
+    Json(models::status(image.as_deref(), &user)).into_response()
+}
+
 async fn capabilities(State(w): State<Arc<Worker>>) -> Response {
     let gpu = w.gpu.is_some();
     Json(serde_json::json!({ "models": gpu && w.ml.is_some(), "gpu": gpu })).into_response()
