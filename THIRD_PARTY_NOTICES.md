@@ -121,6 +121,17 @@ converted by the Dockerfile's `ml-onnx` stages, for that image and for `dev/ml-m
   (Apache-2.0). Only the Small model is Apache-2.0: the Base and Large weights are CC-BY-NC-4.0 and not used.
   Paper: Yang et al., "Depth Anything V2", NeurIPS 2024.
 
+## exrs (`exr` crate) — BSD-3-Clause
+Copyright (c) 2020 Johannes Vollmer and contributors. Used unmodified from crates.io to write OpenEXR files
+(`sidecar_merge::hdri`). Redistributions in binary form reproduce this notice; neither the name of the
+copyright holder nor the names of its contributors may be used to endorse or promote products derived from it
+without specific prior written permission. Provided "as is", without warranty of any kind.
+
+## Panorama and HDRI methods — from the papers
+Brown and Lowe (IJCV 2007), Shum and Szeliski (IJCV 2000), Horn (JOSA A 1987), Lucas and Kanade (IJCAI 1981),
+Burt and Adelson (ACM ToG 1983), Goldman and Chen (ICCV 2005), Ward's RGBE (Graphics Gems II, 1991), ISO 12232.
+Implemented from the publications; no code was copied.
+
 ## MPL-2.0 crates: buildid, colored
 Used unmodified from crates.io through burn and CubeCL. MPL-2.0 applies to these crates' own files; their source
 is at https://crates.io/crates/buildid and https://crates.io/crates/colored.

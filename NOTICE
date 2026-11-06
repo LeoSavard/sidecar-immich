@@ -37,3 +37,4 @@ THIRD_PARTY_NOTICES.md, which ships in the Docker image at /usr/share/doc/sideca
 - BiRefNet — Peng Zheng and contributors (MIT), as exported to ONNX by onnx-community.
 - MediaPipe multi-class selfie segmentation — Google (Apache-2.0).
 - Depth Anything V2 Small — the Depth Anything V2 authors (Apache-2.0), as exported to ONNX by onnx-community.
+- exrs (the `exr` crate) — Johannes Vollmer and contributors (BSD-3-Clause): OpenEXR output for HDRIs.
