@@ -130,6 +130,9 @@ fn main() -> Result<()> {
         ["parity", "fixtures", dir] => parity::fixtures(dir.as_ref()),
         ["parity", "native", dir, out] => parity::native(dir.as_ref(), out.as_ref()),
         ["parity", "compare", dir, out] => parity::compare(dir.as_ref(), out.as_ref()),
+        ["parity", "compare", dir, out, browser] => {
+            parity::compare_with(dir.as_ref(), out.as_ref(), browser.as_ref())
+        }
         _ => bail!(
             "usage: sidecar-dev parity fixtures <dir> | parity native <dir> <out> | parity compare <dir> <out>"
         ),

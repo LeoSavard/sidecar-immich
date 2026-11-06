@@ -53,6 +53,9 @@ pub struct Server {
     pub secure_cookies: bool,
     /// Allow `/open?path=…` (development and desktop use). Access still requires a library root.
     pub allow_path_open: bool,
+    /// Accept parity renders from a browser (`POST /api/debug/parity`), for checking a phone's WebGPU against the
+    /// server's. Development only: the fixtures are in development builds alone.
+    pub parity_uploads: bool,
 }
 
 impl Default for Server {
@@ -65,6 +68,7 @@ impl Default for Server {
             state_dir: "/state".into(),
             secure_cookies: true,
             allow_path_open: false,
+            parity_uploads: false,
         }
     }
 }

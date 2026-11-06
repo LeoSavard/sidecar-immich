@@ -280,8 +280,12 @@ for loupe and export, so an X-Trans file is slower, not broken. Porting LibRaw's
 so the port keeps that header) is what it would take, and `DSCF7611.RAF` is the test case if demand ever
 appears. Milestone 5 is otherwise complete; this is no longer what is holding it open.
 
-**iPhone parity is unverified.** The ΔE2000 harness compares Chromium against the server; Safari on Metal has
-never been in the loop. It needs a way to run the browser side on a phone and post results back.
+**iPhone parity: the harness is built; the run is the owner's** (2026-11-06). `/debug/parity?post` renders the
+fixtures in whatever browser opens it and sends the renders to the server (`POST /api/debug/parity`, on only where
+`parity_uploads` is, as in the dev config), which keeps them as a run under `<state>/parity/`; `sidecar-dev parity
+compare web/static/parity testdata/parity-out <run>` then checks them against this machine's native renders with the
+same ΔE2000 limits. Safari's WebGPU needs HTTPS, so the phone reaches `./dev/serve` the way the A/Bs are reached,
+through a tunnel, signed in. Safari on Metal has still never been measured: that is one URL on the iPhone.
 
 ## Reach
 
