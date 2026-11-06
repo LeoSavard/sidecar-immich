@@ -34,7 +34,7 @@ primitives first, because several features stand on each:
 | 14 | Upright: keystone from the photo's lines | — | #77 |
 | 15 | Heal, clone and spot removal; red-eye | — | #78 |
 | 16 | Camera profiles (DCP forward matrix, HueSatMap, LookTable) | which profiles to test | #79 (the file's own; `.dcp` files and a picker to come) |
-| 17 | 3D LUT loading; defringe; film-negative inversion | — | |
+| 17 | 3D LUT loading; defringe; film-negative inversion | an A/B on fringing | #80 negatives, #81 defringe (3D LUTs to come) |
 | 18 | Rec.2020 export with a synthesised ICC; soft proofing with a gamut check | — | #66 (Rec.2020 done; soft proofing to come) |
 | **Workflow** ||||
 | 19 | Presets and styles; copy-paste of a settings subset; sync across a selection | — | |
