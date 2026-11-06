@@ -177,6 +177,7 @@ impl Worker {
             let warp = sidecar_engine::warp::WarpPass::new(&gpu)?;
             let brush = sidecar_engine::brush::Brush::new(&gpu)?;
             let depth = sidecar_engine::depth::DepthPass::new(&gpu)?;
+            let retouch = sidecar_engine::retouch::RetouchPass::new(&gpu)?;
             Ok(export::Kit {
                 gpu,
                 ingest,
@@ -186,6 +187,7 @@ impl Worker {
                 warp,
                 brush,
                 depth,
+                retouch,
                 lensfun: lensfun.clone(),
             })
         });
@@ -617,6 +619,8 @@ fn preview_jpeg(
         &kit.gpu,
         &sidecar_engine::RgbaF32::from_f16_bytes(width, height, &bytes),
     );
+    // The proxy is oriented already, as the spots are.
+    let source = export::retouch(kit, rendering, &req.edit, &source, 0).unwrap_or(source);
     let source = rendering.correct(kit, &req.edit, source);
     let depth_texture = depth.map(|d| {
         rendering.refine_depth(
@@ -757,6 +761,11 @@ fn loupe_png(
             sessions.truncate(SESSION_LIMIT);
             (tex, flip, sigma, rendering)
         }
+    };
+    // The spots on the whole frame, before any tile is cut: a heal takes from wherever its source is.
+    let source = match export::retouch(kit, &rendering, &req.edit, &source, flip) {
+        Some(t) => Arc::new(t),
+        None => source,
     };
     let (sw, sh) = (source.width(), source.height());
     let (ow, oh) = if flip & 4 != 0 { (sh, sw) } else { (sw, sh) };

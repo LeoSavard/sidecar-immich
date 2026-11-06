@@ -12,6 +12,7 @@ pub mod develop;
 pub mod focus;
 pub mod ingest;
 pub mod lens;
+pub mod retouch;
 pub mod warp;
 pub use develop::{DevelopPass, Masks, needs_density_map};
 pub use focus::focus_energy;
@@ -352,6 +353,7 @@ mod uniforms {
             &[
                 R::of::<crate::ingest::IngestParams>(),
                 R::of::<crate::detail::DetailParams>(),
+                R::of::<crate::retouch::RetouchParams>(),
                 R::of::<crate::brush::BrushParams>(),
                 R::of::<crate::brush::CompositeParams>(),
             ],

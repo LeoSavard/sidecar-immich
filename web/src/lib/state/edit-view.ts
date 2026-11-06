@@ -167,6 +167,10 @@ export function describeChanges(from: EditParams, to: EditParams): string[] {
 	if (!!from.lens !== !!to.lens) out.push(to.lens ? 'Lens correction on' : 'Lens correction off');
 	else if (from.lens && to.lens && JSON.stringify(from.lens) !== JSON.stringify(to.lens)) out.push('Lens correction adjusted');
 	out.push(...describeMasks(from.masks ?? [], to.masks ?? []));
+	const [s0, s1] = [from.spots ?? [], to.spots ?? []];
+	if (s1.length > s0.length) out.push(s1.length - s0.length === 1 ? 'Spot added' : `${s1.length - s0.length} spots added`);
+	else if (s1.length < s0.length) out.push(s0.length - s1.length === 1 ? 'Spot removed' : `${s0.length - s1.length} spots removed`);
+	else if (JSON.stringify(s0) !== JSON.stringify(s1)) out.push('Spots adjusted');
 	return out;
 }
 
