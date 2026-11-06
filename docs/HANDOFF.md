@@ -38,7 +38,7 @@ primitives first, because several features stand on each:
 | 18 | Rec.2020 export with a synthesised ICC; soft proofing with a gamut check | a printer profile to check against a print; whether the warning should follow the intent | #66 Rec.2020, #83 soft proofing (on #82) |
 | **Workflow** ||||
 | 19 | Presets and styles; copy-paste of a settings subset; sync across a selection | per person or shared presets | #84 (auto-sync to come) |
-| 20 | Snapshots and virtual copies | — | |
+| 20 | Snapshots and virtual copies | — | #85 snapshots and the split view (virtual copies to come) |
 | 21 | Browsing the editing folder; other folder layouts (name-walk fallback, tokens, locales) | — | |
 | 22 | Histogram and overlays in the no-WebGPU fallback | — | |
 | 23 | Models on demand (Settings → Models) | — | |
