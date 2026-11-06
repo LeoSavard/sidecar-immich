@@ -56,6 +56,7 @@ struct DevelopParams {
   slide_tone: vec4f,
   // The base curve's shape above middle grey: x the shoulder's order (0 = the logistic, as before
   // `PROCESS_VERSION` 6), y Contrast as an exponent for the S-curve that grades the straight segment,
-  // since a fixed segment has no steepness of its own for Contrast to set. z, w unused.
+  // since a fixed segment has no steepness of its own for Contrast to set. z 1 to compress out-of-gamut
+  // colour in ACEScg (`Tone::gamut_ap1`), 0 in Rec.2020 as before `PROCESS_VERSION` 9. w unused.
   tone_shape: vec4f,
 }

@@ -967,13 +967,14 @@
 	/** The references as they stand, for putting back: every field `adopt_current_rendering` sets. One left out
 	 *  is never taken up, so the edit stays behind and the offer comes back the moment it was taken. */
 	function referencesOf(e: EditParams) {
-		return { processVersion: e.processVersion, baselineEv: e.exposure.baselineEv, whiteEv: e.tone.whiteEv, whiteZeroEv: e.tone.whiteZeroEv, shoulderOrder: e.tone.shoulderOrder, highlightBleach: e.tone.highlightBleach, highlightReachEv: e.tone.highlightReachEv };
+		return { processVersion: e.processVersion, baselineEv: e.exposure.baselineEv, whiteEv: e.tone.whiteEv, whiteZeroEv: e.tone.whiteZeroEv, shoulderOrder: e.tone.shoulderOrder, highlightBleach: e.tone.highlightBleach, highlightReachEv: e.tone.highlightReachEv, gamutAp1: e.tone.gamutAp1, noiseModel: e.detail.noiseModel };
 	}
 
 	function setReferences(e: EditParams, r: ReturnType<typeof referencesOf>) {
 		e.processVersion = r.processVersion;
 		e.exposure = { ...e.exposure, baselineEv: r.baselineEv };
-		e.tone = { ...e.tone, whiteEv: r.whiteEv, whiteZeroEv: r.whiteZeroEv, shoulderOrder: r.shoulderOrder, highlightBleach: r.highlightBleach, highlightReachEv: r.highlightReachEv };
+		e.tone = { ...e.tone, whiteEv: r.whiteEv, whiteZeroEv: r.whiteZeroEv, shoulderOrder: r.shoulderOrder, highlightBleach: r.highlightBleach, highlightReachEv: r.highlightReachEv, gamutAp1: r.gamutAp1 };
+		e.detail = { ...e.detail, noiseModel: r.noiseModel };
 	}
 
 	/**
