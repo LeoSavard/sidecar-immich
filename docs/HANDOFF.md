@@ -55,7 +55,7 @@ primitives first, because several features stand on each:
 | **Denoiser** ||||
 | 33 | burn-on-wgpu training benchmark; noise synthesis from dark frames; training; a Denoise job | dark frames per camera; whether the library may train published weights | |
 | **Film** ||||
-| 34 | Halation; grain per dye layer | an A/B of Dye layers | #96 grain per dye layer (halation to come) |
+| 34 | Halation; grain per dye layer | A/Bs of Dye layers and Halation | #96 grain per dye layer, #97 halation (on #96) |
 | 35 | A print stock, so colour negatives render as seen | which print stock, and its data sheet | |
 | 36 | Alternative processes: tintype, cyanotype, cyanotype digital negatives | the step tablet scan for the last | |
 | **Studies** ||||
