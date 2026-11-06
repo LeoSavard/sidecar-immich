@@ -4,6 +4,7 @@
 
 pub mod camera;
 pub mod cct;
+pub mod color_range;
 pub mod depth;
 pub mod developer;
 mod film_data;
