@@ -45,7 +45,7 @@ primitives first, because several features stand on each:
 | 24 | Parametric auto-edit (grey-world/edge WB, percentile tone anchoring, face-aware exposure) | whether an Auto is wanted despite the measurements | #91 (measured; nothing beats the defaults, so not wired) |
 | 25 | Colour ranges and skin; hair-edge refinement; subject- and depth-weighted peaking | a portrait for the skin A/B | #92 colour ranges, #93 subject peaking and eyes, #94 hair edges (on #92; uniformity to come) |
 | 26 | Apple's own disparity as a second depth source | an A/B on a Portrait capture | |
-| 27 | iPhone parity: the harness runs on the phone and posts back | the owner opens one URL on the iPhone | |
+| 27 | iPhone parity: the harness runs on the phone and posts back | the owner opens one URL on the iPhone | #95 (harness built; the run is the owner's) |
 | **Multi-frame** ||||
 | 28 | Alignment and features (shared) | test sets, chosen by the owner | #67 |
 | 29 | HDR merge → linear DNG | a bracket set | #68 (tool; editor to come) |
