@@ -10,6 +10,8 @@
 //! `sidecar-dev lens <file>…`             the lens correction and identity each file yields
 //! `sidecar-dev radial <list>`            measured radial falloff per RAW (vignetting checks)
 //! `sidecar-dev camera-jpeg <list>`       a RAW's lens profile checked against the camera's own JPEG
+//! `sidecar-dev pano <out.dng> <raw>… [--projection rectilinear|cylindrical|spherical] [--scale s]
+//!                  [--no-crop] [--lensfun <dir>] [--png <out.png>]`  frames stitched into one linear DNG
 
 mod parity;
 
@@ -62,6 +64,7 @@ fn main() -> Result<()> {
         ["compare-png", a, b] => compare_png(a.as_ref(), b.as_ref()),
         ["align", files @ ..] if files.len() >= 2 => align(files),
         ["hdr", out, files @ ..] if files.len() >= 2 => hdr(out.as_ref(), files),
+        ["pano", out, args @ ..] if args.len() >= 2 => pano(out.as_ref(), args),
         ["linear-dng", input, out, rest @ ..] => {
             let input: &std::path::Path = input.as_ref();
             let edge: u32 = rest.first().map_or(Ok(1600), |v| v.parse())?;
@@ -1517,6 +1520,284 @@ fn hdr(out: &std::path::Path, files: &[&str]) -> Result<()> {
             );
         }
         first = Some(est);
+    }
+    Ok(())
+}
+
+/// `pano <out.dng> <raw>… [options]`: frames turned about one point, stitched into one linear DNG
+/// (`sidecar_merge::pano`). The lens profile is the first file's own, or lensfun's from `--lensfun <dir>`;
+/// without either the solve fits distortion and vignetting itself. Frames are solved on proxies, then each
+/// is demosaiced at full resolution, warped and blended in turn, so only one full frame is held at a time.
+fn pano(out: &std::path::Path, args: &[&str]) -> Result<()> {
+    use sidecar_merge::pano::{self, Canvas, Input, Optics, Projection};
+    let t0 = std::time::Instant::now();
+    let mut files = vec![];
+    let (mut projection, mut scale, mut crop, mut lensfun, mut png) = (None, 1.0, true, None, None);
+    let mut it = args.iter();
+    while let Some(&a) = it.next() {
+        let mut value = || {
+            it.next()
+                .copied()
+                .ok_or_else(|| anyhow::anyhow!("{a} needs a value"))
+        };
+        match a {
+            "--projection" => {
+                let v = value()?;
+                projection =
+                    Some(Projection::parse(v).ok_or_else(|| anyhow::anyhow!("no projection {v}"))?)
+            }
+            "--scale" => scale = value()?.parse()?,
+            "--no-crop" => crop = false,
+            "--lensfun" => lensfun = Some(std::path::PathBuf::from(value()?)),
+            "--png" => png = Some(std::path::PathBuf::from(value()?)),
+            f => files.push(f),
+        }
+    }
+    anyhow::ensure!(files.len() >= 2, "a panorama needs two frames");
+    let gpu = sidecar_engine::Gpu::new_headless()?;
+    let ingest = sidecar_engine::Ingest::new(&gpu)?;
+    let raws: Vec<sidecar_raw::RawFile> = files
+        .iter()
+        .map(|f| sidecar_raw::RawFile::open(f.as_ref()))
+        .collect::<Result<_, _>>()?;
+    let mut info = raws[0].info().clone();
+    sidecar_raw::read_extras(files[0].as_ref(), &mut info);
+    let focal = info.focal_length_mm;
+    for (r, f) in raws.iter().zip(&files) {
+        let fl = r.info().focal_length_mm;
+        anyhow::ensure!(
+            (fl - focal).abs() <= 0.01 * focal.max(1.0),
+            "{f} is at {fl} mm and {} at {focal} mm: one panorama is one focal length",
+            files[0]
+        );
+    }
+    let profile = info.lens_profile.clone().or_else(|| {
+        let db = sidecar_raw::lensfun::Database::load(lensfun.as_deref()?);
+        db.profile(&info, info.lens_identity.as_ref()?)
+    });
+    let sample = |c: &Option<sidecar_color::lens::Curve>| -> Vec<f64> {
+        c.as_ref().map_or(vec![], |c| {
+            (0..=96)
+                .map(|k| c.eval(k as f64 / 96.0 * pano::R_MAX))
+                .collect()
+        })
+    };
+    let optics = match &profile {
+        Some(p) => Optics {
+            center: p.center,
+            distortion: sample(&p.distortion),
+            ca: [sample(&p.ca_red), sample(&p.ca_blue)],
+            vignetting: sample(&p.vignetting),
+        },
+        None => Optics {
+            center: [0.5, 0.5],
+            ..Default::default()
+        },
+    };
+    println!(
+        "{} {} · {} · {focal} mm · lens: {}",
+        info.make,
+        info.model,
+        info.lens,
+        profile
+            .as_ref()
+            .map_or("no profile; fitted".into(), |p| p.label.clone())
+    );
+    // One white balance for every frame (the middle one's), so the proxies compare alike.
+    let mul = raws[raws.len() / 2].info().color.as_shot_mul;
+    let wb = [mul[0] as f32, 1.0, mul[2] as f32];
+    fn mosaic(m: &sidecar_raw::Mosaic) -> sidecar_engine::MosaicInput<'_> {
+        sidecar_engine::MosaicInput {
+            width: m.width,
+            height: m.height,
+            data: &m.data,
+            black: m.black,
+            white: m.white,
+            pattern: m.pattern,
+            period: m.period,
+        }
+    }
+    let mut inputs = vec![];
+    for r in &raws {
+        let m = r.mosaic()?;
+        let p = ingest.proxy(&gpu, &mosaic(&m), wb, 1600)?;
+        let i = r.info();
+        let flip = i.orientation_flip & 7;
+        let up = if flip & 4 != 0 {
+            [if flip & 1 != 0 { 1.0 } else { -1.0 }, 0.0]
+        } else {
+            [0.0, if flip & 2 != 0 { 1.0 } else { -1.0 }]
+        };
+        let [sw, sh] = i.sensor_size();
+        inputs.push(Input {
+            w: sw as usize,
+            h: sh as usize,
+            proxy: sidecar_merge::align::Grey::log_luminance(
+                p.width as usize,
+                p.height as usize,
+                p.data.chunks(4).map(|c| (c[0] + c[1] + c[2]) / 3.0),
+            ),
+            up,
+            light: i.shutter_s as f64 * i.iso as f64 / (i.aperture as f64).max(0.7).powi(2),
+        });
+    }
+    let sol = pano::solve(&inputs, &optics, None).map_err(anyhow::Error::msg)?;
+    let diag_mm = |crop: f64| 43.27 / crop;
+    println!(
+        "solved in {:.1} s: reference {} · focal {:.4} half-diagonals (homographies said {:.4}){} · k1 {:+.4} · rms {:.3} px of the proxy",
+        t0.elapsed().as_secs_f64(),
+        files[sol.reference],
+        sol.lens.focal,
+        sol.focal_initial,
+        info.lens_identity
+            .as_ref()
+            .and_then(|l| l.crop_factor)
+            .map_or(String::new(), |c| format!(
+                " = {:.1} mm on this sensor (EXIF {focal} mm)",
+                sol.lens.focal * diag_mm(c) / 2.0
+            )),
+        sol.lens.k1,
+        sol.rms
+    );
+    for l in &sol.links {
+        println!(
+            "  {} ↔ {}: {} inliers, {} refined",
+            files[l.i],
+            files[l.j],
+            l.inliers,
+            l.a.len()
+        );
+    }
+    for (i, f) in files.iter().enumerate() {
+        match sol.rotations[i] {
+            Some(_) => println!("  {f}: gain {:+.2} EV", sol.gains[i].log2()),
+            None => println!("  {f}: joins nothing; left out"),
+        }
+    }
+    if optics.vignetting.is_empty() {
+        println!(
+            "  vignetting fitted: {:+.2} EV at the corners",
+            sol.lens.flatten(1.0).log2()
+        );
+    }
+    let sizes: Vec<(usize, usize)> = inputs.iter().map(|i| (i.w, i.h)).collect();
+    let lay =
+        pano::layout(&sol, &sizes, projection, scale, 600_000_000).map_err(anyhow::Error::msg)?;
+    println!(
+        "{:?}, {} × {}{}, {} bands",
+        lay.projection,
+        lay.w,
+        lay.h,
+        if lay.wrap { ", a full turn" } else { "" },
+        lay.levels
+    );
+    let mut canvas = Canvas::new(&sol, &sizes, lay.clone());
+    for (i, r) in raws.iter().enumerate() {
+        if sol.rotations[i].is_none() {
+            continue;
+        }
+        let m = r.mosaic()?;
+        let tex = ingest.demosaic(&gpu, &mosaic(&m), wb, true)?;
+        let img = sidecar_engine::read_rgba16(&gpu, &tex)?;
+        anyhow::ensure!(
+            (img.width as usize, img.height as usize) == sizes[i],
+            "{}: demosaiced to {}×{}, expected {:?}",
+            files[i],
+            img.width,
+            img.height,
+            sizes[i]
+        );
+        let rgb: Vec<f32> = img
+            .data
+            .chunks(4)
+            .flat_map(|p| [p[0], p[1], p[2]])
+            .collect();
+        drop(img);
+        canvas.add(i, &rgb);
+        println!(
+            "  blended {} ({:.0} s)",
+            files[i],
+            t0.elapsed().as_secs_f64()
+        );
+    }
+    let (img, seen) = canvas.finish();
+    let (x0, y0, x1, y1) = if crop {
+        pano::largest_rectangle(&seen, lay.w, lay.h, 8)
+    } else {
+        (0, 0, lay.w, lay.h)
+    };
+    let (w, h) = (x1 - x0, y1 - y0);
+    let rgb: Vec<f32> = (y0..y1)
+        .flat_map(|y| {
+            img[(y * lay.w + x0) * 3..(y * lay.w + x1) * 3]
+                .iter()
+                .copied()
+        })
+        .collect();
+    drop(img);
+    let ri = raws[sol.reference].info();
+    let limit = sol
+        .rotations
+        .iter()
+        .zip(&sol.gains)
+        .filter(|(r, _)| r.is_some())
+        .map(|(_, g)| *g)
+        .fold(f64::MAX, f64::min);
+    sidecar_raw::dng_write::write(
+        out,
+        w as u32,
+        h as u32,
+        &rgb,
+        &sidecar_raw::dng_write::DngMeta {
+            make: &ri.make,
+            model: &ri.model,
+            software: "Sidecar (sidecar-dev pano)",
+            color: &raws[raws.len() / 2].info().color,
+            orientation: 1,
+            noise: None,
+            // A frame's white, in the reference's radiance, is its gain (more where vignetting was lifted).
+            linear_response_limit: Some(limit),
+        },
+    )?;
+    println!(
+        "{} × {}{} → {} ({:.0} MB) in {:.0} s",
+        w,
+        h,
+        if crop { " cropped" } else { "" },
+        out.display(),
+        std::fs::metadata(out)?.len() as f64 / 1e6,
+        t0.elapsed().as_secs_f64()
+    );
+    if let Some(png) = png {
+        let f = w.max(h).div_ceil(2400);
+        let (ow, oh) = (w.div_ceil(f), h.div_ceil(f));
+        let mut sum = vec![0f32; ow * oh * 4];
+        let mut n = vec![0f32; ow * oh];
+        for y in 0..h {
+            for x in 0..w {
+                let d = (y / f) * ow + x / f;
+                for k in 0..3 {
+                    sum[d * 4 + k] += rgb[(y * w + x) * 3 + k].max(0.0);
+                }
+                n[d] += 1.0;
+            }
+        }
+        for (p, k) in sum.chunks_mut(4).zip(&n) {
+            p.iter_mut().for_each(|v| *v /= k);
+        }
+        let small = sidecar_engine::RgbaF32 {
+            width: ow as u32,
+            height: oh as u32,
+            data: sum,
+        };
+        let packed = sidecar_color::pack(
+            &Default::default(),
+            &raws[raws.len() / 2].info().color,
+            sidecar_raw::SourceKind::Raw,
+            sidecar_color::DisplaySpace::Srgb,
+        );
+        let pass = sidecar_engine::DevelopPass::new(&gpu)?;
+        write_png(&pass.run(&gpu, &small, &packed.uniform, &packed.lut)?, &png)?;
     }
     Ok(())
 }

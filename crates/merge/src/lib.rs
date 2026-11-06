@@ -4,3 +4,5 @@
 
 pub mod align;
 pub mod hdr;
+pub mod linalg;
+pub mod pano;
