@@ -658,7 +658,7 @@ pub struct MaskAdjustment {
     pub other: serde_json::Map<String, serde_json::Value>,
 }
 
-fn is_zero(v: &f64) -> bool {
+pub(crate) fn is_zero(v: &f64) -> bool {
     *v == 0.0
 }
 
@@ -958,9 +958,12 @@ pub struct MaskLayer {
     pub flags: [f32; 4],
     /// Added to `DevelopParams::mixer` at full weight.
     pub mixer: [[f32; 4]; 8],
+    /// A colour range's uniformity (`ColorRange`): x, y how far hue and saturation are pulled toward the range's
+    /// centre (0…1), z that hue (radians, OKLab), w that saturation (OKLab chroma over lightness). Zero for none.
+    pub uniformity: [f32; 4],
 }
 
-/// The mask layers' uniform (1,568 bytes). Its WGSL declaration,
+/// The mask layers' uniform (1,696 bytes). Its WGSL declaration,
 /// `shaders/uniforms/mask_params.wgsl`, is generated from this struct (`sidecar-uniform`); the
 /// `uniforms` test checks the file and every offset.
 #[repr(C)]
@@ -1414,6 +1417,11 @@ fn pack_inner(
                 0.0,
             ],
             mixer: mixer_params(&m.mixer),
+            uniformity: m
+                .color
+                .as_ref()
+                .filter(|_| m.mask == crate::color_range::COLOR)
+                .map_or([0.0; 4], |c| c.uniformity()),
         };
     }
     let lut = tone_curve_lut(

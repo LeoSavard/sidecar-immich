@@ -128,6 +128,7 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   }
   c = mask_saturation(mask_contrast(c, local.contrast), local.saturation);
   c = color_mixer(c, local.mixer);                             // 5
+  c = mask_uniformity(c, local.pull, M.count);
   c = output_transform(c, P.work_to_disp, developed);
   return vec4f(c, 1.0);
 }

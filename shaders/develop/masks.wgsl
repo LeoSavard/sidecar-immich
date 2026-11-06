@@ -15,6 +15,7 @@ struct MaskMix {
   tone: vec4f,
   mixer: array<vec4f, 8>,
   curves: array<f32, 8>,     // each layer's weight on its curve, 0 for a layer without one
+  pull: array<vec4f, 8>,     // each colour range's uniformity by its weight: hue and saturation pulls, its centre
 }
 
 // No layer yet: the global edit's `tone` and `mixer`.
@@ -49,6 +50,31 @@ fn mask_add(m: ptr<function, MaskMix>, l: MaskLayer, i: u32, weight: f32, tone: 
     for (var b = 0u; b < 8u; b++) { (*m).mixer[b] += w * l.mixer[b]; }
   }
   if (l.flags.x > 0.5) { (*m).curves[i] = w; }
+  if (l.uniformity.x + l.uniformity.y > 0.0) { (*m).pull[i] = vec4f(w * l.uniformity.xy, l.uniformity.zw); }
+}
+
+// Colour ranges' uniformity (`ColorRange::uniformity`), after the mixer: each layer pulls the hue, and the
+// saturation (OKLab chroma over lightness, which exposure leaves alone), of what it selected toward its range's
+// centre, by its pull times its weight here. Lightness is kept, so evening out redness doesn't move brightness.
+fn mask_uniformity(c: vec3f, pull: array<vec4f, 8>, count: u32) -> vec3f {
+  var lab = rec2020_to_oklab(c);
+  if (lab.x <= 1e-4) { return c; }
+  var moved = false;
+  for (var i = 0u; i < min(count, 8u); i++) {
+    let p = pull[i];
+    if (p.x + p.y <= 0.0) { continue; }
+    var chroma = length(lab.yz);
+    var h = atan2(lab.z, lab.y);
+    // Toward the centre's hue the short way round.
+    var d = p.z - h;
+    d = d - 6.283185307 * floor((d + 3.141592654) / 6.283185307);
+    h += p.x * d;
+    let s = chroma / lab.x;
+    chroma = (s + p.y * (p.w - s)) * lab.x;
+    lab = vec3f(lab.x, chroma * cos(h), chroma * sin(h));
+    moved = true;
+  }
+  return select(c, oklab_to_rec2020(lab), moved);
 }
 
 // Row `row` of the layer curves at `v`, linearly between entries (r32float isn't filterable).

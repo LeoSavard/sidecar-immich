@@ -35,6 +35,15 @@ pub struct ColorRange {
     pub saturation: [f64; 2],
     /// The soft edge beyond each limit: degrees of hue, and as many saturation points.
     pub feather: f64,
+    /// 0…100: uniformity — how far the hue, and the saturation, of what the range selects are pulled toward the
+    /// range's centre (its hue, the middle of its saturation band): blotches and redness evened out, the colour's
+    /// depth kept. Applied after the mixer, by the layer's weight.
+    #[serde(skip_serializing_if = "crate::params::is_zero")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<f64>", optional))]
+    pub uniformity_hue: f64,
+    #[serde(skip_serializing_if = "crate::params::is_zero")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<f64>", optional))]
+    pub uniformity_saturation: f64,
     /// Only within this model mask (`skin` for the skin preset); none for anywhere.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
@@ -49,8 +58,30 @@ impl Default for ColorRange {
             width: 40.0,
             saturation: [8.0, 60.0],
             feather: 10.0,
+            uniformity_hue: 0.0,
+            uniformity_saturation: 0.0,
             within: None,
         }
+    }
+}
+
+impl ColorRange {
+    /// `MaskLayer::uniformity`: the pulls as 0…1, the centre's hue in radians and its saturation as OKLab chroma
+    /// over lightness (the selection's measure, `saturation` being that × 200).
+    pub fn uniformity(&self) -> [f32; 4] {
+        let (h, s) = (
+            self.uniformity_hue.clamp(0.0, 100.0),
+            self.uniformity_saturation.clamp(0.0, 100.0),
+        );
+        if h == 0.0 && s == 0.0 {
+            return [0.0; 4];
+        }
+        [
+            (h / 100.0) as f32,
+            (s / 100.0) as f32,
+            self.hue.rem_euclid(360.0).to_radians() as f32,
+            ((self.saturation[0] + self.saturation[1]) / 2.0 / 200.0) as f32,
+        ]
     }
 }
 
@@ -206,7 +237,7 @@ mod tests {
             width: 40.0,
             saturation: [0.0, 200.0],
             feather: 10.0,
-            within: None,
+            ..Default::default()
         };
         assert_eq!(weight(&r, [0.5, 0.1, 5.0]), 1.0, "inside, across 0°");
         assert_eq!(weight(&r, [0.5, 0.1, 340.0]), 1.0);

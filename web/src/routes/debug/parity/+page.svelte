@@ -41,7 +41,7 @@
 					device.queue.writeTexture({ texture: t }, await get(`mask${i}.u8`), { bytesPerRow: w }, [w, h]);
 					masks.push(t);
 				}
-				pass.setMasks(masks.length ? new Uint8Array(await get('masks.bin')) : new Uint8Array(1568), masks, masks.length ? new Float32Array(await get('curves.f32')) : undefined);
+				pass.setMasks(masks.length ? new Uint8Array(await get('masks.bin')) : new Uint8Array(1696), masks, masks.length ? new Float32Array(await get('curves.f32')) : undefined);
 				pass.setUniforms(await get('uniform.bin'));
 				pass.setMono(c.mono ? new Float32Array(await get('mono.f32')) : new Float32Array(0));
 				// A spectral colour stock's two tables: the fixtures carry both, so this needs no server.

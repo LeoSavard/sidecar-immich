@@ -14,4 +14,7 @@ struct MaskLayer {
   flags: vec4f,
   // Added to `DevelopParams::mixer` at full weight.
   mixer: array<vec4f, 8>,
+  // A colour range's uniformity (`ColorRange`): x, y how far hue and saturation are pulled toward the range's
+  // centre (0…1), z that hue (radians, OKLab), w that saturation (OKLab chroma over lightness). Zero for none.
+  uniformity: vec4f,
 }
