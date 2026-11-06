@@ -7,6 +7,20 @@ Source: the architecture plan (PWA entry, XMP sidecars, server-side demosaic, We
 
 Where the code differs from the text below, the code and these notes win.
 
+- **Gamut compression in ACEScg** (`PROCESS_VERSION` 9, `Tone::gamut_ap1`, `develop/gamut.wgsl`): the ACES
+  Reference Gamut Compression was already in the pipeline, but it ran in the working Rec.2020, while its
+  thresholds and limits were derived in ACEScg (AP1). The working colour now goes to AP1 for it and comes back,
+  with a Bradford adaptation from D65 to the ACES white, so a neutral stays exactly on the achromatic axis
+  (`mat::rec2020_to_ap1`; a test checks the shader's constants against it). Edits from before version 9 keep
+  compressing in Rec.2020, and "take up today's rendering" moves them; the editor's reference list now also
+  carries `noiseModel`, which version 8 had left off.
+  Measured: monochromatic lights from 400 to 700 nm, the extreme LEDs and neon approach, shift hue 6.17° on
+  average in OKLab, against 6.33° before. Greens and yellows improve; violet and deep red worsen by a few
+  tenths of a degree. The two spaces are close, so the change is small: mean ΔE76 0.6 on the parity source,
+  13 % of pixels above 1, and the largest moves in the most saturated red-orange transitions. Parity cases
+  `graded-p3` (new) and `gamut-legacy` (old) are both ΔE 0.0000 between renderers. It wants the owner's A/B on
+  LED and neon frames.
+
 - **Noise reduction against each photo's measured noise** (`PROCESS_VERSION` 8, `Detail::noise_model`):
   `sidecar_engine::noise` fits σ² = a·y + b to the luminance of a central 1024² crop — 5×5 local mean as the
   level, a 4-neighbour high-pass (noise gain √1.25) as the noise, the flattest 40 % of each of 24 log-spaced
