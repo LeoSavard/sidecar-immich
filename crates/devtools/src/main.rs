@@ -52,7 +52,6 @@ fn main() -> Result<()> {
         ),
         ["radial", list] => radial(list.as_ref()),
         ["levels", input] => levels(input.as_ref()),
-        ["align", files @ ..] if files.len() >= 2 => align(files),
         ["denoise-truth", clean, noisy] => denoise_truth(clean.as_ref(), noisy.as_ref()),
         ["noise", files @ ..] if !files.is_empty() => noise(files),
         ["to-dng", input, out, rest @ ..] => to_dng(
@@ -61,6 +60,7 @@ fn main() -> Result<()> {
             rest.first().map(|p| std::path::Path::new(*p)),
         ),
         ["compare-png", a, b] => compare_png(a.as_ref(), b.as_ref()),
+        ["align", files @ ..] if files.len() >= 2 => align(files),
         ["linear-dng", input, out, rest @ ..] => {
             let input: &std::path::Path = input.as_ref();
             let edge: u32 = rest.first().map_or(Ok(1600), |v| v.parse())?;
@@ -873,6 +873,14 @@ fn align(files: &[&str]) -> Result<()> {
             None => println!("{} → {}: no alignment", name(pair[0]), name(pair[1])),
         }
         prev = next;
+    }
+    Ok(())
+}
+
+/// Where each CFA colour actually saturates, by the histogram of the top of its range, beside the single
+/// brightest sample the old heuristics keyed off (D6/D7 in docs/research/pipeline-review-2026-10.md). On a
+/// frame with blown highlights the two should agree; where they don't, the histogram is the one that
+/// survives a stuck pixel.
 /// `noise <raw>…`: each file's measured noise model (`sidecar_engine::noise`) on its full-resolution
 /// demosaic, with the ratio read/gain that decides how far the fixed transform's assumption is from it
 /// (the fixed transform is the model with read/gain = 0.0005 at gain 1), and the level bins it was fitted to.
@@ -896,27 +904,6 @@ fn noise(files: &[&str]) -> Result<()> {
         };
         let mul = info.color.as_shot_mul;
         let input = sidecar_engine::MosaicInput {
-/// `to-dng <raw> <out.dng>`: the raw's full-resolution demosaic written as a linear float DNG
-/// (`sidecar_raw::dng_write`), with its colour model and orientation — what a merge writes, from one frame, so
-/// the writer can be checked end to end: `develop` the raw and `linear-dng` the result, and the two pictures
-/// should be the same.
-/// With a third argument, also writes there the demosaic developed exactly as `linear-dng` develops the file
-/// (averaged down by the same whole factor to a 1600 px long edge, default edit, sRGB): the two PNGs then
-/// differ only by what the file did to the pixels.
-fn to_dng(
-    input: &std::path::Path,
-    out: &std::path::Path,
-    png: Option<&std::path::Path>,
-) -> Result<()> {
-    let gpu = sidecar_engine::Gpu::new_headless()?;
-    let ingest = sidecar_engine::Ingest::new(&gpu)?;
-    let raw = sidecar_raw::RawFile::open(input)?;
-    let info = raw.info();
-    let m = raw.mosaic()?;
-    let mul = info.color.as_shot_mul;
-    let tex = ingest.demosaic(
-        &gpu,
-        &sidecar_engine::MosaicInput {
             width: m.width,
             height: m.height,
             data: &m.data,
@@ -1125,6 +1112,42 @@ fn denoise_truth(clean: &std::path::Path, noisy: &std::path::Path) -> Result<()>
     println!(
         "best mean over bands: fixed {:.1} % at {:.0}, model {:.1} % at {:.0}",
         best[0].0, best[0].1, best[1].0, best[1].1
+    );
+    Ok(())
+}
+
+/// Where each CFA colour actually saturates, by the histogram of the top of its range, beside the single
+/// brightest sample the old heuristics keyed off (D6/D7 in docs/research/pipeline-review-2026-10.md). On a
+/// frame with blown highlights the two should agree; where they don't, the histogram is the one that
+/// survives a stuck pixel.
+/// `to-dng <raw> <out.dng>`: the raw's full-resolution demosaic written as a linear float DNG
+/// (`sidecar_raw::dng_write`), with its colour model and orientation — what a merge writes, from one frame, so
+/// the writer can be checked end to end: `develop` the raw and `linear-dng` the result, and the two pictures
+/// should be the same.
+/// With a third argument, also writes there the demosaic developed exactly as `linear-dng` develops the file
+/// (averaged down by the same whole factor to a 1600 px long edge, default edit, sRGB): the two PNGs then
+/// differ only by what the file did to the pixels.
+fn to_dng(
+    input: &std::path::Path,
+    out: &std::path::Path,
+    png: Option<&std::path::Path>,
+) -> Result<()> {
+    let gpu = sidecar_engine::Gpu::new_headless()?;
+    let ingest = sidecar_engine::Ingest::new(&gpu)?;
+    let raw = sidecar_raw::RawFile::open(input)?;
+    let info = raw.info();
+    let m = raw.mosaic()?;
+    let mul = info.color.as_shot_mul;
+    let tex = ingest.demosaic(
+        &gpu,
+        &sidecar_engine::MosaicInput {
+            width: m.width,
+            height: m.height,
+            data: &m.data,
+            black: m.black,
+            white: m.white,
+            pattern: m.pattern,
+            period: m.period,
         },
         [mul[0] as f32, 1.0, mul[2] as f32],
         true,
