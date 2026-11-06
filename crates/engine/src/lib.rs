@@ -12,6 +12,7 @@ pub mod develop;
 pub mod focus;
 pub mod ingest;
 pub mod lens;
+pub mod noise;
 pub mod warp;
 pub use develop::{DevelopPass, Masks, needs_density_map};
 pub use focus::focus_energy;

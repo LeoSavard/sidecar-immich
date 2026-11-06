@@ -623,6 +623,16 @@ luminance norm and handle chroma separately. Sidecar's base curve is already a l
 to an existing stage rather than a new one — and it is half of what ROADMAP's "Tone curve above middle grey"
 is really asking for, the other half being the gamut compression above.
 
+**The noise model and its transform — built** (2026-11-06, `PROCESS_VERSION` 8; `sidecar_engine::noise`,
+`detail/to_opponent.wgsl`/`from_opponent.wgsl`). The denoiser already had a square-root stabilization, with a
+fixed read-noise floor; each photo's noise is now *measured* as σ² = a·y + b (Foi et al. 2008), stabilized
+with the generalized Anscombe transform for that model and brought back with Mäkitalo and Foi's exact
+unbiased inverse. `sidecar-dev noise <raw…>` prints a file's model; `sidecar-dev denoise-truth <clean>
+<noisy>` puts a measured model's noise on a clean frame and scores both transforms per brightness band. What
+the measurements say: read/gain spans ~100× across the cameras here (D5 4.5e-4…6e-3, ZV-1 4.5e-2); on D5-like
+sensors the two transforms coincide, and on a read-noise-heavy model the fixed one over-smooths highlights.
+Edits that denoised before version 8 keep the fixed transform. The original entry:
+
 **A variance-stabilising transform around the existing wavelet noise reduction.** Raw noise is
 Poisson-Gaussian per CFA plane, and the wavelet stage implicitly assumes uniform-variance Gaussian — which is
 exactly why it is habitually too strong in shadows and too weak in highlights. Foi's pipeline (generalised
@@ -712,7 +722,7 @@ order:
   profile, they do not measure one.
 - **3D LUT loading**, **defringe** as a post-demosaic tool distinct from raw CA correction, and
   **film-negative inversion** for scans.
-- **HDR merge and focus stacking.** These sit with panorama below: not table stakes for a RAW *developer*
+- **HDR merge — built** (2026-11-06; DESIGN.md, "HDR merge"; editor integration to come). **Focus stacking** still open. These sit with panorama below: not table stakes for a RAW *developer*
   (darktable and RawTherapee have none of the three) but expected of anything calling itself all-in-one. All
   three ride on the multi-frame alignment infrastructure above, and focus stacking is cheap given that focus
   peaking already computes a focus measure — the hard part is that focal breathing changes the field of view

@@ -6473,6 +6473,7 @@ dependencies = [
  "serde_json",
  "sidecar-color",
  "sidecar-engine",
+ "sidecar-merge",
  "sidecar-raw",
  "sidecar-shaders",
  "zune-jpeg",
@@ -6500,6 +6501,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "sidecar-merge"
+version = "0.5.0"
+dependencies = [
+ "rayon",
+]
+
+[[package]]
 name = "sidecar-ml"
 version = "0.5.0"
 dependencies = [
@@ -6523,6 +6531,8 @@ version = "0.5.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "flate2",
+ "half",
  "jxl-oxide",
  "png",
  "rayon",

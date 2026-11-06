@@ -582,7 +582,7 @@ pub struct Session {
     key: String,
     source: Arc<wgpu::Texture>,
     flip: i32,
-    sigma: f32,
+    noise: sidecar_engine::detail::Noise,
     rendering: export::Rendering,
 }
 
@@ -730,16 +730,16 @@ fn loupe_png(
         let mut sessions = w.sessions.lock().unwrap();
         sessions.iter().position(|s| s.key == req.key).map(|i| {
             let s = sessions.remove(i);
-            let out = (s.source.clone(), s.flip, s.sigma, s.rendering.clone());
+            let out = (s.source.clone(), s.flip, s.noise, s.rendering.clone());
             sessions.insert(0, s);
             out
         })
     };
-    let (source, flip, sigma, rendering) = match session {
+    let (source, flip, noise, rendering) = match session {
         Some(s) => s,
         None => {
             let (tex, flip, rendering) = export::full_source_for(kit, &req.path)?;
-            let sigma = kit.detail.noise_sigma(&kit.gpu, &tex)?;
+            let noise = kit.detail.noise(&kit.gpu, &tex)?;
             let tex = Arc::new(tex);
             let mut sessions = w.sessions.lock().unwrap();
             // Two loupe requests on a cold photo both decode it; keep one, or the pair fills every slot.
@@ -750,12 +750,12 @@ fn loupe_png(
                     key: req.key.clone(),
                     source: tex.clone(),
                     flip,
-                    sigma,
+                    noise,
                     rendering: rendering.clone(),
                 },
             );
             sessions.truncate(SESSION_LIMIT);
-            (tex, flip, sigma, rendering)
+            (tex, flip, noise, rendering)
         }
     };
     let (sw, sh) = (source.width(), source.height());
@@ -826,7 +826,7 @@ fn loupe_png(
                     let cw = ((x1.ceil() + reach).clamp(1.0, sw as f64) as u32).max(cx + 1) - cx;
                     let ch = ((y1.ceil() + reach).clamp(1.0, sh as f64) as u32).max(cy + 1) - cy;
                     let region = kit.detail.crop(&kit.gpu, &source, cx, cy, cw, ch);
-                    let region = kit.detail.apply(&kit.gpu, region, sigma, &settings);
+                    let region = kit.detail.apply(&kit.gpu, region, &noise, &settings);
                     let params = rendering
                         .lens_params(
                             &req.edit,
@@ -842,7 +842,7 @@ fn loupe_png(
                     let (cx, cy) = (ux.saturating_sub(m), uy.saturating_sub(m));
                     let (cw, ch) = ((ux + uw + m).min(sw) - cx, (uy + uh + m).min(sh) - cy);
                     let tile = kit.detail.crop(&kit.gpu, &source, cx, cy, cw, ch);
-                    let tile = kit.detail.apply(&kit.gpu, tile, sigma, &settings);
+                    let tile = kit.detail.apply(&kit.gpu, tile, &noise, &settings);
                     kit.detail.crop(&kit.gpu, &tile, ux - cx, uy - cy, uw, uh)
                 }
             };
