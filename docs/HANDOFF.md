@@ -5,7 +5,7 @@ For whoever picks this up next, person or agent. [`ARCHITECTURE.md`](ARCHITECTUR
 checked), [`ROADMAP.md`](ROADMAP.md) what's known to be missing. This page is the state of play; update it when
 you stop.
 
-*Last updated 2026-11-05.*
+*Last updated 2026-11-06.*
 
 ## The programme from 2026-11-06: the whole roadmap, one pull request per feature
 
@@ -30,8 +30,8 @@ primitives first, because several features stand on each:
 | 10 | ACES reference gamut compression | an A/B on LED and neon | #74 (already present; now in ACEScg, `PROCESS_VERSION` 9) |
 | 11 | Hue-preserving tone mapping / a scene-to-display transform | the look is the owner's | Already present: `tone_apply` maps luminance and scales RGB by the ratio, fading to neutral over the last stop. Choosing a different scene-to-display look (sigmoid, AgX-style) waits on the owner |
 | 12 | Detail per layer (sharpening and noise reduction through a mask) | — | #75 |
-| 13 | Sky mask from the depth map, guided-filter edges (on #1) | an A/B | |
-| 14 | Upright: keystone from the photo's lines | — | |
+| 13 | Sky mask from the depth map, edges by the compositing equation (beat the guided filter here) | an A/B | #76 |
+| 14 | Upright: keystone from the photo's lines | — | #77 |
 | 15 | Heal, clone and spot removal; red-eye | — | |
 | 16 | Camera profiles (DCP forward matrix, HueSatMap, LookTable) | which profiles to test | |
 | 17 | 3D LUT loading; defringe; film-negative inversion | — | |
