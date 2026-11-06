@@ -6504,6 +6504,7 @@ dependencies = [
 name = "sidecar-merge"
 version = "0.5.0"
 dependencies = [
+ "exr",
  "rayon",
 ]
 

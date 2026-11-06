@@ -7,6 +7,21 @@ Source: the architecture plan (PWA entry, XMP sidecars, server-side demosaic, We
 
 Where the code differs from the text below, the code and these notes win.
 
+- **HDRIs** (`sidecar_merge::hdri`, `sidecar-dev hdri <out.exr|.hdr> <raw>… [--brackets n] [--space
+  rec709|rec2020|acescg] [--half] [--absolute] …`): merge first, stitch second, as the research says —
+  each direction's bracket through the HDR merge (`merge_bracket`, now shared with `hdr`), then the merged
+  frames through the panorama solve onto a 2 : 1 equirectangular canvas of the whole sphere (`layout(…,
+  sphere: true)`). The bracket size is found from the EXIF exposures' repeating pattern unless given. Output is
+  scene-linear and white-balanced (the reference's as-shot white), in linear Rec.709 (the default; what most
+  renderers assume), Rec.2020 or ACEScg, with no tone curve. The absolute scale is ISO 12232's saturation
+  speed — a value of 1 is 78·N²/(0.65·S·t) cd/m² — written as OpenEXR's `whiteLuminance` and Radiance's
+  `EXPOSURE` (or applied to the pixels with `--absolute`); makers' ISO ratings make it good to about a third
+  of a stop, and the tool says so. OpenEXR through the `exr` crate (BSD-3-Clause, ZIP scanlines, f32 or half);
+  Radiance RGBE with run-length scanlines written here. Checked: both files round-trip (RGBE to its 8-bit
+  mantissa, EXR exactly, with `chromaticities` and `whiteLuminance` read back), bracket periods found, a
+  sphere layout 2 : 1 and wrapping, and the D3 panorama placed on the sphere (3 % of it) with the right colour.
+  No 360° set exists in the library to test the whole path; the owner may shoot one.
+
 - **Panoramas** (`sidecar_merge::pano`, `sidecar-dev pano <out.dng> <raw>… [--projection …] [--scale s]
   [--no-crop] [--lensfun <dir>] [--png <out>]`): frames turned about one point, stitched into one linear DNG,
   after Brown and Lowe (IJCV 2007), from the papers. Every pair is matched on proxies and kept when its inliers
