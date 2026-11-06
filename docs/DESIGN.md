@@ -17,6 +17,7 @@ Where the code differs from the text below, the code and these notes win.
   corners; unrelated frames don't align (the same frame turned half round does, as it should). On the library,
   `sidecar-dev align` aligns a 9-frame ZV-1 bracket across 8 EV with 366–528 inliers and sub-pixel error — and
   shows a 2 px handheld drift per frame — and finds a four-frame D3 panorama by its overlaps.
+
 - **Noise reduction against each photo's measured noise** (`PROCESS_VERSION` 8, `Detail::noise_model`):
   `sidecar_engine::noise` fits σ² = a·y + b to the luminance of a central 1024² crop — 5×5 local mean as the
   level, a 4-neighbour high-pass (noise gain √1.25) as the noise, the flattest 40 % of each of 24 log-spaced
@@ -34,6 +35,7 @@ Where the code differs from the text below, the code and these notes win.
   quite unbiased; the fixed transform moved it −7 %). `sidecar-dev noise` and `denoise-truth` are the tools.
   An edit saved before version 8 that denoised keeps the fixed transform (`migrate`); one that never did gets
   the model if it starts to; "take up today's rendering" switches it on.
+
 - **Writing a linear DNG** (`sidecar_raw::dng_write`; read back by `linear_dng`): what every merge will
   produce, so its result is an original like any other (docs/research/multi-frame-and-denoise.md).
   Camera-native linear RGB as 16-bit IEEE floats — `PhotometricInterpretation` LinearRaw, `SampleFormat` 3 —
