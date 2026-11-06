@@ -39,6 +39,94 @@ const MONTHS_FR: [&str; 12] = [
     "novembre",
     "décembre",
 ];
+const MONTHS_DE: [&str; 12] = [
+    "Januar",
+    "Februar",
+    "März",
+    "April",
+    "Mai",
+    "Juni",
+    "Juli",
+    "August",
+    "September",
+    "Oktober",
+    "November",
+    "Dezember",
+];
+const MONTHS_ES: [&str; 12] = [
+    "enero",
+    "febrero",
+    "marzo",
+    "abril",
+    "mayo",
+    "junio",
+    "julio",
+    "agosto",
+    "septiembre",
+    "octubre",
+    "noviembre",
+    "diciembre",
+];
+const MONTHS_IT: [&str; 12] = [
+    "gennaio",
+    "febbraio",
+    "marzo",
+    "aprile",
+    "maggio",
+    "giugno",
+    "luglio",
+    "agosto",
+    "settembre",
+    "ottobre",
+    "novembre",
+    "dicembre",
+];
+const MONTHS_PT: [&str; 12] = [
+    "janeiro",
+    "fevereiro",
+    "março",
+    "abril",
+    "maio",
+    "junho",
+    "julho",
+    "agosto",
+    "setembro",
+    "outubro",
+    "novembro",
+    "dezembro",
+];
+const MONTHS_NL: [&str; 12] = [
+    "januari",
+    "februari",
+    "maart",
+    "april",
+    "mei",
+    "juni",
+    "juli",
+    "augustus",
+    "september",
+    "oktober",
+    "november",
+    "december",
+];
+/// Every language's month names, for matching folders on disk: a month folder is recognised in any of them.
+const MONTHS_ALL: [&[&str; 12]; 7] = [
+    &MONTHS_EN, &MONTHS_FR, &MONTHS_DE, &MONTHS_ES, &MONTHS_IT, &MONTHS_PT, &MONTHS_NL,
+];
+
+/// The month names a template's `month_locale` writes with: its first two letters pick the language, English
+/// when none is known.
+fn months_for(locale: &str) -> &'static [&'static str; 12] {
+    match locale.get(..2).map(str::to_ascii_lowercase).as_deref() {
+        Some("fr") => &MONTHS_FR,
+        Some("de") => &MONTHS_DE,
+        Some("es") => &MONTHS_ES,
+        Some("it") => &MONTHS_IT,
+        Some("pt") => &MONTHS_PT,
+        Some("nl") => &MONTHS_NL,
+        _ => &MONTHS_EN,
+    }
+}
 
 fn days_in_month(y: i32, m: u32) -> u32 {
     match m {
@@ -65,6 +153,51 @@ impl Date {
         let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
         let year = (yoe + era * 400 + i64::from(month <= 2)) as i32;
         Date { year, month, day }
+    }
+
+    /// Days since 1970-01-01 (Hinnant's days_from_civil).
+    fn days_since_epoch(self) -> i64 {
+        let y = i64::from(self.year) - i64::from(self.month <= 2);
+        let era = y.div_euclid(400);
+        let yoe = y.rem_euclid(400);
+        let m = i64::from(self.month);
+        let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + i64::from(self.day) - 1;
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        era * 146_097 + doe - 719_468
+    }
+
+    /// Monday 1 … Sunday 7.
+    fn weekday(self) -> i64 {
+        (self.days_since_epoch() + 3).rem_euclid(7) + 1
+    }
+
+    /// The ISO 8601 week number (`{{W}}`): weeks start on Monday, and week 1 is the one with the year's first
+    /// Thursday, so the first days of January can belong to the last week of the year before.
+    pub fn iso_week(self) -> u32 {
+        let jan1 = Date {
+            year: self.year,
+            month: 1,
+            day: 1,
+        };
+        let doy = self.days_since_epoch() - jan1.days_since_epoch() + 1;
+        let week = (doy - self.weekday() + 10) / 7;
+        let weeks_in = |year: i32| {
+            let j = Date {
+                year,
+                month: 1,
+                day: 1,
+            }
+            .weekday();
+            let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+            if j == 4 || (leap && j == 3) { 53 } else { 52 }
+        };
+        if week < 1 {
+            weeks_in(self.year - 1) as u32
+        } else if week > weeks_in(self.year) {
+            1
+        } else {
+            week as u32
+        }
     }
 
     pub fn add_days(self, delta: i32) -> Date {
@@ -133,23 +266,171 @@ pub fn parse_capture_date(s: &str) -> Option<Date> {
     (day >= 1 && day <= days_in_month(year, month)).then_some(Date { year, month, day })
 }
 
-/// Render the directory part of a template (everything before `{{filename}}`).
+/// Render the directory part of a template (everything before `{{filename}}`), for writing: where Sidecar
+/// files an imported photo. Tokens with no value at import (an album, a time of day) are left as written.
 pub fn render_dir(template: &str, date: Date, month_locale: &str) -> String {
-    let months = if month_locale.starts_with("fr") {
-        &MONTHS_FR
-    } else {
-        &MONTHS_EN
-    };
+    let months = months_for(month_locale);
+    let month = months[date.month as usize - 1];
+    let short: String = month.chars().take(3).collect();
     let dir = template.rsplit_once('/').map_or("", |(d, _)| d);
     dir.replace("{{yyyy}}", &format!("{:04}", date.year))
         .replace("{{yy}}", &format!("{:02}", date.year.rem_euclid(100)))
         .replace("{{y}}", &format!("{:04}", date.year))
-        .replace("{{MMMM}}", months[date.month as usize - 1])
-        .replace("{{MMM}}", &months[date.month as usize - 1][..3])
+        .replace("{{MMMM}}", month)
+        .replace("{{MMM}}", &short)
         .replace("{{MM}}", &format!("{:02}", date.month))
         .replace("{{M}}", &date.month.to_string())
+        .replace("{{WW}}", &format!("{:02}", date.iso_week()))
+        .replace("{{W}}", &date.iso_week().to_string())
         .replace("{{dd}}", &format!("{:02}", date.day))
         .replace("{{d}}", &date.day.to_string())
+        .replace("{{filetypefull}}", "IMAGE")
+        .replace("{{filetype}}", "IMG")
+}
+
+/// A piece of one folder name in a template, as it can be matched against what is on disk.
+#[derive(Clone, Debug, PartialEq)]
+enum Piece {
+    Text(String),
+    /// A month by number, written out (`{{MMMM}}`) or abbreviated (`{{MMM}}`), in any language.
+    Month(u32),
+    /// A token with no value from a capture date — an album, an event, a time of day: any text.
+    Any,
+}
+
+/// The folder part of `template` for `date`, one pattern per folder level. Date tokens become their text;
+/// month names match in any language and any abbreviation; every other token matches anything. So a library
+/// laid out as `{{yyyy}}/{{album}}/` or `{{yyyy}}/Holidays {{MMMM}}/` is searched rather than missed.
+fn dir_patterns(template: &str, date: Date) -> Vec<Vec<Piece>> {
+    let dir = template.rsplit_once('/').map_or("", |(d, _)| d);
+    dir.split('/')
+        .filter(|seg| !seg.is_empty())
+        .map(|seg| {
+            let mut pieces = Vec::new();
+            let mut rest = seg;
+            let text = |pieces: &mut Vec<Piece>, t: &str| {
+                if t.is_empty() {
+                    return;
+                }
+                match pieces.last_mut() {
+                    Some(Piece::Text(prev)) => prev.push_str(t),
+                    _ => pieces.push(Piece::Text(t.to_string())),
+                }
+            };
+            while let Some(open) = rest.find("{{") {
+                text(&mut pieces, &rest[..open]);
+                let Some(close) = rest[open..].find("}}") else {
+                    text(&mut pieces, &rest[open..]);
+                    rest = "";
+                    break;
+                };
+                let token = &rest[open + 2..open + close];
+                rest = &rest[open + close + 2..];
+                let value = match token {
+                    "yyyy" | "y" => Some(format!("{:04}", date.year)),
+                    "yy" => Some(format!("{:02}", date.year.rem_euclid(100))),
+                    "MM" => Some(format!("{:02}", date.month)),
+                    "M" => Some(date.month.to_string()),
+                    "dd" => Some(format!("{:02}", date.day)),
+                    "d" => Some(date.day.to_string()),
+                    "WW" => Some(format!("{:02}", date.iso_week())),
+                    "W" => Some(date.iso_week().to_string()),
+                    "filetype" => Some("IMG".into()),
+                    "filetypefull" => Some("IMAGE".into()),
+                    _ => None,
+                };
+                match (value, token) {
+                    (Some(v), _) => text(&mut pieces, &v),
+                    (None, "MMMM" | "MMM") => pieces.push(Piece::Month(date.month)),
+                    (None, _) => {
+                        if pieces.last() != Some(&Piece::Any) {
+                            pieces.push(Piece::Any);
+                        }
+                    }
+                }
+            }
+            text(&mut pieces, rest);
+            pieces
+        })
+        .collect()
+}
+
+/// The ways month `m` may be written in a folder name: its full name in each language, and every abbreviation
+/// of three letters or more, with or without a full stop. Dutch writes March `mrt`, which is no prefix.
+fn month_spellings(m: u32) -> Vec<String> {
+    let mut out = Vec::new();
+    for months in MONTHS_ALL {
+        let full: Vec<char> = months[m as usize - 1].to_lowercase().chars().collect();
+        for n in 3..=full.len() {
+            let s: String = full[..n].iter().collect();
+            if n < full.len() {
+                out.push(format!("{s}."));
+            }
+            out.push(s);
+        }
+    }
+    if m == 3 {
+        out.push("mrt".into());
+    }
+    out.sort_by_key(|s| std::cmp::Reverse(s.len()));
+    out.dedup();
+    out
+}
+
+/// Does `name` (lower-cased) match `pieces` exactly?
+fn matches(pieces: &[Piece], name: &str) -> bool {
+    let Some((first, rest)) = pieces.split_first() else {
+        return name.is_empty();
+    };
+    match first {
+        Piece::Text(t) => name
+            .strip_prefix(t.to_lowercase().as_str())
+            .is_some_and(|r| matches(rest, r)),
+        Piece::Month(m) => month_spellings(*m).iter().any(|s| {
+            name.strip_prefix(s.as_str())
+                .is_some_and(|r| matches(rest, r))
+        }),
+        Piece::Any => name
+            .char_indices()
+            .map(|(i, _)| i)
+            .chain([name.len()])
+            .any(|i| matches(rest, &name[i..])),
+    }
+}
+
+/// The folders under `root` that `patterns` describe, level by level: an exact folder name is joined straight
+/// on, as before; anything else, or one written in another case, is found by listing the level above. Hidden
+/// folders are skipped and the expansion is bounded, so a wildcard over a large library stays a short walk.
+fn matching_dirs(root: &Path, patterns: &[Vec<Piece>]) -> Vec<PathBuf> {
+    const MAX: usize = 2_000;
+    let mut level = vec![root.to_path_buf()];
+    for pat in patterns {
+        let mut next = Vec::new();
+        for dir in &level {
+            if let [Piece::Text(t)] = pat.as_slice()
+                && dir.join(t).is_dir()
+            {
+                next.push(dir.join(t));
+                continue;
+            }
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                continue;
+            };
+            let mut found: Vec<PathBuf> = entries
+                .flatten()
+                .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+                .filter_map(|e| {
+                    let name = e.file_name().to_str()?.to_lowercase();
+                    (!name.starts_with('.') && matches(pat, &name)).then(|| e.path())
+                })
+                .collect();
+            found.sort();
+            next.extend(found);
+        }
+        next.truncate(MAX);
+        level = next;
+    }
+    level
 }
 
 pub const RAW_EXTENSIONS: &[&str] = &[
@@ -198,57 +479,129 @@ pub fn stem_of(name: &str) -> &str {
     }
 }
 
-/// Look for `name`'s stem in the folders the template gives for `date` and the days either side.
+/// Look for `name`'s stem in the folders the template gives for `date` and the days either side. Month names
+/// are recognised in any language, so the template's locale only matters when writing (`render_dir`).
 /// Ranking: RAW before other formats, exact name, then matching size; the capture day before its neighbours.
 pub fn find_by_date_and_name(
     root: &Path,
     template: &str,
-    month_locale: &str,
+    _month_locale: &str,
     date: Date,
     name: &str,
     size: Option<u64>,
 ) -> Vec<Candidate> {
     let want_stem = stem_of(name).to_ascii_lowercase();
     let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     for (day_offset, penalty) in [(0, 0), (-1, 8), (1, 8)] {
-        let dir = root.join(render_dir(
-            template,
-            date.add_days(day_offset),
-            month_locale,
-        ));
+        for dir in matching_dirs(root, &dir_patterns(template, date.add_days(day_offset))) {
+            // A folder that isn't per day (an album, a month) comes up for all three days: once is enough.
+            if !seen.insert(dir.clone()) {
+                continue;
+            }
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let Some(fname) = path.file_name().and_then(|f| f.to_str()) else {
+                    continue;
+                };
+                if fname.ends_with(".xmp") || stem_of(fname).to_ascii_lowercase() != want_stem {
+                    continue;
+                }
+                let Ok(md) = entry.metadata() else { continue };
+                if !md.is_file() {
+                    continue;
+                }
+                let mut rank = penalty;
+                if !is_raw(&path) {
+                    rank += 4;
+                }
+                if !fname.eq_ignore_ascii_case(name) {
+                    rank += 2;
+                }
+                if size.is_some_and(|s| s != md.len()) {
+                    rank += 1;
+                }
+                out.push(Candidate {
+                    path,
+                    size: md.len(),
+                    rank,
+                });
+            }
+        }
+    }
+    out.sort_by(|a, b| a.rank.cmp(&b.rank).then_with(|| a.path.cmp(&b.path)));
+    out
+}
+
+/// Look for `query` anywhere under `root`, by stem, case-insensitively and as a substring — which is what a
+/// person typing into a picker means, and what Immich's own filename search does.
+///
+/// A library is a photo collection, so the walk is bounded rather than exhaustive: it stops once `limit`
+/// matches are in hand or `MAX_DIRS` directories have been opened, and it never follows a symlink, so a link
+/// pointing back up its own tree cannot spin. Directories are visited newest first, because a picker's answer
+/// is far more often a recent photo than an old one, and that ordering makes the bound land in the right
+/// place when it does bite. Hidden directories are skipped.
+///
+/// Ranking: an exact stem before a substring, RAW before anything else, then the shorter stem — a query that
+/// is the whole of one name and part of another should offer the whole one first.
+pub fn find_by_name(root: &Path, query: &str, limit: usize) -> Vec<Candidate> {
+    const MAX_DIRS: usize = 20_000;
+    let want = stem_of(query).to_ascii_lowercase();
+    let mut out = Vec::new();
+    if want.is_empty() {
+        return out;
+    }
+    let (mut queue, mut opened) = (vec![root.to_path_buf()], 0usize);
+    while let Some(dir) = queue.pop() {
+        if out.len() >= limit || opened >= MAX_DIRS {
+            break;
+        }
+        opened += 1;
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };
+        let mut subdirs = Vec::new();
         for entry in entries.flatten() {
             let path = entry.path();
             let Some(fname) = path.file_name().and_then(|f| f.to_str()) else {
                 continue;
             };
-            if fname.ends_with(".xmp") || stem_of(fname).to_ascii_lowercase() != want_stem {
+            if fname.starts_with('.') {
+                continue;
+            }
+            // `file_type` does not follow a symlink, so a linked directory is simply not descended into.
+            let Ok(ft) = entry.file_type() else { continue };
+            if ft.is_dir() {
+                subdirs.push(path);
+                continue;
+            }
+            if !ft.is_file() || !is_editable(&path) {
+                continue;
+            }
+            let stem = stem_of(fname).to_ascii_lowercase();
+            if !stem.contains(&want) {
                 continue;
             }
             let Ok(md) = entry.metadata() else { continue };
-            if !md.is_file() {
-                continue;
-            }
-            let mut rank = penalty;
+            let mut rank = if stem == want { 0 } else { 8 };
             if !is_raw(&path) {
                 rank += 4;
             }
-            if !fname.eq_ignore_ascii_case(name) {
-                rank += 2;
-            }
-            if size.is_some_and(|s| s != md.len()) {
-                rank += 1;
-            }
+            rank += (stem.len() - want.len()).min(3) as u32;
             out.push(Candidate {
                 path,
                 size: md.len(),
                 rank,
             });
         }
+        subdirs.sort();
+        queue.extend(subdirs);
     }
     out.sort_by(|a, b| a.rank.cmp(&b.rank).then_with(|| a.path.cmp(&b.path)));
+    out.truncate(limit);
     out
 }
 
@@ -402,6 +755,59 @@ mod tests {
         );
         assert!(c[0].path.ends_with("_D5N9000+1.NEF"));
     }
+
+    #[test]
+    fn searches_a_folder_library_by_name_without_a_date() {
+        let tmp = tempfile::tempdir().unwrap();
+        let day = tmp.path().join("2026/08.August/2026-08-26");
+        let other = tmp.path().join("2019/05.May/2019-05-02");
+        std::fs::create_dir_all(&day).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::create_dir_all(tmp.path().join(".hidden")).unwrap();
+        std::fs::write(day.join("_D5N5068.JPG"), b"jpeg").unwrap();
+        std::fs::write(day.join("_D5N5068.NEF"), b"raw!").unwrap();
+        std::fs::write(day.join("_D5N5068.NEF.xmp"), b"<x/>").unwrap();
+        std::fs::write(other.join("holiday_D5N5068_edit.NEF"), b"raw").unwrap();
+        std::fs::write(tmp.path().join(".hidden/_D5N5068.NEF"), b"raw").unwrap();
+        std::fs::write(day.join("notes.txt"), b"text").unwrap();
+
+        // The whole point of this one: a picker can find a photo with no capture date to go on.
+        let c = find_by_name(tmp.path(), "_D5N5068", 10);
+        let names: Vec<_> = c
+            .iter()
+            .map(|c| c.path.file_name().unwrap().to_str().unwrap())
+            .collect();
+        // Exact stem and RAW first, then the exact-stem JPEG, then the substring match. No sidecar, no
+        // text file, nothing from a hidden directory.
+        assert_eq!(
+            names,
+            vec!["_D5N5068.NEF", "_D5N5068.JPG", "holiday_D5N5068_edit.NEF"]
+        );
+
+        // An extension on the query is a stem too, so pasting a file name works.
+        assert_eq!(find_by_name(tmp.path(), "_D5N5068.NEF", 10).len(), 3);
+        // Case-insensitive, like Immich's own filename search.
+        assert_eq!(find_by_name(tmp.path(), "_d5n5068", 10).len(), 3);
+        // The limit is honoured, and the best match survives it.
+        let one = find_by_name(tmp.path(), "_D5N5068", 1);
+        assert_eq!(one.len(), 1);
+        assert!(one[0].path.ends_with("_D5N5068.NEF"));
+        // An empty query matches nothing rather than the whole library.
+        assert!(find_by_name(tmp.path(), "", 10).is_empty());
+        assert!(find_by_name(tmp.path(), "nothing-like-this", 10).is_empty());
+    }
+
+    #[test]
+    fn a_symlink_loop_does_not_hang_the_walk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let deep = tmp.path().join("a/b");
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(deep.join("IMG_0001.NEF"), b"raw").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(tmp.path(), deep.join("loop")).unwrap();
+        let c = find_by_name(tmp.path(), "IMG_0001", 10);
+        assert_eq!(c.len(), 1);
+    }
 }
 
 #[cfg(test)]
@@ -456,5 +862,135 @@ mod date_from_unix_tests {
                 day: 31
             }
         );
+    }
+
+    /// ISO weeks across a year boundary, against dates whose week is well known.
+    #[test]
+    fn iso_weeks() {
+        let w = |year, month, day| Date { year, month, day }.iso_week();
+        assert_eq!(w(2026, 1, 1), 1, "a Thursday: week 1");
+        assert_eq!(w(2021, 1, 1), 53, "a Friday: still 2020's week 53");
+        assert_eq!(w(2024, 12, 30), 1, "a Monday: 2025's week 1");
+        assert_eq!(w(2026, 11, 6), 45);
+        assert_eq!(w(2020, 12, 31), 53);
+        assert_eq!(Date::from_unix(0).weekday(), 4, "1970-01-01 was a Thursday");
+    }
+
+    /// Layouts that aren't Immich's: an album or event folder under the year, a month written in another language
+    /// or case, an abbreviation, a time of day — found by matching folders rather than missed by joining a path.
+    #[test]
+    fn finds_originals_in_layouts_that_are_not_immichs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let put = |dir: &str, name: &str| {
+            let d = tmp.path().join(dir);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join(name), b"raw").unwrap();
+        };
+        put("2019/Holidays in Crete", "DSC_0001.NEF");
+        put("2019/.trash", "DSC_0002.NEF");
+        put("2019/Mai 2019/Paris", "DSC_0003.NEF");
+        put("2018/03.MARS", "DSC_0004.NEF");
+        put("2017/sept.", "DSC_0005.NEF");
+        put("2016/2016-05-02 14h", "DSC_0006.NEF");
+        put("all", "DSC_0007.NEF");
+        let date = |year, month, day| Date { year, month, day };
+        let find = |template: &str, d: Date, name: &str| {
+            find_by_date_and_name(tmp.path(), template, "en", d, name, None)
+                .into_iter()
+                .map(|c| {
+                    c.path
+                        .strip_prefix(tmp.path())
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect::<Vec<_>>()
+        };
+        // {{album}} is anything, so the event folder is searched.
+        assert_eq!(
+            find(
+                "{{y}}/{{album}}/{{filename}}",
+                date(2019, 7, 4),
+                "DSC_0001.NEF"
+            ),
+            ["2019/Holidays in Crete/DSC_0001.NEF"]
+        );
+        // Hidden folders are not.
+        assert!(
+            find(
+                "{{y}}/{{album}}/{{filename}}",
+                date(2019, 7, 4),
+                "DSC_0002.NEF"
+            )
+            .is_empty()
+        );
+        // A month in German, with literal text around it, and a nested event.
+        assert_eq!(
+            find(
+                "{{y}}/{{MMMM}} {{y}}/{{album}}/{{filename}}",
+                date(2019, 5, 2),
+                "DSC_0003.NEF"
+            ),
+            ["2019/Mai 2019/Paris/DSC_0003.NEF"]
+        );
+        // A French month in capitals.
+        assert_eq!(
+            find(
+                "{{y}}/{{MM}}.{{MMMM}}/{{filename}}",
+                date(2018, 3, 9),
+                "DSC_0004.NEF"
+            ),
+            ["2018/03.MARS/DSC_0004.NEF"]
+        );
+        // An abbreviation with a full stop.
+        assert_eq!(
+            find(
+                "{{y}}/{{MMM}}/{{filename}}",
+                date(2017, 9, 1),
+                "DSC_0005.NEF"
+            ),
+            ["2017/sept./DSC_0005.NEF"]
+        );
+        // A time of day nobody knows from a capture date.
+        assert_eq!(
+            find(
+                "{{y}}/{{y}}-{{MM}}-{{dd}} {{hh}}h/{{filename}}",
+                date(2016, 5, 2),
+                "DSC_0006.NEF"
+            ),
+            ["2016/2016-05-02 14h/DSC_0006.NEF"]
+        );
+        // Everything in one folder.
+        assert_eq!(
+            find("all/{{filename}}", date(2001, 1, 1), "DSC_0007.NEF"),
+            ["all/DSC_0007.NEF"]
+        );
+        // The wrong month is still wrong.
+        assert!(
+            find(
+                "{{y}}/{{MM}}.{{MMMM}}/{{filename}}",
+                date(2018, 4, 9),
+                "DSC_0004.NEF"
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn renders_week_and_other_languages_for_writing() {
+        let d = Date {
+            year: 2026,
+            month: 3,
+            day: 4,
+        };
+        assert_eq!(
+            render_dir("{{y}}/W{{WW}}/{{MMMM}}/{{filename}}", d, "de-DE"),
+            "2026/W10/März"
+        );
+        assert_eq!(
+            render_dir("{{y}}/{{MMM}}/{{filename}}", Date { month: 2, ..d }, "fr"),
+            "2026/fév"
+        );
+        assert_eq!(render_dir("{{filetype}}/{{filename}}", d, "en"), "IMG");
     }
 }

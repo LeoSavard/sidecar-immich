@@ -285,7 +285,10 @@ never been in the loop. It needs a way to run the browser side on a phone and po
 
 ## Reach
 
-**Someone else's folder structure.** The storage template is tuned to one library — this one. `render_dir`
+**Someone else's folder structure — the finding half is done** (2026-11-06; DESIGN.md, build log, "Layouts that aren't
+the template's"): templates are matched rather than joined, with unknown tokens as wildcards, month names in seven
+languages and the ISO week; the name walk is the fallback after them, and the picker's search without Immich. What
+follows is how it stood before. The storage template is tuned to one library — this one. `render_dir`
 understands date tokens only (`{{yyyy}}`, `{{yy}}`, `{{y}}`, `{{MMMM}}`, `{{MMM}}`, `{{MM}}`, `{{M}}`,
 `{{dd}}`, `{{d}}`) with month names in English or French, and a `Root` carries an `immich_prefix` and a
 `per_user` flag shaped by Immich's own internal layout. Note what this does *not* affect: the sidecar is
