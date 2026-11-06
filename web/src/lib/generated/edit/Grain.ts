@@ -16,4 +16,11 @@ amount: number,
 /**
  * 0–100: the grain's size on a 35 mm frame (`Grain::microns`), 5 µm to 40 µm.
  */
-size: number, };
+size: number, 
+/**
+ * In colour film rendering, a grain of its own in each dye layer — red, green and blue each flickering
+ * independently, each by its own layer's density — as colour film's three emulsions are grained apart.
+ * Off (and absent, so an edit made before it keeps its grain) is one grain for all three, as black and white
+ * has and a print is left with.
+ */
+layered?: boolean, };

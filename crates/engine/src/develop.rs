@@ -954,4 +954,76 @@ mod tests {
             "a stock at amount 0 renders as if it were not there"
         );
     }
+
+    /// Colour film's grain per dye layer: on flat grey, one grain moves red, green and blue together (their
+    /// correlation near 1), a grain per layer moves them apart — independent in the working space where the
+    /// layers are, and on screen negatively correlated by the Rec.2020 → sRGB matrix's negative terms, film's own
+    /// interlayer coupling left out — and the picture's level is what one grain leaves it at (grain
+    /// keeps the mean exposure; the tone curve then bends it the same way for both).
+    #[test]
+    fn grain_per_dye_layer_decorrelates_the_channels() {
+        use sidecar_color::params::{Film, Grain};
+        let Ok(gpu) = crate::test_gpu() else {
+            return eprintln!("skipping: no GPU");
+        };
+        let pass = DevelopPass::new(gpu).unwrap();
+        let (w, h) = (256u32, 256u32);
+        let src = RgbaF32 {
+            width: w,
+            height: h,
+            data: [0.12f32, 0.12, 0.12, 0.0].repeat((w * h) as usize),
+        };
+        let cam = sidecar_color::camera::SourceSpace::Srgb.camera_color();
+        let render = |layered: bool, amount: f64| {
+            let edit = sidecar_color::EditParams {
+                film: Some(Film {
+                    interlayer: 0.0,
+                    ..Film::default()
+                }),
+                grain: Some(Grain {
+                    amount,
+                    size: 0.0,
+                    layered,
+                }),
+                ..Default::default()
+            };
+            let p = sidecar_color::pack(
+                &edit,
+                &cam,
+                sidecar_color::SourceKind::Raw,
+                sidecar_color::DisplaySpace::Srgb,
+            );
+            pass.run(gpu, &src, &p.uniform, &p.lut).unwrap()
+        };
+        let stats = |img: &RgbaF32| {
+            let n = (w * h) as f64;
+            let mean: [f64; 3] =
+                std::array::from_fn(|k| img.data.chunks(4).map(|p| p[k] as f64).sum::<f64>() / n);
+            let cov = |a: usize, b: usize| {
+                img.data
+                    .chunks(4)
+                    .map(|p| (p[a] as f64 - mean[a]) * (p[b] as f64 - mean[b]))
+                    .sum::<f64>()
+                    / n
+            };
+            (mean, cov(0, 1) / (cov(0, 0) * cov(1, 1)).sqrt())
+        };
+        let (flat, _) = stats(&render(false, 0.0));
+        let (m1, r1) = stats(&render(false, 100.0));
+        let (m3, r3) = stats(&render(true, 100.0));
+        println!(
+            "one grain: mean {m1:?} corr {r1:.3}; per layer: mean {m3:?} corr {r3:.3}; no grain {flat:?}"
+        );
+        assert!(r1 > 0.9, "one grain moves the channels together: {r1}");
+        assert!(r3 < 0.0, "a grain per layer moves them apart: {r3}");
+        assert!(flat[0] > m1[0], "grain against no grain: {flat:?}");
+        for k in 0..3 {
+            assert!(
+                (m3[k] / m1[k] - 1.0).abs() < 0.01,
+                "channel {k}: {} against one grain's {}",
+                m3[k],
+                m1[k]
+            );
+        }
+    }
 }

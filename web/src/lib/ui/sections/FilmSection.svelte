@@ -126,7 +126,8 @@ sees the light, through a filter. -->
 	/** Grain, kept while its size is set even at amount 0, so the size isn't lost on the way back up. */
 	function setGrain(field: 'amount' | 'size', v: number) {
 		onchange((e) => {
-			const g = { amount: e.grain?.amount ?? 0, size: e.grain?.size ?? 50, [field]: v };
+			// New grain is colour film's own, a grain per dye layer; an edit's existing choice is kept.
+			const g = { amount: e.grain?.amount ?? 0, size: e.grain?.size ?? 50, layered: e.grain ? !!e.grain.layered : true, [field]: v };
 			if (g.amount === 0 && g.size === 50) delete e.grain;
 			else e.grain = g;
 		});
@@ -233,5 +234,9 @@ sees the light, through a filter. -->
 	<p class="pt-1 text-[11px] font-medium tracking-wide text-muted uppercase">Grain</p>
 	<Slider id="grain-amount" label="Amount" value={edit.grain?.amount ?? 0} min={0} max={100} defaultValue={0} format={(v) => decimals(v)} onchange={(v) => setGrain('amount', v)} {oncommit} />
 	<Slider id="grain-size" label="Size" value={edit.grain?.size ?? 50} min={0} max={100} defaultValue={50} format={(v) => `${Math.round(grainMicrons(v))} µm`} onchange={(v) => setGrain('size', v)} {oncommit} />
+	{#if edit.grain && rendering === 'film'}
+		<button type="button" aria-pressed={!!edit.grain.layered} class="{choice(!!edit.grain.layered)} w-fit text-xs" onclick={() => { onchange((e) => { if (e.grain) e.grain.layered = !e.grain.layered; }); oncommit(); }}>Dye layers</button>
+		<p class="text-xs text-muted">Colour film has three emulsions, each grained on its own: with Dye layers each colour flickers by its own layer's density, as on film; off, one grain for all three, as before.</p>
+	{/if}
 	<p class="text-xs text-muted">Size is a grain on a 35 mm negative, so it keeps its share of the picture at any size. The preview, smaller than the photo, shows grain softer than the export does; zoom in to see it as exported.</p>
 </div>

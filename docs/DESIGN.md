@@ -1310,6 +1310,19 @@ Where an octave is finer than a pixel, its lattice is the pixels and its strengt
 pixel size — Selwyn's law, granularity × √(area seen) constant — so the proxy shows what a scaled-down export
 would, and the full-size export shows the grain itself.
 
+**Grain per dye layer** (`Grain.layered`, Film → Dye layers). Colour film has three emulsions — red-, green- and
+blue-sensitive — each grained on its own, its grain growing with that layer's own density. In film rendering from a
+RAW, Dye layers gives each channel its own noise (octaves of its own from the same hash, so the browser and the
+server still agree) and its own σ from its own exposure (`grain_apply_layers`), each keeping its mean. Independent in
+the working space, where the layers are, the three show on screen as colour in the grain: the Rec.2020 → sRGB
+matrix's negative terms even correlate them negatively, and film's interlayer effects more so. Black and white has
+one emulsion and a developed file is a print, so both keep one grain; so does the neutral rendering. New grain in
+film rendering starts with Dye layers on; an edit saved before the field existed reads it as off and keeps its grain.
+Checked: `grain_per_dye_layer_decorrelates_the_channels` (one grain moves the channels together, correlation 1.00;
+per layer −0.44; the level is one grain's to 0.1 %), `grain_per_dye_layer_only_in_colour_film`, and the parity case
+`grain-film-layers` (ΔE 0). The relative grain of the three layers is taken as equal: no datasheet surveyed gives it
+per layer, so a named stock's would need measuring.
+
 The flicker is in exposure, `exp2(σ·n)`, with its mean kept (`− σ² ln 2 / 2`). Grain is denser where the
 negative is, so σ grows with the pixel's place between the black and white points (`√((0.2 + t)/1.2)`); the
 tone curve then flattens it in the deep shadows and the clipped highlights, and more contrast shows more of it,

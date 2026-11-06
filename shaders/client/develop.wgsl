@@ -86,7 +86,13 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   }
   // Grain, in the exposure the tone map is about to take, placed on the whole frame.
   if (P.grain.x > 0.0) {
-    c = grain_apply(c, grain_noise(at, P.grain.y * max(frame.x, frame.y)), P.grain.x, P.grain.z, P.tone, developed);
+    let size = P.grain.y * max(frame.x, frame.y);
+    if (P.grain.w > 0.5) {
+      let n = vec3f(grain_noise_layer(at, size, 1u), grain_noise_layer(at, size, 2u), grain_noise_layer(at, size, 3u));
+      c = grain_apply_layers(c, n, P.grain.x, P.grain.z, P.tone);
+    } else {
+      c = grain_apply(c, grain_noise(at, size), P.grain.x, P.grain.z, P.tone, developed);
+    }
   }
   // A named stock's curve: the shadows, grain and all, bent into its fog, the highlights over its shoulder.
   if (P.stock.x > 0.5) { c = vec3f(stock_print(c.r, P.stock, P.shoulder)); }
