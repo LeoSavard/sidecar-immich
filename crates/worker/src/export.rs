@@ -88,6 +88,20 @@ pub fn detail_settings(edit: &EditParams) -> sidecar_engine::detail::DetailSetti
         sharpen_radius: d.sharpen_radius as f32,
         sharpen_iterations: d.sharpen_iterations,
         noise_model: d.noise_model,
+        // Slot `i` is `edit.masks[i]`, as the mask textures are.
+        layers: edit
+            .masks
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.renders() && (m.noise != 0.0 || m.sharpness != 0.0))
+            .map(|(slot, m)| sidecar_engine::detail::LayerDetail {
+                slot,
+                noise: m.noise as f32,
+                sharpness: m.sharpness as f32,
+                amount: (m.amount / 100.0) as f32,
+                invert: m.invert,
+            })
+            .collect(),
     }
 }
 
@@ -576,11 +590,26 @@ pub fn render(
     stage(tx, "demosaic", 0.15);
     let (mut source, flip, rendering) = full_source_for(kit, &req.path)?;
 
+    // Masks cover the whole frame, here and in develop: the detail pass reads them for its layers.
+    let mask_textures = rendering.mask_textures(
+        kit,
+        &req.edit,
+        masks,
+        flip,
+        [source.width(), source.height()],
+    );
     let settings = detail_settings(&req.edit);
     if !settings.is_noop() {
         stage(tx, "detail", 0.35);
         let noise = kit.detail.noise(&kit.gpu, &source)?;
-        source = kit.detail.apply(&kit.gpu, source, &noise, &settings);
+        let frame = [0.0, 0.0, source.width() as f32, source.height() as f32];
+        let layer_masks = sidecar_engine::detail::DetailMasks {
+            textures: mask_textures.iter().map(Option::as_ref).collect(),
+            frame,
+        };
+        source = kit
+            .detail
+            .apply(&kit.gpu, source, &noise, &settings, Some(&layer_masks));
     }
     if req.edit.lens.is_some() {
         stage(tx, "lens", 0.42);
@@ -599,13 +628,6 @@ pub fn render(
     let packed = rendering.pack(&req.edit, req.color_space);
     let profile = crate::stocks::for_edit(&req.edit);
     let slide_response = crate::stocks::response(&profile);
-    let mask_textures = rendering.mask_textures(
-        kit,
-        &req.edit,
-        masks,
-        flip,
-        [source.width(), source.height()],
-    );
     let developed = kit.develop.render(
         &kit.gpu,
         &source,

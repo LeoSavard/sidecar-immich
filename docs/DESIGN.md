@@ -7,6 +7,25 @@ Source: the architecture plan (PWA entry, XMP sidecars, server-side demosaic, We
 
 Where the code differs from the text below, the code and these notes win.
 
+- **Detail per layer** (§15, `MaskAdjustment::{sharpness, noise}`, `detail/strength.wgsl`): a mask layer adds
+  sharpening and luminance noise reduction to the Detail section's own, −100…100 each, where its mask is.
+  The detail pass reads a strength map: noise reduction in red, sharpening in green, 0…1 per pixel. It is
+  the global settings plus each layer's offset weighted by its mask as develop weighs it (inverted, times
+  its amount). The wavelet shrink's luminance threshold and the Richardson–Lucy blend take their strength
+  from it. With no layers it is one texel of the global values, so nothing else changed. Chroma noise
+  reduction and the sharpening radius stay global.
+  - Masks are in develop's frame and detail runs on the sensor's pixels before the lens pass, so a layer's
+    mask is read at the same place in the frame: a distorting lens's few pixels off near the corners, under
+    an edge that is usually feathered.
+  - Like the global Detail, it is the server's: the 1:1 loupe and export. The editor's preview doesn't run
+    detail, and the panel says so.
+  Checked:
+  - Engine: a layer over half a noisy frame, with no global noise reduction, takes its half's noise from
+    0.0050 to 0.0001 and leaves the other half as it was. Inverted, it does the other half; at half its
+    amount it lands in between.
+  - `web/scripts/detail-layer-smoke.mjs` on the worker's loupe: a brush layer over the left half denoises
+    that half of a 1:1 tile (0.54 → 0.24) and leaves the right half identical.
+
 - **Noise reduction against each photo's measured noise** (`PROCESS_VERSION` 8, `Detail::noise_model`):
   `sidecar_engine::noise` fits σ² = a·y + b to the luminance of a central 1024² crop — 5×5 local mean as the
   level, a 4-neighbour high-pass (noise gain √1.25) as the noise, the flattest 40 % of each of 24 log-spaced

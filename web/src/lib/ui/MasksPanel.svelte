@@ -170,6 +170,11 @@ added on top of it where the mask is. "Show" greys out what the selected mask le
 					<button type="button" class="justify-self-end rounded px-2 py-1 text-fg-2 hover:bg-raised" onclick={() => { setCurve([[0, 0], [1, 1]]); oncommit(); }}>Reset curve</button>
 				</div>
 			</details>
+
+			{@render group('Detail')}
+			<p class="text-[11px] text-muted">Added to the Detail section's settings where this mask is; seen in the 1:1 loupe and in exports.</p>
+			<Slider id="mask-sharpness" label="Sharpness" value={layer.sharpness ?? 0} min={-100} max={100} defaultValue={0} bipolar {disabled} format={(v) => signed(v)} onchange={(v) => onchange(i, { sharpness: v || undefined })} {oncommit} />
+			<Slider id="mask-noise" label="Noise reduction" value={layer.noise ?? 0} min={-100} max={100} defaultValue={0} bipolar {disabled} format={(v) => signed(v)} onchange={(v) => onchange(i, { noise: v || undefined })} {oncommit} />
 		</div>
 	{/if}
 	{#if set?.faces.length}<p class="text-[11px] text-muted">{set.faces.length} {set.faces.length === 1 ? 'face' : 'faces'} found.</p>{/if}

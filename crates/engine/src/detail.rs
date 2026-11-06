@@ -29,6 +29,39 @@ pub struct DetailParams {
     pub d: f32,
 }
 
+/// Detail per layer's uniform (`detail/strength.wgsl`, 160 bytes). Its WGSL declaration,
+/// `shaders/uniforms/detail_layers.wgsl`, is generated from this struct (`sidecar-uniform`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable, Uniform)]
+pub struct DetailLayers {
+    /// Per mask slot: luminance noise reduction and sharpening to add (−1…1), the layer's amount (0…1), and 1
+    /// when it is inverted. All zero for a slot without a layer.
+    pub layers: [[f32; 4]; 8],
+    /// Where the texture being detailed sits in the masks' frame: x, y, and the frame's width and height.
+    pub frame: [f32; 4],
+    /// The global noise reduction and sharpening (0…1), unused ×2.
+    pub base: [f32; 4],
+}
+
+/// One mask layer's detail: its slot among the masks develop binds, what it adds (−100…100 each, as the
+/// global sliders), and how its mask applies.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LayerDetail {
+    pub slot: usize,
+    pub noise: f32,
+    pub sharpness: f32,
+    /// 0…1.
+    pub amount: f32,
+    pub invert: bool,
+}
+
+/// The masks a layered detail reads: one texture per slot (`None` for a slot without one), in a frame of
+/// `frame[2] × frame[3]` pixels, of which the texture being detailed starts at `frame[0], frame[1]`.
+pub struct DetailMasks<'a> {
+    pub textures: Vec<Option<&'a wgpu::Texture>>,
+    pub frame: [f32; 4],
+}
+
 /// Noise of each à-trous B3-spline band relative to white noise at scale 0 (Starck & Murtagh).
 const BAND_NOISE: [f32; 5] = [0.889, 0.200, 0.086, 0.041, 0.020];
 /// Chroma channels carry about √6 times the stabilized luma noise.
@@ -46,6 +79,9 @@ pub struct Detail {
     update: Kernel,
     apply: Kernel,
     crop: Kernel,
+    strength: Kernel,
+    sampler: wgpu::Sampler,
+    no_mask: wgpu::Texture,
 }
 
 pub struct DetailSettings {
@@ -59,6 +95,8 @@ pub struct DetailSettings {
     /// Stabilize with this photo's measured noise model (`noise`), not the fixed transform an edit saved
     /// before `PROCESS_VERSION` 8 was denoised with.
     pub noise_model: bool,
+    /// Mask layers that change the noise reduction or the sharpening where they are.
+    pub layers: Vec<LayerDetail>,
 }
 
 /// A photo's noise, measured once and kept with its source: the noise level after the fixed transform, and
@@ -115,18 +153,37 @@ impl Noise {
 }
 
 impl DetailSettings {
+    /// The most luminance noise reduction any pixel gets: the global amount plus every layer that adds.
+    fn most_denoise(&self) -> f32 {
+        self.denoise_luminance
+            + self
+                .layers
+                .iter()
+                .map(|l| l.noise.max(0.0) * l.amount)
+                .sum::<f32>()
+    }
+
+    fn most_sharpen(&self) -> f32 {
+        self.sharpen_amount
+            + self
+                .layers
+                .iter()
+                .map(|l| l.sharpness.max(0.0) * l.amount)
+                .sum::<f32>()
+    }
+
     pub fn is_noop(&self) -> bool {
-        self.denoise_luminance <= 0.0 && self.denoise_chroma <= 0.0 && self.sharpen_amount <= 0.0
+        self.most_denoise() <= 0.0 && self.denoise_chroma <= 0.0 && self.most_sharpen() <= 0.0
     }
 
     /// Pixels of context a tile needs so its centre matches a full-image render.
     pub fn margin(&self) -> u32 {
-        let denoise = if self.denoise_luminance > 0.0 || self.denoise_chroma > 0.0 {
+        let denoise = if self.most_denoise() > 0.0 || self.denoise_chroma > 0.0 {
             64
         } else {
             0
         };
-        let sharpen = if self.sharpen_amount > 0.0 {
+        let sharpen = if self.most_sharpen() > 0.0 {
             (3.0 * self.sharpen_radius).ceil() as u32 * 2 * self.sharpen_iterations.min(10)
         } else {
             0
@@ -153,7 +210,14 @@ impl Detail {
             )?,
             shrink: k(
                 "detail/shrink.wgsl",
-                &[B::Uniform, B::Tex, B::Tex, B::Tex, B::Store(F::Rgba32Float)],
+                &[
+                    B::Uniform,
+                    B::Tex,
+                    B::Tex,
+                    B::Tex,
+                    B::Store(F::Rgba32Float),
+                    B::Tex,
+                ],
             )?,
             band: k(
                 "detail/detail_band.wgsl",
@@ -177,12 +241,48 @@ impl Detail {
             )?,
             apply: k(
                 "detail/rl_apply.wgsl",
-                &[B::Uniform, B::Tex, B::Tex, B::Tex, B::Store(F::Rgba16Float)],
+                &[
+                    B::Uniform,
+                    B::Tex,
+                    B::Tex,
+                    B::Tex,
+                    B::Store(F::Rgba16Float),
+                    B::Tex,
+                ],
             )?,
             crop: k(
                 "detail/crop.wgsl",
                 &[B::Uniform, B::Tex, B::Store(F::Rgba16Float)],
             )?,
+            strength: k(
+                "detail/strength.wgsl",
+                &[
+                    B::Uniform,
+                    B::Samp,
+                    B::TexF,
+                    B::TexF,
+                    B::TexF,
+                    B::TexF,
+                    B::TexF,
+                    B::TexF,
+                    B::TexF,
+                    B::TexF,
+                    B::Store(F::Rgba32Float),
+                ],
+            )?,
+            sampler: gpu.device.create_sampler(&wgpu::SamplerDescriptor {
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
+                ..Default::default()
+            }),
+            no_mask: crate::upload_rgba16(
+                gpu,
+                &crate::RgbaF32 {
+                    width: 1,
+                    height: 1,
+                    data: vec![0.0; 4],
+                },
+            ),
         })
     }
 
@@ -319,12 +419,14 @@ impl Detail {
         Ok((*median / 0.6745 / BAND_NOISE[0]).max(1e-5))
     }
 
+    /// Denoise `src`: luminance by the strength map's red at each pixel (`strength`, see `strength_map`), chroma
+    /// by `chroma` (0…100) everywhere.
     pub fn denoise(
         &self,
         gpu: &Gpu,
         src: &wgpu::Texture,
         stab: &Stabilization,
-        luminance: f32,
+        strength: &wgpu::Texture,
         chroma: f32,
     ) -> wgpu::Texture {
         let (w, h) = (src.width(), src.height());
@@ -340,10 +442,8 @@ impl Detail {
             &[Res::View(&view(src)), Res::View(&view(&fine))],
         );
         let mut acc = texture(gpu, w, h, F::Rgba32Float);
-        let (kl, kc) = (
-            3.0 * luminance.clamp(0.0, 100.0) / 100.0,
-            4.0 * chroma.clamp(0.0, 100.0) / 100.0,
-        );
+        // Full strength; the map scales the luminance threshold at each pixel.
+        let (kl, kc) = (3.0, 4.0 * chroma.clamp(0.0, 100.0) / 100.0);
         for (j, noise) in BAND_NOISE.iter().enumerate() {
             let step = 1u32 << j;
             let tmp = texture(gpu, w, h, F::Rgba32Float);
@@ -386,6 +486,7 @@ impl Detail {
                     Res::View(&view(&coarse)),
                     Res::View(&view(&acc)),
                     Res::View(&view(&next_acc)),
+                    Res::View(&view(strength)),
                 ],
             );
             acc = next_acc;
@@ -407,11 +508,12 @@ impl Detail {
         out
     }
 
+    /// Sharpen `src` by the strength map's green at each pixel (`strength`).
     pub fn sharpen(
         &self,
         gpu: &Gpu,
         src: &wgpu::Texture,
-        amount: f32,
+        strength: &wgpu::Texture,
         sigma: f32,
         iterations: u32,
     ) -> wgpu::Texture {
@@ -507,51 +609,229 @@ impl Detail {
         self.apply.run(
             gpu,
             &mut enc,
-            &DetailParams {
-                a: amount.clamp(0.0, 100.0) / 100.0,
-                ..Self::p(size)
-            },
+            &Self::p(size),
             size,
             &[
                 Res::View(&view(src)),
                 Res::View(&view(&observed)),
                 Res::View(&view(&estimate)),
                 Res::View(&view(&out)),
+                Res::View(&view(strength)),
             ],
         );
         gpu.queue.submit([enc.finish()]);
         out
     }
 
-    /// Apply denoise then sharpening as configured; returns the source unchanged when both are off.
+    /// The strengths over a texture `size` pixels big: luminance noise reduction in red and sharpening in green,
+    /// 0…1. 1×1 when no layer changes them (the global settings everywhere); otherwise drawn from the masks
+    /// (`detail/strength.wgsl`).
+    pub fn strength_map(
+        &self,
+        gpu: &Gpu,
+        s: &DetailSettings,
+        masks: Option<&DetailMasks>,
+        size: [u32; 2],
+    ) -> wgpu::Texture {
+        let base = [
+            s.denoise_luminance.clamp(0.0, 100.0) / 100.0,
+            s.sharpen_amount.clamp(0.0, 100.0) / 100.0,
+        ];
+        let layered = masks.filter(|_| !s.layers.is_empty());
+        let Some(m) = layered else {
+            return constant(gpu, [base[0], base[1], 0.0, 1.0]);
+        };
+        let mut u = DetailLayers {
+            frame: m.frame,
+            base: [base[0], base[1], 0.0, 0.0],
+            ..Default::default()
+        };
+        for l in s.layers.iter().filter(|l| l.slot < 8) {
+            u.layers[l.slot] = [
+                l.noise.clamp(-100.0, 100.0) / 100.0,
+                l.sharpness.clamp(-100.0, 100.0) / 100.0,
+                l.amount.clamp(0.0, 1.0),
+                if l.invert { 1.0 } else { 0.0 },
+            ];
+        }
+        let views: Vec<wgpu::TextureView> = (0..8)
+            .map(|i| {
+                view(
+                    m.textures
+                        .get(i)
+                        .copied()
+                        .flatten()
+                        .unwrap_or(&self.no_mask),
+                )
+            })
+            .collect();
+        let out = texture(gpu, size[0], size[1], F::Rgba32Float);
+        let ov = view(&out);
+        let mut res = vec![Res::Sampler(&self.sampler)];
+        res.extend(views.iter().map(Res::View));
+        res.push(Res::View(&ov));
+        let mut enc = gpu.device.create_command_encoder(&Default::default());
+        self.strength.run(gpu, &mut enc, &u, size, &res);
+        gpu.queue.submit([enc.finish()]);
+        out
+    }
+
+    /// Apply denoise then sharpening as configured, through the mask layers when `masks` gives them; returns the
+    /// source unchanged when both are off everywhere.
     pub fn apply(
         &self,
         gpu: &Gpu,
         src: wgpu::Texture,
         noise: &Noise,
         s: &DetailSettings,
+        masks: Option<&DetailMasks>,
     ) -> wgpu::Texture {
-        let mut cur = src;
-        if s.denoise_luminance > 0.0 || s.denoise_chroma > 0.0 {
-            let stab = noise.stabilization(s.noise_model);
-            cur = self.denoise(gpu, &cur, &stab, s.denoise_luminance, s.denoise_chroma);
+        if s.is_noop() {
+            return src;
         }
-        if s.sharpen_amount > 0.0 {
-            cur = self.sharpen(
-                gpu,
-                &cur,
-                s.sharpen_amount,
-                s.sharpen_radius,
-                s.sharpen_iterations,
-            );
+        let strength = self.strength_map(gpu, s, masks, [src.width(), src.height()]);
+        let mut cur = src;
+        if s.most_denoise() > 0.0 || s.denoise_chroma > 0.0 {
+            let stab = noise.stabilization(s.noise_model);
+            cur = self.denoise(gpu, &cur, &stab, &strength, s.denoise_chroma);
+        }
+        if s.most_sharpen() > 0.0 {
+            cur = self.sharpen(gpu, &cur, &strength, s.sharpen_radius, s.sharpen_iterations);
         }
         cur
     }
 }
 
+/// A 1×1 RGBA32F texture holding `v`: a strength map that is the same everywhere — `[luminance noise
+/// reduction, sharpening, 0, 1]`, each 0…1.
+pub fn constant(gpu: &Gpu, v: [f32; 4]) -> wgpu::Texture {
+    use wgpu::util::DeviceExt;
+    gpu.device.create_texture_with_data(
+        &gpu.queue,
+        &wgpu::TextureDescriptor {
+            label: Some("detail strength"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: F::Rgba32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        },
+        wgpu::util::TextureDataOrder::LayerMajor,
+        bytemuck::cast_slice(&v),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A layer whose mask covers the left half denoises there and leaves the right half exactly as it was, with
+    /// no global noise reduction at all; inverted, it does the other half; at half its amount, half as much.
+    #[test]
+    fn a_layer_denoises_where_its_mask_is() {
+        let Ok(gpu) = crate::test_gpu() else { return };
+        let detail = Detail::new(gpu).unwrap();
+        let (w, h) = (256u32, 256u32);
+        let mut state = 777u64;
+        let mut rnd = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % 10_000) as f32 / 10_000.0 - 0.5
+        };
+        let img = crate::RgbaF32 {
+            width: w,
+            height: h,
+            data: (0..w * h)
+                .flat_map(|_| {
+                    [
+                        0.2 + 0.03 * rnd(),
+                        0.2 + 0.03 * rnd(),
+                        0.2 + 0.03 * rnd(),
+                        0.0,
+                    ]
+                })
+                .collect(),
+        };
+        let tex = crate::upload_rgba16(gpu, &img);
+        let noise = detail.noise(gpu, &tex).unwrap();
+        let mask = crate::upload_rgba16(
+            gpu,
+            &crate::RgbaF32 {
+                width: w,
+                height: h,
+                data: (0..w * h)
+                    .flat_map(|i| {
+                        let v = if i % w < w / 2 { 1.0 } else { 0.0 };
+                        [v, v, v, 1.0]
+                    })
+                    .collect(),
+            },
+        );
+        let masks = DetailMasks {
+            textures: vec![Some(&mask)],
+            frame: [0.0, 0.0, w as f32, h as f32],
+        };
+        let run = |invert: bool, amount: f32| {
+            let s = DetailSettings {
+                denoise_luminance: 0.0,
+                denoise_chroma: 0.0,
+                sharpen_amount: 0.0,
+                sharpen_radius: 1.0,
+                sharpen_iterations: 10,
+                noise_model: false,
+                layers: vec![LayerDetail {
+                    slot: 0,
+                    noise: 100.0,
+                    sharpness: 0.0,
+                    amount,
+                    invert,
+                }],
+            };
+            let tex = crate::upload_rgba16(gpu, &img);
+            read_rgba16(gpu, &detail.apply(gpu, tex, &noise, &s, Some(&masks))).unwrap()
+        };
+        // Luminance noise over a column band, inside its 16 px margin from the seam.
+        let spread = |img: &crate::RgbaF32, x0: u32, x1: u32| {
+            let v: Vec<f32> = (16..h - 16)
+                .flat_map(|y| (x0..x1).map(move |x| (y, x)))
+                .map(|(y, x)| {
+                    let i = ((y * w + x) * 4) as usize;
+                    (img.data[i] + img.data[i + 1] + img.data[i + 2]) / 3.0
+                })
+                .collect();
+            let m = v.iter().sum::<f32>() / v.len() as f32;
+            (v.iter().map(|x| (x - m).powi(2)).sum::<f32>() / v.len() as f32).sqrt()
+        };
+        let before = (spread(&img, 16, 112), spread(&img, 144, 240));
+        let left = run(false, 1.0);
+        let right = run(true, 1.0);
+        let half = run(false, 0.5);
+        let after = (spread(&left, 16, 112), spread(&left, 144, 240));
+        eprintln!(
+            "noise {before:?} → layer {after:?}, inverted ({:.4}, {:.4}), half amount {:.4}",
+            spread(&right, 16, 112),
+            spread(&right, 144, 240),
+            spread(&half, 16, 112)
+        );
+        assert!(after.0 < 0.6 * before.0, "masked side denoised");
+        assert!(
+            (after.1 - before.1).abs() < 0.03 * before.1,
+            "unmasked side as it was"
+        );
+        assert!(
+            spread(&right, 144, 240) < 0.6 * before.1
+                && (spread(&right, 16, 112) - before.0).abs() < 0.03 * before.0
+        );
+        let h0 = spread(&half, 16, 112);
+        assert!(h0 < before.0 && h0 > after.0, "half amount between: {h0}");
+    }
 
     #[test]
     fn denoise_reduces_noise_and_keeps_the_mean() {
@@ -590,7 +870,17 @@ mod tests {
         // what it gets.
         for model in [false, true] {
             let stab = noise.stabilization(model);
-            let out = read_rgba16(gpu, &detail.denoise(gpu, &tex, &stab, 100.0, 100.0)).unwrap();
+            let out = read_rgba16(
+                gpu,
+                &detail.denoise(
+                    gpu,
+                    &tex,
+                    &stab,
+                    &constant(gpu, [100.0 / 100.0, 0.0, 0.0, 1.0]),
+                    100.0,
+                ),
+            )
+            .unwrap();
             let (m1, s1) = stats(&out.data);
             assert!((m1 - m0).abs() < 0.005, "{stab:?}: mean {m0} → {m1}");
             assert!(s1 < s0 * 0.6, "{stab:?}: noise {s0} → {s1}");
@@ -646,11 +936,27 @@ mod tests {
         };
         let fixed = read_rgba16(
             gpu,
-            &detail.denoise(gpu, &tex, &noise.stabilization(false), 60.0, 60.0),
+            &detail.denoise(
+                gpu,
+                &tex,
+                &noise.stabilization(false),
+                &constant(gpu, [60.0 / 100.0, 0.0, 0.0, 1.0]),
+                60.0,
+            ),
         )
         .unwrap();
         let stab = noise.stabilization(true);
-        let out = read_rgba16(gpu, &detail.denoise(gpu, &tex, &stab, 60.0, 60.0)).unwrap();
+        let out = read_rgba16(
+            gpu,
+            &detail.denoise(
+                gpu,
+                &tex,
+                &stab,
+                &constant(gpu, [60.0 / 100.0, 0.0, 0.0, 1.0]),
+                60.0,
+            ),
+        )
+        .unwrap();
         let mut factors = Vec::new();
         for b in 0..8 {
             let ((m0, s0), (m1, s1), (mf, sf)) =
