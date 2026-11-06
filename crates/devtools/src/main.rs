@@ -430,8 +430,7 @@ fn hilite_edge(input: &std::path::Path, evs: &[f32]) -> Result<()> {
         }
         let names = ["clipped", "1 px from it", "2–3 px", "farther"];
         let mut acc = [(0f64, 0f64, 0f64, 0u64); 4];
-        for i in 0..w * h {
-            let (t, g) = (&truth.data[i * 4..i * 4 + 4], &got.data[i * 4..i * 4 + 4]);
+        for ((t, g), &d) in truth.data.chunks(4).zip(got.data.chunks(4)).zip(&dist) {
             if t[3] > 0.0 {
                 continue;
             }
@@ -447,7 +446,7 @@ fn hilite_edge(input: &std::path::Path, evs: &[f32]) -> Result<()> {
             if ts <= 1e-4 || !gs.is_finite() || gs <= 1e-9 {
                 continue;
             }
-            let class = match dist[i] {
+            let class = match d {
                 0 => 0,
                 1 => 1,
                 2 | 3 => 2,
