@@ -11,7 +11,7 @@ fn main() -> Result<()> {
     };
     let dir = PathBuf::from(dir);
     std::fs::create_dir_all(&dir)?;
-    for entry in sidecar_shaders::WEB_ENTRIES {
+    for entry in sidecar_shaders::web_entries() {
         let path = dir.join(sidecar_shaders::composed_name(entry));
         let composed = sidecar_shaders::compose(entry)?;
         // Leave an unchanged file alone, so Vite's watcher doesn't reload the editor for nothing.

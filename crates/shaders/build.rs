@@ -41,6 +41,12 @@ fn main() {
         code.push_str(&format!("    ({rel:?}, include_str!({abs:?})),\n"));
     }
     code.push_str("];\n");
+    // Every file in `client/` is a browser entry point, so the list is the directory: a new one can't be missed.
+    code.push_str("pub static CLIENT_ENTRIES: &[&str] = &[\n");
+    for (rel, _) in files.iter().filter(|(rel, _)| rel.starts_with("client/")) {
+        code.push_str(&format!("    {rel:?},\n"));
+    }
+    code.push_str("];\n");
     fs::write(
         Path::new(&env::var("OUT_DIR").unwrap()).join("files.rs"),
         code,
