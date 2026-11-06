@@ -7,6 +7,24 @@ Source: the architecture plan (PWA entry, XMP sidecars, server-side demosaic, We
 
 Where the code differs from the text below, the code and these notes win.
 
+- **Noise reduction against each photo's measured noise** (`PROCESS_VERSION` 8, `Detail::noise_model`):
+  `sidecar_engine::noise` fits σ² = a·y + b to the luminance of a central 1024² crop — 5×5 local mean as the
+  level, a 4-neighbour high-pass (noise gain √1.25) as the noise, the flattest 40 % of each of 24 log-spaced
+  level bins, a robust MAD per bin, weighted least squares with a and b held non-negative (Foi, Trimeche,
+  Katkovnik and Egiazarian 2008). `to_opponent.wgsl` then applies the generalized Anscombe transform for
+  that model, chroma scaled by its derivative as before, and `from_opponent.wgsl` inverts luminance with
+  Mäkitalo and Foi's closed-form exact unbiased inverse (2013), falling back to the algebraic one below D = 1.
+  The noise level after the transform is still measured, so a model that is a little off changes only the
+  balance across levels, never the overall strength. Checked: a known model is recovered from synthetic
+  Poisson-Gaussian patches (gain within 0.3 %, read within 2 %); the transform gives unit variance at every
+  level and the inverse returns the mean; on eight bands a stop apart, 6 to 800 photo-electrons, the model
+  denoises every band by the same factor (0.06–0.10 of its noise) where the fixed transform kept 59 % of the
+  deepest band's noise and 6.5 % of the brightest's; every band's mean moves by under a tenth of its noise (the
+  deepest by +14 % of its level at about six photo-electrons, where soft thresholding of skewed noise is not
+  quite unbiased; the fixed transform moved it −7 %). `sidecar-dev noise` and `denoise-truth` are the tools.
+  An edit saved before version 8 that denoised keeps the fixed transform (`migrate`); one that never did gets
+  the model if it starts to; "take up today's rendering" switches it on.
+
 - **D1 and D5 are both closed, neither merged** (pull request #46, closed 2026-10-29). The owner's rule,
   2026-10-27: what is merged and deployed should be what has been tested. Both were written, and neither
   earned its way in.
