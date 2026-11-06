@@ -4,6 +4,7 @@
 	import { importPhoto, type Who } from '$lib/intake';
 	import { ACCEPT_RAW, isRaw } from '$lib/formats';
 	import { showPreview, type ShownPreview } from '$lib/local/preview';
+	import FolderBrowser from '$lib/ui/FolderBrowser.svelte';
 
 	type Recent = { assetKey: string; fileName: string; immichAssetId: string | null; openedAt: string };
 	let recent = $state<Recent[] | null>(null);
@@ -361,4 +362,5 @@
 	{:else if recent}
 		<p class="text-sm text-[#8d8d8d]">{folder?.items?.length ? 'Photos you open from elsewhere appear here.' : 'Photos you open appear here.'}</p>
 	{/if}
+	<FolderBrowser />
 </main>

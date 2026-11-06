@@ -240,7 +240,7 @@ pub async fn resolve(app: &App, user: &User, q: &OpenQuery) -> Result<Resolved> 
 const WALK_LIMIT: usize = 20;
 
 /// The folder a root's photos are under for this user.
-fn mount_for(root: &Root, user: &User) -> std::path::PathBuf {
+pub(crate) fn mount_for(root: &Root, user: &User) -> std::path::PathBuf {
     if root.per_user {
         root.mount.join(user.library_folder())
     } else {

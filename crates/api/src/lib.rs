@@ -3,6 +3,7 @@
 
 pub mod config;
 pub mod export;
+mod folders;
 pub mod immich;
 mod lensfun;
 pub mod resolve;
@@ -1672,6 +1673,12 @@ pub fn router(app: Arc<App>) -> Router {
             axum::routing::post(intake).layer(axum::extract::DefaultBodyLimit::max(INTAKE_LIMIT)),
         )
         .route("/api/intake/folder", get(folder))
+        .route("/api/folders", get(folders::roots))
+        .route("/api/folders/{root}/list", get(folders::list))
+        .route(
+            "/api/folders/{root}/open",
+            axum::routing::post(folders::open),
+        )
         .route("/api/intake/folder/{key}", axum::routing::delete(forget))
         .route("/api/immich/assets/{id}/thumbnail", get(thumbnail))
         .route("/api/capabilities", get(capabilities))
