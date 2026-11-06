@@ -786,10 +786,17 @@ fn lab(p: &[f32]) -> Lab {
 }
 
 pub fn compare(dir: &Path, out: &Path) -> Result<()> {
+    compare_with(dir, out, out)
+}
+
+/// `compare`, the browser's renders read from `browser` rather than beside the native ones: a run a phone uploaded
+/// (`POST /api/debug/parity`), checked against this machine's native renders.
+pub fn compare_with(dir: &Path, out: &Path, browser: &Path) -> Result<()> {
     let mut failed = false;
     for case in load_index(dir)? {
         let read = |kind: &str| -> Result<RgbaF32> {
-            let path = out.join(format!("{}.{kind}.f16", case.name));
+            let path = if kind == "browser" { browser } else { out }
+                .join(format!("{}.{kind}.f16", case.name));
             Ok(RgbaF32::from_f16_bytes(
                 case.width,
                 case.height,

@@ -1212,6 +1212,64 @@ async fn capabilities(State(app): State<Arc<App>>, ApiUser(_user): ApiUser) -> R
     relay(app.http.get(app.worker("/v1/capabilities")).send().await).await
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ParityUpload {
+    adapter: String,
+    user_agent: String,
+    /// Each case's render, RGBA16F as the page reads it back, base64.
+    images: std::collections::BTreeMap<String, String>,
+}
+
+/// `POST /api/debug/parity` — a browser's parity renders (`/debug/parity?post`), kept as a run under
+/// `<state>/parity/` for `sidecar-dev parity compare <fixtures> <native> <run>`: how a phone's WebGPU checks against
+/// the server's when no automation can drive its browser. Only where `parity_uploads` is on.
+async fn parity_upload(
+    State(app): State<Arc<App>>,
+    ApiUser(_user): ApiUser,
+    Json(up): Json<ParityUpload>,
+) -> Response {
+    use base64::Engine;
+    if !app.config.server.parity_uploads {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let run = format!(
+        "{}-{}",
+        sidecar_xmp::utc_now().replace([':', '.'], "-"),
+        up.user_agent
+            .split_whitespace()
+            .find(|w| w.contains("iPhone")
+                || w.contains("iPad")
+                || w.contains("Mac")
+                || w.contains("Android"))
+            .unwrap_or("browser")
+            .replace(|c: char| !c.is_ascii_alphanumeric(), "")
+    );
+    let dir = app.config.server.state_dir.join("parity").join(&run);
+    let saved = (|| -> Result<usize> {
+        std::fs::create_dir_all(&dir)?;
+        for (name, b64) in &up.images {
+            anyhow::ensure!(
+                !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'),
+                "not a case name: {name}"
+            );
+            let bytes = base64::engine::general_purpose::STANDARD.decode(b64)?;
+            std::fs::write(dir.join(format!("{name}.browser.f16")), bytes)?;
+        }
+        std::fs::write(
+            dir.join("run.json"),
+            serde_json::to_vec_pretty(
+                &serde_json::json!({ "adapter": up.adapter, "userAgent": up.user_agent, "cases": up.images.len() }),
+            )?,
+        )?;
+        Ok(up.images.len())
+    })();
+    match saved {
+        Ok(n) => Json(serde_json::json!({ "run": run, "dir": dir, "cases": n })).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, format!("{e:#}")).into_response(),
+    }
+}
+
 async fn film_stocks(State(app): State<Arc<App>>, ApiUser(_user): ApiUser) -> Response {
     relay(app.http.get(app.worker("/v1/film/stocks")).send().await).await
 }
@@ -1675,6 +1733,11 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/intake/folder/{key}", axum::routing::delete(forget))
         .route("/api/immich/assets/{id}/thumbnail", get(thumbnail))
         .route("/api/capabilities", get(capabilities))
+        .route(
+            "/api/debug/parity",
+            axum::routing::post(parity_upload)
+                .layer(axum::extract::DefaultBodyLimit::max(256 << 20)),
+        )
         .route("/api/film/stocks", get(film_stocks))
         .route("/api/film/stocks/{id}", get(film_stock))
         .route("/api/assets/{key}/meta", get(meta))
