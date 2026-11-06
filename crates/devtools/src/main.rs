@@ -52,6 +52,13 @@ fn main() -> Result<()> {
         ),
         ["radial", list] => radial(list.as_ref()),
         ["levels", input] => levels(input.as_ref()),
+        ["maskedge", raw, proxy, edge, mask, out] => maskedge(
+            raw.as_ref(),
+            proxy.as_ref(),
+            edge.parse()?,
+            mask.as_ref(),
+            out.as_ref(),
+        ),
         ["linear-dng", input, out, rest @ ..] => {
             let input: &std::path::Path = input.as_ref();
             let edge: u32 = rest.first().map_or(Ok(1600), |v| v.parse())?;
@@ -955,5 +962,107 @@ fn ingest(input: &std::path::Path, out: &std::path::Path, long_edge: u32) -> Res
         (t_mosaic - t_open).as_secs_f64() * 1e3,
         (t_gpu - t_mosaic).as_secs_f64() * 1e3
     );
+    Ok(())
+}
+
+/// A model mask's edges against the photo, before and after `mask_refine::refine`: the cached proxy (`f16`, its
+/// long edge given) and the cached mask PNG of one photo, the photo's RAW for its colour (as shot). Reported: the
+/// share of the mask that is transition (between 10 % and 90 %) per pixel inside it, smaller being sharper; and
+/// the photo's mean luminance gradient along the mask's half-way contour, higher meaning the edge sits on the
+/// photo's edges. The refined mask is written as `out`, for looking at.
+fn maskedge(
+    raw: &std::path::Path,
+    proxy: &std::path::Path,
+    edge: u32,
+    mask_png: &std::path::Path,
+    out: &std::path::Path,
+) -> Result<()> {
+    let bytes = std::fs::read(proxy)?;
+    let px = (bytes.len() / 8) as u32;
+    let (w, h) = if px.is_multiple_of(edge) && px / edge <= edge {
+        (edge, px / edge)
+    } else {
+        (px / edge, edge)
+    };
+    let photo = sidecar_engine::RgbaF32::from_f16_bytes(w, h, &bytes);
+    let info = sidecar_raw::RawFile::open(raw)?.info();
+    let packed = sidecar_color::pack(
+        &Default::default(),
+        &info.color,
+        info.source_kind,
+        sidecar_color::DisplaySpace::Srgb,
+    );
+    let develop: sidecar_color::DevelopParams = bytemuck::pod_read_unaligned(&packed.uniform);
+    let mut reader =
+        png::Decoder::new(std::io::BufReader::new(std::fs::File::open(mask_png)?)).read_info()?;
+    let mut buf = vec![0u8; reader.output_buffer_size().unwrap_or(0)];
+    let frame = reader.next_frame(&mut buf)?;
+    let (mw, mh) = (frame.width, frame.height);
+    let mask = buf[..(mw * mh) as usize].to_vec();
+    // The baseline: the model's mask stretched bilinearly, as it is used without refining.
+    let stretched: Vec<u8> = (0..w * h)
+        .map(|i| {
+            let (x, y) = ((i % w) as f32, (i / w) as f32);
+            let u = ((x + 0.5) * mw as f32 / w as f32 - 0.5).clamp(0.0, (mw - 1) as f32);
+            let v = ((y + 0.5) * mh as f32 / h as f32 - 0.5).clamp(0.0, (mh - 1) as f32);
+            let (x0, y0) = (u.floor() as u32, v.floor() as u32);
+            let (x1, y1) = ((x0 + 1).min(mw - 1), (y0 + 1).min(mh - 1));
+            let (fx, fy) = (u - x0 as f32, v - y0 as f32);
+            let at = |x: u32, y: u32| mask[(y * mw + x) as usize] as f32;
+            ((at(x0, y0) * (1.0 - fx) + at(x1, y0) * fx) * (1.0 - fy)
+                + (at(x0, y1) * (1.0 - fx) + at(x1, y1) * fx) * fy)
+                .round() as u8
+        })
+        .collect();
+    let sigma: f32 = std::env::var("SIGMA")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0.04);
+    let t0 = std::time::Instant::now();
+    let refined =
+        sidecar_color::mask_refine::refine_with(&mask, mw, mh, &photo.data, w, h, &develop, sigma);
+    let took = t0.elapsed();
+    let luma: Vec<f32> = photo
+        .data
+        .chunks(4)
+        .map(|p| {
+            (0.2627 * p[0] + 0.678 * p[1] + 0.0593 * p[2])
+                .max(1e-4)
+                .ln()
+        })
+        .collect();
+    let stats = |m: &[u8]| {
+        let inside = m.iter().filter(|&&v| v >= 128).count().max(1) as f64;
+        let transition = m.iter().filter(|&&v| v > 25 && v < 230).count() as f64;
+        let (mut g, mut n) = (0f64, 0usize);
+        for y in 1..h - 1 {
+            for x in 1..w - 1 {
+                let i = (y * w + x) as usize;
+                let crosses = (m[i] >= 128) != (m[i + 1] >= 128)
+                    || (m[i] >= 128) != (m[i + w as usize] >= 128);
+                if crosses {
+                    let gx = luma[i + 1] - luma[i - 1];
+                    let gy = luma[i + w as usize] - luma[i - w as usize];
+                    g += ((gx * gx + gy * gy) as f64).sqrt();
+                    n += 1;
+                }
+            }
+        }
+        (transition / inside, g / n.max(1) as f64)
+    };
+    let (sb, ab) = stats(&stretched);
+    let (sa, aa) = stats(&refined);
+    println!(
+        "{} × {} photo, {mw} × {mh} mask; refined in {:.0} ms",
+        w,
+        h,
+        took.as_secs_f64() * 1e3
+    );
+    println!("transition per pixel inside: stretched {sb:.3}, refined {sa:.3}");
+    println!("photo gradient along the edge: stretched {ab:.3}, refined {aa:.3}");
+    let mut e = png::Encoder::new(std::io::BufWriter::new(std::fs::File::create(out)?), w, h);
+    e.set_color(png::ColorType::Grayscale);
+    e.set_depth(png::BitDepth::Eight);
+    e.write_header()?.write_image_data(&refined)?;
     Ok(())
 }
