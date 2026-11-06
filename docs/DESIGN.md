@@ -7,6 +7,30 @@ Source: the architecture plan (PWA entry, XMP sidecars, server-side demosaic, We
 
 Where the code differs from the text below, the code and these notes win.
 
+- **Texture and Clarity — local contrast** (§7, `EditParams::presence`, `develop/local.wgsl`, sliders at the
+  foot of Light): detail in log luminance at two scales, raised or lowered. Each band is the difference
+  between edge-preserving bases: self-guided filters of the source's log luminance (the guided filter, #59,
+  with a new "filter the guide itself" channel). Texture's base is a radius of 0.3 % of the long edge with
+  ε = 0.04 (detail under about ⅕ stop); Clarity's is 2.5 % with ε = 0.25 (detail under about ½ stop). The
+  coefficients are computed once per frame on the adjacency map's grid (≤ 1,024 on the long edge, the whole
+  frame, lens-corrected like it), packed into one RGBA32F texture (`client/local_pack.wgsl`), and applied
+  inside develop against each pixel's own luminance. That is the fast guided filter's point: edges come
+  from the full-resolution pixel, so preview and export agree and a loupe tile given the whole frame's map
+  matches the whole. The change is one gain on all three channels, so hue and saturation stay, and it is
+  limited smoothly to ±1.5 stops. Exposure, white balance and masks don't move the bands, because they come
+  from the source. The browser builds the same map with the same passes (`web/src/lib/gpu/local.ts`); the
+  adjacency map's own render leaves local contrast out on both sides. At 0 the pass doesn't run: no
+  `PROCESS_VERSION` bump.
+  Checked:
+  - Engine: a ±0.15-stop ripple 60 px across rises 1.78× at Clarity +100.
+  - Halos: a 3.3-stop edge shows −0.11 stop on its dark side 8 px out at Clarity +100 (the guided filter's
+    windows that straddle an edge; bounded in the test). Texture shows none.
+  - Both bands at 0 change nothing, bit for bit, and a tile matches the whole frame to 1e-3.
+  - Parity case `local`: ΔE 0.0000.
+  - `web/scripts/local-smoke.mjs` in Chromium on the GPU: Clarity +80 raises local contrast 11 % in the
+    canvas and in the worker's preview at the same brightness; −80 on both lowers it 21 %; the saved edit
+    holds it; both back at 0 leaves nothing in the edit. The constants are a look and want the owner's A/B.
+
 - **Colour grading** (§7, `develop/grading.wgsl`, `EditParams::color_grading`): four wheels — shadows,
   midtones, highlights, global — each a hue, a saturation and a luminance, plus Blending and Balance. It runs
   after the tone map and the mixer, on the picture as it will be seen, in OKLab: a wheel adds a fixed (a, b)

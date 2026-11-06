@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright Sidecar contributors
-//! requires: uniforms/develop_params.wgsl develop/wb.wgsl develop/exposure.wgsl develop/gamut.wgsl develop/tone.wgsl develop/masks.wgsl develop/mixer.wgsl develop/mono.wgsl develop/developer.wgsl develop/grain.wgsl develop/stock.wgsl develop/slide.wgsl develop/grading.wgsl develop/output.wgsl
+//! requires: uniforms/develop_params.wgsl develop/wb.wgsl develop/exposure.wgsl develop/gamut.wgsl develop/tone.wgsl develop/masks.wgsl develop/mixer.wgsl develop/mono.wgsl develop/developer.wgsl develop/grain.wgsl develop/stock.wgsl develop/slide.wgsl develop/grading.wgsl develop/local.wgsl develop/output.wgsl
 // Develop pass: full-screen triangle into developedTex (rgba16float, proxy size). Output is display-linear.
 
 @group(0) @binding(0) var<uniform> P: DevelopParams;
@@ -15,6 +15,25 @@
 // cube, and the slide's colour over the layers' log H. Both 1×1×1 unless a stock is being rendered.
 @group(0) @binding(5) var slide_exposures: texture_3d<f32>;
 @group(0) @binding(6) var slide_responses: texture_3d<f32>;
+// Texture and Clarity's map (`develop/local.wgsl`): two bands' guided-filter coefficients over the whole frame at
+// low resolution, rgba32float (not filterable everywhere, so `local_coef` interpolates by hand); 1×1 when off.
+@group(0) @binding(7) var local_map: texture_2d<f32>;
+
+// The local-contrast map at frame position `at` of a frame `frame` pixels across: the map covers the whole frame,
+// one texel per `ceil(long edge / 1024)` pixels square (`developer::map_scale`).
+fn local_coef(at: vec2f, frame: vec2f) -> vec4f {
+  let k = max(ceil(max(frame.x, frame.y) / 1024.0), 1.0);
+  let size = vec2i(textureDimensions(local_map));
+  let f = at / k - 0.5;
+  let base = vec2i(floor(f));
+  let t = f - floor(f);
+  let last = size - 1;
+  let c00 = textureLoad(local_map, clamp(base, vec2i(0), last), 0);
+  let c10 = textureLoad(local_map, clamp(base + vec2i(1, 0), vec2i(0), last), 0);
+  let c01 = textureLoad(local_map, clamp(base + vec2i(0, 1), vec2i(0), last), 0);
+  let c11 = textureLoad(local_map, clamp(base + vec2i(1, 1), vec2i(0), last), 0);
+  return mix(mix(c00, c10, t.x), mix(c01, c11, t.x), t.y);
+}
 
 // Masks: one texture per adjustment, in the frame `M.frame` describes. Unused slots hold a 1×1 texture.
 @group(1) @binding(0) var<uniform> M: MaskParams;
@@ -67,6 +86,11 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   // and developer are the export's.
   let frame = select(vec2f(textureDimensions(source_tex)), M.frame.zw, M.frame.z > 0.0);
   let at = vec2i(pos.xy) + vec2i(M.frame.xy);
+  // Texture and Clarity, on the scene's light: a gain from the source's own detail, so exposure, white balance and
+  // the masks don't move the bands.
+  if (P.local.z > 0.5 && textureDimensions(local_map).x > 1u) {
+    c = local_contrast(c, src.rgb, local_coef(vec2f(at) + 0.5, frame), P.local);
+  }
   // Black and white: the film's exposure in place of the colour, before the tone map, as film is exposed; then
   // what the developer makes of it.
   if (P.mono.x > 0.5) {

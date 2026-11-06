@@ -684,7 +684,8 @@ order:
   for portrait work, since the skin, hair and face masks can constrain a source region automatically. Red-eye
   is a small adjacent tool. *Generative* fill is a trap for a self-hosted Apache-2.0 project: every
   commercial one is a paid cloud service needing an internet connection.
-- **Clarity, texture and local contrast.** Front-panel sliders everywhere; their absence is immediately
+- **Clarity, texture and local contrast — built** (2026-11-06, `EditParams::presence`; DESIGN.md's build log).
+  Front-panel sliders everywhere; their absence is immediately
   visible. Falls out of the local Laplacian or guided filter above, which is why those come first.
 - **Dehaze.** Present in all of Lightroom, darktable and RawTherapee.
 - **A scene-to-display tone transform.** This is becoming the consensus default rather than an option:

@@ -25,7 +25,8 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
       // a guide of the grid's own size, that is the guide texel's centre exactly.
       let uv = (vec2f(id.xy) + (vec2f(f32(sx), f32(sy)) + 0.5) / vec2f(n)) / vec2f(low);
       let i = guided_guide(textureSampleLevel(guide, samp, uv, 0.0).rgb, G.log_guide);
-      let p = textureSampleLevel(input, samp, uv, 0.0)[G.channel];
+      // Channel 4 is the guide itself: a self-guided filter, as local contrast needs.
+      let p = select(textureSampleLevel(input, samp, uv, 0.0)[min(G.channel, 3u)], i, G.channel == 4u);
       acc += vec4f(i, p, i * p, i * i);
     }
   }

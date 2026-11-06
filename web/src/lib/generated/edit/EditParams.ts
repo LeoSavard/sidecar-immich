@@ -10,6 +10,7 @@ import type { LensBlur } from "./LensBlur";
 import type { MaskAdjustment } from "./MaskAdjustment";
 import type { Mixer } from "./Mixer";
 import type { Monochrome } from "./Monochrome";
+import type { Presence } from "./Presence";
 import type { Tone } from "./Tone";
 import type { WhiteBalance } from "./WhiteBalance";
 
@@ -64,4 +65,9 @@ haze?: number,
  * Colour grading wheels (DESIGN.md §7, "Colour grading"): a colour and a lightness for the shadows,
  * midtones and highlights, and one for all of it. Absent, and left out of the serialized edit, is none.
  */
-colorGrading?: ColorGrading, };
+colorGrading?: ColorGrading, 
+/**
+ * Texture and Clarity (DESIGN.md §7, "Local contrast"): fine and middle detail in log luminance, raised or
+ * lowered against an edge-preserving base. Absent, and left out of the serialized edit, is none.
+ */
+presence?: Presence, };

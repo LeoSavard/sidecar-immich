@@ -769,27 +769,31 @@ fn loupe_png(
     let mask_textures = rendering.mask_textures(kit, &req.edit, masks, flip, [sw, sh]);
     // Black and white's adjacency map covers the whole frame too: averaged down, lens-corrected at that size as
     // export corrects the whole, then developed and blurred.
-    let density = match sidecar_engine::needs_density_map(&packed.uniform) {
-        true => {
-            let small = kit.develop.density_source(&kit.gpu, &source);
-            let size = [small.width(), small.height()];
-            let small = match rendering.lens_params(&req.edit, size, [0.0; 2], [0.0; 2]) {
-                Some(p) => kit.lens.apply(&kit.gpu, &small, &p, size),
-                None => small,
-            };
-            Some(kit.develop.density_map(
-                &kit.gpu,
-                &small,
-                [sw, sh],
-                &packed.uniform,
-                &packed.lut,
-                &export::masks_for(&packed, &mask_textures, [0.0; 4], slide_response),
-            )?)
+    let small_whole = || {
+        let small = kit.develop.density_source(&kit.gpu, &source);
+        let size = [small.width(), small.height()];
+        match rendering.lens_params(&req.edit, size, [0.0; 2], [0.0; 2]) {
+            Some(p) => kit.lens.apply(&kit.gpu, &small, &p, size),
+            None => small,
         }
+    };
+    let density = match sidecar_engine::needs_density_map(&packed.uniform) {
+        true => Some(kit.develop.density_map(
+            &kit.gpu,
+            &small_whole(),
+            [sw, sh],
+            &packed.uniform,
+            &packed.lut,
+            &export::masks_for(&packed, &mask_textures, [0.0; 4], slide_response),
+        )?),
         false => None,
     };
+    // Texture and Clarity's map is the whole frame's as well, at the same size and corrected the same way.
+    let local = sidecar_engine::needs_local_map(&packed.uniform)
+        .then(|| kit.develop.local_map(&kit.gpu, &small_whole(), [sw, sh]));
     let masks_at = |x: u32, y: u32| sidecar_engine::Masks {
         density: density.as_ref(),
+        local: local.as_ref(),
         ..export::masks_for(
             &packed,
             &mask_textures,

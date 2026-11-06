@@ -12,7 +12,7 @@ struct GuidedParams {
   // The regularisation ε, in the guide's units squared: a window whose guide varies less than this is
   // treated as flat and smoothed; one that varies more keeps its edge.
   eps: f32,
-  // Which channel of the input is filtered, 0…3.
+  // Which channel of the input is filtered, 0…3; `GUIDE` filters the guide value itself.
   channel: u32,
   // 1 to guide by log₂ luminance, so ε is relative to the level rather than absolute.
   log_guide: u32,

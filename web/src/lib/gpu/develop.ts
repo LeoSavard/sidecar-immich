@@ -7,6 +7,7 @@ import densityBlurWgsl from './wgsl/client_density_blur.wgsl?raw';
 import { DEVELOP_UNIFORM_BYTES } from '$lib/color/pack';
 import { fromHalf } from '$lib/color/transfer';
 import { kernel } from './depth';
+import { LocalMap } from './local';
 
 /** `MaskParams` (shaders/develop/masks.wgsl), and the texture slots it describes. */
 const MASK_UNIFORM_BYTES = 1568;
@@ -18,6 +19,8 @@ const MAP_LONG = 1024;
 /** Float offsets in `DevelopParams` (crates/color/src/params.rs): `mono` and `developer`. */
 const MONO = 72;
 const DEVELOPER = 80;
+/** `DevelopParams.local`: Texture and Clarity. */
+const LOCAL = 128;
 
 /** One of a spectral stock's tables: `side`³ of four floats, read corner by corner (rgba32float can't filter). */
 function slideTexture(device: GPUDevice, label: string, side: number): GPUTexture {
@@ -64,14 +67,21 @@ export class DevelopPass {
 	private boundDensity?: GPUTexture;
 	private densityDown: GPUComputePipeline;
 	private densityBlur: GPUComputePipeline;
+	/** Texture and Clarity's map (`./local`), the averaged-down picture it is made from, and what binds without it. */
+	private localMap: LocalMap;
+	private local?: { small: GPUTexture; map: GPUTexture; params: GPUBuffer };
+	private noLocal: GPUTexture;
+	private boundLocal?: GPUTexture;
 
-	private constructor(device: GPUDevice, pipeline: GPURenderPipeline, layout: GPUBindGroupLayout, maskLayout: GPUBindGroupLayout, densityDown: GPUComputePipeline, densityBlur: GPUComputePipeline) {
+	private constructor(device: GPUDevice, pipeline: GPURenderPipeline, layout: GPUBindGroupLayout, maskLayout: GPUBindGroupLayout, densityDown: GPUComputePipeline, densityBlur: GPUComputePipeline, localMap: LocalMap) {
 		this.device = device;
 		this.pipeline = pipeline;
 		this.layout = layout;
 		this.maskLayout = maskLayout;
 		this.densityDown = densityDown;
 		this.densityBlur = densityBlur;
+		this.localMap = localMap;
+		this.noLocal = device.createTexture({ label: 'no local map', size: [1, 1], format: 'rgba32float', usage: GPUTextureUsage.TEXTURE_BINDING });
 		this.ubo = device.createBuffer({ label: 'develop params', size: DEVELOP_UNIFORM_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 		// Zeroed on creation: no masks until `setMasks` says otherwise.
 		this.maskUbo = device.createBuffer({ label: 'develop masks', size: MASK_UNIFORM_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
@@ -99,7 +109,8 @@ export class DevelopPass {
 				{ binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '3d' } },
 				{ binding: 4, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '2d' } },
 				{ binding: 5, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '3d' } },
-				{ binding: 6, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '3d' } }
+				{ binding: 6, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '3d' } },
+				{ binding: 7, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } }
 			]
 		});
 		// Mirrors crates/engine/src/develop.rs: the mask uniforms, a linear sampler, a texture per slot.
@@ -119,11 +130,12 @@ export class DevelopPass {
 			fragment: { module, entryPoint: 'fs', targets: [{ format: 'rgba16float' }] },
 			primitive: { topology: 'triangle-list' }
 		});
-		const [densityDown, densityBlur] = await Promise.all([
+		const [densityDown, densityBlur, localMap] = await Promise.all([
 			kernel(device, 'density down', densityDownWgsl, ['uniform', 'texture', 'storage']),
-			kernel(device, 'density blur', densityBlurWgsl, ['uniform', 'texture', 'storage'])
+			kernel(device, 'density blur', densityBlurWgsl, ['uniform', 'texture', 'storage']),
+			LocalMap.create(device)
 		]);
-		return new DevelopPass(device, pipeline, layout, maskLayout, densityDown, densityBlur);
+		return new DevelopPass(device, pipeline, layout, maskLayout, densityDown, densityBlur, localMap);
 	}
 
 	get output(): GPUTexture | undefined {
@@ -169,6 +181,38 @@ export class DevelopPass {
 	private get needsDensityMap(): boolean {
 		const u = this.uniform;
 		return u[MONO] > 0.5 && u[MONO + 2] < 0.5 && u[DEVELOPER] !== 0;
+	}
+
+	/** Texture or Clarity is on: `crates/engine`'s `needs_local_map`. */
+	private get needsLocalMap(): boolean {
+		return this.uniform[LOCAL + 2] > 0.5;
+	}
+
+	/**
+	 * Texture and Clarity's map over the picture develop reads, as `DevelopPass::local_map` makes it on the server:
+	 * averaged down by the adjacency map's whole number, then filtered. Rebuilt with every draw that needs it, as
+	 * the adjacency map is: the lens pass may have redrawn the input in place.
+	 */
+	private buildLocalMap() {
+		const input = this.input ?? this.source!;
+		const [w, h] = [input.width, input.height];
+		const k = Math.max(1, Math.ceil(Math.max(w, h) / MAP_LONG));
+		const [mw, mh] = [Math.ceil(w / k), Math.ceil(h / k)];
+		if (this.local?.map.width !== mw || this.local?.map.height !== mh) {
+			if (this.local) for (const t of [this.local.small, this.local.map]) t.destroy();
+			this.local = {
+				small: this.storage('local source', mw, mh),
+				map: this.device.createTexture({ label: 'local map', size: [mw, mh], format: 'rgba32float', usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING }),
+				params: this.local?.params ?? this.device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST })
+			};
+			this.bindGroup = undefined;
+		}
+		const l = this.local;
+		this.device.queue.writeBuffer(l.params, 0, new Float32Array([k, 0, 0, 0]));
+		const encoder = this.device.createCommandEncoder();
+		this.dispatch(encoder, this.densityDown, l.params, input, l.small);
+		this.device.queue.submit([encoder.finish()]);
+		this.localMap.build(l.small, [w, h], k, l.map);
 	}
 
 	private storage(label: string, w: number, h: number, usage = 0): GPUTexture {
@@ -217,6 +261,8 @@ export class DevelopPass {
 		const d = this.density;
 		const own = this.uniform.slice();
 		own[MONO + 2] = 1;
+		// The film's exposure, without Texture and Clarity, as on the server.
+		own[LOCAL + 2] = 0;
 		this.device.queue.writeBuffer(d.ubo, 0, own);
 		const sigma = (this.uniform[DEVELOPER + 1] * Math.max(w, h)) / k;
 		this.device.queue.writeBuffer(d.params[0], 0, new Float32Array([k, 0, 0, 0]));
@@ -307,7 +353,7 @@ export class DevelopPass {
 		});
 	}
 
-	private groupFor(ubo: GPUBuffer, input: GPUTexture, density: GPUTexture): GPUBindGroup {
+	private groupFor(ubo: GPUBuffer, input: GPUTexture, density: GPUTexture, local: GPUTexture = this.noLocal): GPUBindGroup {
 		return this.device.createBindGroup({
 			layout: this.layout,
 			entries: [
@@ -317,7 +363,8 @@ export class DevelopPass {
 				{ binding: 3, resource: this.mono.createView() },
 				{ binding: 4, resource: density.createView() },
 				{ binding: 5, resource: this.slideExposures.createView() },
-				{ binding: 6, resource: this.slideResponses.createView() }
+				{ binding: 6, resource: this.slideResponses.createView() },
+				{ binding: 7, resource: local.createView() }
 			]
 		});
 	}
@@ -328,7 +375,11 @@ export class DevelopPass {
 		const density = this.needsDensityMap && this.density ? this.density.map : this.noMask;
 		if (density !== this.boundDensity) this.bindGroup = undefined;
 		this.boundDensity = density;
-		this.bindGroup ??= this.groupFor(this.ubo, this.input ?? this.source, density);
+		if (this.needsLocalMap) this.buildLocalMap();
+		const local = this.needsLocalMap && this.local ? this.local.map : this.noLocal;
+		if (local !== this.boundLocal) this.bindGroup = undefined;
+		this.boundLocal = local;
+		this.bindGroup ??= this.groupFor(this.ubo, this.input ?? this.source, density, local);
 		this.drawWith(this.bindGroup, target, masks);
 	}
 

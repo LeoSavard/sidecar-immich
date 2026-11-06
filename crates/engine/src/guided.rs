@@ -31,7 +31,7 @@ pub struct GuidedParams {
     /// The regularisation ε, in the guide's units squared: a window whose guide varies less than this is
     /// treated as flat and smoothed; one that varies more keeps its edge.
     pub eps: f32,
-    /// Which channel of the input is filtered, 0…3.
+    /// Which channel of the input is filtered, 0…3; `GUIDE` filters the guide value itself.
     pub channel: u32,
     /// 1 to guide by log₂ luminance, so ε is relative to the level rather than absolute.
     pub log_guide: u32,
@@ -50,6 +50,10 @@ pub struct Guided {
     pub channel: u32,
     pub log_guide: bool,
 }
+
+/// `Guided::channel` for a self-guided filter: the input is the guide's own value (log luminance with
+/// `log_guide`).
+pub const GUIDE: u32 = 4;
 
 pub struct GuidedFilter {
     stats: Kernel,
@@ -107,6 +111,36 @@ impl GuidedFilter {
         out: [u32; 2],
         how: Guided,
     ) -> wgpu::Texture {
+        let (coef, p) = self.coefficients(gpu, guide, input, out, how);
+        let result = texture(gpu, out[0].max(1), out[1].max(1), F::Rgba16Float);
+        let mut enc = gpu.device.create_command_encoder(&Default::default());
+        self.apply.run(
+            gpu,
+            &mut enc,
+            &p,
+            [out[0].max(1), out[1].max(1)],
+            &[
+                Res::View(&view(guide)),
+                Res::View(&view(&coef)),
+                Res::Sampler(&self.sampler),
+                Res::View(&view(&result)),
+            ],
+        );
+        gpu.queue.submit([enc.finish()]);
+        result
+    }
+
+    /// The filter's smoothed linear coefficients on its statistics grid (`grid(out, subsample)`): an RGBA32F
+    /// texture holding mean(a) and mean(b) in x and y, so that q = mean(a)·I + mean(b) at any resolution —
+    /// what `filter` applies, and what a pass that applies them itself (develop's local contrast) takes.
+    pub fn coefficients(
+        &self,
+        gpu: &Gpu,
+        guide: &wgpu::Texture,
+        input: &wgpu::Texture,
+        out: [u32; 2],
+        how: Guided,
+    ) -> (wgpu::Texture, GuidedParams) {
         let low = Self::grid(out, how.subsample);
         let s = how.subsample.max(1) as f32;
         let p = GuidedParams {
@@ -114,14 +148,13 @@ impl GuidedFilter {
             radius: ((how.radius / s).round() as u32).max(1),
             axis: 0,
             eps: how.eps.max(1e-12),
-            channel: how.channel.min(3),
+            channel: how.channel.min(GUIDE),
             log_guide: how.log_guide as u32,
             _pad: 0,
         };
         let wide = || texture(gpu, low[0], low[1], F::Rgba32Float);
         let (a, b) = (wide(), wide());
-        let result = texture(gpu, out[0].max(1), out[1].max(1), F::Rgba16Float);
-        let (gv, iv, av, bv, rv) = (view(guide), view(input), view(&a), view(&b), view(&result));
+        let (gv, iv, av, bv) = (view(guide), view(input), view(&a), view(&b));
         let mut enc = gpu.device.create_command_encoder(&Default::default());
         let samp = Res::Sampler(&self.sampler);
         self.stats.run(
@@ -143,20 +176,8 @@ impl GuidedFilter {
             .run(gpu, &mut enc, &p, low, &[Res::View(&av), Res::View(&bv)]);
         boxed(&mut enc, &bv, &av, 0);
         boxed(&mut enc, &av, &bv, 1);
-        self.apply.run(
-            gpu,
-            &mut enc,
-            &p,
-            [out[0].max(1), out[1].max(1)],
-            &[
-                Res::View(&gv),
-                Res::View(&bv),
-                Res::Sampler(&self.sampler),
-                Res::View(&rv),
-            ],
-        );
         gpu.queue.submit([enc.finish()]);
-        result
+        (b, p)
     }
 }
 
