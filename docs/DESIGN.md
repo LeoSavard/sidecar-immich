@@ -7,6 +7,18 @@ Source: the architecture plan (PWA entry, XMP sidecars, server-side demosaic, We
 
 Where the code differs from the text below, the code and these notes win.
 
+- **The guided filter, as a primitive** (`sidecar_engine::guided`; `client/guided_stats`, `_box`, `_coef`,
+  `_apply.wgsl`, so the browser composes the same passes): He, Sun and Tang's filter in He and Sun's fast
+  subsampled form. Statistics on a grid `subsample` times coarser than the output, each texel the mean of its
+  footprint (products averaged, not multiplied after averaging, since the covariance needs E[I·p]); box means
+  normalised by the taps inside the image; coefficients and their box means on that grid in rgba32float —
+  the variance is a difference of means and half precision cancels it — then q = mean(a)·I + mean(b) at full
+  resolution against the full-resolution guide. The guide is linear luminance, or log₂ luminance so that ε
+  is relative to the level (a doubling of light counts the same in the shadows as in the highlights). Checked
+  against an f64 implementation of the paper's equations (largest difference 9.4e-4, half-float output), and
+  for its defining behaviour: a noisy step keeps the guide's edge while each flat side is smoothed, at
+  subsample 1 and 4, linear and log guide; a constant input is returned unchanged. No feature uses it yet.
+
 - **D1 and D5 are both closed, neither merged** (pull request #46, closed 2026-10-29). The owner's rule,
   2026-10-27: what is merged and deployed should be what has been tested. Both were written, and neither
   earned its way in.
