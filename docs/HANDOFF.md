@@ -40,7 +40,7 @@ primitives first, because several features stand on each:
 | 19 | Presets and styles; copy-paste of a settings subset; sync across a selection | per person or shared presets | #84 (auto-sync to come) |
 | 20 | Snapshots and virtual copies | — | #85 snapshots and the split view, #86 virtual copies |
 | 21 | Browsing the editing folder; other folder layouts (name-walk fallback, tokens, locales) | whether a root can opt out of browsing | #87 layouts and the name walk, #88 browsing (on #87) |
-| 22 | Histogram and overlays in the no-WebGPU fallback | — | |
+| 22 | Histogram and overlays in the no-WebGPU fallback | — | #89 (AF marker and Measure still hidden) |
 | 23 | Models on demand (Settings → Models) | — | |
 | 24 | Parametric auto-edit (grey-world/edge WB, percentile tone anchoring, face-aware exposure) | an A/B | |
 | 25 | Colour ranges and skin; hair-edge refinement; subject- and depth-weighted peaking | — | |
