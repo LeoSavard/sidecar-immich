@@ -7,6 +7,32 @@ Source: the architecture plan (PWA entry, XMP sidecars, server-side demosaic, We
 
 Where the code differs from the text below, the code and these notes win.
 
+- **Retouch: heal, clone, red eye** (§15, `EditParams::spots`, `client/retouch.wgsl`, `sidecar_engine::retouch`,
+  `web/src/lib/gpu/retouch.ts`, Processing → Retouch): spots on the photo's camera-native linear light, before
+  everything else, in order — a spot can take from what an earlier one healed. Positions are in the masks' frame
+  (oriented, before lens correction); the radius is a share of the long edge.
+  - **Heal** is gradient-domain cloning (Pérez, Gangnet and Blake 2003): the source's texture, its edge made to
+    meet the target's surroundings by a harmonic function — on a disc, exactly the Poisson integral of the edge
+    mismatch, so one pass with no iteration. The mismatch is taken in log light, so a source lit differently is
+    corrected by a ratio, as light differs.
+  - **Clone** copies; **red eye** takes red down to the mean of green and blue where, white-balanced by the
+    camera's as-shot multipliers, it stands well above them.
+  - Each spot runs over its own box and is copied back: the cost is the spots' area. In the browser the pass sits
+    inside `DevelopPass`, whose `proxy` is then the retouched source the lens pass, depth effects and develop all
+    read. The worker applies it first in export, the server preview and the loupe (to the whole frame, before
+    tiles are cut), mapping spots to the sensor's orientation (`geometry::sensor_from_oriented`).
+  - A tap with a tool armed adds a spot. Heal and clone choose their own source: of the places 2.2–3.6 radii
+    away and inside the photo, the one whose surroundings (rings of log luminance) best match the target's.
+    Both centres can be dragged.
+  Checked:
+  - Engine: a blemish on a textured surface whose light falls off across it, healed from a patch lit two thirds
+    of a stop differently, ends 0.037 stops from the clean surface, against 0.62 for a clone of the same patch;
+    nothing outside the spot moves. Red eye fixes a red pupil and leaves a neutral one alone.
+  - Parity case `retouch` (a heal, a feathered clone and a red eye): ΔE 0.0000.
+  - `web/scripts/retouch-smoke.mjs` in Chromium: a tap with Heal makes one spot with its source found away from
+    it, drawn on the photo. It changes the canvas at the spot (54) and nowhere else (0.04), and the worker's
+    preview likewise (18 against 0.00); removing it leaves no spots in the edit.
+
 - **D1 and D5 are both closed, neither merged** (pull request #46, closed 2026-10-29). The owner's rule,
   2026-10-27: what is merged and deployed should be what has been tested. Both were written, and neither
   earned its way in.

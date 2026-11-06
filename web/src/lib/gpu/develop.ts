@@ -7,6 +7,8 @@ import densityBlurWgsl from './wgsl/client_density_blur.wgsl?raw';
 import { DEVELOP_UNIFORM_BYTES } from '$lib/color/pack';
 import { fromHalf } from '$lib/color/transfer';
 import { kernel } from './depth';
+import { RetouchPass } from './retouch';
+import type { Spot } from '$lib/types';
 
 /** `MaskParams` (shaders/develop/masks.wgsl), and the texture slots it describes. */
 const MASK_UNIFORM_BYTES = 1568;
@@ -64,14 +66,18 @@ export class DevelopPass {
 	private boundDensity?: GPUTexture;
 	private densityDown: GPUComputePipeline;
 	private densityBlur: GPUComputePipeline;
+	/** Retouch (`./retouch`): the proxy with the edit's spots applied, and what it was made from. */
+	private retouchPass: RetouchPass;
+	private retouched?: { out: GPUTexture; scratch: GPUTexture; key: string };
 
-	private constructor(device: GPUDevice, pipeline: GPURenderPipeline, layout: GPUBindGroupLayout, maskLayout: GPUBindGroupLayout, densityDown: GPUComputePipeline, densityBlur: GPUComputePipeline) {
+	private constructor(device: GPUDevice, pipeline: GPURenderPipeline, layout: GPUBindGroupLayout, maskLayout: GPUBindGroupLayout, densityDown: GPUComputePipeline, densityBlur: GPUComputePipeline, retouchPass: RetouchPass) {
 		this.device = device;
 		this.pipeline = pipeline;
 		this.layout = layout;
 		this.maskLayout = maskLayout;
 		this.densityDown = densityDown;
 		this.densityBlur = densityBlur;
+		this.retouchPass = retouchPass;
 		this.ubo = device.createBuffer({ label: 'develop params', size: DEVELOP_UNIFORM_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 		// Zeroed on creation: no masks until `setMasks` says otherwise.
 		this.maskUbo = device.createBuffer({ label: 'develop masks', size: MASK_UNIFORM_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
@@ -119,20 +125,48 @@ export class DevelopPass {
 			fragment: { module, entryPoint: 'fs', targets: [{ format: 'rgba16float' }] },
 			primitive: { topology: 'triangle-list' }
 		});
-		const [densityDown, densityBlur] = await Promise.all([
+		const [densityDown, densityBlur, retouchPass] = await Promise.all([
 			kernel(device, 'density down', densityDownWgsl, ['uniform', 'texture', 'storage']),
-			kernel(device, 'density blur', densityBlurWgsl, ['uniform', 'texture', 'storage'])
+			kernel(device, 'density blur', densityBlurWgsl, ['uniform', 'texture', 'storage']),
+			RetouchPass.create(device)
 		]);
-		return new DevelopPass(device, pipeline, layout, maskLayout, densityDown, densityBlur);
+		return new DevelopPass(device, pipeline, layout, maskLayout, densityDown, densityBlur, retouchPass);
 	}
 
 	get output(): GPUTexture | undefined {
 		return this.target;
 	}
 
-	/** The proxy as uploaded, for the lens pass to read. */
+	/** The proxy as the lens pass reads it: as uploaded, with the edit's retouch spots applied (`setSpots`). */
 	get proxy(): GPUTexture | undefined {
-		return this.source;
+		return this.retouched?.out ?? this.source;
+	}
+
+	/**
+	 * The edit's retouch spots (`sidecar_color::params::Spot`), in the proxy's frame; `wb` the camera's as-shot
+	 * multipliers. Applied to the proxy only when they or the proxy changed; returns whether `proxy` changed, so
+	 * the passes that read it run again.
+	 */
+	setSpots(spots: Spot[], wb: [number, number, number]): boolean {
+		const src = this.source;
+		if (!src) return false;
+		const key = spots.length ? JSON.stringify([spots, wb, src.label, src.width, src.height]) : '';
+		if (key === (this.retouched?.key ?? '')) return false;
+		if (!spots.length) {
+			this.retouched?.out.destroy();
+			this.retouched?.scratch.destroy();
+			this.retouched = undefined;
+		} else {
+			if (this.retouched?.out.width !== src.width || this.retouched?.out.height !== src.height) {
+				this.retouched?.out.destroy();
+				this.retouched?.scratch.destroy();
+				this.retouched = { out: this.retouchPass.target(src, 'retouched'), scratch: this.retouchPass.target(src, 'retouch scratch'), key };
+			}
+			this.retouchPass.apply(src, this.retouched.out, this.retouched.scratch, spots, wb);
+			this.retouched.key = key;
+		}
+		this.bindGroup = undefined;
+		return true;
 	}
 
 	/** Develop from `texture` (the proxy's size) instead of the proxy; `undefined` goes back to the proxy. */
@@ -147,6 +181,9 @@ export class DevelopPass {
 		this.source?.destroy();
 		this.target?.destroy();
 		this.input = undefined;
+		this.retouched?.out.destroy();
+		this.retouched?.scratch.destroy();
+		this.retouched = undefined;
 		this.source = this.device.createTexture({ label: 'source', size: [width, height], format: 'rgba16float', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC });
 		this.device.queue.writeTexture({ texture: this.source }, f16, { bytesPerRow: width * 8 }, [width, height]);
 		this.target = this.device.createTexture({
@@ -196,7 +233,7 @@ export class DevelopPass {
 	 * averaged down by a whole number, developed to the film's log exposure, blurred over the developer's reach.
 	 */
 	private buildDensityMap(masks: GPUBindGroup) {
-		const input = this.input ?? this.source!;
+		const input = this.input ?? this.proxy!;
 		const [w, h] = [input.width, input.height];
 		const k = Math.max(1, Math.ceil(Math.max(w, h) / MAP_LONG));
 		const [mw, mh] = [Math.ceil(w / k), Math.ceil(h / k)];
@@ -328,7 +365,7 @@ export class DevelopPass {
 		const density = this.needsDensityMap && this.density ? this.density.map : this.noMask;
 		if (density !== this.boundDensity) this.bindGroup = undefined;
 		this.boundDensity = density;
-		this.bindGroup ??= this.groupFor(this.ubo, this.input ?? this.source, density);
+		this.bindGroup ??= this.groupFor(this.ubo, this.input ?? this.proxy!, density);
 		this.drawWith(this.bindGroup, target, masks);
 	}
 
@@ -363,6 +400,34 @@ export class DevelopPass {
 		const ubo = this.device.createBuffer({ size: MASK_UNIFORM_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 		this.device.queue.writeBuffer(ubo, 0, maskParams);
 		this.draw(target, this.maskGroup(ubo, textures));
+	}
+
+	/**
+	 * The proxy's log₂ luminance as the lens pass reads it (retouched), box-averaged to at most `edge` on its long
+	 * side: what a heal's source is chosen by. Read back once per request.
+	 */
+	async proxyLuminance(edge: number): Promise<{ lum: Float32Array; size: [number, number] }> {
+		const t = this.proxy!;
+		const k = Math.max(1, Math.ceil(Math.max(t.width, t.height) / edge));
+		const [w, h] = [Math.floor(t.width / k), Math.floor(t.height / k)];
+		const bytesPerRow = 256 * Math.ceil((t.width * 8) / 256);
+		const buf = this.device.createBuffer({ size: bytesPerRow * t.height, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+		const encoder = this.device.createCommandEncoder();
+		encoder.copyTextureToBuffer({ texture: t }, { buffer: buf, bytesPerRow }, [t.width, t.height]);
+		this.device.queue.submit([encoder.finish()]);
+		await buf.mapAsync(GPUMapMode.READ);
+		const lum = new Float32Array(w * h);
+		const all = new Uint16Array(buf.getMappedRange());
+		const stride = bytesPerRow / 2;
+		for (let y = 0; y < h * k; y++)
+			for (let x = 0; x < w * k; x++) {
+				const i = y * stride + x * 4;
+				lum[Math.floor(y / k) * w + Math.floor(x / k)] += fromHalf(all[i]) + fromHalf(all[i + 1]) + fromHalf(all[i + 2]);
+			}
+		buf.unmap();
+		buf.destroy();
+		for (let i = 0; i < lum.length; i++) lum[i] = Math.log2(Math.max(lum[i] / (3 * k * k), 1e-5));
+		return { lum, size: [w, h] };
 	}
 
 	/**

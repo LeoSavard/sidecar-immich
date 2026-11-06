@@ -50,7 +50,7 @@ try {
 	// Keyed by the section's label in `allSections`, not by its id: 'Mixer' is the section the panel calls
 	// 'color'. An unknown label used to click an arbitrary button and then wait out the timeout on a tab that
 	// was never coming, so a renamed section cost thirty silent seconds; say so instead.
-	const GROUP = { 'White balance': 'Colour', Film: 'Colour', Mixer: 'Colour', Light: 'Light', Curve: 'Light', 'Crop and straighten': 'Crop and straighten', Depth: 'Processing', Masks: 'Processing', Detail: 'Processing', Lens: 'Processing', History: 'History' };
+	const GROUP = { 'White balance': 'Colour', Film: 'Colour', Mixer: 'Colour', Light: 'Light', Curve: 'Light', 'Crop and straighten': 'Crop and straighten', Depth: 'Processing', Masks: 'Processing', Retouch: 'Processing', Detail: 'Processing', Lens: 'Processing', History: 'History' };
 	async function section(label) {
 		if (narrow) {
 			if (!GROUP[label]) throw new Error(`no group for section "${label}" — has it been renamed?`);

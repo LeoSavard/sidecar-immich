@@ -9,6 +9,7 @@ import type { LensBlur } from "./LensBlur";
 import type { MaskAdjustment } from "./MaskAdjustment";
 import type { Mixer } from "./Mixer";
 import type { Monochrome } from "./Monochrome";
+import type { Spot } from "./Spot";
 import type { Tone } from "./Tone";
 import type { WhiteBalance } from "./WhiteBalance";
 
@@ -58,4 +59,9 @@ lensBlur?: LensBlur,
  * Haze by distance, from the depth mask: −100 takes it away, 100 adds it; 0, left out of the serialized
  * edit, is none.
  */
-haze?: number, };
+haze?: number, 
+/**
+ * Heal, clone and red-eye spots (DESIGN.md §15, "Retouch"), applied in order to the photo before anything
+ * else. Empty, and left out of the serialized edit, is none.
+ */
+spots?: Array<Spot>, };

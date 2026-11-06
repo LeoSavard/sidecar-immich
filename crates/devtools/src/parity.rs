@@ -37,6 +37,10 @@ struct Case {
     /// simply has no such case rather than a different rendering.
     #[serde(default)]
     slide: bool,
+    /// `<name>.spots.json` holds retouch spots (with the camera's as-shot multipliers), applied to the source
+    /// before anything else.
+    #[serde(default)]
+    spots: bool,
 }
 
 /// Masks for the parity case, at half the image's size so both renderers interpolate them: a soft disc and a
@@ -451,6 +455,43 @@ fn cases() -> Vec<Fixture> {
             None,
         ),
         (
+            // Retouch: a heal, a clone and a red eye on the source before develop, in both renderers.
+            "retouch".into(),
+            nikon_d850(),
+            SourceKind::Raw,
+            {
+                use sidecar_color::params::{Spot, SpotKind};
+                let mut e = graded.clone();
+                e.spots = vec![
+                    Spot {
+                        kind: SpotKind::Heal,
+                        at: [0.3, 0.5],
+                        from: [0.6, 0.4],
+                        radius: 0.05,
+                        ..Default::default()
+                    },
+                    Spot {
+                        kind: SpotKind::Clone,
+                        at: [0.8, 0.3],
+                        from: [0.2, 0.7],
+                        radius: 0.04,
+                        feather: 50.0,
+                        opacity: 80.0,
+                    },
+                    Spot {
+                        kind: SpotKind::RedEye,
+                        at: [0.5, 0.8],
+                        from: [0.5, 0.8],
+                        radius: 0.06,
+                        ..Default::default()
+                    },
+                ];
+                e
+            },
+            DisplaySpace::Srgb,
+            None,
+        ),
+        (
             "film-layers".into(),
             nikon_d850(),
             SourceKind::Raw,
@@ -621,6 +662,17 @@ pub fn fixtures(dir: &Path) -> Result<()> {
             }
             _ => false,
         };
+        let spots = !edit.spots.is_empty();
+        if spots {
+            let m = camera.as_shot_mul;
+            std::fs::write(
+                dir.join(format!("{name}.spots.json")),
+                serde_json::to_vec(&serde_json::json!({
+                    "spots": edit.spots,
+                    "wb": [m[0] as f32, m[1] as f32, m[2] as f32],
+                }))?,
+            )?;
+        }
         let mono = !packed.mono_lut.is_empty();
         if mono {
             std::fs::write(
@@ -673,6 +725,7 @@ pub fn fixtures(dir: &Path) -> Result<()> {
             mask_size: if masks > 0 { MASK_SIZE } else { [0; 2] },
             mono,
             slide,
+            spots,
         });
     }
     std::fs::write(dir.join("index.json"), serde_json::to_vec_pretty(&index)?)?;
@@ -695,6 +748,7 @@ pub fn native(dir: &Path, out: &Path) -> Result<()> {
     );
     let pass = DevelopPass::new(&gpu)?;
     let lens_pass = sidecar_engine::lens::LensPass::new(&gpu)?;
+    let retouch = sidecar_engine::retouch::RetouchPass::new(&gpu)?;
     for case in load_index(dir)? {
         let src = RgbaF32::from_f16_bytes(
             case.width,
@@ -706,6 +760,20 @@ pub fn native(dir: &Path, out: &Path) -> Result<()> {
             bytemuck::cast_slice(&std::fs::read(dir.join(format!("{}.lut.f32", case.name)))?)
                 .to_vec();
         let mut tex = sidecar_engine::upload_rgba16(&gpu, &src);
+        if case.spots {
+            let json: serde_json::Value = serde_json::from_slice(&std::fs::read(
+                dir.join(format!("{}.spots.json", case.name)),
+            )?)?;
+            let spots: Vec<sidecar_color::params::Spot> =
+                serde_json::from_value(json["spots"].clone())?;
+            let wb: [f32; 3] = serde_json::from_value(json["wb"].clone())?;
+            let size = [case.width, case.height];
+            let px: Vec<_> = spots
+                .iter()
+                .map(|s| sidecar_engine::retouch::PixelSpot::new(s, size, |p| p))
+                .collect();
+            tex = retouch.apply(&gpu, &tex, &px, wb);
+        }
         if case.lens {
             let bytes = std::fs::read(dir.join(format!("{}.lens.bin", case.name)))?;
             let params: sidecar_color::lens::LensParams = bytemuck::pod_read_unaligned(&bytes);

@@ -25,6 +25,8 @@
 	import CropOverlay from '$lib/ui/CropOverlay.svelte';
 	import LensSection from '$lib/ui/sections/LensSection.svelte';
 	import CropSection from '$lib/ui/sections/CropSection.svelte';
+	import RetouchSection from '$lib/ui/sections/RetouchSection.svelte';
+	import type { RetouchTool, SpotSettings } from '$lib/ui/sections/section';
 	import WhiteBalanceSection from '$lib/ui/sections/WhiteBalanceSection.svelte';
 	import LightSection from '$lib/ui/sections/LightSection.svelte';
 	import FilmSection from '$lib/ui/sections/FilmSection.svelte';
@@ -39,7 +41,7 @@
 
 	const SPACES: DisplaySpace[] = ['srgb', 'display-p3'];
 
-	type Section = 'lens' | 'crop' | 'wb' | 'light' | 'film' | 'curve' | 'color' | 'depth' | 'masks' | 'detail' | 'history';
+	type Section = 'lens' | 'crop' | 'wb' | 'light' | 'film' | 'curve' | 'color' | 'depth' | 'masks' | 'retouch' | 'detail' | 'history';
 
 	const key = page.params.key!;
 	let canvas: HTMLCanvasElement;
@@ -50,6 +52,11 @@
 	let pickingWhite = $state(false);
 	/** Tap-to-focus (the lens blur) is waiting for a tap on the photo. */
 	let pickingFocus = $state(false);
+	/** Retouch: the tool armed, the spot selected, what the next spot gets, and the spots on screen. */
+	let retouchTool = $state<RetouchTool>('off');
+	let spotSelected = $state<number | null>(null);
+	let spotSettings = $state<SpotSettings>({ radius: 0.02, feather: 0, opacity: 100 });
+	let spotMarks = $state<{ at: { x: number; y: number }; from: { x: number; y: number } | null; r: number }[]>([]);
 	let error = $state('');
 	/**
 	 * The white balance the camera recorded, resolved once per photo. It is the Temperature slider's detent, so
@@ -358,6 +365,14 @@
 		if (!develop?.output) return;
 		if (stroke && preview) drawStroke();
 		if (developDirty) {
+			// The spots first: they change the proxy every pass after reads.
+			const shownSpots = $state.snapshot((before ? compareEdit() : edit).spots ?? []);
+			const m = cameraColor().asShotMul;
+			if (develop.setSpots(shownSpots, [m[0], m[1], m[2]])) {
+				lensMadeFrom = '';
+				depthMadeFrom = undefined;
+				refinedFrom = undefined;
+			}
 			correctLens();
 			depthEffects();
 			const packed = repack();
@@ -388,6 +403,7 @@
 		const geometry: ViewGeometry | undefined = shown ? { toPicture: shown.frame.toPicture, size: shown.frame.size } : undefined;
 		view.render(develop.output, canvas, viewport, (clipHigh ? CLIP_HIGHS : 0) | (clipLow ? CLIP_LOWS : 0) | (peaking ? PEAKING : 0) | maskFlags, geometry);
 		markerPos = cropping ? null : imageToScreen(afPoint());
+		spotMarks = !cropping && (section === 'retouch' || retouchTool !== 'off') ? markSpots() : [];
 		// The zoom readout: device pixels per output pixel, which is what the double tap's 100 % means. 0 at fit,
 		// where there is nothing to say and nothing to go back to.
 		zoomPercent = viewport.zoom > 1.001 ? Math.round(imageRect().fit * viewport.zoom * 100) : 0;
@@ -543,6 +559,105 @@
 		if (!edit) return;
 		edit.geometry = { ...($state.snapshot(edit.geometry) ?? NO_GEOMETRY), crop: cropFromScreen(r) };
 		changed();
+	}
+
+	// ---------- retouch
+
+	/** A point of the proxy (0…1, before lens correction) → the canvas, in CSS pixels. */
+	function sourceToScreen(p: [number, number]) {
+		const proxy = develop?.proxy;
+		if (!proxy) return null;
+		return imageToScreen(correctedPoint(lensUniform, proxy.width, proxy.height, { x: p[0], y: p[1] }));
+	}
+
+	/** The spots as the overlay draws them: centre, source and radius on screen. */
+	function markSpots() {
+		const proxy = develop?.proxy;
+		if (!proxy || !develop.output || !edit?.spots?.length) return [];
+		const r = imageRect();
+		const outW = displayFrame()?.frame.size[0] ?? develop.output.width;
+		const scale = r.w / outW / devicePixelRatio;
+		return edit.spots.flatMap((s) => {
+			const at = sourceToScreen(s.at);
+			if (!at) return [];
+			return [{ at, from: s.kind === 'redEye' ? null : sourceToScreen(s.from), r: s.radius * Math.max(proxy.width, proxy.height) * scale }];
+		});
+	}
+
+	/**
+	 * Where a heal or clone at `p` (radius `r`, a share of the long edge) should take from: of the places two to
+	 * four radii away, inside the photo, the one whose surroundings — rings of log luminance around it — are most
+	 * like the target's, so the edge it blends into is the same kind of surface.
+	 */
+	async function chooseSource(p: [number, number], r: number): Promise<[number, number]> {
+		const { lum, size } = await develop.proxyLuminance(512);
+		const [w, h] = size;
+		const long = Math.max(w, h);
+		const at = (x: number, y: number) => lum[Math.min(h - 1, Math.max(0, Math.round(y))) * w + Math.min(w - 1, Math.max(0, Math.round(x)))];
+		const rings = (cx: number, cy: number) => {
+			const v: number[] = [];
+			for (const k of [1.2, 1.45, 1.7])
+				for (let a = 0; a < 24; a++) {
+					const t = (a / 24) * 2 * Math.PI;
+					v.push(at(cx + Math.cos(t) * k * r * long, cy + Math.sin(t) * k * r * long));
+				}
+			return v;
+		};
+		const [tx, ty] = [p[0] * w, p[1] * h];
+		const target = rings(tx, ty);
+		let best: [number, number] = [p[0] + 2.5 * r * (long / w), p[1]];
+		let bestScore = Infinity;
+		for (const d of [2.2, 2.8, 3.6])
+			for (let a = 0; a < 24; a++) {
+				const t = (a / 24) * 2 * Math.PI;
+				const [cx, cy] = [tx + Math.cos(t) * d * r * long, ty + Math.sin(t) * d * r * long];
+				const reach = 1.8 * r * long;
+				if (cx < reach || cy < reach || cx > w - reach || cy > h - reach) continue;
+				const c = rings(cx, cy);
+				const score = c.reduce((s, v, i) => s + Math.abs(v - target[i]), 0) / c.length;
+				if (score < bestScore) [bestScore, best] = [score, [cx / w, cy / h]];
+			}
+		return best;
+	}
+
+	/** A tap with a retouch tool armed: a spot there, selected. */
+	async function addSpot(e: PointerEvent) {
+		const p = screenToSource(px(e));
+		if (!p || !edit || p.some((v) => v < 0 || v > 1)) return;
+		const kind = retouchTool as Exclude<RetouchTool, 'off'>;
+		const { radius, feather, opacity } = spotSettings;
+		const from = kind === 'redEye' ? p : await chooseSource(p, radius);
+		update((ed) => {
+			ed.spots = [...(ed.spots ?? []), { kind, at: p, from, radius, feather, opacity }];
+		});
+		spotSelected = (edit.spots?.length ?? 1) - 1;
+		committed();
+	}
+
+	/** Drag a spot's centre or its source. */
+	function dragSpot(e: PointerEvent, i: number, which: 'at' | 'from') {
+		e.stopPropagation();
+		if (readOnly) return;
+		const el = e.currentTarget as Element;
+		el.setPointerCapture(e.pointerId);
+		spotSelected = i;
+		const move = (ev: PointerEvent) => {
+			const p = screenToSource(px(ev));
+			if (!p) return;
+			update((ed) => {
+				const s = ed.spots?.[i];
+				if (s) s[which] = [Math.min(1, Math.max(0, p[0])), Math.min(1, Math.max(0, p[1]))];
+			});
+		};
+		const up = () => {
+			el.removeEventListener('pointermove', move as EventListener);
+			el.removeEventListener('pointerup', up);
+			el.removeEventListener('pointercancel', up);
+			committed();
+		};
+		el.addEventListener('pointermove', move as EventListener);
+		el.addEventListener('pointerup', up);
+		el.addEventListener('pointercancel', up);
 	}
 
 	/** A quarter turn. A locked ratio turns with the photo, so the same part of it stays cropped. */
@@ -1580,7 +1695,7 @@
 		clearTimeout(holdTimer);
 		// With the brush on, one finger paints; a second one turns it into a pinch.
 		if (painting && pointers.size === 1) startStroke(e);
-		else if (pointers.size === 1 && !pickingWhite && !pickingFocus && !probing) holdTimer = setTimeout(() => setBefore(true), 450);
+		else if (pointers.size === 1 && !pickingWhite && !pickingFocus && !probing && retouchTool === 'off') holdTimer = setTimeout(() => setBefore(true), 450);
 		if (pointers.size === 2) {
 			cancelStroke();
 			clearTimeout(holdTimer);
@@ -1625,6 +1740,10 @@
 		const now = performance.now();
 		const still = Math.hypot(px(e).x - downAt.x, px(e).y - downAt.y) < 8 * devicePixelRatio && now - downAt.t < 300;
 		if (still && pointers.size === 0) {
+			if (retouchTool !== 'off' && !fallback && !readOnly && develop?.output) {
+				addSpot(e);
+				return;
+			}
 			if (pickingWhite && !fallback && develop?.output) {
 				pickWhite(e);
 				return;
@@ -1752,6 +1871,7 @@
 		{ id: 'crop', label: 'Crop and straighten', short: 'Crop' },
 		{ id: 'depth', label: 'Depth', short: 'Depth' },
 		{ id: 'masks', label: 'Masks', short: 'Masks' },
+		{ id: 'retouch', label: 'Retouch', short: 'Retouch' },
 		{ id: 'detail', label: 'Detail', short: 'Detail' },
 		{ id: 'lens', label: 'Lens', short: 'Lens' },
 		{ id: 'history', label: 'History', short: 'History' }
@@ -1762,7 +1882,7 @@
 		{ id: 'colour', label: 'Colour', short: 'Colour', children: ['wb', 'film', 'color'] },
 		{ id: 'light', label: 'Light', short: 'Light', children: ['light', 'curve'] },
 		{ id: 'crop', label: 'Crop and straighten', short: 'Crop', children: ['crop'] },
-		{ id: 'processing', label: 'Processing', short: 'Processing', children: ['depth', 'masks', 'detail', 'lens'] },
+		{ id: 'processing', label: 'Processing', short: 'Processing', children: ['depth', 'masks', 'retouch', 'detail', 'lens'] },
 		{ id: 'history', label: 'History', short: 'History', children: ['history'] }
 	];
 	/**
@@ -1805,6 +1925,26 @@
 
 {#snippet detailSection()}
 	{#if edit}<DetailSection {edit} onchange={update} oncommit={committed} assetKey={key} {loupeCenter} colorSpace={displaySpace} />{/if}
+{/snippet}
+
+{#snippet retouchSection()}
+	{#if edit}
+		<RetouchSection
+			{edit}
+			onchange={update}
+			oncommit={committed}
+			tool={retouchTool}
+			selected={spotSelected}
+			settings={spotSettings}
+			readOnly={readOnly || fallback}
+			ontool={(t) => {
+				retouchTool = t;
+				schedule();
+			}}
+			onselect={(i) => (spotSelected = i)}
+			onsettings={(p) => (spotSettings = { ...spotSettings, ...p })}
+		/>
+	{/if}
 {/snippet}
 
 {#snippet masksSection()}
@@ -1863,7 +2003,7 @@
 	>
 		<summary class="cursor-pointer py-1 text-xs font-medium">{s.label}</summary>
 		<div class="pt-2">
-			{#if s.id === 'lens'}{@render lensSection()}{:else if s.id === 'crop'}{@render cropSection()}{:else if s.id === 'wb'}{@render wbSection()}{:else if s.id === 'light'}{@render lightSection()}{:else if s.id === 'film'}{@render filmSection()}{:else if s.id === 'curve'}{@render curveSection()}{:else if s.id === 'color'}{@render colorSection()}{:else if s.id === 'depth'}{@render depthSection()}{:else if s.id === 'masks'}{@render masksSection()}{:else if s.id === 'history'}{@render historySection()}{:else if detailOpen}{@render detailSection()}{/if}
+			{#if s.id === 'lens'}{@render lensSection()}{:else if s.id === 'crop'}{@render cropSection()}{:else if s.id === 'wb'}{@render wbSection()}{:else if s.id === 'light'}{@render lightSection()}{:else if s.id === 'film'}{@render filmSection()}{:else if s.id === 'curve'}{@render curveSection()}{:else if s.id === 'color'}{@render colorSection()}{:else if s.id === 'depth'}{@render depthSection()}{:else if s.id === 'masks'}{@render masksSection()}{:else if s.id === 'retouch'}{@render retouchSection()}{:else if s.id === 'history'}{@render historySection()}{:else if detailOpen}{@render detailSection()}{/if}
 		</div>
 	</details>
 {/snippet}
@@ -1946,6 +2086,19 @@
 		{#if brushCursor && painting}
 			<div class="pointer-events-none absolute rounded-full border border-white/80 shadow-[0_0_0_1px_rgba(0,0,0,0.5)]" style="left: {brushCursor.x - brushCursor.r}px; top: {brushCursor.y - brushCursor.r}px; width: {brushCursor.r * 2}px; height: {brushCursor.r * 2}px;"></div>
 		{/if}
+		{#each spotMarks as m, i (i)}
+			<svg class="pointer-events-none absolute inset-0 h-full w-full overflow-visible" aria-hidden="true">
+				{#if m.from}
+					<line x1={m.at.x} y1={m.at.y} x2={m.from.x} y2={m.from.y} stroke="white" stroke-opacity="0.6" stroke-width="1" />
+					<circle cx={m.from.x} cy={m.from.y} r={m.r} fill="none" stroke="white" stroke-dasharray="4 3" stroke-width="1.5" />
+				{/if}
+				<circle cx={m.at.x} cy={m.at.y} r={m.r} fill="none" stroke={spotSelected === i ? '#fadb26' : 'white'} stroke-width={spotSelected === i ? 2 : 1.5} />
+			</svg>
+			<button type="button" class="absolute h-4 w-4 -translate-x-1/2 -translate-y-1/2 touch-none rounded-full border-2 border-white bg-black/30" style="left: {m.at.x}px; top: {m.at.y}px;" aria-label="Spot {i + 1}" onpointerdown={(e) => dragSpot(e, i, 'at')}></button>
+			{#if m.from}
+				<button type="button" class="absolute h-4 w-4 -translate-x-1/2 -translate-y-1/2 touch-none rounded-full border-2 border-dashed border-white bg-black/30" style="left: {m.from.x}px; top: {m.from.y}px;" aria-label="Spot {i + 1}'s source" onpointerdown={(e) => dragSpot(e, i, 'from')}></button>
+			{/if}
+		{/each}
 		{#if markerPos && showAfPoint}
 			<!-- While a tool is armed the marker steps aside: it is 28 px over the autofocus point, which on most
 			     cameras is the middle of the frame, and that is exactly where someone aims to sample a neutral.
@@ -2210,7 +2363,7 @@
 			{/if}
 			{#if !toolsHidden}
 			<div class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-6 pt-1">
-				{#if section === 'lens'}{@render lensSection()}{:else if section === 'crop'}{@render cropSection()}{:else if section === 'wb'}{@render wbSection()}{:else if section === 'light'}{@render lightSection()}{:else if section === 'film'}{@render filmSection()}{:else if section === 'curve'}{@render curveSection()}{:else if section === 'color'}{@render colorSection()}{:else if section === 'depth'}{@render depthSection()}{:else if section === 'masks'}{@render masksSection()}{:else if section === 'history'}{@render historySection()}{:else}{@render detailSection()}{/if}
+				{#if section === 'lens'}{@render lensSection()}{:else if section === 'crop'}{@render cropSection()}{:else if section === 'wb'}{@render wbSection()}{:else if section === 'light'}{@render lightSection()}{:else if section === 'film'}{@render filmSection()}{:else if section === 'curve'}{@render curveSection()}{:else if section === 'color'}{@render colorSection()}{:else if section === 'depth'}{@render depthSection()}{:else if section === 'masks'}{@render masksSection()}{:else if section === 'retouch'}{@render retouchSection()}{:else if section === 'history'}{@render historySection()}{:else}{@render detailSection()}{/if}
 			</div>
 			{/if}
 
