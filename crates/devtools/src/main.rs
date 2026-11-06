@@ -1013,7 +1013,13 @@ fn denoise_truth(clean: &std::path::Path, noisy: &std::path::Path) -> Result<()>
             let stab = noise.stabilization(model_on);
             let out = sidecar_engine::read_rgba16(
                 &gpu,
-                &detail.denoise(&gpu, &tex, &stab, strength, strength),
+                &detail.denoise(
+                    &gpu,
+                    &tex,
+                    &stab,
+                    &sidecar_engine::detail::constant(&gpu, [strength / 100.0, 0.0, 0.0, 1.0]),
+                    strength,
+                ),
             )?;
             let e = errors(&out);
             let mean: f64 = e.iter().filter(|v| v.is_finite()).sum::<f64>()

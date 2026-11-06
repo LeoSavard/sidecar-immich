@@ -809,6 +809,11 @@ fn loupe_png(
     });
     let depth_params =
         depth.and_then(|d| sidecar_color::depth::pack(&req.edit, d.airlight, [sw, sh], [0.0; 2]));
+    // The detail pass's mask layers, for a region of the source starting at `(x, y)`.
+    let layer_masks = |x: u32, y: u32| sidecar_engine::detail::DetailMasks {
+        textures: mask_textures.iter().map(Option::as_ref).collect(),
+        frame: [x as f32, y as f32, sw as f32, sh as f32],
+    };
     // A rectangle of the sensor's pixels, developed as export develops it: denoised, sharpened, lens-corrected,
     // hazed and blurred by distance, through the masks.
     let develop_rect = |ux: u32, uy: u32, uw: u32, uh: u32| -> Result<Vec<f32>> {
@@ -826,7 +831,13 @@ fn loupe_png(
                     let cw = ((x1.ceil() + reach).clamp(1.0, sw as f64) as u32).max(cx + 1) - cx;
                     let ch = ((y1.ceil() + reach).clamp(1.0, sh as f64) as u32).max(cy + 1) - cy;
                     let region = kit.detail.crop(&kit.gpu, &source, cx, cy, cw, ch);
-                    let region = kit.detail.apply(&kit.gpu, region, &noise, &settings);
+                    let region = kit.detail.apply(
+                        &kit.gpu,
+                        region,
+                        &noise,
+                        &settings,
+                        Some(&layer_masks(cx, cy)),
+                    );
                     let params = rendering
                         .lens_params(
                             &req.edit,
@@ -842,7 +853,13 @@ fn loupe_png(
                     let (cx, cy) = (ux.saturating_sub(m), uy.saturating_sub(m));
                     let (cw, ch) = ((ux + uw + m).min(sw) - cx, (uy + uh + m).min(sh) - cy);
                     let tile = kit.detail.crop(&kit.gpu, &source, cx, cy, cw, ch);
-                    let tile = kit.detail.apply(&kit.gpu, tile, &noise, &settings);
+                    let tile = kit.detail.apply(
+                        &kit.gpu,
+                        tile,
+                        &noise,
+                        &settings,
+                        Some(&layer_masks(cx, cy)),
+                    );
                     kit.detail.crop(&kit.gpu, &tile, ux - cx, uy - cy, uw, uh)
                 }
             };

@@ -645,6 +645,15 @@ pub struct MaskAdjustment {
     #[serde(skip_serializing_if = "is_zero")]
     #[cfg_attr(feature = "ts", ts(as = "Option<f64>", optional))]
     pub blacks: f64,
+    /// −100…100: sharpening added to the global Detail amount where the mask is (DESIGN.md §15, "Detail per
+    /// layer"). Like the global one it is the server's — the loupe and export — not the editor's preview.
+    #[serde(skip_serializing_if = "is_zero")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<f64>", optional))]
+    pub sharpness: f64,
+    /// −100…100: luminance noise reduction added to the global amount where the mask is, as `sharpness`.
+    #[serde(skip_serializing_if = "is_zero")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<f64>", optional))]
+    pub noise: f64,
     /// A curve over display-encoded values, applied after the global curve where the mask is. Highlights and
     /// Shadows move its 75 % and 25 % points, as the global sliders move the global curve's. Empty is none.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -695,6 +704,8 @@ impl Default for MaskAdjustment {
             tint: 0.0,
             whites: 0.0,
             blacks: 0.0,
+            sharpness: 0.0,
+            noise: 0.0,
             curve: Vec::new(),
             mixer: Mixer::default(),
             range: None,
