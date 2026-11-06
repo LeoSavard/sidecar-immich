@@ -25,9 +25,9 @@ primitives first, because several features stand on each:
 | **Editing** ||||
 | 6 | Gradients: linear and radial mask layers | — | #64 |
 | 7 | Colour grading wheels (lift/gamma/gain on tonal ranges) | — | #65 |
-| 8 | Clarity, texture, local contrast (local Laplacian, on #2) | an A/B | |
-| 9 | Dehaze without depth (dark channel prior, on #1) | an A/B | |
-| 10 | ACES reference gamut compression | an A/B on LED and neon | |
+| 8 | Clarity, texture, local contrast (built on #1's guided filter: fast, halo-light) | an A/B | #72 |
+| 9 | Dehaze without depth (dark channel prior, on #1) | an A/B | #73 |
+| 10 | ACES reference gamut compression | an A/B on LED and neon | #74 (already present; now in ACEScg, `PROCESS_VERSION` 9) |
 | 11 | Hue-preserving tone mapping / a scene-to-display transform | the look is the owner's | |
 | 12 | Detail per layer (sharpening and noise reduction through a mask) | — | |
 | 13 | Sky mask from the depth map, guided-filter edges (on #1) | an A/B | |
