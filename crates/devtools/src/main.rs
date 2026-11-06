@@ -10,6 +10,9 @@
 //! `sidecar-dev lens <file>…`             the lens correction and identity each file yields
 //! `sidecar-dev radial <list>`            measured radial falloff per RAW (vignetting checks)
 //! `sidecar-dev camera-jpeg <list>`       a RAW's lens profile checked against the camera's own JPEG
+//! `sidecar-dev profile <dng|dcp>…`       the camera profile each file carries (`sidecar_color::dcp`)
+//! `sidecar-dev profile-check <dng>…`     hue and chroma with and without that profile, against the file's own
+//!                                        preview (which its maker rendered with it)
 
 mod parity;
 
@@ -127,6 +130,27 @@ fn main() -> Result<()> {
             Ok(())
         }
         ["camera-jpeg", list] => camera_jpeg(list.as_ref()),
+        ["profile", files @ ..] if !files.is_empty() => {
+            for f in files {
+                match sidecar_raw::linear_dng::profile_in(f.as_ref()) {
+                    None => println!("{f}: no camera profile"),
+                    Some(p) => println!(
+                        "{f}: \"{}\" · forward matrices at {:?} K · HueSatMap {:?} · LookTable {:?}",
+                        p.name,
+                        p.forward.iter().map(|f| f.0).collect::<Vec<_>>(),
+                        p.hue_sat
+                            .iter()
+                            .map(|t| (t.0, t.1.dims, t.1.srgb))
+                            .collect::<Vec<_>>(),
+                        p.look.as_ref().map(|t| (t.dims, t.srgb)),
+                    ),
+                }
+            }
+            Ok(())
+        }
+        ["profile-check", files @ ..] if !files.is_empty() => {
+            files.iter().try_for_each(|f| profile_check(f.as_ref()))
+        }
         ["parity", "fixtures", dir] => parity::fixtures(dir.as_ref()),
         ["parity", "native", dir, out] => parity::native(dir.as_ref(), out.as_ref()),
         ["parity", "compare", dir, out] => parity::compare(dir.as_ref(), out.as_ref()),
@@ -159,6 +183,138 @@ fn write_png(img: &sidecar_engine::RgbaF32, out: &std::path::Path) -> Result<()>
     e.set_color(png::ColorType::Rgb);
     e.set_depth(png::BitDepth::Eight);
     e.write_header()?.write_image_data(&rgb)?;
+    Ok(())
+}
+
+/// `profile-check <dng>`: is the camera profile rendered as its maker meant? A DNG's embedded preview was rendered
+/// by whatever wrote it — Adobe's converter, with the "Adobe Standard" profile it embeds — so with the profile our
+/// colours should sit nearer that preview's than with the camera matrices alone. Tone curves differ by design, so
+/// only hue and chroma are compared, in OKLab, over the coloured midtones of each image as a whole (a preview can be
+/// cropped or turned against the raw): the chroma-weighted hue histograms' distance, and the mean chroma.
+fn profile_check(path: &std::path::Path) -> Result<()> {
+    let mut raw = sidecar_raw::RawFile::open(path)?;
+    let mut info = raw.info();
+    sidecar_raw::read_extras(path, &mut info);
+    let Some(name) = info.color.profile.as_ref().map(|p| p.name.clone()) else {
+        println!("{}: no camera profile", path.display());
+        return Ok(());
+    };
+    let preview = std::process::Command::new("exiftool")
+        .args(["-b", "-PreviewImage"])
+        .arg(path)
+        .output()?
+        .stdout;
+    let mut d = zune_jpeg::JpegDecoder::new(std::io::Cursor::new(&preview));
+    let jpeg = d.decode().map_err(|e| anyhow::anyhow!("preview: {e:?}"))?;
+    let (jw, jh) = d
+        .dimensions()
+        .ok_or_else(|| anyhow::anyhow!("preview size"))?;
+    anyhow::ensure!(jpeg.len() == jw * jh * 3, "preview isn't RGB");
+    // develop_linear applies the orientation; the preview is stored unrotated, so compare only landscape with
+    // landscape.
+    let linear = raw.develop_linear(true)?;
+    let proxy = sidecar_engine::RgbaF32 {
+        width: linear.width,
+        height: linear.height,
+        data: linear.rgba(),
+    }
+    .downsampled(1024);
+    let gpu = sidecar_engine::Gpu::new_headless()?;
+    let pass = sidecar_engine::DevelopPass::new(&gpu)?;
+    let render = |edit: &sidecar_color::EditParams| -> Result<sidecar_engine::RgbaF32> {
+        let packed = sidecar_color::pack(
+            edit,
+            &info.color,
+            info.source_kind,
+            sidecar_color::DisplaySpace::Srgb,
+        );
+        let masks = sidecar_engine::Masks {
+            profile: packed.profile.as_ref(),
+            ..sidecar_engine::Masks::none()
+        };
+        let out = pass.render(
+            &gpu,
+            &sidecar_engine::upload_rgba16(&gpu, &proxy),
+            &packed.uniform,
+            &packed.lut,
+            &masks,
+        )?;
+        sidecar_engine::read_rgba16(&gpu, &out)
+    };
+    let matrix = render(&Default::default())?;
+    let profiled = render(&sidecar_color::EditParams {
+        camera_profile: Some(sidecar_color::params::FILE_PROFILE.into()),
+        ..Default::default()
+    })?;
+    let lin = |v: u8| {
+        let s = v as f64 / 255.0;
+        if s <= 0.04045 {
+            s / 12.92
+        } else {
+            ((s + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    // OKLab (Ottosson) from linear sRGB.
+    let oklab = |c: [f64; 3]| {
+        let l = 0.4122214708 * c[0] + 0.5363325363 * c[1] + 0.0514459929 * c[2];
+        let m = 0.2119034982 * c[0] + 0.6806995451 * c[1] + 0.1073969566 * c[2];
+        let s = 0.0883024619 * c[0] + 0.2817188376 * c[1] + 0.6299787005 * c[2];
+        let (l, m, s) = (l.max(0.0).cbrt(), m.max(0.0).cbrt(), s.max(0.0).cbrt());
+        [
+            0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+            1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+            0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s,
+        ]
+    };
+    // Each image's colours as wholes — the preview may be cropped or turned against the raw, so pixels don't
+    // correspond: the hue histogram (36 bins, weighted by chroma) and the mean chroma over coloured midtones.
+    let stats = |pixels: &mut dyn Iterator<Item = [f64; 3]>| {
+        let (mut hist, mut chroma, mut n) = ([0f64; 36], 0f64, 0f64);
+        for c in pixels {
+            let o = oklab(c);
+            let ch = o[1].hypot(o[2]);
+            if ch < 0.03 || !(0.3..0.85).contains(&o[0]) {
+                continue;
+            }
+            let h = o[2].atan2(o[1]).to_degrees().rem_euclid(360.0);
+            hist[((h / 10.0) as usize).min(35)] += ch;
+            chroma += ch;
+            n += 1.0;
+        }
+        let total: f64 = hist.iter().sum();
+        (hist.map(|v| v / total.max(1e-12)), chroma / n.max(1.0))
+    };
+    let (ref_hist, ref_chroma) = stats(&mut (0..jw * jh).step_by(3).map(|p| {
+        let i = p * 3;
+        [lin(jpeg[i]), lin(jpeg[i + 1]), lin(jpeg[i + 2])]
+    }));
+    let ours = |img: &sidecar_engine::RgbaF32| {
+        stats(
+            &mut img
+                .data
+                .chunks(4)
+                .map(|p| [0, 1, 2].map(|k| p[k].clamp(0.0, 1.0) as f64)),
+        )
+    };
+    let distance = |h: &[f64; 36]| {
+        h.iter()
+            .zip(&ref_hist)
+            .map(|(a, b)| (a - b).abs())
+            .sum::<f64>()
+            / 2.0
+    };
+    let ((mh, mc), (ph, pc)) = (ours(&matrix), ours(&profiled));
+    println!(
+        "{} ({} {}, \"{name}\"): against its preview — hue distribution off by {:.3} with the camera matrix, {:.3} with the profile (0 same, 1 disjoint); mean chroma {:.3} and {:.3}, the preview's {:.3}",
+        path.display(),
+        info.make,
+        info.model,
+        distance(&mh),
+        distance(&ph),
+        mc,
+        pc,
+        ref_chroma
+    );
     Ok(())
 }
 

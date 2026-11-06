@@ -69,6 +69,47 @@ pub struct EditParams {
     #[serde(skip_serializing_if = "is_zero")]
     #[cfg_attr(feature = "ts", ts(as = "Option<f64>", optional))]
     pub haze: f64,
+    /// The camera profile to render with (DESIGN.md §7, "Camera profiles"): `FILE_PROFILE` for the one the
+    /// photo's file carries (`CameraColor::profile`); absent, and left out of the serialized edit, for the camera
+    /// matrices alone, as before profiles existed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub camera_profile: Option<String>,
+}
+
+/// `EditParams::camera_profile` for the profile the photo's own file carries.
+pub const FILE_PROFILE: &str = "file";
+
+/// The camera profile pass's uniform (`client/profile.wgsl`, 96 bytes). Its WGSL declaration,
+/// `shaders/uniforms/profile_params.wgsl`, is generated from this struct (`sidecar-uniform`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable, Uniform)]
+pub struct ProfileParams {
+    /// White-balanced camera RGB → linear ProPhoto RGB (D50): the profile's forward matrix, as develop's matrix
+    /// carries it, taken on into the space the DNG specification applies its tables in.
+    #[uniform(wgsl = "mat3x3f")]
+    pub to_prophoto: [[f32; 4]; 3],
+    #[uniform(wgsl = "mat3x3f")]
+    pub from_prophoto: [[f32; 4]; 3],
+    /// The camera multipliers develop applies (`DevelopParams::wb_mul`); w unused.
+    pub wb: [f32; 4],
+    /// The HueSatMap's hue, saturation and value divisions (0 for none), and 1 when its values are sRGB-spaced.
+    pub hue_sat: [u32; 4],
+    /// The LookTable's, likewise.
+    pub look: [u32; 4],
+    /// x: the exposure the LookTable applies at — the file's BaselineExposure and the person's exposure, as the DNG
+    /// specification has it; y: develop's own (`DevelopParams::exposure`), which the input already carries; z, w
+    /// unused.
+    pub exposure: [f32; 4],
+}
+
+/// What the camera profile pass needs: its uniform and its two tables, four floats an entry (hue shift, saturation
+/// scale, value scale, unused), saturation fastest, then hue, then value — a 3D texture's order.
+#[derive(Clone, Debug)]
+pub struct ProfilePass {
+    pub uniform: Vec<u8>,
+    pub hue_sat: Vec<f32>,
+    pub look: Vec<f32>,
 }
 
 /// A lens blur by distance: how far it reaches, where the focus is, and how deep the sharp band around it is.
@@ -112,6 +153,7 @@ impl Default for EditParams {
             masks: Vec::new(),
             lens_blur: None,
             haze: 0.0,
+            camera_profile: None,
         }
     }
 }
@@ -1113,6 +1155,8 @@ pub struct Packed {
     /// floats an entry; empty unless a stock is named *and* its profile was given to `pack_with`. The response
     /// table it goes with is the profile's.
     pub slide_exposure: Vec<f32>,
+    /// The camera profile pass, when the edit renders with one that has tables (`FILE_PROFILE`).
+    pub profile: Option<ProfilePass>,
 }
 
 /// Row-major 3×3 → WGSL `mat3x3f` columns.
@@ -1233,8 +1277,27 @@ fn pack_inner(
             crate::cct::temp_tint_to_xy(edit.white_balance.temperature_k, edit.white_balance.tint)
         }
     };
-    let wb = camera::resolve(camera, white_xy);
+    let mut wb = camera::resolve(camera, white_xy);
     let developed = source == SourceKind::Developed;
+    // The file's camera profile, when the edit asks for it: its forward matrix in place of the inverted colour
+    // matrix — white-balanced camera RGB to XYZ under D50, adapted to D65 for the working space and normalised so
+    // the white maps to white, as `resolve` does.
+    let dcp = (!developed && edit.camera_profile.as_deref() == Some(FILE_PROFILE))
+        .then_some(camera.profile.as_deref())
+        .flatten();
+    if let Some(fm) = dcp.and_then(|p| p.forward_at(wb.temperature_k)) {
+        let mut m = mat::mul(
+            &mat::XYZ_TO_REC2020,
+            &mat::mul(&mat::bradford(crate::dcp::D50, mat::D65), &fm),
+        );
+        let white = mat::apply(&m, &[1.0, 1.0, 1.0]);
+        for (row, w) in m.iter_mut().zip(white) {
+            for v in row.iter_mut() {
+                *v /= w;
+            }
+        }
+        wb.cam_to_rec2020 = m;
+    }
     let mono_lut = edit
         .monochrome
         .as_ref()
@@ -1421,7 +1484,56 @@ fn pack_inner(
         mask_curves,
         mono_lut,
         slide_exposure: slide.map(|(lut, _)| lut).unwrap_or_default(),
+        profile: dcp.and_then(|p| {
+            // The LookTable applies after the file's own BaselineExposure and the person's exposure (DNG 1.6, chapter
+            // 6) — not after Sidecar's placement of grey, which is a rendering choice of its own.
+            let look_exposure =
+                2f64.powf(edit.exposure.ev + camera.baseline_exposure.unwrap_or(0.0)) as f32;
+            profile_pass(p, &params, wb.temperature_k, look_exposure)
+        }),
     }
+}
+
+/// The camera profile pass for `p` under this develop's uniform: its tables at the white balance's `temperature`,
+/// in a 3D texture's layout, and the matrices that carry develop's white-balanced camera RGB to ProPhoto and back.
+fn profile_pass(
+    p: &crate::dcp::Profile,
+    d: &DevelopParams,
+    temperature: f64,
+    look_exposure: f32,
+) -> Option<ProfilePass> {
+    let hue_sat = p.hue_sat_at(temperature);
+    let look = p.look.clone().filter(crate::dcp::HsvTable::is_valid);
+    if hue_sat.is_none() && look.is_none() {
+        return None;
+    }
+    let cam: M3 = std::array::from_fn(|r| std::array::from_fn(|c| d.cam_to_work[c][r] as f64));
+    let to = mat::mul(&crate::dcp::rec2020_to_prophoto(), &cam);
+    let dims = |t: &Option<crate::dcp::HsvTable>| {
+        t.as_ref()
+            .map_or([0; 4], |t| [t.dims[0], t.dims[1], t.dims[2], t.srgb as u32])
+    };
+    let rgba = |t: &Option<crate::dcp::HsvTable>| {
+        t.as_ref().map_or(vec![], |t| {
+            t.data
+                .chunks(3)
+                .flat_map(|e| [e[0], e[1], e[2], 0.0])
+                .collect()
+        })
+    };
+    let u = ProfileParams {
+        to_prophoto: to_mat3(&to),
+        from_prophoto: to_mat3(&mat::inverse(&to)),
+        wb: [d.wb_mul[0], d.wb_mul[1], d.wb_mul[2], 0.0],
+        hue_sat: dims(&hue_sat),
+        look: dims(&look),
+        exposure: [look_exposure, d.exposure, 0.0, 0.0],
+    };
+    Some(ProfilePass {
+        uniform: bytemuck::bytes_of(&u).to_vec(),
+        hue_sat: rgba(&hue_sat),
+        look: rgba(&look),
+    })
 }
 
 #[cfg(test)]

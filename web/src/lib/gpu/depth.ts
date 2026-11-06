@@ -25,7 +25,7 @@ export function refinedSize(frame: [number, number]): [number, number] {
 }
 
 /** A compute binding, as `crates/engine/src/compute.rs`'s `B` names them: `storage` alone is an RGBA16F target. */
-export type Binding = 'uniform' | 'texture' | 'filtered' | 'uint' | 'sampler' | 'storage' | { storage: GPUTextureFormat };
+export type Binding = 'uniform' | 'texture' | 'texture3d' | 'filtered' | 'uint' | 'sampler' | 'storage' | { storage: GPUTextureFormat };
 
 export async function kernel(device: GPUDevice, label: string, code: string, bindings: Binding[]): Promise<GPUComputePipeline> {
 	const module = device.createShaderModule({ label, code });
@@ -41,6 +41,8 @@ export async function kernel(device: GPUDevice, label: string, code: string, bin
 					return { binding, visibility, buffer: { type: 'uniform' } };
 				case 'texture':
 					return { binding, visibility, texture: { sampleType: 'unfilterable-float' } };
+				case 'texture3d':
+					return { binding, visibility, texture: { sampleType: 'unfilterable-float', viewDimension: '3d' } };
 				case 'filtered':
 					return { binding, visibility, texture: { sampleType: 'float' } };
 				case 'uint':

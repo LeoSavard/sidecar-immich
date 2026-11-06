@@ -13,6 +13,8 @@ pub enum B {
     Tex,
     TexF,
     TexU,
+    /// A 3D float texture, read with `textureLoad`.
+    Tex3,
     Samp,
     Store(wgpu::TextureFormat),
 }
@@ -62,6 +64,11 @@ impl Kernel {
                     B::TexU => wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Uint,
                         view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    B::Tex3 => wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D3,
                         multisampled: false,
                     },
                     B::Samp => wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),

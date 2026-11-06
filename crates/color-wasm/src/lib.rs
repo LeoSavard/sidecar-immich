@@ -128,6 +128,19 @@ pub unsafe extern "C" fn sc_pack(ptr: *const u8, len: usize) -> *const u8 {
                 out.extend_from_slice(bytemuck::cast_slice(&p.mono_lut));
                 out.extend_from_slice(&(p.slide_exposure.len() as u32).to_le_bytes());
                 out.extend_from_slice(bytemuck::cast_slice(&p.slide_exposure));
+                // The camera profile pass, when the edit renders with one: its uniform's length in bytes (0 for
+                // none), the uniform, then its two tables, each preceded by its length in floats.
+                match &p.profile {
+                    Some(pp) => {
+                        out.extend_from_slice(&(pp.uniform.len() as u32).to_le_bytes());
+                        out.extend_from_slice(&pp.uniform);
+                        for t in [&pp.hue_sat, &pp.look] {
+                            out.extend_from_slice(&(t.len() as u32).to_le_bytes());
+                            out.extend_from_slice(bytemuck::cast_slice(t));
+                        }
+                    }
+                    None => out.extend_from_slice(&0u32.to_le_bytes()),
+                }
                 out
             }),
     )

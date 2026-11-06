@@ -362,6 +362,7 @@
 			depthEffects();
 			const packed = repack();
 			develop.setUniforms(packed.uniform);
+			develop.setProfile(packed.profile);
 			develop.setToneLut(packed.lut);
 			develop.setMono(packed.monoLut);
 			develop.setSlide(packed.slideExposure, slideProfile?.response ?? NO_TABLE);
@@ -1788,7 +1789,7 @@
 {/snippet}
 
 {#snippet wbSection()}
-	{#if edit}<WhiteBalanceSection {edit} onchange={update} oncommit={committed} {developed} asShot={asShotWb} picking={fallback || readOnly ? undefined : pickingWhite} onpick={(on) => (pickingWhite = on)} />{/if}
+	{#if edit}<WhiteBalanceSection {edit} onchange={update} oncommit={committed} {developed} asShot={asShotWb} picking={fallback || readOnly ? undefined : pickingWhite} onpick={(on) => (pickingWhite = on)} fileProfile={meta?.info.color.profile?.name} />{/if}
 {/snippet}
 
 {#snippet lightSection()}

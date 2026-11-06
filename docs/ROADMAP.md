@@ -687,7 +687,8 @@ order:
   sigmoid tone mapper in 5.12. An editor shipping only exposure, contrast and a curve clips highlights in a
   way that reads as broken to anyone arriving from those. This is the same question as "Tone curve above
   middle grey" at the top of this file — worth noting that the field has converged while that decision waits.
-- **Camera profile selection — a correctness issue, not a feature.** Everyone exposes an input-profile
+- **Camera profile selection — a correctness issue, not a feature — the file's own built** (2026-11-06,
+  `EditParams::camera_profile`; standalone `.dcp` files and a profile picker still to come). Everyone exposes an input-profile
   choice; without one, Sidecar's colours differ from every other tool on the same file and users read that
   as a bug. The incremental piece is DCP's forward matrix plus HueSatMap/LookTable — data plumbing and a
   small 3D-LUT sampler, not an algorithm, since camera matrices are already interpolated by illuminant.

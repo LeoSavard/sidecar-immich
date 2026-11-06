@@ -58,4 +58,10 @@ lensBlur?: LensBlur,
  * Haze by distance, from the depth mask: −100 takes it away, 100 adds it; 0, left out of the serialized
  * edit, is none.
  */
-haze?: number, };
+haze?: number, 
+/**
+ * The camera profile to render with (DESIGN.md §7, "Camera profiles"): `FILE_PROFILE` for the one the
+ * photo's file carries (`CameraColor::profile`); absent, and left out of the serialized edit, for the camera
+ * matrices alone, as before profiles existed.
+ */
+cameraProfile?: string, };

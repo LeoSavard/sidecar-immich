@@ -4,6 +4,8 @@
 import developWgsl from './wgsl/client_develop.wgsl?raw';
 import densityDownWgsl from './wgsl/client_density_down.wgsl?raw';
 import densityBlurWgsl from './wgsl/client_density_blur.wgsl?raw';
+import profileWgsl from './wgsl/client_profile.wgsl?raw';
+import type { ProfilePass } from '$lib/color/pack';
 import { DEVELOP_UNIFORM_BYTES } from '$lib/color/pack';
 import { fromHalf } from '$lib/color/transfer';
 import { kernel } from './depth';
@@ -64,14 +66,20 @@ export class DevelopPass {
 	private boundDensity?: GPUTexture;
 	private densityDown: GPUComputePipeline;
 	private densityBlur: GPUComputePipeline;
+	/** The camera profile pass (`client/profile.wgsl`): what it was given, and what it made of develop's input. */
+	private profilePipeline: GPUComputePipeline;
+	private profile?: { pass: ProfilePass; ubo: GPUBuffer; hueSat: GPUTexture; look: GPUTexture };
+	private profiled?: GPUTexture;
+	private boundInput?: GPUTexture;
 
-	private constructor(device: GPUDevice, pipeline: GPURenderPipeline, layout: GPUBindGroupLayout, maskLayout: GPUBindGroupLayout, densityDown: GPUComputePipeline, densityBlur: GPUComputePipeline) {
+	private constructor(device: GPUDevice, pipeline: GPURenderPipeline, layout: GPUBindGroupLayout, maskLayout: GPUBindGroupLayout, densityDown: GPUComputePipeline, densityBlur: GPUComputePipeline, profilePipeline: GPUComputePipeline) {
 		this.device = device;
 		this.pipeline = pipeline;
 		this.layout = layout;
 		this.maskLayout = maskLayout;
 		this.densityDown = densityDown;
 		this.densityBlur = densityBlur;
+		this.profilePipeline = profilePipeline;
 		this.ubo = device.createBuffer({ label: 'develop params', size: DEVELOP_UNIFORM_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 		// Zeroed on creation: no masks until `setMasks` says otherwise.
 		this.maskUbo = device.createBuffer({ label: 'develop masks', size: MASK_UNIFORM_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
@@ -119,11 +127,12 @@ export class DevelopPass {
 			fragment: { module, entryPoint: 'fs', targets: [{ format: 'rgba16float' }] },
 			primitive: { topology: 'triangle-list' }
 		});
-		const [densityDown, densityBlur] = await Promise.all([
+		const [densityDown, densityBlur, profilePipeline] = await Promise.all([
 			kernel(device, 'density down', densityDownWgsl, ['uniform', 'texture', 'storage']),
-			kernel(device, 'density blur', densityBlurWgsl, ['uniform', 'texture', 'storage'])
+			kernel(device, 'density blur', densityBlurWgsl, ['uniform', 'texture', 'storage']),
+			kernel(device, 'camera profile', profileWgsl, ['uniform', 'texture', 'texture3d', 'texture3d', 'storage'])
 		]);
-		return new DevelopPass(device, pipeline, layout, maskLayout, densityDown, densityBlur);
+		return new DevelopPass(device, pipeline, layout, maskLayout, densityDown, densityBlur, profilePipeline);
 	}
 
 	get output(): GPUTexture | undefined {
@@ -156,6 +165,71 @@ export class DevelopPass {
 			usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC
 		});
 		this.bindGroup = undefined;
+	}
+
+	/**
+	 * The camera profile pass for the edit (`Packed.profile`), or null for none: run over develop's input on every
+	 * render, as `DevelopPass::render` runs it on the server.
+	 */
+	setProfile(pass: ProfilePass | null) {
+		if (!pass) {
+			if (this.profile) {
+				for (const t of [this.profile.hueSat, this.profile.look]) t.destroy();
+				this.profile.ubo.destroy();
+				this.profile = undefined;
+			}
+			return;
+		}
+		const p = this.profile;
+		if (!p || p.pass.hueSat !== pass.hueSat || p.pass.look !== pass.look) {
+			if (p) for (const t of [p.hueSat, p.look]) t.destroy();
+			const u = new Uint32Array(pass.uniform.buffer, pass.uniform.byteOffset, pass.uniform.byteLength / 4);
+			// `ProfileParams`: hue_sat at float 28, look at 32 (after two mat3x3f and wb).
+			const table = (at: number, data: Float32Array) => {
+				const [h, s, v] = [u[at], u[at + 1], u[at + 2]];
+				const ok = h > 0 && data.length === h * s * v * 4;
+				const t = this.device.createTexture({ label: 'profile table', size: ok ? [s, h, v] : [1, 1, 1], dimension: '3d', format: 'rgba32float', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+				if (ok) this.device.queue.writeTexture({ texture: t }, data, { bytesPerRow: s * 16, rowsPerImage: h }, [s, h, v]);
+				return t;
+			};
+			this.profile = {
+				pass,
+				ubo: p?.ubo ?? this.device.createBuffer({ label: 'profile params', size: pass.uniform.byteLength, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }),
+				hueSat: table(28, pass.hueSat),
+				look: table(32, pass.look)
+			};
+		}
+		this.profile!.pass = pass;
+		this.device.queue.writeBuffer(this.profile!.ubo, 0, pass.uniform);
+	}
+
+	/** Develop's input as develop reads it: through the camera profile pass when there is one. */
+	private developInput(): GPUTexture {
+		const input = this.input ?? this.source!;
+		const p = this.profile;
+		if (!p) return input;
+		if (this.profiled?.width !== input.width || this.profiled?.height !== input.height) {
+			this.profiled?.destroy();
+			this.profiled = this.storage('profiled', input.width, input.height);
+		}
+		const bind = this.device.createBindGroup({
+			layout: this.profilePipeline.getBindGroupLayout(0),
+			entries: [
+				{ binding: 0, resource: { buffer: p.ubo } },
+				{ binding: 1, resource: input.createView() },
+				{ binding: 2, resource: p.hueSat.createView() },
+				{ binding: 3, resource: p.look.createView() },
+				{ binding: 4, resource: this.profiled.createView() }
+			]
+		});
+		const encoder = this.device.createCommandEncoder();
+		const pass = encoder.beginComputePass();
+		pass.setPipeline(this.profilePipeline);
+		pass.setBindGroup(0, bind);
+		pass.dispatchWorkgroups(Math.ceil(input.width / 16), Math.ceil(input.height / 16));
+		pass.end();
+		this.device.queue.submit([encoder.finish()]);
+		return this.profiled;
 	}
 
 	setUniforms(bytes: ArrayBuffer | ArrayBufferView) {
@@ -196,7 +270,7 @@ export class DevelopPass {
 	 * averaged down by a whole number, developed to the film's log exposure, blurred over the developer's reach.
 	 */
 	private buildDensityMap(masks: GPUBindGroup) {
-		const input = this.input ?? this.source!;
+		const input = this.developInput();
 		const [w, h] = [input.width, input.height];
 		const k = Math.max(1, Math.ceil(Math.max(w, h) / MAP_LONG));
 		const [mw, mh] = [Math.ceil(w / k), Math.ceil(h / k)];
@@ -328,7 +402,10 @@ export class DevelopPass {
 		const density = this.needsDensityMap && this.density ? this.density.map : this.noMask;
 		if (density !== this.boundDensity) this.bindGroup = undefined;
 		this.boundDensity = density;
-		this.bindGroup ??= this.groupFor(this.ubo, this.input ?? this.source, density);
+		const input = this.developInput();
+		if (input !== this.boundInput) this.bindGroup = undefined;
+		this.boundInput = input;
+		this.bindGroup ??= this.groupFor(this.ubo, input, density);
 		this.drawWith(this.bindGroup, target, masks);
 	}
 
