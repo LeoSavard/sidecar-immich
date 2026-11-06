@@ -58,4 +58,6 @@ struct DevelopParams {
   // `PROCESS_VERSION` 6), y Contrast as an exponent for the S-curve that grades the straight segment,
   // since a fixed segment has no steepness of its own for Contrast to set. z, w unused.
   tone_shape: vec4f,
+  // A film negative inverted (`Negative::uniform`): the film base's camera RGB, and 1/γ; all zero for a positive.
+  negative: vec4f,
 }

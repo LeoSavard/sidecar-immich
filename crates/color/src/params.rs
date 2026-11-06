@@ -69,6 +69,62 @@ pub struct EditParams {
     #[serde(skip_serializing_if = "is_zero")]
     #[cfg_attr(feature = "ts", ts(as = "Option<f64>", optional))]
     pub haze: f64,
+    /// The photo is a film negative to invert (DESIGN.md §7, "Negatives"). Absent, and left out of the serialized
+    /// edit, is a positive.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub negative: Option<Negative>,
+}
+
+/// A film negative photographed or scanned: inverted by its density. A negative's transmittance T at a point is
+/// 10^−D, and above its base the density is γ·log₁₀ of the exposure it had (the straight line of its
+/// characteristic curve) — so the scene's light, per channel, is (T_base / T)^(1/γ). Dividing by the base removes
+/// the orange mask and the light it was lit by exactly; γ undoes the film's contrast. Develop subtracts the base's
+/// own level, so unexposed film is black, and scales grey into place (`NEGATIVE_SCALE`).
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "edit/"))]
+pub struct Negative {
+    /// The film base's camera RGB, as the photo holds it: an unexposed part of the film (its rebate, between frames).
+    pub base: [f64; 3],
+    /// The film's contrast, the slope of its characteristic curve: about 0.6 for colour negative.
+    pub gamma: f64,
+}
+
+impl Default for Negative {
+    fn default() -> Self {
+        Self {
+            base: [1.0; 3],
+            gamma: 0.6,
+        }
+    }
+}
+
+/// What multiplies the inverted exposure above the base's (`(T_base / T)^(1/γ) − 1`) to put a typical negative's grey
+/// near 0.18: grey sits about two decades of exposure above the film's threshold, 10^2 in those units.
+pub const NEGATIVE_SCALE: f64 = 0.0018;
+
+impl Negative {
+    /// The uniform's `negative`: the base and 1/γ; zero when there is none.
+    pub fn uniform(n: Option<&Negative>) -> [f32; 4] {
+        let Some(n) = n else { return [0.0; 4] };
+        [
+            n.base[0].max(1e-6) as f32,
+            n.base[1].max(1e-6) as f32,
+            n.base[2].max(1e-6) as f32,
+            (1.0 / n.gamma.clamp(0.2, 3.0)) as f32,
+        ]
+    }
+
+    /// A camera colour of the negative inverted, as develop inverts it: what the eyedropper reads back.
+    pub fn invert(&self, c: [f64; 3]) -> [f64; 3] {
+        let g = 1.0 / self.gamma.clamp(0.2, 3.0);
+        std::array::from_fn(|k| {
+            ((self.base[k].max(1e-6) / c[k].max(1e-6 * self.base[k].max(1e-6))).powf(g) - 1.0)
+                .max(0.0)
+                * NEGATIVE_SCALE
+        })
+    }
 }
 
 /// A lens blur by distance: how far it reaches, where the focus is, and how deep the sharp band around it is.
@@ -112,6 +168,7 @@ impl Default for EditParams {
             masks: Vec::new(),
             lens_blur: None,
             haze: 0.0,
+            negative: None,
         }
     }
 }
@@ -1009,7 +1066,7 @@ pub enum DisplaySpace {
     DisplayP3,
 }
 
-/// The develop modules' uniform (432 bytes). Its WGSL declaration,
+/// The develop modules' uniform (448 bytes). Its WGSL declaration,
 /// `shaders/uniforms/develop_params.wgsl`, is generated from this struct (`sidecar-uniform`); the
 /// `uniforms` test checks the file and every offset.
 #[repr(C)]
@@ -1072,6 +1129,8 @@ pub struct DevelopParams {
     /// `PROCESS_VERSION` 6), y Contrast as an exponent for the S-curve that grades the straight segment,
     /// since a fixed segment has no steepness of its own for Contrast to set. z, w unused.
     pub tone_shape: [f32; 4],
+    /// A film negative inverted (`Negative::uniform`): the film base's camera RGB, and 1/γ; all zero for a positive.
+    pub negative: [f32; 4],
 }
 
 /// Contrast slider value → logistic steepness.
@@ -1335,6 +1394,12 @@ fn pack_inner(
             0.0,
             0.0,
         ],
+        // A developed file is a picture already, never a negative to invert.
+        negative: if developed {
+            [0.0; 4]
+        } else {
+            Negative::uniform(edit.negative.as_ref())
+        },
         slide_tone: match &slide {
             Some(_) => {
                 let mut t = display_tone(edit);
@@ -1428,6 +1493,39 @@ fn pack_inner(
 mod tests {
     use super::*;
 
+    /// A scene exposed onto film of contrast γ, its density above the base γ·log₁₀(H / H₀), read through an orange
+    /// mask lit by a coloured light, inverts to the scene's light above the threshold — the same through either mask,
+    /// in proportion to the exposure.
+    #[test]
+    fn a_negative_inverts_to_the_scene_whatever_its_mask() {
+        let gamma = 0.6;
+        let film = |h: f64, base: [f64; 3]| -> [f64; 3] {
+            let d = gamma * (h / 0.01).log10();
+            base.map(|b| b * 10f64.powf(-d))
+        };
+        let scene = [0.02, 0.18, 0.9];
+        for base in [[0.8, 0.45, 0.25], [0.6, 0.6, 0.6]] {
+            let n = Negative { base, gamma };
+            let out: Vec<[f64; 3]> = scene.iter().map(|&h| n.invert(film(h, base))).collect();
+            for (o, &h) in out.iter().zip(&scene) {
+                let want = (h / 0.01 - 1.0) * NEGATIVE_SCALE;
+                for v in o {
+                    assert!(
+                        (v / want - 1.0).abs() < 1e-9,
+                        "{base:?} {h}: {o:?} against {want}"
+                    );
+                }
+            }
+        }
+        assert_eq!(Negative::uniform(None), [0.0; 4]);
+        assert!(
+            serde_json::to_value(EditParams::default())
+                .unwrap()
+                .get("negative")
+                .is_none()
+        );
+    }
+
     /// Default settings on a developed file must be the identity: every tone value at its neutral, and the
     /// RAW-only highlight blend off whatever the stored strength says.
     #[test]
@@ -1470,7 +1568,7 @@ mod tests {
             SourceKind::Raw,
             DisplaySpace::Srgb,
         );
-        assert_eq!(p.uniform.len(), 432);
+        assert_eq!(p.uniform.len(), 448);
         assert_eq!(p.lut.len(), LUT_SIZE);
         // exposure sits at byte 12, and for a RAW at default it is the baseline, not 1.0
         let gain = |p: &Packed| f32::from_le_bytes(p.uniform[12..16].try_into().unwrap());
