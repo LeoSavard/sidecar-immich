@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright Sidecar contributors
-//! requires: uniforms/develop_params.wgsl develop/wb.wgsl develop/exposure.wgsl develop/gamut.wgsl develop/tone.wgsl develop/masks.wgsl develop/mixer.wgsl develop/mono.wgsl develop/developer.wgsl develop/grain.wgsl develop/stock.wgsl develop/slide.wgsl develop/grading.wgsl develop/local.wgsl develop/output.wgsl
+//! requires: uniforms/develop_params.wgsl develop/wb.wgsl develop/exposure.wgsl develop/gamut.wgsl develop/tone.wgsl develop/masks.wgsl develop/mixer.wgsl develop/mono.wgsl develop/developer.wgsl develop/grain.wgsl develop/stock.wgsl develop/slide.wgsl develop/grading.wgsl develop/local.wgsl develop/haze.wgsl develop/output.wgsl
 // Develop pass: full-screen triangle into developedTex (rgba16float, proxy size). Output is display-linear.
 
 @group(0) @binding(0) var<uniform> P: DevelopParams;
@@ -15,23 +15,27 @@
 // cube, and the slide's colour over the layers' log H. Both 1×1×1 unless a stock is being rendered.
 @group(0) @binding(5) var slide_exposures: texture_3d<f32>;
 @group(0) @binding(6) var slide_responses: texture_3d<f32>;
-// Texture and Clarity's map (`develop/local.wgsl`): two bands' guided-filter coefficients over the whole frame at
-// low resolution, rgba32float (not filterable everywhere, so `local_coef` interpolates by hand); 1×1 when off.
-@group(0) @binding(7) var local_map: texture_2d<f32>;
+// The whole-frame maps at low resolution, rgba32float (not filterable everywhere, so `map_texel` interpolates by
+// hand), one array because develop is at the fragment stage's sixteen textures: layer 0 Texture and Clarity's two
+// bands' guided-filter coefficients (`develop/local.wgsl`), layer 1 Dehaze's transmission coefficients, and the
+// airlight in texel (0, 0) of layer 2 (`develop/haze.wgsl`, working space before exposure). 1×1 when unused.
+@group(0) @binding(7) var maps: texture_2d_array<f32>;
 
 // The local-contrast map at frame position `at` of a frame `frame` pixels across: the map covers the whole frame,
 // one texel per `ceil(long edge / 1024)` pixels square (`developer::map_scale`).
-fn local_coef(at: vec2f, frame: vec2f) -> vec4f {
+// Layer `layer` of the whole-frame maps at frame position `at` of a frame `frame` pixels across: the maps cover the
+// whole frame, one texel per `ceil(long edge / 1024)` pixels square (`developer::map_scale`).
+fn map_texel(layer: i32, at: vec2f, frame: vec2f) -> vec4f {
   let k = max(ceil(max(frame.x, frame.y) / 1024.0), 1.0);
-  let size = vec2i(textureDimensions(local_map));
+  let size = vec2i(textureDimensions(maps));
   let f = at / k - 0.5;
   let base = vec2i(floor(f));
   let t = f - floor(f);
   let last = size - 1;
-  let c00 = textureLoad(local_map, clamp(base, vec2i(0), last), 0);
-  let c10 = textureLoad(local_map, clamp(base + vec2i(1, 0), vec2i(0), last), 0);
-  let c01 = textureLoad(local_map, clamp(base + vec2i(0, 1), vec2i(0), last), 0);
-  let c11 = textureLoad(local_map, clamp(base + vec2i(1, 1), vec2i(0), last), 0);
+  let c00 = textureLoad(maps, clamp(base, vec2i(0), last), layer, 0);
+  let c10 = textureLoad(maps, clamp(base + vec2i(1, 0), vec2i(0), last), layer, 0);
+  let c01 = textureLoad(maps, clamp(base + vec2i(0, 1), vec2i(0), last), layer, 0);
+  let c11 = textureLoad(maps, clamp(base + vec2i(1, 1), vec2i(0), last), layer, 0);
   return mix(mix(c00, c10, t.x), mix(c01, c11, t.x), t.y);
 }
 
@@ -88,8 +92,16 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let at = vec2i(pos.xy) + vec2i(M.frame.xy);
   // Texture and Clarity, on the scene's light: a gain from the source's own detail, so exposure, white balance and
   // the masks don't move the bands.
-  if (P.local.z > 0.5 && textureDimensions(local_map).x > 1u) {
-    c = local_contrast(c, src.rgb, local_coef(vec2f(at) + 0.5, frame), P.local);
+  if (P.local.z > 0.5 && textureDimensions(maps).x > 1u) {
+    c = local_contrast(c, src.rgb, map_texel(0, vec2f(at) + 0.5, frame), P.local);
+  }
+  // Dehaze, on the scene's light: the airlight scaled into this pixel's exposure, the transmission at this
+  // pixel's own luminance.
+  if (P.local.w != 0.0 && textureDimensions(maps).x > 1u) {
+    let ab = map_texel(1, vec2f(at) + 0.5, frame).xy;
+    let t = clamp(ab.x * guided_guide(src.rgb, 1u) + ab.y, 0.0, 1.0);
+    let air = textureLoad(maps, vec2i(0), 2, 0).rgb * P.exposure * exp2(local.ev);
+    c = haze_apply(c, air, t, P.local.w);
   }
   // Black and white: the film's exposure in place of the colour, before the tone map, as film is exposed; then
   // what the developer makes of it.

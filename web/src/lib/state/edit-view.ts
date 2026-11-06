@@ -113,6 +113,7 @@ const CONTROLS: Control[] = [
 	{ label: 'Blacks', get: view.blacks, show: (v) => signed(v) },
 	{ label: 'Texture', get: (e) => e.presence?.texture ?? 0, show: (v) => signed(v) },
 	{ label: 'Clarity', get: (e) => e.presence?.clarity ?? 0, show: (v) => signed(v) },
+	{ label: 'Dehaze', get: (e) => e.presence?.dehaze ?? 0, show: (v) => signed(v) },
 	{ label: 'Highlight recovery', get: view.highlightRecovery, show: (v) => `${decimals(v)} %` },
 	{ label: 'Saturation', get: (e) => e.saturation ?? 0, show: (v) => signed(v) },
 	...BANDS.flatMap((b) => FIELDS.map((f): Control => ({ label: `${cap(b)} ${f}`, get: (e) => e.mixer[b][f], show: (v) => signed(v) }))),

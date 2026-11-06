@@ -687,7 +687,8 @@ order:
 - **Clarity, texture and local contrast — built** (2026-11-06, `EditParams::presence`; DESIGN.md's build log).
   Front-panel sliders everywhere; their absence is immediately
   visible. Falls out of the local Laplacian or guided filter above, which is why those come first.
-- **Dehaze.** Present in all of Lightroom, darktable and RawTherapee.
+- **Dehaze — built** (2026-11-06, `Presence::dehaze`; DESIGN.md's build log). Present in all of Lightroom,
+  darktable and RawTherapee.
 - **A scene-to-display tone transform.** This is becoming the consensus default rather than an option:
   darktable made `sigmoid` the default for new installs in 5.2 and added AgX in 5.4; RawTherapee added a
   sigmoid tone mapper in 5.12. An editor shipping only exposure, contrast and a curve clips highlights in a
