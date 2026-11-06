@@ -28,8 +28,8 @@ primitives first, because several features stand on each:
 | 8 | Clarity, texture, local contrast (built on #1's guided filter: fast, halo-light) | an A/B | #72 |
 | 9 | Dehaze without depth (dark channel prior, on #1) | an A/B | #73 |
 | 10 | ACES reference gamut compression | an A/B on LED and neon | #74 (already present; now in ACEScg, `PROCESS_VERSION` 9) |
-| 11 | Hue-preserving tone mapping / a scene-to-display transform | the look is the owner's | |
-| 12 | Detail per layer (sharpening and noise reduction through a mask) | — | |
+| 11 | Hue-preserving tone mapping / a scene-to-display transform | the look is the owner's | Already present: `tone_apply` maps luminance and scales RGB by the ratio, fading to neutral over the last stop. Choosing a different scene-to-display look (sigmoid, AgX-style) waits on the owner |
+| 12 | Detail per layer (sharpening and noise reduction through a mask) | — | #75 |
 | 13 | Sky mask from the depth map, guided-filter edges (on #1) | an A/B | |
 | 14 | Upright: keystone from the photo's lines | — | |
 | 15 | Heal, clone and spot removal; red-eye | — | |
