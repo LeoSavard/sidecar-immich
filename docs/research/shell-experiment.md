@@ -105,3 +105,44 @@ Neither is a reason to stop. Electron is the short path to a desktop app that be
 editor; the native canvas is the only path to Wayland colour management and HDR. They also compose: the
 shell's window can come first, and the image canvas can move to a native surface later without the rest of
 the UI changing. The decision is the owner's.
+
+## Windows and macOS (a desk estimate, 2026-11-06 — nothing below was run)
+
+**The renderer is the cheap part.** wgpu targets Metal and DX12 (or Vulkan) with the same WGSL; the work is
+proving it, by running the parity harness against each backend on real hardware, since Metal and DX12 differ
+in f16 and filtering details. Windows CI runners can run DX12 in software (WARP); whether macOS runners
+expose Metal to a job is unchecked.
+
+**The native dependencies are where the effort is**, read from the code:
+
+| | macOS | Windows |
+|---|---|---|
+| LibRaw (`libraw-sys`, `cc`) | builds; OpenMP needs `libomp`, since Apple clang has none and the build asks for `-fopenmp` and `gomp` | MSVC has OpenMP; zlib and libjpeg vendored or static rather than system |
+| ExifTool (8 call sites) | Perl ships with macOS but is deprecated: bundle it | a standalone `exiftool.exe` exists: bundle it |
+| HEIC (`heif-dec`, a separate program for licence reasons) | use ImageIO instead — no licence question and a better decoder | bundle `heif-dec`; Windows' own decoder needs the paid HEVC extension. The HEVC pool question in V2 stays open |
+| ML (burn on wgpu) | Metal | DX12 / Vulkan |
+| Platform code | a few `cfg(unix)` permission lines | the same |
+
+**The window and the web UI.** macOS is the easiest of the three: a Metal-backed view under a WKWebView is an
+ordinary view hierarchy, and macOS is colour-managed system-wide — wgpu already sets the `CAMetalLayer` colour
+space for Display P3, extended P3 and EDR (its 2026 Metal colour-space fixes show it in use). That closes, on
+paper, the survey's "macOS ColorSync and EDR were not researched". Windows is more work: WebView2 over a DX12
+swapchain hits the airspace problem (a child HWND cannot be transparent over another surface), which
+WebView2's composition-hosting mode solves at some complexity; colour is good once done — render scRGB or
+HDR10 and let Windows' colour management convert, which is Microsoft's own advice. WebView2 also supports
+WebGPU, so Windows alone could keep today's in-page rendering and skip a native canvas.
+
+**Packaging.** macOS: an `.app` in a `.dmg` or a Homebrew cask; the Apple Developer Program (~$99/year) plus
+notarisation, or Gatekeeper blocks it; outside the App Store a sidecar beside the original needs nothing
+special, inside it the sandbox's related-items mechanism exists for exactly sidecar files. Windows: MSIX or
+MSI and `winget`; signing is the hard part — unsigned means SmartScreen warnings, Azure's cheap signing service
+reportedly needs an organisation with a verifiable multi-year history in a limited set of countries, and a
+traditional certificate costs a few hundred dollars a year with reputation that builds slowly.
+
+**Rough effort, a judgement:** macOS 2–4 weeks plus $99/year; Windows 3–6 weeks plus a signing arrangement.
+macOS can be as seamless as Linux once signed; Windows can come close, gated on signing rather than code.
+
+## Where this leaves the desktop target
+
+**Parked by the owner, 2026-11-06:** they have no personal need for desktop integration. It stays on the
+roadmap, to be picked up if the need arises; this page and `dev/shell-probe/` are where it restarts.
