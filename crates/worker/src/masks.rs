@@ -19,10 +19,10 @@ use crate::ml::{Face, PARTS, Picture};
 use crate::{DEFAULT_EDGE, Worker, cache_generation, export, unique_tmp};
 
 /// Bump when the models, or how masks are made from them, change: every cached mask is then made again.
-pub const MASK_REVISION: u32 = 3;
+pub const MASK_REVISION: u32 = 6;
 
 /// The masks an edit can name, in the order the editor lists them.
-pub const NAMES: [&str; 7] = [
+pub const NAMES: [&str; 8] = [
     "subject",
     "skin",
     "face-skin",
@@ -30,6 +30,7 @@ pub const NAMES: [&str; 7] = [
     "hair",
     "clothes",
     "depth",
+    "sky",
 ];
 
 /// The size the models look at: past BiRefNet's 1024² input nothing more is seen.
@@ -56,6 +57,72 @@ pub struct MaskSet {
 pub struct DepthMap {
     pub image: sidecar_engine::RgbaF32,
     pub airlight: [f32; 3],
+}
+
+/// The sky mask's long edge: its edges come from the photo (`sidecar_engine::sky`), so it is kept as fine as
+/// the subject's.
+const SKY_EDGE: u32 = 1024;
+
+/// The sky (`sidecar_engine::sky`): found in the depth map — the far plane, from the top edge, not the subject,
+/// light — and drawn by the proxy, box-averaged to `SKY_EDGE`. Empty when there is none.
+fn sky(
+    proxy: &sidecar_engine::RgbaF32,
+    depth: &[u8],
+    dw: u32,
+    dh: u32,
+    subject: (&[u8], u32, u32),
+    wb: [f32; 3],
+) -> (u32, u32, Vec<u8>) {
+    let k = proxy.width.max(proxy.height).div_ceil(SKY_EDGE).max(1);
+    let (w, h) = (proxy.width / k, proxy.height / k);
+    let photo = sidecar_engine::RgbaF32 {
+        width: w,
+        height: h,
+        data: (0..w * h)
+            .flat_map(|i| {
+                let (bx, by) = (i % w * k, i / w * k);
+                let mut s = [0f32; 3];
+                for y in by..by + k {
+                    for x in bx..bx + k {
+                        let p = ((y * proxy.width + x) * 4) as usize;
+                        for (c, v) in s.iter_mut().enumerate() {
+                            *v += proxy.data[p + c].max(0.0);
+                        }
+                    }
+                }
+                let n = (k * k) as f32;
+                [s[0] / n, s[1] / n, s[2] / n, 1.0]
+            })
+            .collect(),
+    };
+    // At the depth map's size: the photo's log luminance and the subject.
+    let at = |x: u32, y: u32, sw: u32, sh: u32| {
+        (
+            ((x as f64 + 0.5) / dw as f64 * sw as f64) as u32,
+            ((y as f64 + 0.5) / dh as f64 * sh as f64) as u32,
+        )
+    };
+    // White-balanced, so a grey sky is grey and foliage green.
+    let rgb: Vec<[f32; 3]> = (0..dw * dh)
+        .map(|i| {
+            let (x, y) = at(i % dw, i / dw, w, h);
+            let p = ((y.min(h - 1) * w + x.min(w - 1)) * 4) as usize;
+            [0, 1, 2].map(|c| photo.data[p + c] * wb[c])
+        })
+        .collect();
+    let (sd, sw, sh) = subject;
+    let subject: Vec<u8> = (0..dw * dh)
+        .map(|i| {
+            let (x, y) = at(i % dw, i / dw, sw, sh);
+            sd[(y.min(sh - 1) * sw + x.min(sw - 1)) as usize]
+        })
+        .collect();
+    let mask =
+        match sidecar_engine::sky::coarse(depth, dw as usize, dh as usize, &rgb, Some(&subject)) {
+            Some(c) => sidecar_engine::sky::refine(&photo, &c, dw as usize, dh as usize),
+            None => vec![0; (w * h) as usize],
+        };
+    (w, h, mask)
 }
 
 /// The share of the photo, farthest first, whose colour is the airlight.
@@ -157,6 +224,17 @@ impl Worker {
                         depth.width,
                         depth.height,
                     );
+                    let sky = sky(
+                        &sidecar_engine::RgbaF32::from_f16_bytes(w, h, &bytes),
+                        &depth.data,
+                        depth.width,
+                        depth.height,
+                        (&subject.data, subject.width, subject.height),
+                        {
+                            let m = info.color.as_shot_mul;
+                            [m[0] as f32, 1.0, m[2] as f32]
+                        },
+                    );
                     let faces = ml.faces(&picture)?;
                     let channel = |name: &str| {
                         let c = PARTS.iter().position(|p| *p == name).expect("a part");
@@ -179,6 +257,7 @@ impl Worker {
                             "subject" => grey_png(subject.width, subject.height, &subject.data)?,
                             "skin" => grey_png(parts.width, parts.height, &skin)?,
                             "depth" => grey_png(depth.width, depth.height, &depth.data)?,
+                            "sky" => grey_png(sky.0, sky.1, &sky.2)?,
                             "depth.json" => {
                                 serde_json::to_vec(&serde_json::json!({ "airlight": air }))?
                             }
