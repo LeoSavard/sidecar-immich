@@ -4,7 +4,7 @@ a brush or not, or one painted from nothing — and its own light and colour: ev
 added on top of it where the mask is. "Show" greys out what the selected mask leaves out. -->
 <script lang="ts">
 	import type { Band, MaskAdjustment, MaskEdge, MixerBand } from '$lib/types';
-	import { BRUSH, DEPTH, MASK_LABELS, type BrushMode, type BrushSettings, type MaskSet } from '$lib/masks';
+	import { BRUSH, COLOR, DEPTH, MASK_LABELS, type BrushMode, type BrushSettings, type MaskSet } from '$lib/masks';
 	import { curvePointOffset, isIdentityCurve, withCurvePoint } from '$lib/state/edit-view';
 	import Slider from '$lib/ui/Slider.svelte';
 	import ColorMixer from '$lib/ui/ColorMixer.svelte';
@@ -92,6 +92,7 @@ added on top of it where the mask is. "Show" greys out what the selected mask le
 		<div class="flex flex-wrap items-center gap-1.5 text-xs">
 			<span class="text-fg-2">Add</span>
 			<button type="button" disabled={disabled || !canPaint} class="rounded-full bg-raised px-2.5 py-1 text-fg disabled:opacity-40" onclick={() => onadd(BRUSH)}>{MASK_LABELS[BRUSH]}</button>
+			<button type="button" {disabled} class="rounded-full bg-raised px-2.5 py-1 text-fg disabled:opacity-40" onclick={() => onadd(COLOR)}>{MASK_LABELS[COLOR]}</button>
 			{#each models as name (name)}
 				<button type="button" {disabled} class="rounded-full bg-raised px-2.5 py-1 text-fg disabled:opacity-40" onclick={() => onadd(name)}>{MASK_LABELS[name] ?? name}</button>
 			{/each}
@@ -121,6 +122,24 @@ added on top of it where the mask is. "Show" greys out what the selected mask le
 				<Slider id="mask-edge-feather" label="Feather" value={layer.edge.feather} min={0} max={100} defaultValue={100} {disabled} format={(v) => `${decimals(v)} %`} onchange={(v) => setEdge(i, { feather: v })} {oncommit} />
 				<Slider id="mask-edge-shift" label="Shift" value={layer.edge.shift} min={-100} max={100} defaultValue={0} bipolar {disabled} format={(v) => (v < 0 ? `${decimals(-v)} in` : v > 0 ? `${decimals(v)} out` : '0')} onchange={(v) => setEdge(i, { shift: v })} {oncommit} />
 				<p class="text-xs text-muted">Width is how far the edge reaches; Feather how soft it is across that width; Shift moves it inward or outward.</p>
+			{/if}
+			{#if layer.mask === COLOR}
+				{@const c = layer.color ?? { hue: 55, width: 40, saturation: [8, 60] as [number, number], feather: 10 }}
+				{@render group('Colours')}
+				<div class="h-2 rounded-full" style="background: linear-gradient(to right, {[0, 60, 120, 180, 240, 300, 360].map((h) => `oklch(0.7 0.13 ${h})`).join(', ')})" aria-hidden="true"></div>
+				<Slider id="range-hue" label="Hue" value={c.hue} min={0} max={360} defaultValue={55} {disabled} format={(v) => `${decimals(v)}°`} onchange={(v) => onchange(i, { color: { ...c, hue: v } })} {oncommit} />
+				<Slider id="range-width" label="Width" value={c.width} min={5} max={180} defaultValue={40} {disabled} format={(v) => `${decimals(v)}°`} onchange={(v) => onchange(i, { color: { ...c, width: v } })} {oncommit} />
+				<Slider id="range-sat-from" label="Saturation from" value={c.saturation[0]} min={0} max={100} defaultValue={8} {disabled} format={(v) => decimals(v)} onchange={(v) => onchange(i, { color: { ...c, saturation: [v, c.saturation[1]] } })} {oncommit} />
+				<Slider id="range-sat-to" label="to" value={c.saturation[1]} min={0} max={100} defaultValue={60} {disabled} format={(v) => decimals(v)} onchange={(v) => onchange(i, { color: { ...c, saturation: [c.saturation[0], v] } })} {oncommit} />
+				<Slider id="range-feather" label="Softness" value={c.feather} min={1} max={40} defaultValue={10} {disabled} format={(v) => decimals(v)} onchange={(v) => onchange(i, { color: { ...c, feather: v } })} {oncommit} />
+				{#if set?.names?.includes('skin')}
+					<div class="flex items-center gap-1.5 text-xs" role="radiogroup" aria-label="Where">
+						<span class="text-fg-2">Where</span>
+						<button type="button" role="radio" aria-checked={!c.within} {disabled} class={chip(!c.within)} onclick={() => { onchange(i, { color: { ...c, within: undefined } }); oncommit(); }}>Anywhere</button>
+						<button type="button" role="radio" aria-checked={c.within === 'skin'} {disabled} class={chip(c.within === 'skin')} onclick={() => { onchange(i, { color: { ...c, within: 'skin' } }); oncommit(); }}>On skin</button>
+					</div>
+				{/if}
+				<p class="text-xs text-muted">Hue and saturation as the eye sees them (OKLab), judged after the white balance. It starts on skin tones; On skin keeps it to people. Show the mask to see what it picks.</p>
 			{/if}
 			{#if layer.mask === DEPTH}
 				{@const r = layer.range ?? { from: 0, to: 100, feather: 0 }}

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // The Rust colour maths (crates/color) running as WebAssembly. Same code the worker uses for export.
 import wasmUrl from './sidecar_color.wasm?url';
+import type { ColorRange } from '$lib/generated/edit/ColorRange';
 import type { CameraColor, DisplaySpace, EditParams, Frame, Geometry, Lens, LensProfile, MaskEdge, SourceKind } from '$lib/types';
 
 /** Mirrors `sidecar_color::params::EdgePlan`: the mask edge passes for one mask size. */
@@ -24,6 +25,7 @@ type Exports = {
 	sc_camera_color(ptr: number, len: number): number;
 	sc_pack_depth(ptr: number, len: number): number;
 	sc_mask_edge(ptr: number, len: number): number;
+	sc_color_select(req: number, reqLen: number, uniform: number, uniformLen: number, pixels: number, pixelsLen: number, mask: number, maskLen: number): number;
 };
 
 /**
@@ -139,6 +141,25 @@ export class ColorPacker {
 		const out = this.framed(this.x.sc_pack_depth(ptr, input.length));
 		this.x.sc_free(ptr, input.length);
 		return out.length ? out.slice() : undefined;
+	}
+
+	/**
+	 * A colour-range layer's selection (`color_range::select`), one byte a pixel at the proxy's size: `proxy` is its
+	 * camera RGB, `uniform` the develop uniform the edit packs to, `within` the model mask it is limited to.
+	 */
+	colorSelect(range: ColorRange, uniform: Uint8Array, proxy: { width: number; height: number; rgba: Float32Array }, within: { width: number; height: number; bytes: Uint8Array } | null): Uint8Array {
+		const req = new TextEncoder().encode(JSON.stringify({ range, width: proxy.width, height: proxy.height, maskWidth: within?.width ?? 0, maskHeight: within?.height ?? 0 }));
+		const px = new Uint8Array(proxy.rgba.buffer, proxy.rgba.byteOffset, proxy.rgba.byteLength);
+		const parts = [req, uniform, px, within?.bytes ?? new Uint8Array(0)];
+		const ptrs = parts.map((p) => {
+			const ptr = this.x.sc_alloc(Math.max(p.length, 1));
+			new Uint8Array(this.x.memory.buffer, ptr, p.length).set(p);
+			return ptr;
+		});
+		const out = this.framed(this.x.sc_color_select(ptrs[0], req.length, ptrs[1], uniform.length, ptrs[2], px.length, ptrs[3], parts[3].length));
+		parts.forEach((p, k) => this.x.sc_free(ptrs[k], Math.max(p.length, 1)));
+		if (out.length === 0) throw new Error(new TextDecoder().decode(this.framed(this.x.sc_last_error())));
+		return out;
 	}
 
 	/** The temperature and tint under which `neutral`, a camera RGB, is grey: the white balance eyedropper. */
