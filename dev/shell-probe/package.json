@@ -1,0 +1,10 @@
+{
+	"name": "sidecar-shell-probe",
+	"private": true,
+	"description": "V2's shell experiment: does Electron give WebGPU on Linux, presented to a real window? Not part of the app.",
+	"license": "Apache-2.0",
+	"type": "module",
+	"devDependencies": {
+		"electron": "45.0.0"
+	}
+}

@@ -27,8 +27,15 @@ Two more of the owner's calls from that day, recorded where they belong: **model
 downloaded by the user, never shipped** (ROADMAP, "Models on demand", which adds a fourth licence status for
 weights), and the order above.
 
-What V2 puts next, after these: Workstream B's one real piece is effectively done (a configuration with no
-Immich runs, now with sign-in), so **Workstream C, the desktop target**, starting with the shell experiment.
+**The shell experiment, 2026-11-06** ([`research/shell-experiment.md`](research/shell-experiment.md)): Electron
+45 gives WebGPU on Linux under X11/XWayland with flags the app sets, renders Sidecar's parity fixtures
+21/21 on the NVIDIA GPU, but not on native Wayland, where Chromium refuses Vulkan; wgpu 30 can already
+present P3 and HDR to a colour-managed Wayland desktop. The owner then **parked the desktop target**
+(2026-11-06): no personal need for it; it stays on the roadmap with this research as its starting point.
+Still to run if it is ever picked up: AMD, Intel and a real compositor, with `dev/shell-probe/`.
+
+What comes next instead (owner, 2026-11-06): **the rest of the roadmap**, one pull request per feature — the
+custom raw denoiser, panoramas, HDR merge and HDRIs, and the items listed in ROADMAP.
 The standalone deployment's remaining gap is **browsing the editing folder** (#28's `find_by_name`, on
 `library-name-search`).
 
