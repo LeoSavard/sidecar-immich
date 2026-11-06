@@ -30,7 +30,7 @@ struct DevelopParams {
   // map's log exposure, w unused.
   mono: vec4f,
   // Grain (`Grain::uniform`): standard deviation in stops (0 none), size as a share of the long edge, the
-  // share a staining developer hides at the white point, unused.
+  // share a staining developer hides at the white point, 1 for a grain per dye layer.
   grain: vec4f,
   // Black and white's developer (`crate::developer`): adjacency, its reach as a share of the long edge,
   // development's contrast factor, compensation. `[0, 0, 1, 0]` does nothing; all zero in colour.
