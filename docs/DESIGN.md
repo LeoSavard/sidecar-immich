@@ -7,6 +7,23 @@ Source: the architecture plan (PWA entry, XMP sidecars, server-side demosaic, We
 
 Where the code differs from the text below, the code and these notes win.
 
+- **HDR merge** (`sidecar_merge::hdr`, `sidecar-dev hdr <out.dng> <raw>…`): a bracket merged into one linear
+  DNG. Raw is linear, so no response curve is estimated; each frame is scaled into the reference's radiance and
+  the frames are averaged with inverse-variance weights from each frame's *measured* noise model (Granados et
+  al., CVPR 2010) — a sample at or near saturation weighs nothing. A second pass drops samples further than
+  4σ from the first estimate, so something that moved is taken from fewer frames instead of smeared (after
+  Granados et al. 2013). The reference is the median exposure; frames are aligned to it on proxies
+  (`sidecar_merge::align`) and the homography carried to full resolution; the exposure steps are *measured*
+  as a chain outward from the reference, each frame against its neighbour (far apart, too few pixels are well
+  exposed in both), with EXIF as the fallback when a measurement strays more than half a stop. It streams —
+  frames demosaiced one at a time into running sums, twice — so memory is two accumulators, not nine frames.
+  A pixel no frame measured takes the darkest frame's saturated value, and the DNG's `LinearResponseLimit`
+  then says where that is. Checked on a synthetic bracket (14 → 11.5 stops of scene, Poisson–Gaussian noise,
+  clipping): highlights two frames clipped come back within 3 %, shadows less noisy than the best single frame,
+  a moving patch in one frame removed by the second pass. On a 9-frame, 8 EV ZV-1 bracket from the library:
+  every frame aligned (174–504 inliers, rms ≤ 1.06 px), steps measured at 1.00 ± 0.04 EV where EXIF said
+  0.97–1.09, 35 s for 9 × 20 MP, and the DNG develops clean.
+
 - **Aligning frames** (`sidecar_merge::align`, a new crate for the multi-frame work): FAST-9 corners scored and
   spread over a grid, oriented by intensity centroid, described by steered BRIEF with BRIEF's Gaussian sampling
   pattern from a fixed seed, matched by Hamming distance with the ratio test and a cross-check, and a

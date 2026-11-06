@@ -722,7 +722,7 @@ order:
   profile, they do not measure one.
 - **3D LUT loading**, **defringe** as a post-demosaic tool distinct from raw CA correction, and
   **film-negative inversion** for scans.
-- **HDR merge and focus stacking.** These sit with panorama below: not table stakes for a RAW *developer*
+- **HDR merge — built** (2026-11-06; DESIGN.md, "HDR merge"; editor integration to come). **Focus stacking** still open. These sit with panorama below: not table stakes for a RAW *developer*
   (darktable and RawTherapee have none of the three) but expected of anything calling itself all-in-one. All
   three ride on the multi-frame alignment infrastructure above, and focus stacking is cheap given that focus
   peaking already computes a focus measure — the hard part is that focal breathing changes the field of view

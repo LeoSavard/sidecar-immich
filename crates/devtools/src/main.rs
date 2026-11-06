@@ -61,6 +61,7 @@ fn main() -> Result<()> {
         ),
         ["compare-png", a, b] => compare_png(a.as_ref(), b.as_ref()),
         ["align", files @ ..] if files.len() >= 2 => align(files),
+        ["hdr", out, files @ ..] if files.len() >= 2 => hdr(out.as_ref(), files),
         ["linear-dng", input, out, rest @ ..] => {
             let input: &std::path::Path = input.as_ref();
             let edge: u32 = rest.first().map_or(Ok(1600), |v| v.parse())?;
@@ -1287,6 +1288,236 @@ fn compare_png(a: &std::path::Path, b: &std::path::Path) -> Result<()> {
         de[de.len() * 99 / 100],
         de[de.len() - 1]
     );
+    Ok(())
+}
+
+/// `hdr <out.dng> <raw>…`: a bracket merged into one linear DNG (`sidecar_merge::hdr`). The reference is the
+/// median exposure; every frame is aligned to it on proxies, its exposure step measured against it, its noise
+/// measured, and it is merged in two streaming passes — the second dropping samples that disagree beyond their
+/// noise — then written by `sidecar_raw::dng_write`.
+fn hdr(out: &std::path::Path, files: &[&str]) -> Result<()> {
+    use sidecar_merge::align::{Grey, H};
+    use sidecar_merge::hdr::{Accum, Frame};
+    let t0 = std::time::Instant::now();
+    let gpu = sidecar_engine::Gpu::new_headless()?;
+    let ingest = sidecar_engine::Ingest::new(&gpu)?;
+    let detail = sidecar_engine::detail::Detail::new(&gpu)?;
+    let raws: Vec<sidecar_raw::RawFile> = files
+        .iter()
+        .map(|f| sidecar_raw::RawFile::open(f.as_ref()))
+        .collect::<Result<_, _>>()?;
+    // What each frame let in, by its EXIF: shutter × ISO / f².
+    let light: Vec<f64> = raws
+        .iter()
+        .map(|r| {
+            let i = r.info();
+            i.shutter_s as f64 * i.iso as f64 / (i.aperture as f64).max(0.7).powi(2)
+        })
+        .collect();
+    let mut order: Vec<usize> = (0..raws.len()).collect();
+    order.sort_by(|&a, &b| light[a].total_cmp(&light[b]));
+    let reference = order[order.len() / 2];
+    let input = |r: &sidecar_raw::RawFile| -> Result<(sidecar_raw::Mosaic, [f32; 3])> {
+        let m = r.mosaic()?;
+        let mul = r.info().color.as_shot_mul;
+        Ok((m, [mul[0] as f32, 1.0, mul[2] as f32]))
+    };
+    fn mosaic(m: &sidecar_raw::Mosaic) -> sidecar_engine::MosaicInput<'_> {
+        sidecar_engine::MosaicInput {
+            width: m.width,
+            height: m.height,
+            data: &m.data,
+            black: m.black,
+            white: m.white,
+            pattern: m.pattern,
+            period: m.period,
+        }
+    }
+    // Alignment on proxies of log luminance, in the sensor's own orientation.
+    let proxy = |r: &sidecar_raw::RawFile| -> Result<Grey> {
+        let (m, wb) = input(r)?;
+        let p = ingest.proxy(&gpu, &mosaic(&m), wb, 1600)?;
+        Ok(Grey::log_luminance(
+            p.width as usize,
+            p.height as usize,
+            p.data.chunks(4).map(|c| (c[0] + c[1] + c[2]) / 3.0),
+        ))
+    };
+    let ref_proxy = proxy(&raws[reference])?;
+    // Full-resolution frames, as the merge reads them.
+    /// A frame at full resolution: width, height, RGB, clip flags, and its measured noise.
+    type FullFrame = (
+        usize,
+        usize,
+        Vec<f32>,
+        Vec<bool>,
+        sidecar_engine::detail::Noise,
+    );
+    let full = |r: &sidecar_raw::RawFile| -> Result<FullFrame> {
+        let (m, wb) = input(r)?;
+        let tex = ingest.demosaic(&gpu, &mosaic(&m), wb, true)?;
+        let noise = detail.noise(&gpu, &tex)?;
+        let img = sidecar_engine::read_rgba16(&gpu, &tex)?;
+        let rgb = img
+            .data
+            .chunks(4)
+            .flat_map(|p| [p[0], p[1], p[2]])
+            .collect();
+        let clipped = img.data.chunks(4).map(|p| p[3] > 0.0).collect();
+        Ok((img.width as usize, img.height as usize, rgb, clipped, noise))
+    };
+    let (rw, rh, ref_rgb, ref_clipped, ref_noise) = full(&raws[reference])?;
+    let id: H = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    let per_channel = |n: &sidecar_engine::detail::Noise| {
+        n.model.map_or((3e-4, 3e-6), |(m, _)| {
+            (3.0 * m.gain as f64, 3.0 * m.read as f64)
+        })
+    };
+    // Per frame: the homography from the reference at full resolution, the scale into the reference's
+    // radiance, and the noise. Scales are measured as a chain, outward from the reference in both directions,
+    // each frame against its neighbour a step nearer — far apart, too few pixels are well exposed in both.
+    println!(
+        "reference {} ({} frames) · {rw}×{rh}",
+        files[reference],
+        files.len()
+    );
+    let n = raws.len();
+    let mut plan: Vec<(H, f64, (f64, f64))> = vec![(id, 1.0, (0.0, 0.0)); n];
+    plan[reference] = (id, 1.0, per_channel(&ref_noise));
+    let rp = order.iter().position(|&i| i == reference).unwrap();
+    let chains: [Vec<usize>; 2] = [
+        order[rp + 1..].to_vec(),
+        order[..rp].iter().rev().copied().collect(),
+    ];
+    for chain in chains {
+        let (mut nb_i, mut nb_rgb, mut nb_clipped, mut nb_h, mut nb_scale) =
+            (reference, ref_rgb.clone(), ref_clipped.clone(), id, 1.0);
+        let (mut nb_w, mut nb_hh) = (rw, rh);
+        for i in chain {
+            let p = proxy(&raws[i])?;
+            let s = rw as f64 / ref_proxy.w as f64;
+            let h = match sidecar_merge::align::align(&ref_proxy, &p) {
+                Some(a) => {
+                    let hp = a.h;
+                    // Proxy → full: conjugate by the scale (pixel centres at +0.5).
+                    let sc: H = [
+                        [s, 0.0, 0.5 * s - 0.5],
+                        [0.0, s, 0.5 * s - 0.5],
+                        [0.0, 0.0, 1.0],
+                    ];
+                    let inv: H = [
+                        [1.0 / s, 0.0, (0.5 - 0.5 * s) / s],
+                        [0.0, 1.0 / s, (0.5 - 0.5 * s) / s],
+                        [0.0, 0.0, 1.0],
+                    ];
+                    let mul = |a: &H, b: &H| -> H {
+                        std::array::from_fn(|i| {
+                            std::array::from_fn(|j| (0..3).map(|k| a[i][k] * b[k][j]).sum())
+                        })
+                    };
+                    println!(
+                        "  {}: aligned, {} inliers, rms {:.2} px",
+                        files[i], a.inliers, a.rms
+                    );
+                    mul(&sc, &mul(&hp, &inv))
+                }
+                None => {
+                    println!("  {}: no alignment; taken as it is", files[i]);
+                    id
+                }
+            };
+            let (w, hh, rgb, clipped, noise) = full(&raws[i])?;
+            let exif = light[nb_i] / light[i];
+            let frame = |w, h, rgb, clipped, from_ref| Frame {
+                w,
+                h,
+                rgb,
+                clipped,
+                scale: 1.0,
+                gain: 0.0,
+                read: 0.0,
+                from_ref,
+            };
+            let measured = sidecar_merge::hdr::measured_ratio(
+                &frame(nb_w, nb_hh, &nb_rgb, &nb_clipped, nb_h),
+                &frame(w, hh, &rgb, &clipped, h),
+                rw,
+                rh,
+            );
+            // Half a stop from EXIF is not a bracket's rounding but a failed measurement: EXIF it is.
+            let step = measured
+                .filter(|m| (m.log2() - exif.log2()).abs() < 0.5)
+                .unwrap_or(exif);
+            let scale = nb_scale * step;
+            println!(
+                "    {:+.2} EV from the frame before by EXIF, {} measured → {:+.2} EV from the reference",
+                -exif.log2(),
+                measured.map_or("not".into(), |m| format!("{:+.2} EV", -m.log2())),
+                -scale.log2()
+            );
+            plan[i] = (h, scale, per_channel(&noise));
+            (nb_i, nb_rgb, nb_clipped, nb_h, nb_scale, nb_w, nb_hh) =
+                (i, rgb, clipped, h, scale, w, hh);
+        }
+    }
+    let mut first = None;
+    for pass in 0..2 {
+        let mut acc = Accum::new(rw, rh);
+        for (i, r) in raws.iter().enumerate() {
+            let (w, hh, rgb, clipped, _) = if i == reference {
+                (rw, rh, ref_rgb.clone(), ref_clipped.clone(), ref_noise)
+            } else {
+                full(r)?
+            };
+            let (h, scale, (gain, read)) = plan[i];
+            acc.add(
+                &Frame {
+                    w,
+                    h: hh,
+                    rgb: &rgb,
+                    clipped: &clipped,
+                    scale,
+                    gain,
+                    read,
+                    from_ref: h,
+                },
+                if pass == 1 { first.as_deref() } else { None },
+            );
+        }
+        let (est, fell) = acc.finish();
+        if pass == 1 {
+            let info = raws[reference].info();
+            let m = raws[reference].mosaic()?;
+            let darkest = plan.iter().map(|p| p.1).fold(0.0, f64::max);
+            sidecar_raw::dng_write::write(
+                out,
+                rw as u32,
+                rh as u32,
+                &est,
+                &sidecar_raw::dng_write::DngMeta {
+                    make: &info.make,
+                    model: &info.model,
+                    software: "Sidecar (sidecar-dev hdr)",
+                    color: &info.color,
+                    orientation: sidecar_raw::decoded::orientation_from_flip(m.flip),
+                    noise: None,
+                    // Where no frame measured the light, the darkest frame's saturation is all there is.
+                    linear_response_limit: (fell > 0).then_some(darkest * 0.95),
+                },
+            )?;
+            let peak = est.iter().cloned().fold(0f32, f32::max);
+            println!(
+                "merged: peak {:.1}× the reference's white ({:+.1} EV), {} px measured by no frame · {} ({:.0} MB) in {:.0} s",
+                peak,
+                (peak as f64).log2(),
+                fell,
+                out.display(),
+                std::fs::metadata(out)?.len() as f64 / 1e6,
+                t0.elapsed().as_secs_f64()
+            );
+        }
+        first = Some(est);
+    }
     Ok(())
 }
 

@@ -3,3 +3,4 @@
 //! HDRIs and focus stacks build on it, and each writes its result as a linear DNG.
 
 pub mod align;
+pub mod hdr;
