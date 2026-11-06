@@ -27,6 +27,13 @@ Two more of the owner's calls from that day, recorded where they belong: **model
 downloaded by the user, never shipped** (ROADMAP, "Models on demand", which adds a fourth licence status for
 weights), and the order above.
 
+**The shell experiment, 2026-11-06** ([`research/shell-experiment.md`](research/shell-experiment.md)): Electron
+45 gives WebGPU on Linux under X11/XWayland with flags the app sets, renders Sidecar's parity fixtures
+21/21 on the NVIDIA GPU, but not on native Wayland, where Chromium refuses Vulkan; wgpu 30 can already
+present P3 and HDR to a colour-managed Wayland desktop. The shell choice (Electron/CEF against a native wgpu
+canvas, or one then the other) is the owner's. Still to run, on a desktop: AMD, Intel, a real compositor —
+`dev/shell-probe/` is written for that.
+
 What V2 puts next, after these: Workstream B's one real piece is effectively done (a configuration with no
 Immich runs, now with sign-in), so **Workstream C, the desktop target**, starting with the shell experiment.
 The standalone deployment's remaining gap is **browsing the editing folder** (#28's `find_by_name`, on
