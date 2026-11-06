@@ -105,7 +105,7 @@ fn cookie_value<'a>(parts: &'a Parts, name: &str) -> Option<&'a str> {
 }
 
 async fn user_from(parts: &Parts, app: &App) -> Option<User> {
-    if !app.immich.enabled() {
+    if app.immich.is_none() {
         return Some(User {
             id: "dev".into(),
             name: "Developer".into(),
@@ -193,7 +193,14 @@ pub struct SessionInfo {
 
 pub async fn sign_in(State(app): State<Arc<App>>, Json(body): Json<SignIn>) -> Response {
     let key = body.api_key.trim();
-    let me = match app.immich.me(key).await {
+    let Some(immich) = &app.immich else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            "This Sidecar has no Immich to sign in to.",
+        )
+            .into_response();
+    };
+    let me = match immich.me(key).await {
         Ok(me) => me,
         Err(e) => return (StatusCode::UNAUTHORIZED, format!("{e:#}")).into_response(),
     };
@@ -224,7 +231,7 @@ pub async fn sign_in(State(app): State<Arc<App>>, Json(body): Json<SignIn>) -> R
             name: me.name,
             email: me.email,
             auth_required: true,
-            immich: app.immich.enabled(),
+            immich: app.immich.is_some(),
             intake_folder: app.config.intake_root().map(|r| r.name.clone()),
             mobile: app.config.mobile_root().is_some(),
         }),
@@ -237,8 +244,8 @@ pub async fn session(State(app): State<Arc<App>>, parts: Parts) -> Response {
         Some(u) => Json(SessionInfo {
             name: u.name,
             email: u.email,
-            auth_required: app.immich.enabled(),
-            immich: app.immich.enabled(),
+            auth_required: app.immich.is_some(),
+            immich: app.immich.is_some(),
             intake_folder: app.config.intake_root().map(|r| r.name.clone()),
             mobile: app.config.mobile_root().is_some(),
         })

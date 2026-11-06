@@ -5,10 +5,14 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+/// The Immich library behind this Sidecar. Present on `App` only when `[immich] url` is set, so "is there an
+/// Immich" is a question the type answers: code that needs it has to get past an `Option` first.
 #[derive(Clone)]
 pub struct Immich {
     pub base: String,
     pub http: reqwest::Client,
+    /// An admin key, for the one call that needs one (`discover_missing_sidecars`).
+    pub admin_key: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -60,10 +64,6 @@ fn mime_for(file_name: &str) -> &'static str {
 }
 
 impl Immich {
-    pub fn enabled(&self) -> bool {
-        !self.base.is_empty()
-    }
-
     fn url(&self, path: &str) -> String {
         format!("{}/api{}", self.base.trim_end_matches('/'), path)
     }

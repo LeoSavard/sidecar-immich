@@ -36,10 +36,10 @@ use tower_http::{
 pub struct App {
     pub config: Config,
     pub http: reqwest::Client,
-    pub immich: immich::Immich,
+    /// `None` when no `[immich] url` is configured: a folder-only deployment.
+    pub immich: Option<immich::Immich>,
     pub store: Store,
     pub secret: [u8; 32],
-    pub admin_key: Option<String>,
     pub jobs: export::Jobs,
     discovery: Mutex<Discovery>,
 }
@@ -55,17 +55,22 @@ impl App {
         let store = Store::new(config.server.state_dir.clone())?;
         let secret = session::load_secret(&config.server.state_dir)?;
         let http = reqwest::Client::new();
-        let admin_key = match &config.immich.admin_api_key_file {
-            Some(p) => Some(
-                std::fs::read_to_string(p)
-                    .map(|s| s.trim().to_string())
-                    .map_err(|e| anyhow::anyhow!("reading {}: {e}", p.display()))?,
-            ),
-            None => None,
-        };
-        let immich = immich::Immich {
-            base: config.immich.url.clone(),
-            http: http.clone(),
+        let immich = if config.immich.url.trim().is_empty() {
+            None
+        } else {
+            let admin_key = match &config.immich.admin_api_key_file {
+                Some(p) => Some(
+                    std::fs::read_to_string(p)
+                        .map(|s| s.trim().to_string())
+                        .map_err(|e| anyhow::anyhow!("reading {}: {e}", p.display()))?,
+                ),
+                None => None,
+            };
+            Some(immich::Immich {
+                base: config.immich.url.clone(),
+                http: http.clone(),
+                admin_key,
+            })
         };
         Ok(Arc::new(Self {
             config,
@@ -73,7 +78,6 @@ impl App {
             immich,
             store,
             secret,
-            admin_key,
             jobs: export::Jobs::default(),
             discovery: Mutex::new(Discovery::default()),
         }))
@@ -128,7 +132,11 @@ impl App {
 
     /// Ask Immich to discover a newly created internal-library sidecar: at most one run an hour.
     fn queue_sidecar_discovery(self: &Arc<Self>) {
-        let Some(key) = self.admin_key.clone() else {
+        let Some((immich, key)) = self
+            .immich
+            .clone()
+            .and_then(|i| i.admin_key.clone().map(|k| (i, k)))
+        else {
             return;
         };
         let delay = {
@@ -144,7 +152,7 @@ impl App {
         let app = self.clone();
         tokio::spawn(async move {
             tokio::time::sleep(delay).await;
-            match app.immich.discover_missing_sidecars(&key).await {
+            match immich.discover_missing_sidecars(&key).await {
                 Ok(()) => tracing::info!("started Immich sidecar discovery"),
                 Err(e) => tracing::warn!(
                     "Immich sidecar discovery failed — an internal-library sidecar may not move with its original: {e:#}"
@@ -323,7 +331,7 @@ async fn intake(
     mut form: axum::extract::Multipart,
 ) -> Response {
     let folder = app.config.intake_root();
-    if q.to == IntakeTo::Immich && !app.immich.enabled() {
+    if q.to == IntakeTo::Immich && app.immich.is_none() {
         let detail = if folder.is_some() {
             "This Sidecar has no Immich library. Import the photo into the editing folder instead."
         } else {
@@ -374,8 +382,8 @@ async fn intake(
         };
     }
 
-    let id = match app
-        .immich
+    let immich = app.immich.as_ref().expect("checked above");
+    let id = match immich
         .upload(&user.api_key, &file_name, bytes, &sidecar_xmp::utc_now())
         .await
     {
@@ -388,7 +396,7 @@ async fn intake(
     let deadline = Instant::now() + INTAKE_SETTLE;
     let mut last_path;
     loop {
-        match app.immich.asset(&user.api_key, &id).await {
+        match immich.asset(&user.api_key, &id).await {
             Ok(asset) => {
                 last_path = asset.original_path.clone();
                 if let Some(c) = resolve::from_asset(&app, &asset) {
@@ -953,7 +961,10 @@ async fn thumbnail(
     if id.len() != 36 || !id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-') {
         return StatusCode::NOT_FOUND.into_response();
     }
-    match app.immich.thumbnail(&user.api_key, &id).await {
+    let Some(immich) = &app.immich else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    match immich.thumbnail(&user.api_key, &id).await {
         Ok(r) => {
             let ct = r
                 .headers()
@@ -1000,6 +1011,7 @@ pub(crate) async fn asset_for(app: &App, user: &User, key: &str) -> Option<Asset
     }
     let asset = app
         .immich
+        .as_ref()?
         .asset(&user.api_key, rec.immich_asset_id.as_deref()?)
         .await
         .ok()?;
@@ -1774,6 +1786,25 @@ mod tests {
             EditState::of(&SidecarDoc::load(&other).unwrap(), "bbbb", true, false).saved_for,
             None
         );
+    }
+
+    /// An empty or blank `[immich] url` is a folder-only deployment: no adapter at all, so nothing can call
+    /// Immich by accident. A URL gives one, with no admin key unless a file names it.
+    #[test]
+    fn immich_is_present_only_when_a_url_is_configured() {
+        let tmp = tempfile::tempdir().unwrap();
+        let with = |url: &str| {
+            let mut config: Config = toml::from_str("").unwrap();
+            config.server.state_dir = tmp.path().to_path_buf();
+            config.immich.url = url.into();
+            App::new(config).unwrap()
+        };
+        assert!(with("").immich.is_none());
+        assert!(with("  ").immich.is_none());
+        let app = with("http://immich:2283");
+        let immich = app.immich.as_ref().unwrap();
+        assert_eq!(immich.base, "http://immich:2283");
+        assert!(immich.admin_key.is_none());
     }
 
     /// A name nothing else holds. The import keeps the photographer's file name where it can.
