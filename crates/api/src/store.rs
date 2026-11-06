@@ -26,7 +26,7 @@ fn safe(segment: &str) -> bool {
 
 impl Store {
     pub fn new(dir: PathBuf) -> Result<Self> {
-        for sub in ["sessions", "assets", "users", "picks"] {
+        for sub in ["sessions", "assets", "users", "picks", "presets"] {
             std::fs::create_dir_all(dir.join(sub))
                 .with_context(|| format!("creating {}", dir.join(sub).display()))?;
         }

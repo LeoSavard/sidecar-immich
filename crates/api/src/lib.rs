@@ -5,6 +5,7 @@ pub mod config;
 pub mod export;
 pub mod immich;
 mod lensfun;
+pub mod presets;
 pub mod resolve;
 pub mod session;
 pub mod store;
@@ -1677,6 +1678,8 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/capabilities", get(capabilities))
         .route("/api/film/stocks", get(film_stocks))
         .route("/api/film/stocks/{id}", get(film_stock))
+        .route("/api/presets", get(presets::list).post(presets::create))
+        .route("/api/presets/{id}", axum::routing::delete(presets::remove))
         .route("/api/assets/{key}/meta", get(meta))
         .route("/api/assets/{key}/proxy", get(proxy))
         .route("/api/assets/{key}/thumb", get(thumb))
