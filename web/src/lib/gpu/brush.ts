@@ -6,6 +6,7 @@
 import brushWgsl from './wgsl/client_brush.wgsl?raw';
 import compositeWgsl from './wgsl/client_brush_composite.wgsl?raw';
 import edgeWgsl from './wgsl/client_mask_edge.wgsl?raw';
+import gradientWgsl from './wgsl/client_gradient.wgsl?raw';
 import type { EdgePlan } from '$lib/color/pack';
 import lensMaskWgsl from './wgsl/client_lens_mask.wgsl?raw';
 import previewWgsl from './wgsl/client_mask_preview.wgsl?raw';
@@ -45,6 +46,7 @@ export class MaskPainter {
 	private edgeUbos: GPUBuffer[];
 	private edgeSmall?: [GPUTexture, GPUTexture];
 	private previewUbo: GPUBuffer;
+	private gradientUbo: GPUBuffer;
 	/** Segments for one draw, grown as needed: every pointer move reuses it. */
 	private segments?: GPUBuffer;
 	/** Scratch at the mask size: a stroke's coverage, and the mask as it was before the stroke. */
@@ -60,7 +62,8 @@ export class MaskPainter {
 		private edgeBlur: GPURenderPipeline,
 		private edgeMask: GPURenderPipeline,
 		private lens: GPURenderPipeline,
-		private preview: GPURenderPipeline
+		private preview: GPURenderPipeline,
+		private gradientPipeline: GPURenderPipeline
 	) {
 		this.sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
 		this.empty = this.mask([1, 1], 'empty mask');
@@ -69,19 +72,21 @@ export class MaskPainter {
 		this.compositeUbo = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 		this.edgeUbos = [0, 1, 2, 3].map(() => device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }));
 		this.previewUbo = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+		this.gradientUbo = device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 	}
 
 	static async create(device: GPUDevice): Promise<MaskPainter> {
-		const [b, c, l, v, e] = await Promise.all([
+		const [b, c, l, v, e, g] = await Promise.all([
 			compiled(device, 'brush', brushWgsl),
 			compiled(device, 'brush composite', compositeWgsl),
 			compiled(device, 'lens mask', lensMaskWgsl),
 			compiled(device, 'mask preview', previewWgsl),
-			compiled(device, 'mask edge', edgeWgsl)
+			compiled(device, 'mask edge', edgeWgsl),
+			compiled(device, 'gradient', gradientWgsl)
 		]);
 		const target = (blend?: GPUBlendState): GPUColorTargetState => ({ format: MASK, blend });
 		const max: GPUBlendComponent = { operation: 'max', srcFactor: 'one', dstFactor: 'one' };
-		const [brush, composite, lens, preview, edgeBlur, edgeMask] = await Promise.all([
+		const [brush, composite, lens, preview, edgeBlur, edgeMask, gradient] = await Promise.all([
 			device.createRenderPipelineAsync({
 				label: 'brush',
 				layout: 'auto',
@@ -92,9 +97,10 @@ export class MaskPainter {
 			device.createRenderPipelineAsync({ label: 'lens mask', layout: 'auto', vertex: { module: l, entryPoint: 'vs' }, fragment: { module: l, entryPoint: 'fs', targets: [target()] } }),
 			device.createRenderPipelineAsync({ label: 'mask preview', layout: 'auto', vertex: { module: v, entryPoint: 'vs' }, fragment: { module: v, entryPoint: 'fs', targets: [{ format: 'rgba16float' }] } }),
 			device.createRenderPipelineAsync({ label: 'mask edge blur', layout: 'auto', vertex: { module: e, entryPoint: 'vs' }, fragment: { module: e, entryPoint: 'fs', targets: [{ format: EDGE }] } }),
-			device.createRenderPipelineAsync({ label: 'mask edge', layout: 'auto', vertex: { module: e, entryPoint: 'vs' }, fragment: { module: e, entryPoint: 'fs', targets: [target()] } })
+			device.createRenderPipelineAsync({ label: 'mask edge', layout: 'auto', vertex: { module: e, entryPoint: 'vs' }, fragment: { module: e, entryPoint: 'fs', targets: [target()] } }),
+			device.createRenderPipelineAsync({ label: 'gradient', layout: 'auto', vertex: { module: g, entryPoint: 'vs' }, fragment: { module: g, entryPoint: 'fs', targets: [target()] } })
 		]);
-		return new MaskPainter(device, brush, composite, edgeBlur, edgeMask, lens, preview);
+		return new MaskPainter(device, brush, composite, edgeBlur, edgeMask, lens, preview, gradient);
 	}
 
 	/** A mask texture the painter can draw into and develop can read. */
@@ -174,6 +180,19 @@ export class MaskPainter {
 		);
 		pass.draw(3);
 		pass.end();
+	}
+
+	/** A gradient layer's base: its shape drawn into `target` (client_gradient.wgsl), from the uniform the colour
+	 *  maths packs for it (`ColorPacker.gradientUniform`). `paint` then takes it as the layer's base. */
+	gradient(target: GPUTexture, uniform: Uint8Array) {
+		this.device.queue.writeBuffer(this.gradientUbo, 0, uniform as Uint8Array<ArrayBuffer>);
+		const encoder = this.device.createCommandEncoder();
+		const pass = this.pass(encoder, target, true)!;
+		pass.setPipeline(this.gradientPipeline);
+		pass.setBindGroup(0, this.device.createBindGroup({ layout: this.gradientPipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: this.gradientUbo } }] }));
+		pass.draw(3);
+		pass.end();
+		this.device.queue.submit([encoder.finish()]);
 	}
 
 	/** Paint `target` from scratch: `base` (a model's mask, any size; none starts empty) through `range`

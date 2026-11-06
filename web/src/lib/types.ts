@@ -12,6 +12,7 @@ export type { Detail } from './generated/edit/Detail';
 export type { DisplaySpace } from './generated/edit/DisplaySpace';
 export type { EditParams } from './generated/edit/EditParams';
 export type { Frame } from './generated/edit/Frame';
+export type { Gradient } from './generated/edit/Gradient';
 export type { Geometry } from './generated/edit/Geometry';
 export type { Lens } from './generated/edit/Lens';
 export type { LensProfile } from './generated/edit/LensProfile';

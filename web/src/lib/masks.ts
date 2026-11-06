@@ -25,7 +25,8 @@ export const MASK_LABELS: Record<string, string> = {
 	hair: 'Hair',
 	clothes: 'Clothes',
 	depth: 'Depth',
-	brush: 'Brush'
+	brush: 'Brush',
+	gradient: 'Gradient'
 };
 
 /** The depth mask: near is white. A layer on it selects a band of distance with its `range`. */
@@ -38,6 +39,9 @@ export function rangeUniform(r: MaskRange | undefined): number[] {
 	const [a, b] = [clamp(r.from), clamp(r.to)];
 	return [Math.min(a, b) / 100, Math.max(a, b) / 100, clamp(r.feather) / 100, 1];
 }
+
+/** A layer whose mask is a drawn shape (`Gradient`), which needs no models. */
+export const GRADIENT = 'gradient';
 
 /** A layer painted from nothing, which needs no models. */
 export const BRUSH = 'brush';
