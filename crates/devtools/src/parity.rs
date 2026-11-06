@@ -340,6 +340,14 @@ fn cases() -> Vec<Fixture> {
         grain(&graded_film, 60.0, 30.0),
         grain(&phone, 100.0, 100.0),
     );
+    // Colour film's halation: the red layer's exposure, blurred over the map each side builds, back in.
+    let film_halation = EditParams {
+        film: Some(sidecar_color::params::Film {
+            halation: 100.0,
+            ..graded_film.film.clone().unwrap()
+        }),
+        ..graded_film.clone()
+    };
     // Colour film's grain per dye layer: three noises, each by its own layer's density.
     let mut grain_film_layers = grain(&graded_film, 70.0, 40.0);
     grain_film_layers.grain.as_mut().unwrap().layered = true;
@@ -498,6 +506,14 @@ fn cases() -> Vec<Fixture> {
             None,
         ),
         (
+            "film-halation".into(),
+            nikon_d850(),
+            SourceKind::Raw,
+            film_halation,
+            DisplaySpace::Srgb,
+            None,
+        ),
+        (
             "grain-film-layers".into(),
             nikon_d850(),
             SourceKind::Raw,
@@ -562,6 +578,7 @@ fn cases() -> Vec<Fixture> {
                 interlayer: 45.0,
                 stock: "provia-100f".into(),
                 light: light.into(),
+                halation: 0.0,
             }),
             ..e.clone()
         };

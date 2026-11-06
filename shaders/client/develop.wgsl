@@ -7,6 +7,9 @@
 @group(0) @binding(1) var source_tex: texture_2d<f32>;
 @group(0) @binding(2) var tone_lut: texture_1d<f32>;
 // Black and white's table over the colour cube; 1×1×1 in colour.
+// `HALATION_GREEN` in `sidecar_color::params`: the share of the halo the green layer sees.
+const HALATION_GREEN = 0.15;
+
 @group(0) @binding(3) var mono_lut: texture_3d<f32>;
 // Black and white's adjacency map (`sidecar_color::developer`): the film's log exposure around each place, over
 // the whole frame at low resolution; 1×1 when there is none.
@@ -83,6 +86,20 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
       adjacency = P.developer.x;
     }
     c = vec3f(developer_apply(e, local, adjacency, P.developer));
+  }
+  // Halation (`Film.halation`), colour film's: the red layer's exposure, blurred over the base's reflection, back
+  // into the red layer and a little of the green, as light before the grain. The map pass reads the red layer
+  // itself. Normalised so a flat field is left as it was, as a print's colour correction would take out the cast
+  // a uniform reflection gives: what is left is the glow beside bright things.
+  if (P.mono.x < 0.5 && P.film.z > 0.0) {
+    if (P.mono.z > 0.5) { return vec4f(vec3f(max(c.r, 0.0)), 1.0); }
+    let map = vec2f(textureDimensions(density_map));
+    if (map.x > 1.0) {
+      let k = max(ceil(max(frame.x, frame.y) / 1024.0), 1.0);
+      let halo = textureSampleLevel(density_map, mask_sampler, (vec2f(at) + 0.5) / k / map, 0.0).r;
+      let into = P.film.z * vec3f(1.0, HALATION_GREEN, 0.0);
+      c = (c + into * halo) / (1.0 + into);
+    }
   }
   // Grain, in the exposure the tone map is about to take, placed on the whole frame.
   if (P.grain.x > 0.0) {

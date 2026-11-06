@@ -1310,6 +1310,21 @@ Where an octave is finer than a pixel, its lattice is the pixels and its strengt
 pixel size — Selwyn's law, granularity × √(area seen) constant — so the proxy shows what a scaled-down export
 would, and the full-size export shows the grain itself.
 
+**Halation** (`Film.halation`, Film → Halation). Light that crossed the emulsion reflects off the back of the film
+base and exposes the red-sensitive bottom layer again: a red glow just beside bright things. Without an
+anti-halation backing (CineStill's films, their rem-jet removed) the reflected share is of the order of 10–20 %; with
+one, about 1 % — so 100 is `HALATION_MAX` = 0.15. The base is about 0.13 mm thick and total internal reflection
+past the critical angle (≈ 42° at n ≈ 1.5) puts the strongest reflection in a ring about 0.24 mm out, modelled as a
+Gaussian of `HALATION_MM` = 0.12 mm on a 36 mm frame (a ring kernel is the refinement if pictures ask for it).
+Rendered with black and white's adjacency map machinery, which colour film never uses: the map pass returns the red
+layer's linear exposure, the blur takes halation's reach (carried in the developer's reach lane, which colour leaves
+free), and develop adds `k ×` the blurred red back — into red, and `HALATION_GREEN` = 15 % of it into green, the
+reflected light being mostly red — as light, before the grain. Divided by `1 + k`, so a flat field is left as it
+was, as a print's colour correction takes out a uniform cast: what remains is the glow. Generic colour film only (a
+named spectral stock's chain is its sheet's). Checked: `halation_glows_red_beside_bright_things` (beside a
+highlight, red goes from 0.011 to 1.0 and green to 0.31; far from it nothing moves), and parity case
+`film-halation` (ΔE 0; each side builds its own map).
+
 **Grain per dye layer** (`Grain.layered`, Film → Dye layers). Colour film has three emulsions — red-, green- and
 blue-sensitive — each grained on its own, its grain growing with that layer's own density. In film rendering from a
 RAW, Dye layers gives each channel its own noise (octaves of its own from the same hash, so the browser and the

@@ -16,6 +16,7 @@ const LUT = 4096;
 /** The adjacency map's long edge, at most: `sidecar_color::developer::MAP_LONG`. */
 const MAP_LONG = 1024;
 /** Float offsets in `DevelopParams` (crates/color/src/params.rs): `mono` and `developer`. */
+const FILM = 68;
 const MONO = 72;
 const DEVELOPER = 80;
 
@@ -168,7 +169,8 @@ export class DevelopPass {
 	/** Black and white, a developer with adjacency: `crates/engine`'s `needs_density_map`. */
 	private get needsDensityMap(): boolean {
 		const u = this.uniform;
-		return u[MONO] > 0.5 && u[MONO + 2] < 0.5 && u[DEVELOPER] !== 0;
+		// Black and white's developer, or colour film's halation (`needs_density_map` in the engine).
+		return u[MONO + 2] < 0.5 && ((u[MONO] > 0.5 && u[DEVELOPER] !== 0) || (u[MONO] < 0.5 && u[FILM + 2] > 0));
 	}
 
 	private storage(label: string, w: number, h: number, usage = 0): GPUTexture {
