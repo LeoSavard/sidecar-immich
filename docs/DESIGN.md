@@ -7,6 +7,24 @@ Source: the architecture plan (PWA entry, XMP sidecars, server-side demosaic, We
 
 Where the code differs from the text below, the code and these notes win.
 
+- **Focus stacking** (`sidecar_merge::focus`, `sidecar-dev stack <out.dng> <raw>… [--depth <png>]`):
+  defocus is a low-pass filter, so a point is sharpest in the frame focused on it. Instead of picking the
+  sharpest sample per pixel (which follows noise where there's no detail, and leaves halos where it switches),
+  a **depth map** is built: the index of the frame with the highest sum-modified Laplacian (Nayar and Nakagawa,
+  PAMI 1994) of log luminance. Each index is trusted by how far that frame stands out from the mean, then
+  spread by normalised push–pull into the flat regions that carry no focus information. A point between two
+  focus planes takes from both, linearly, and the frames are joined by the multi-band blend — now
+  `sidecar_merge::blend`, shared with the panorama. Alignment is a chain of homographies (neighbours differ
+  least in focus) composed onto the middle frame, so focus breathing's scale is included, and the output keeps
+  what every frame saw. It runs in two streaming passes, one full frame at a time. Checked on a synthetic stack
+  (five focus planes over a depth ramp with a near square): the depth map finds both, and the stack's error
+  is 0.026 against 0.075 for the best single frame and 0.025 for a nearest-focus oracle. The tool refuses
+  what isn't a stack: an alignment must pass Brown–Lowe's inlier test, its scale must stay within focus
+  breathing (±10 %), and the aligned neighbours' coarse pictures — box-blurred past any defocus — must agree
+  within 0.15 stops (`focus::MOVED`); `--force` overrides. No focus stack was found in the library: a scan of
+  every burst whose EXIF focus distance changes monotonically turned up refocusing on moving subjects, which
+  the guards reject (the first one tried failed at the third pair).
+
 - **Panoramas** (`sidecar_merge::pano`, `sidecar-dev pano <out.dng> <raw>… [--projection …] [--scale s]
   [--no-crop] [--lensfun <dir>] [--png <out>]`): frames turned about one point, stitched into one linear DNG,
   after Brown and Lowe (IJCV 2007), from the papers. Every pair is matched on proxies and kept when its inliers
