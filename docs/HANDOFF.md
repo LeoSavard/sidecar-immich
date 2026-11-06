@@ -39,7 +39,7 @@ primitives first, because several features stand on each:
 | **Workflow** ||||
 | 19 | Presets and styles; copy-paste of a settings subset; sync across a selection | per person or shared presets | #84 (auto-sync to come) |
 | 20 | Snapshots and virtual copies | — | #85 snapshots and the split view, #86 virtual copies |
-| 21 | Browsing the editing folder; other folder layouts (name-walk fallback, tokens, locales) | — | |
+| 21 | Browsing the editing folder; other folder layouts (name-walk fallback, tokens, locales) | whether a root can opt out of browsing | #87 layouts and the name walk, #88 browsing (on #87) |
 | 22 | Histogram and overlays in the no-WebGPU fallback | — | |
 | 23 | Models on demand (Settings → Models) | — | |
 | 24 | Parametric auto-edit (grey-world/edge WB, percentile tone anchoring, face-aware exposure) | an A/B | |
