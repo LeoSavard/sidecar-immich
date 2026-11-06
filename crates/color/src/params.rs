@@ -13,7 +13,7 @@ use crate::tone;
 /// `migrate_highlight_shadow_anchors`) — an edit saved under version 1 needs its curve read differently, not
 /// just a field that defaults to off, so this is a real bump rather than an additive field. See
 /// docs/ROADMAP.md, "Curve editor: Highlights and Shadows stop sharing points with the manual curve".
-pub const PROCESS_VERSION: u32 = 7;
+pub const PROCESS_VERSION: u32 = 8;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
@@ -124,6 +124,14 @@ impl EditParams {
         if self.process_version < 2 {
             self.migrate_highlight_shadow_anchors();
         }
+        if self.process_version < 8
+            && (self.detail.denoise_luminance > 0.0 || self.detail.denoise_chroma > 0.0)
+        {
+            // Its noise reduction was tuned by eye under the fixed transform; the same strengths under the
+            // photo's own noise model would denoise its shadows and highlights differently. An edit that
+            // never denoised has nothing to keep, and gets the measured model if it starts to.
+            self.detail.noise_model = false;
+        }
         if self.process_version < 7 {
             // Its Highlights bent the curve below white and left anything past it alone, and that is the
             // picture the person approved — a slider that suddenly reaches two stops further would re-grade
@@ -183,6 +191,7 @@ impl EditParams {
             self.tone.highlight_bleach = Tone::default().highlight_bleach;
             self.tone.highlight_reach_ev = HIGHLIGHT_REACH_EV;
         }
+        self.detail.noise_model = true;
         self.process_version = PROCESS_VERSION;
     }
 
@@ -455,6 +464,16 @@ pub struct Detail {
     pub sharpen_iterations: u32,
     pub denoise_luminance: f64,
     pub denoise_chroma: f64,
+    /// Denoise against this photo's measured noise, σ² = a·level + b (`sidecar_engine::noise`), rather than the
+    /// fixed transform edits before `PROCESS_VERSION` 8 were denoised with, which assumed one balance of shot
+    /// and read noise for every camera and ISO. Left out of the serialized edit when on.
+    #[serde(skip_serializing_if = "is_true")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<bool>", optional))]
+    pub noise_model: bool,
+}
+
+fn is_true(v: &bool) -> bool {
+    *v
 }
 
 impl Default for Detail {
@@ -465,6 +484,7 @@ impl Default for Detail {
             sharpen_iterations: 10,
             denoise_luminance: 0.0,
             denoise_chroma: 0.0,
+            noise_model: true,
         }
     }
 }
@@ -1427,6 +1447,38 @@ fn pack_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An edit that denoised under the fixed transform keeps it; one that never denoised, and every new edit,
+    /// uses the photo's measured noise; taking up today's rendering switches it on.
+    #[test]
+    fn denoising_edits_keep_their_transform_and_new_ones_measure() {
+        assert!(EditParams::default().detail.noise_model);
+        let mut old = EditParams {
+            process_version: 7,
+            ..Default::default()
+        };
+        old.detail.denoise_luminance = 30.0;
+        old.migrate();
+        assert!(!old.detail.noise_model);
+        assert!(old.behind_current_rendering(false));
+        old.adopt_current_rendering(false);
+        assert!(old.detail.noise_model);
+
+        let mut plain = EditParams {
+            process_version: 7,
+            ..Default::default()
+        };
+        plain.migrate();
+        assert!(
+            plain.detail.noise_model,
+            "nothing denoised, nothing to keep"
+        );
+        let json = serde_json::to_value(EditParams::default()).unwrap();
+        assert!(
+            json["detail"].get("noiseModel").is_none(),
+            "left out when on"
+        );
+    }
 
     /// Default settings on a developed file must be the identity: every tone value at its neutral, and the
     /// RAW-only highlight blend off whatever the stored strength says.
