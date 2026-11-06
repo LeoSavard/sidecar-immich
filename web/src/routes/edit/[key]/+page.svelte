@@ -11,6 +11,7 @@
 	import { LensPass, correctedPoint, sourcePoint } from '$lib/gpu/lens';
 	import { ColorPacker, type SlideProfile } from '$lib/color/pack';
 	import { cachedProfile, loadProfile } from '$lib/film';
+	import { cachedTable, loadTable } from '$lib/luts';
 	import { api } from '$lib/api';
 	import type { Reading } from '$lib/measure';
 	import { saveSettings, settings, SPACE_LABELS } from '$lib/settings';
@@ -343,6 +344,15 @@
 		return packed;
 	}
 
+	/** The edit's LUT for the develop pass, once its table is here; until then, and for none, no look. */
+	function lookFor(l: EditParams['lut']) {
+		if (!l) return null;
+		loadTable(l.id, () => schedule(true));
+		const t = cachedTable(l.id);
+		const uniform = t && packer.packLook($state.snapshot(l), display, t.header);
+		return t && uniform ? { uniform, size: t.header.size, rgba: t.rgba } : null;
+	}
+
 	function draw() {
 		frame = 0;
 		if (!edit || !meta) return;
@@ -363,6 +373,7 @@
 			const packed = repack();
 			develop.setUniforms(packed.uniform);
 			develop.setDefringe(packed.defringe);
+			develop.setLook(lookFor((before ? compareEdit() : edit).lut));
 			develop.setToneLut(packed.lut);
 			develop.setMono(packed.monoLut);
 			develop.setSlide(packed.slideExposure, slideProfile?.response ?? NO_TABLE);

@@ -7,6 +7,7 @@ import type { Geometry } from "./Geometry";
 import type { Grain } from "./Grain";
 import type { Lens } from "./Lens";
 import type { LensBlur } from "./LensBlur";
+import type { LookLut } from "./LookLut";
 import type { MaskAdjustment } from "./MaskAdjustment";
 import type { Mixer } from "./Mixer";
 import type { Monochrome } from "./Monochrome";
@@ -64,4 +65,9 @@ haze?: number,
  * Purple and green fringes taken out (DESIGN.md §15, "Defringe"). Absent, and left out of the serialized edit,
  * is none.
  */
-defringe?: Defringe, };
+defringe?: Defringe, 
+/**
+ * A 3D LUT applied after develop as a look (DESIGN.md §15, "3D LUTs"). Absent, and left out of the
+ * serialized edit, is none.
+ */
+lut?: LookLut, };

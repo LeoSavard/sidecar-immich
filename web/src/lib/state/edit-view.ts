@@ -167,6 +167,8 @@ export function describeChanges(from: EditParams, to: EditParams): string[] {
 	if (!!from.lens !== !!to.lens) out.push(to.lens ? 'Lens correction on' : 'Lens correction off');
 	else if (from.lens && to.lens && JSON.stringify(from.lens) !== JSON.stringify(to.lens)) out.push('Lens correction adjusted');
 	out.push(...describeMasks(from.masks ?? [], to.masks ?? []));
+	if ((from.lut?.id ?? '') !== (to.lut?.id ?? '')) out.push(to.lut ? `LUT ${to.lut.name}` : 'No LUT');
+	else if (from.lut && to.lut && JSON.stringify(from.lut) !== JSON.stringify(to.lut)) out.push(`LUT ${to.lut.name} adjusted`);
 	if (JSON.stringify(from.defringe ?? null) !== JSON.stringify(to.defringe ?? null)) out.push(to.defringe ? 'Defringe adjusted' : 'No defringe');
 	return out;
 }
@@ -270,6 +272,8 @@ export const PICKS: { id: string; label: string; take: (into: EditParams, from: 
 			else delete e.monochrome;
 			if (f.grain) e.grain = structuredClone(f.grain);
 			else delete e.grain;
+			if (f.lut) e.lut = structuredClone(f.lut);
+			else delete e.lut;
 		}
 	},
 	{ id: 'curve', label: 'Curve', take: (e, f) => (e.tone.curve = structuredClone(f.tone.curve)) },
