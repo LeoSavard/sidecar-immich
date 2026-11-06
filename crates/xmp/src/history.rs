@@ -104,6 +104,21 @@ pub struct History {
     pub head: String,
     /// In creation order: a node always comes after its parent.
     pub nodes: Vec<Node>,
+    /// Virtual copies: further entries for the same photo, each with a head of its own in this one tree.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub copies: Vec<VirtualCopy>,
+}
+
+/// A virtual copy (DESIGN.md §15, "Virtual copies"): a second look at the same photo, kept in the photo's own
+/// sidecar as another head of its history. It starts at any version, saves move only its own head, and its
+/// versions are nodes like any other, so the tree shows where it branched.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct VirtualCopy {
+    /// `c` and six hex digits: part of the copy's key, `<asset key>~<id>`.
+    pub id: String,
+    pub name: String,
+    pub head: String,
 }
 
 /// What `SidecarDoc::commit` is asked to record.
@@ -256,6 +271,7 @@ impl History {
         let mut h = History {
             head: ORIGINAL.into(),
             nodes: vec![root],
+            copies: Vec::new(),
         };
         if etag_of(current) != h.nodes[0].etag {
             h.push(ORIGINAL, current, NodeKind::Imported, None, None)
@@ -272,6 +288,68 @@ impl History {
 
     pub fn node(&self, id: &str) -> Option<&Node> {
         self.nodes.iter().find(|n| n.id == id)
+    }
+
+    pub fn copy(&self, id: &str) -> Option<&VirtualCopy> {
+        self.copies.iter().find(|c| c.id == id)
+    }
+
+    /// A new virtual copy named `name`, starting at version `from`.
+    pub fn add_copy(&mut self, name: &str, from: &str) -> Result<VirtualCopy> {
+        if self.node(from).is_none() {
+            bail!(SidecarError::UnknownVersion { id: from.into() });
+        }
+        let mut id = format!("c{}", &new_id(from, name)[..6]);
+        while self.copy(&id).is_some() {
+            id = format!("c{}", &new_id(&id, name)[..6]);
+        }
+        let c = VirtualCopy {
+            id,
+            name: name.trim().to_string(),
+            head: from.into(),
+        };
+        self.copies.push(c.clone());
+        Ok(c)
+    }
+
+    pub fn rename_copy(&mut self, id: &str, name: &str) -> Result<()> {
+        let c = self
+            .copies
+            .iter_mut()
+            .find(|c| c.id == id)
+            .ok_or_else(|| SidecarError::UnknownCopy { id: id.into() })?;
+        c.name = name.trim().to_string();
+        Ok(())
+    }
+
+    /// Take a virtual copy away. Its versions stay in the tree, as any branch's do.
+    pub fn remove_copy(&mut self, id: &str) -> Result<()> {
+        let before = self.copies.len();
+        self.copies.retain(|c| c.id != id);
+        if self.copies.len() == before {
+            bail!(SidecarError::UnknownCopy { id: id.into() });
+        }
+        Ok(())
+    }
+
+    /// Run `f` with `copy`'s head as the head — or as it is, for `None` — and keep where `f` leaves it as that
+    /// copy's head. The photo's own head waits in the copy's place meanwhile, so every head is in the history
+    /// while `f` runs and pruning keeps them all.
+    pub fn with_copy<R>(
+        &mut self,
+        copy: Option<&str>,
+        f: impl FnOnce(&mut History) -> Result<R>,
+    ) -> Result<R> {
+        let Some(id) = copy else { return f(self) };
+        let i = self
+            .copies
+            .iter()
+            .position(|c| c.id == id)
+            .ok_or_else(|| SidecarError::UnknownCopy { id: id.into() })?;
+        std::mem::swap(&mut self.head, &mut self.copies[i].head);
+        let r = f(self);
+        std::mem::swap(&mut self.head, &mut self.copies[i].head);
+        r
     }
 
     fn node_mut(&mut self, id: &str) -> Option<&mut Node> {
@@ -473,6 +551,7 @@ impl History {
             let squashable = self.nodes.iter().position(|n| {
                 n.kind != NodeKind::Original
                     && n.id != self.head
+                    && !self.copies.iter().any(|c| c.head == n.id)
                     && n.label.is_none()
                     && !exported.contains(&n.etag)
                     && self
@@ -534,19 +613,60 @@ impl SidecarDoc {
 
     /// Save `c.edit` as a node of the history and make it the current edit.
     pub fn commit(&mut self, c: &Commit, source_sha1: &str) -> Result<Committed> {
+        self.commit_to(None, c, source_sha1)
+    }
+
+    /// `commit`, to a virtual copy for `Some`: only that copy's head moves, and `sc:Edit` — the photo's own
+    /// edit, which other programs read — stays as it is.
+    pub fn commit_to(
+        &mut self,
+        copy: Option<&str>,
+        c: &Commit,
+        source_sha1: &str,
+    ) -> Result<Committed> {
         let mut h = self.history();
         let exported = self.exported_etags();
-        let done = h.commit(c, &exported)?;
-        self.set_edit(c.edit, source_sha1)?;
+        let done = h.with_copy(copy, |h| h.commit(c, &exported))?;
+        if copy.is_none() {
+            self.set_edit(c.edit, source_sha1)?;
+        }
         self.set_history(&h)?;
         Ok(done)
     }
 
     /// Make an earlier version — or the original — current again. Nothing is removed from the history.
     pub fn checkout(&mut self, id: &str, source_sha1: &str) -> Result<()> {
+        self.checkout_to(None, id, source_sha1)
+    }
+
+    /// `checkout` for a virtual copy, for `Some`.
+    pub fn checkout_to(&mut self, copy: Option<&str>, id: &str, source_sha1: &str) -> Result<()> {
         let mut h = self.history();
-        let edit = h.checkout(id)?;
-        self.set_edit(&edit, source_sha1)?;
+        let edit = h.with_copy(copy, |h| h.checkout(id))?;
+        if copy.is_none() {
+            self.set_edit(&edit, source_sha1)?;
+        }
+        self.set_history(&h)
+    }
+
+    /// A new virtual copy of this photo, starting from `from` (a version id; the photo's current one for `None`).
+    pub fn add_copy(&mut self, name: &str, from: Option<&str>) -> Result<VirtualCopy> {
+        let mut h = self.history();
+        let from = from.map(String::from).unwrap_or_else(|| h.head.clone());
+        let c = h.add_copy(name, &from)?;
+        self.set_history(&h)?;
+        Ok(c)
+    }
+
+    pub fn rename_copy(&mut self, id: &str, name: &str) -> Result<()> {
+        let mut h = self.history();
+        h.rename_copy(id, name)?;
+        self.set_history(&h)
+    }
+
+    pub fn remove_copy(&mut self, id: &str) -> Result<()> {
+        let mut h = self.history();
+        h.remove_copy(id)?;
         self.set_history(&h)
     }
 

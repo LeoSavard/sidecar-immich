@@ -186,12 +186,33 @@ fn settings_suffix(req: &ExportRequest) -> String {
     s
 }
 
+/// A virtual copy's name as part of a file name: `-` and its letters and digits, lower-case, `-` between words.
+fn copy_suffix(name: &str) -> String {
+    let words: Vec<String> = name
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_lowercase)
+        .collect();
+    if words.is_empty() {
+        String::new()
+    } else {
+        format!("-{}", words.join("-"))
+    }
+}
+
 pub async fn create(
     State(app): State<Arc<App>>,
     ApiUser(user): ApiUser,
     headers: HeaderMap,
     Json(mut req): Json<ExportRequest>,
 ) -> Response {
+    // A virtual copy exports its own edit, under its own name; everything else is the photo's.
+    let Some((key, copy)) =
+        crate::split_key(&req.asset_key).map(|(k, c)| (k.to_string(), c.map(String::from)))
+    else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    req.asset_key = key;
     let Some(rec) = crate::asset_for(&app, &user, &req.asset_key).await else {
         return StatusCode::NOT_FOUND.into_response();
     };
@@ -220,7 +241,14 @@ pub async fn create(
         Ok(Err(e)) => return crate::internal(e),
         Err(e) => return crate::internal(e.into()),
     };
-    if doc.etag() != req.edit_etag {
+    let (edit, etag) = match doc.edit_for(copy.as_deref()) {
+        Ok(e) => (e.clone(), sidecar_xmp::etag_of(&e)),
+        Err(e) => return (StatusCode::NOT_FOUND, format!("{e}")).into_response(),
+    };
+    let copy_name = copy
+        .as_deref()
+        .and_then(|id| doc.history().copy(id).map(|c| c.name.clone()));
+    if etag != req.edit_etag {
         return (
             StatusCode::CONFLICT,
             "Save your edit before exporting; the sidecar has changed.",
@@ -267,8 +295,9 @@ pub async fn create(
         .and_then(|e| e["file"].as_str().map(String::from))
         .unwrap_or_else(|| {
             format!(
-                "{}-v{version}{}.{ext}",
+                "{}{}-v{version}{}.{ext}",
                 file_stem(&rec.file_name),
+                copy_name.as_deref().map(copy_suffix).unwrap_or_default(),
                 settings_suffix(&req)
             )
         });
@@ -293,7 +322,7 @@ pub async fn create(
             .insert(k, job.id.clone());
     }
     job.push("queued", json!({ "version": version, "file": file_name }));
-    let (app2, job2, edit, name2) = (app.clone(), job.clone(), doc.edit(), file_name.clone());
+    let (app2, job2, name2) = (app.clone(), job.clone(), file_name.clone());
     tokio::spawn(async move {
         let outcome = run(
             &app2, &job2, &user, &rec, &req, edit, version, &name2, already,

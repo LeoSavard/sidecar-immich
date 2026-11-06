@@ -24,6 +24,7 @@
 	import MasksPanel from '$lib/ui/MasksPanel.svelte';
 	import CropOverlay from '$lib/ui/CropOverlay.svelte';
 	import LensSection from '$lib/ui/sections/LensSection.svelte';
+	import VirtualCopies from '$lib/ui/VirtualCopies.svelte';
 	import CropSection from '$lib/ui/sections/CropSection.svelte';
 	import WhiteBalanceSection from '$lib/ui/sections/WhiteBalanceSection.svelte';
 	import LightSection from '$lib/ui/sections/LightSection.svelte';
@@ -41,7 +42,13 @@
 
 	type Section = 'lens' | 'crop' | 'wb' | 'light' | 'film' | 'curve' | 'color' | 'depth' | 'masks' | 'detail' | 'history';
 
-	const key = page.params.key!;
+	/**
+	 * The photo's key, and the key of the edit open: the same, or a virtual copy's `<key>~<copy id>` (DESIGN.md
+	 * §15, "Virtual copies"). The file — proxy, masks, metadata, renders — is the photo's; the edit, its history
+	 * and its exports are the copy's.
+	 */
+	const editKey = page.params.key!;
+	const key = editKey.split('~')[0];
 	let canvas: HTMLCanvasElement;
 	let meta = $state<Meta | null>(null);
 	let defaults: EditParams;
@@ -156,7 +163,7 @@
 	let viewport: Viewport = { zoom: 1, panX: 0, panY: 0 };
 
 	/** The edit, its saving and its versions (`$lib/state/edit-session`); the page draws what follows a change. */
-	const session = new EditSession(key, {
+	const session = new EditSession(editKey, {
 		redraw: () => schedule(true),
 		settled: () => {
 			if (fallback) renderPreview();
@@ -1417,7 +1424,7 @@
 			})
 			.catch(() => {});
 		try {
-			const [metaResp, stateResp] = await Promise.all([api(`/api/assets/${key}/meta`), api(`/api/assets/${key}/edit`)]);
+			const [metaResp, stateResp] = await Promise.all([api(`/api/assets/${key}/meta`), api(`/api/assets/${editKey}/edit`)]);
 			meta = await metaResp.json();
 			const state: EditState = await stateResp.json();
 			// A browser without WebGPU still edits: the server runs the develop pass instead. Logged, not
@@ -1776,7 +1783,7 @@
 	const groupOf = (id: Section) => groups.find((g) => g.children.includes(id)) ?? groups[0];
 </script>
 
-<svelte:head><title>{meta?.fileName ?? 'Sidecar'}</title></svelte:head>
+<svelte:head><title>{meta?.fileName ?? 'Sidecar'}{session.copy ? ` — ${session.copy.name}` : ''}</title></svelte:head>
 <svelte:window onkeydown={keydown} />
 
 {#snippet lensSection()}
@@ -1837,6 +1844,9 @@
 		<button type="button" class="rounded-full bg-raised px-2.5 py-1 text-fg disabled:opacity-40" disabled={!edit || !lookClipboard || readOnly} onclick={() => { if (edit && pasteLook(edit)) { changed(); committed(); } }}>Paste look</button>
 		{#if lookClipboard}<span class="min-w-0 truncate text-fg-2">from {lookClipboard.from}</span>{/if}
 	</div>
+	{#if meta}
+		<VirtualCopies photoKey={key} fileName={meta.fileName} current={session.copy} copies={session.copies} {readOnly} onnew={async (name) => { const k = await session.newCopy(key, name); if (k) location.assign(`/edit/${k}`); }} onrename={(id, name) => session.renameCopy(key, id, name)} onremove={(id) => session.removeCopy(key, id)} />
+	{/if}
 	{#if session.versions}
 		<HistoryPanel history={session.versions} compareId={compare?.id ?? null} busy={session.versionsBusy || session.saving} onopen={(id) => session.openVersion(id)} oncompare={(id) => session.setCompare(id)} onpick={(id, section) => session.pickFrom(id, section)} onlabel={(id, label) => session.labelVersion(id, label)} />
 
@@ -2078,7 +2088,7 @@
 			{#if !toolsHidden}
 			<header class="flex items-center justify-between gap-3 px-6 pt-3 pb-2 lg:flex-col lg:items-stretch lg:gap-2 lg:px-4">
 				<div class="min-w-0 text-xs text-fg-2">
-					<p class="truncate text-sm text-fg">{meta.fileName}</p>
+					<p class="truncate text-sm text-fg">{meta.fileName}{#if session.copy}<span class="text-fg-2"> — {session.copy.name}</span>{/if}</p>
 					<p class="truncate">{cameraLine(meta.info)}</p>
 				</div>
 				<div class="flex shrink-0 gap-2">
@@ -2250,4 +2260,4 @@
 	</div>
 {/if}
 
-{#if exporting}<ExportSheet assetKey={key} colorSpace={displaySpace} prepare={() => session.prepareExport()} onclose={() => (exporting = false)} />{/if}
+{#if exporting}<ExportSheet assetKey={editKey} colorSpace={displaySpace} prepare={() => session.prepareExport()} onclose={() => (exporting = false)} />{/if}
