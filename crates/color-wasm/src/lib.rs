@@ -128,6 +128,10 @@ pub unsafe extern "C" fn sc_pack(ptr: *const u8, len: usize) -> *const u8 {
                 out.extend_from_slice(bytemuck::cast_slice(&p.mono_lut));
                 out.extend_from_slice(&(p.slide_exposure.len() as u32).to_le_bytes());
                 out.extend_from_slice(bytemuck::cast_slice(&p.slide_exposure));
+                // The defringe pass's uniform, preceded by its length in bytes (0 for none).
+                let defringe = p.defringe.as_deref().unwrap_or(&[]);
+                out.extend_from_slice(&(defringe.len() as u32).to_le_bytes());
+                out.extend_from_slice(defringe);
                 out
             }),
     )

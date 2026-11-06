@@ -362,6 +362,7 @@
 			depthEffects();
 			const packed = repack();
 			develop.setUniforms(packed.uniform);
+			develop.setDefringe(packed.defringe);
 			develop.setToneLut(packed.lut);
 			develop.setMono(packed.monoLut);
 			develop.setSlide(packed.slideExposure, slideProfile?.response ?? NO_TABLE);

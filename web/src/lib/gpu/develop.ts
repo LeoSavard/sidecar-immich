@@ -4,6 +4,7 @@
 import developWgsl from './wgsl/client_develop.wgsl?raw';
 import densityDownWgsl from './wgsl/client_density_down.wgsl?raw';
 import densityBlurWgsl from './wgsl/client_density_blur.wgsl?raw';
+import defringeWgsl from './wgsl/client_defringe.wgsl?raw';
 import { DEVELOP_UNIFORM_BYTES } from '$lib/color/pack';
 import { fromHalf } from '$lib/color/transfer';
 import { kernel } from './depth';
@@ -64,14 +65,20 @@ export class DevelopPass {
 	private boundDensity?: GPUTexture;
 	private densityDown: GPUComputePipeline;
 	private densityBlur: GPUComputePipeline;
+	/** The defringe pass (`client/defringe.wgsl`): its uniform when on, and what it made of develop's input. */
+	private defringePipeline: GPUComputePipeline;
+	private defringeUbo?: GPUBuffer;
+	private defringed?: GPUTexture;
+	private boundInput?: GPUTexture;
 
-	private constructor(device: GPUDevice, pipeline: GPURenderPipeline, layout: GPUBindGroupLayout, maskLayout: GPUBindGroupLayout, densityDown: GPUComputePipeline, densityBlur: GPUComputePipeline) {
+	private constructor(device: GPUDevice, pipeline: GPURenderPipeline, layout: GPUBindGroupLayout, maskLayout: GPUBindGroupLayout, densityDown: GPUComputePipeline, densityBlur: GPUComputePipeline, defringePipeline: GPUComputePipeline) {
 		this.device = device;
 		this.pipeline = pipeline;
 		this.layout = layout;
 		this.maskLayout = maskLayout;
 		this.densityDown = densityDown;
 		this.densityBlur = densityBlur;
+		this.defringePipeline = defringePipeline;
 		this.ubo = device.createBuffer({ label: 'develop params', size: DEVELOP_UNIFORM_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 		// Zeroed on creation: no masks until `setMasks` says otherwise.
 		this.maskUbo = device.createBuffer({ label: 'develop masks', size: MASK_UNIFORM_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
@@ -119,11 +126,12 @@ export class DevelopPass {
 			fragment: { module, entryPoint: 'fs', targets: [{ format: 'rgba16float' }] },
 			primitive: { topology: 'triangle-list' }
 		});
-		const [densityDown, densityBlur] = await Promise.all([
+		const [densityDown, densityBlur, defringePipeline] = await Promise.all([
 			kernel(device, 'density down', densityDownWgsl, ['uniform', 'texture', 'storage']),
-			kernel(device, 'density blur', densityBlurWgsl, ['uniform', 'texture', 'storage'])
+			kernel(device, 'density blur', densityBlurWgsl, ['uniform', 'texture', 'storage']),
+			kernel(device, 'defringe', defringeWgsl, ['uniform', 'texture', 'storage'])
 		]);
-		return new DevelopPass(device, pipeline, layout, maskLayout, densityDown, densityBlur);
+		return new DevelopPass(device, pipeline, layout, maskLayout, densityDown, densityBlur, defringePipeline);
 	}
 
 	get output(): GPUTexture | undefined {
@@ -156,6 +164,31 @@ export class DevelopPass {
 			usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC
 		});
 		this.bindGroup = undefined;
+	}
+
+	/** The defringe pass's uniform (`Packed.defringe`), or null for none: run over develop's input on every render. */
+	setDefringe(uniform: Uint8Array | null) {
+		if (!uniform) {
+			this.defringeUbo?.destroy();
+			this.defringeUbo = undefined;
+			return;
+		}
+		this.defringeUbo ??= this.device.createBuffer({ label: 'defringe params', size: uniform.byteLength, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+		this.device.queue.writeBuffer(this.defringeUbo, 0, uniform);
+	}
+
+	/** Develop's input as develop reads it: through the defringe pass when it is on. */
+	private developInput(): GPUTexture {
+		const input = this.input ?? this.source!;
+		if (!this.defringeUbo) return input;
+		if (this.defringed?.width !== input.width || this.defringed?.height !== input.height) {
+			this.defringed?.destroy();
+			this.defringed = this.storage('defringed', input.width, input.height);
+		}
+		const encoder = this.device.createCommandEncoder();
+		this.dispatch(encoder, this.defringePipeline, this.defringeUbo, input, this.defringed);
+		this.device.queue.submit([encoder.finish()]);
+		return this.defringed;
 	}
 
 	setUniforms(bytes: ArrayBuffer | ArrayBufferView) {
@@ -196,7 +229,7 @@ export class DevelopPass {
 	 * averaged down by a whole number, developed to the film's log exposure, blurred over the developer's reach.
 	 */
 	private buildDensityMap(masks: GPUBindGroup) {
-		const input = this.input ?? this.source!;
+		const input = this.developInput();
 		const [w, h] = [input.width, input.height];
 		const k = Math.max(1, Math.ceil(Math.max(w, h) / MAP_LONG));
 		const [mw, mh] = [Math.ceil(w / k), Math.ceil(h / k)];
@@ -328,7 +361,10 @@ export class DevelopPass {
 		const density = this.needsDensityMap && this.density ? this.density.map : this.noMask;
 		if (density !== this.boundDensity) this.bindGroup = undefined;
 		this.boundDensity = density;
-		this.bindGroup ??= this.groupFor(this.ubo, this.input ?? this.source, density);
+		const input = this.developInput();
+		if (input !== this.boundInput) this.bindGroup = undefined;
+		this.boundInput = input;
+		this.bindGroup ??= this.groupFor(this.ubo, input, density);
 		this.drawWith(this.bindGroup, target, masks);
 	}
 

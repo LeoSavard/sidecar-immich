@@ -22,6 +22,8 @@ pub struct DevelopPass {
     density_blur: Kernel,
     /// Every layer's curve the identity, for a develop whose layers have none.
     identity_curves: wgpu::Texture,
+    /// The defringe pass (`client/defringe.wgsl`).
+    defringe: Kernel,
 }
 
 /// What one develop takes beside its uniform and tone curve: the masks' uniforms, a texture per layer in the
@@ -35,6 +37,8 @@ pub struct Masks<'a> {
     pub curves: &'a [f32],
     pub mono: &'a [f32],
     pub density: Option<&'a wgpu::Texture>,
+    /// The defringe pass's uniform (`Packed::defringe`), run over the source first.
+    pub defringe: Option<&'a [u8]>,
     /// A spectral colour stock's two tables (`Packed::slide_exposure` and the stock profile's response table);
     /// both empty unless one is being rendered.
     pub slide_exposure: &'a [f32],
@@ -49,6 +53,7 @@ impl Masks<'_> {
             curves: &[],
             mono: &[],
             density: None,
+            defringe: None,
             slide_exposure: &[],
             slide_response: &[],
         }
@@ -331,6 +336,15 @@ impl DevelopPass {
             "client/density_blur.wgsl",
             &[B::Uniform, B::Tex, store],
         )?;
+        let defringe = Kernel::new(
+            gpu,
+            "client/defringe.wgsl",
+            &[
+                B::Uniform,
+                B::Tex,
+                B::Store(wgpu::TextureFormat::Rgba16Float),
+            ],
+        )?;
         Ok(Self {
             pipeline,
             layout,
@@ -340,6 +354,7 @@ impl DevelopPass {
             density_down,
             density_blur,
             identity_curves,
+            defringe,
         })
     }
 
@@ -419,6 +434,35 @@ impl DevelopPass {
         Ok(map)
     }
 
+    /// `src` with its fringes taken out (`client/defringe.wgsl`), as a new texture. `frame_long` is the whole frame's
+    /// long edge in pixels when `src` is a tile of it, so the reach is the whole frame's; 0 for a whole frame.
+    pub fn apply_defringe(
+        &self,
+        gpu: &Gpu,
+        src: &wgpu::Texture,
+        uniform: &[u8],
+        frame_long: f32,
+    ) -> wgpu::Texture {
+        let mut u: sidecar_color::params::DefringeParams = bytemuck::pod_read_unaligned(uniform);
+        u.reach[3] = frame_long;
+        let out = texture(
+            gpu,
+            src.width(),
+            src.height(),
+            wgpu::TextureFormat::Rgba16Float,
+        );
+        let mut enc = gpu.device.create_command_encoder(&Default::default());
+        self.defringe.run(
+            gpu,
+            &mut enc,
+            &u,
+            [src.width(), src.height()],
+            &[Res::View(&view(src)), Res::View(&view(&out))],
+        );
+        gpu.queue.submit([enc.finish()]);
+        out
+    }
+
     /// Develop a source texture into a new RGBA16F texture (display-linear).
     pub fn render(
         &self,
@@ -435,6 +479,16 @@ impl DevelopPass {
                 uniform.len()
             );
         }
+        // Fringes first: develop reads the defringed source, as the browser's does.
+        let frame_long = if masks.params.frame[2] > 0.0 {
+            masks.params.frame[2].max(masks.params.frame[3])
+        } else {
+            0.0
+        };
+        let defringed = masks
+            .defringe
+            .map(|u| self.apply_defringe(gpu, src_tex, u, frame_long));
+        let src_tex = defringed.as_ref().unwrap_or(src_tex);
         // The whole frame makes its own adjacency map; a tile without one goes without its edges.
         let own_map = match (
             masks.density,
@@ -799,6 +853,80 @@ mod tests {
             .map(|x| (at(&tile, x) - at(&whole, 960 + x)).abs())
             .fold(0.0, f32::max);
         assert!(worst < 1e-3, "worst difference {worst}");
+    }
+
+    /// Defringe takes a purple fringe beside a black-to-white edge to neutral at its own luminance, and leaves a
+    /// large purple patch, with no edge within reach of its middle, as it was.
+    #[test]
+    fn defringe_takes_fringes_and_leaves_purple_things() {
+        let Ok(gpu) = crate::test_gpu() else {
+            return eprintln!("skipping: no GPU");
+        };
+        let pass = DevelopPass::new(gpu).unwrap();
+        let (w, h) = (512u32, 256u32);
+        let purple = [0.45f32, 0.25, 0.65];
+        let src = RgbaF32 {
+            width: w,
+            height: h,
+            data: (0..w * h)
+                .flat_map(|i| {
+                    let (x, y) = (i % w, i / w);
+                    let c = if y < 128 {
+                        // An edge at x = 256, a fringe in the two pixels beside it on the bright side.
+                        if x < 256 {
+                            [0.02, 0.02, 0.02]
+                        } else if x < 258 {
+                            purple
+                        } else {
+                            [0.8, 0.8, 0.8]
+                        }
+                    } else {
+                        // A purple thing, 200 px wide, on mid grey.
+                        if (156..356).contains(&x) {
+                            purple
+                        } else {
+                            [0.2, 0.2, 0.2]
+                        }
+                    };
+                    [c[0], c[1], c[2], 0.0]
+                })
+                .collect(),
+        };
+        let mut d: DevelopParams = bytemuck::Zeroable::zeroed();
+        d.wb_mul = [1.0; 3];
+        d.cam_to_work = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+        ];
+        let u = sidecar_color::params::Defringe::uniform(
+            Some(&sidecar_color::params::Defringe {
+                purple: 100.0,
+                ..Default::default()
+            }),
+            &d,
+        )
+        .unwrap();
+        let out = crate::read_rgba16(
+            gpu,
+            &pass.apply_defringe(gpu, &crate::upload_rgba16(gpu, &src), &u, 0.0),
+        )
+        .unwrap();
+        let at =
+            |x: u32, y: u32| &out.data[((y * w + x) * 4) as usize..((y * w + x) * 4 + 3) as usize];
+        let spread = |c: &[f32]| {
+            c.iter().cloned().fold(f32::MIN, f32::max) - c.iter().cloned().fold(f32::MAX, f32::min)
+        };
+        let fringe = at(256, 64);
+        eprintln!("fringe {fringe:?}, purple thing {:?}", at(256, 192));
+        assert!(spread(fringe) < 0.02, "the fringe is neutral: {fringe:?}");
+        let y = 0.2627 * purple[0] + 0.678 * purple[1] + 0.0593 * purple[2];
+        assert!((fringe[1] - y).abs() < 0.01, "at its own luminance");
+        let thing = at(256, 192);
+        assert!(
+            (thing[0] - 0.45).abs() < 1e-3 && (thing[2] - 0.65).abs() < 1e-3,
+            "the purple thing keeps its colour: {thing:?}"
+        );
     }
 
     /// The develop pass renders a spectral colour stock as `slide::Slide` does on the CPU: the same two tables,

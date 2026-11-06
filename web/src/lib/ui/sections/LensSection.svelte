@@ -18,6 +18,17 @@ Lens correction (DESIGN.md §15): the file's own profile or lensfun's, on or off
 		oncommit();
 	}
 
+	/** Defringe's controls (`sidecar_color::params::Defringe`): an amount and a hue band for purple and for green. */
+	const DEFRINGE = { purple: 0, purpleHue: [280, 345] as [number, number], green: 0, greenHue: [120, 165] as [number, number] };
+	function setFringe(patch: Partial<typeof DEFRINGE>) {
+		onchange((e) => {
+			const d = { ...DEFRINGE, ...e.defringe, ...patch };
+			if (d.purple === 0 && d.green === 0) delete e.defringe;
+			else e.defringe = d;
+		});
+	}
+	const fringe = $derived({ ...DEFRINGE, ...edit.defringe });
+
 	function setStrength(field: keyof Omit<Lens, 'profile'>, v: number) {
 		onchange((e) => {
 			if (e.lens) e.lens[field] = v;
@@ -51,4 +62,16 @@ Lens correction (DESIGN.md §15): the file's own profile or lensfun's, on or off
 			{/if}
 		{/if}
 	{/if}
+	<p class="pt-1 text-[11px] font-medium tracking-wide text-muted uppercase">Defringe</p>
+	<Slider id="fringe-purple" label="Purple" value={fringe.purple} min={0} max={100} defaultValue={0} format={(v) => decimals(v)} onchange={(v) => setFringe({ purple: v })} {oncommit} />
+	{#if fringe.purple > 0}
+		<Slider id="fringe-purple-from" label="Purple hues from" value={fringe.purpleHue[0]} min={0} max={360} defaultValue={280} format={(v) => `${decimals(v)}°`} onchange={(v) => setFringe({ purpleHue: [v, fringe.purpleHue[1]] })} {oncommit} />
+		<Slider id="fringe-purple-to" label="to" value={fringe.purpleHue[1]} min={0} max={360} defaultValue={345} format={(v) => `${decimals(v)}°`} onchange={(v) => setFringe({ purpleHue: [fringe.purpleHue[0], v] })} {oncommit} />
+	{/if}
+	<Slider id="fringe-green" label="Green" value={fringe.green} min={0} max={100} defaultValue={0} format={(v) => decimals(v)} onchange={(v) => setFringe({ green: v })} {oncommit} />
+	{#if fringe.green > 0}
+		<Slider id="fringe-green-from" label="Green hues from" value={fringe.greenHue[0]} min={0} max={360} defaultValue={120} format={(v) => `${decimals(v)}°`} onchange={(v) => setFringe({ greenHue: [v, fringe.greenHue[1]] })} {oncommit} />
+		<Slider id="fringe-green-to" label="to" value={fringe.greenHue[1]} min={0} max={360} defaultValue={165} format={(v) => `${decimals(v)}°`} onchange={(v) => setFringe({ greenHue: [fringe.greenHue[0], v] })} {oncommit} />
+	{/if}
+	<p class="text-xs text-muted">Takes the colour out of purple and green fringes beside high-contrast edges (the lens focusing colours at different distances), and leaves purple and green things alone. Hues are OKLab's.</p>
 </div>

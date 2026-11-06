@@ -40,6 +40,8 @@ export type Packed = {
 	monoLut: Float32Array;
 	/** A spectral colour stock's layer responses over the colour cube; empty unless one is being rendered. */
 	slideExposure: Float32Array;
+	/** The defringe pass's uniform (`DevelopPass.setDefringe`), when the edit takes fringes out. */
+	defringe: Uint8Array | null;
 };
 
 /** A spectral colour stock's profile, as `GET /api/film/stocks/{id}` sends it (`slide::SlideProfile`). */
@@ -182,6 +184,8 @@ export class ColorPacker {
 		};
 		const monoLut = table();
 		const slideExposure = table();
+		const defringeBytes = view.getUint32(at, true);
+		const defringe = defringeBytes ? out.slice(at + 4, at + 4 + defringeBytes) : null;
 		return {
 			uniform: out.slice(0, U),
 			lut: new Float32Array(out.slice(U, U + lutBytes).buffer),
@@ -190,7 +194,8 @@ export class ColorPacker {
 			masks: out.slice(U + 16 + lutBytes, U + 16 + lutBytes + MASK_UNIFORM_BYTES),
 			maskCurves: new Float32Array(out.slice(U + 16 + lutBytes + MASK_UNIFORM_BYTES, U + 16 + lutBytes + MASK_UNIFORM_BYTES + MAX_MASKS * LUT * 4).buffer),
 			monoLut,
-			slideExposure
+			slideExposure,
+			defringe
 		};
 	}
 }
