@@ -69,7 +69,7 @@ pub struct EditParams {
     #[serde(skip_serializing_if = "is_zero")]
     #[cfg_attr(feature = "ts", ts(as = "Option<f64>", optional))]
     pub haze: f64,
-    /// Purple and green fringes taken out (DESIGN.md §7, "Defringe"). Absent, and left out of the serialized edit,
+    /// Purple and green fringes taken out (DESIGN.md §15, "Defringe"). Absent, and left out of the serialized edit,
     /// is none.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]

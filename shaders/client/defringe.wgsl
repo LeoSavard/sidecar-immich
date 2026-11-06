@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright Sidecar contributors
 //! requires: uniforms/defringe_params.wgsl
-// Defringe (DESIGN.md §7, "Defringe"; `sidecar_color::params::Defringe`): axial chromatic aberration's purple and
+// Defringe (DESIGN.md §15, "Defringe"; `sidecar_color::params::Defringe`): axial chromatic aberration's purple and
 // green fringes, on develop's input. A fringe is a fringe hue beside a steep luminance edge: each pixel's hue is
 // judged in OKLab (white-balanced, in the working space), the edge as the largest contrast in log luminance across
 // the reach along either axis, and a pixel with both is taken toward neutral at its own luminance.

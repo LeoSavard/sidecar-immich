@@ -61,7 +61,7 @@ lensBlur?: LensBlur,
  */
 haze?: number, 
 /**
- * Purple and green fringes taken out (DESIGN.md §7, "Defringe"). Absent, and left out of the serialized edit,
+ * Purple and green fringes taken out (DESIGN.md §15, "Defringe"). Absent, and left out of the serialized edit,
  * is none.
  */
 defringe?: Defringe, };
