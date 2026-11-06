@@ -9,6 +9,7 @@ pub mod developer;
 mod film_data;
 pub mod geometry;
 pub mod lens;
+pub mod lut;
 pub mod mat;
 pub mod params;
 pub mod slide;
@@ -35,6 +36,7 @@ mod uniforms {
                 R::of::<crate::params::MaskLayer>(),
                 R::of::<crate::params::MaskParams>(),
                 R::of::<crate::params::DefringeParams>(),
+                R::of::<crate::lut::LookParams>(),
                 R::of::<crate::params::EdgeParams>(),
                 R::of::<crate::depth::DepthParams>(),
                 R::of::<crate::depth::DepthRefineParams>(),

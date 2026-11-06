@@ -5,6 +5,7 @@ pub mod config;
 pub mod export;
 pub mod immich;
 mod lensfun;
+pub mod luts;
 pub mod resolve;
 pub mod session;
 pub mod store;
@@ -1653,6 +1654,7 @@ async fn preview(
 pub fn router(app: Arc<App>) -> Router {
     app.start_housekeeping();
     app.start_lensfun_sync();
+    app.start_lut_sync();
     let web = &app.config.server.web_root;
     let spa = ServeDir::new(web).fallback(ServeFile::new(web.join("index.html")));
     let routes = Router::new()
@@ -1677,6 +1679,13 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/capabilities", get(capabilities))
         .route("/api/film/stocks", get(film_stocks))
         .route("/api/film/stocks/{id}", get(film_stock))
+        .route(
+            "/api/luts",
+            get(luts::list)
+                .post(luts::upload)
+                .layer(axum::extract::DefaultBodyLimit::max(luts::LUT_LIMIT)),
+        )
+        .route("/api/luts/{id}", get(luts::table).delete(luts::remove))
         .route("/api/assets/{key}/meta", get(meta))
         .route("/api/assets/{key}/proxy", get(proxy))
         .route("/api/assets/{key}/thumb", get(thumb))

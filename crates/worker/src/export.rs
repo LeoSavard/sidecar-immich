@@ -347,6 +347,7 @@ pub fn masks_for<'a>(
     textures: &'a [Option<wgpu::Texture>],
     frame: [f32; 4],
     slide_response: &'a [f32],
+    look: Option<&'a crate::luts::Loaded>,
 ) -> sidecar_engine::Masks<'a> {
     let mut params = packed.masks;
     params.frame = frame;
@@ -357,6 +358,7 @@ pub fn masks_for<'a>(
         mono: &packed.mono_lut,
         density: None,
         defringe: packed.defringe.as_deref(),
+        look: look.map(crate::luts::Loaded::look),
         slide_exposure: &packed.slide_exposure,
         slide_response,
     }
@@ -599,6 +601,7 @@ pub fn render(
     let packed = rendering.pack(&req.edit, req.color_space);
     let profile = crate::stocks::for_edit(&req.edit);
     let slide_response = crate::stocks::response(&profile);
+    let look = crate::luts::for_edit(&req.edit, req.color_space)?;
     let mask_textures = rendering.mask_textures(
         kit,
         &req.edit,
@@ -611,7 +614,13 @@ pub fn render(
         &source,
         &packed.uniform,
         &packed.lut,
-        &masks_for(&packed, &mask_textures, [0.0; 4], slide_response),
+        &masks_for(
+            &packed,
+            &mask_textures,
+            [0.0; 4],
+            slide_response,
+            look.as_ref(),
+        ),
     )?;
     drop(source);
     drop(mask_textures);

@@ -24,6 +24,17 @@ pub struct DevelopPass {
     identity_curves: wgpu::Texture,
     /// The defringe pass (`client/defringe.wgsl`).
     defringe: Kernel,
+    /// A 3D LUT as a look, after develop (`client/look.wgsl`).
+    look: Kernel,
+}
+
+/// A 3D LUT to apply after develop: the pass's uniform (`LookLut::uniform`) and the table, RGBA floats
+/// `size` on a side (`CubeLut::rgba`).
+#[derive(Clone, Copy)]
+pub struct Look<'a> {
+    pub uniform: &'a [u8],
+    pub size: u32,
+    pub table: &'a [f32],
 }
 
 /// What one develop takes beside its uniform and tone curve: the masks' uniforms, a texture per layer in the
@@ -39,6 +50,8 @@ pub struct Masks<'a> {
     pub density: Option<&'a wgpu::Texture>,
     /// The defringe pass's uniform (`Packed::defringe`), run over the source first.
     pub defringe: Option<&'a [u8]>,
+    /// A 3D LUT, run over develop's output last.
+    pub look: Option<Look<'a>>,
     /// A spectral colour stock's two tables (`Packed::slide_exposure` and the stock profile's response table);
     /// both empty unless one is being rendered.
     pub slide_exposure: &'a [f32],
@@ -54,6 +67,7 @@ impl Masks<'_> {
             mono: &[],
             density: None,
             defringe: None,
+            look: None,
             slide_exposure: &[],
             slide_response: &[],
         }
@@ -345,6 +359,16 @@ impl DevelopPass {
                 B::Store(wgpu::TextureFormat::Rgba16Float),
             ],
         )?;
+        let look = Kernel::new(
+            gpu,
+            "client/look.wgsl",
+            &[
+                B::Uniform,
+                B::Tex,
+                B::Store(wgpu::TextureFormat::Rgba16Float),
+                B::Tex3,
+            ],
+        )?;
         Ok(Self {
             pipeline,
             layout,
@@ -355,6 +379,7 @@ impl DevelopPass {
             density_blur,
             identity_curves,
             defringe,
+            look,
         })
     }
 
@@ -458,6 +483,51 @@ impl DevelopPass {
             &u,
             [src.width(), src.height()],
             &[Res::View(&view(src)), Res::View(&view(&out))],
+        );
+        gpu.queue.submit([enc.finish()]);
+        out
+    }
+
+    /// `src`, developed, through a 3D LUT (`client/look.wgsl`), as a new texture.
+    pub fn apply_look(&self, gpu: &Gpu, src: &wgpu::Texture, look: &Look) -> wgpu::Texture {
+        let u: sidecar_color::lut::LookParams = bytemuck::pod_read_unaligned(look.uniform);
+        let n = look.size;
+        let table = gpu.device.create_texture_with_data(
+            &gpu.queue,
+            &wgpu::TextureDescriptor {
+                label: Some("look lut"),
+                size: wgpu::Extent3d {
+                    width: n,
+                    height: n,
+                    depth_or_array_layers: n,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D3,
+                format: wgpu::TextureFormat::Rgba32Float,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            bytemuck::cast_slice(look.table),
+        );
+        let out = texture(
+            gpu,
+            src.width(),
+            src.height(),
+            wgpu::TextureFormat::Rgba16Float,
+        );
+        let mut enc = gpu.device.create_command_encoder(&Default::default());
+        self.look.run(
+            gpu,
+            &mut enc,
+            &u,
+            [src.width(), src.height()],
+            &[
+                Res::View(&view(src)),
+                Res::View(&view(&out)),
+                Res::View(&view(&table)),
+            ],
         );
         gpu.queue.submit([enc.finish()]);
         out
@@ -667,7 +737,11 @@ impl DevelopPass {
             pass.draw(0..3, 0..1);
         }
         gpu.queue.submit([enc.finish()]);
-        Ok(out)
+        // The look last, over the developed picture, as the browser applies it.
+        Ok(match &masks.look {
+            Some(look) => self.apply_look(gpu, &out, look),
+            None => out,
+        })
     }
 }
 
@@ -1081,5 +1155,112 @@ mod tests {
             off.data, plain.data,
             "a stock at amount 0 renders as if it were not there"
         );
+    }
+
+    /// The look pass is `sidecar_color::lut::sample` on the GPU: a graded table through the sRGB curve matches
+    /// the CPU's tetrahedral sample, half the amount sits between, and none leaves even out-of-gamut colour be.
+    #[test]
+    fn look_matches_the_cpu_lut() {
+        use sidecar_color::lut::{CubeLut, LookLut, LutSpace, sample};
+        let Ok(gpu) = crate::test_gpu() else {
+            return eprintln!("skipping: no GPU");
+        };
+        let pass = DevelopPass::new(gpu).unwrap();
+        let n = 17u32;
+        let m = (n - 1) as f32;
+        let lut = CubeLut {
+            title: None,
+            size: n,
+            domain_min: [0.0; 3],
+            domain_max: [1.0; 3],
+            table: (0..n * n * n)
+                .map(|i| {
+                    let c = [i % n, (i / n) % n, i / (n * n)].map(|v| v as f32 / m);
+                    // A warm, contrasty grade, not separable by channel.
+                    [
+                        (c[0] * 0.9 + c[1] * 0.15).powf(1.2).min(1.0),
+                        (c[1] * 0.95 + 0.03 * c[2]).powf(1.1),
+                        (c[2] * 0.8 + 0.1 * c[0]).powf(0.9),
+                    ]
+                })
+                .collect(),
+        };
+        let colours: Vec<[f32; 3]> = vec![
+            [0.0, 0.0, 0.0],
+            [0.18, 0.18, 0.18],
+            [0.7, 0.2, 0.05],
+            [0.03, 0.4, 0.9],
+            [1.0, 1.0, 1.0],
+            [1.3, -0.05, 0.2],
+        ];
+        let src = RgbaF32 {
+            width: colours.len() as u32,
+            height: 1,
+            data: colours
+                .iter()
+                .flat_map(|c| [c[0], c[1], c[2], 0.0])
+                .collect(),
+        };
+        let tex = crate::upload_rgba16(gpu, &src);
+        let table = lut.rgba();
+        let run = |amount: f64| {
+            let look = LookLut {
+                amount,
+                space: LutSpace::Srgb,
+                ..Default::default()
+            };
+            let u = look
+                .uniform(sidecar_color::DisplaySpace::Srgb, &lut.header())
+                .unwrap_or_else(|| vec![0; 1]);
+            if u.len() == 1 {
+                return src.clone();
+            }
+            let out = pass.apply_look(
+                gpu,
+                &tex,
+                &Look {
+                    uniform: &u,
+                    size: n,
+                    table: &table,
+                },
+            );
+            crate::read_rgba16(gpu, &out).unwrap()
+        };
+        let (enc, dec) = (
+            sidecar_color::lut::srgb_encode,
+            sidecar_color::lut::srgb_decode,
+        );
+        let full = run(100.0);
+        let half = run(50.0);
+        for (i, c) in colours.iter().enumerate() {
+            let e = c.map(enc);
+            let want = sample(&lut, e).map(dec);
+            let got = &full.data[i * 4..i * 4 + 3];
+            for k in 0..3 {
+                // f16 storage of the input and output: a few thousandths at most.
+                assert!(
+                    (got[k] - want[k]).abs() < 4e-3,
+                    "{c:?}: {got:?} vs {want:?}"
+                );
+            }
+            let g = sample(&lut, e);
+            let mid: [f32; 3] = std::array::from_fn(|k| dec(0.5 * (e[k] + g[k])));
+            let held: [f32; 3] = std::array::from_fn(|k| 0.5 * (c[k] - c[k].clamp(0.0, 1.0)));
+            for k in 0..3 {
+                let h = half.data[i * 4 + k];
+                assert!(
+                    (h - (mid[k] + held[k])).abs() < 4e-3,
+                    "{c:?} at 50: {h} vs {}",
+                    mid[k] + held[k]
+                );
+            }
+        }
+        // An amount just above zero is all but the input, out of gamut too: nothing is clipped on the way.
+        let faint = run(0.01);
+        for (a, b) in faint.data.chunks(4).zip(src.data.chunks(4)) {
+            for k in 0..3 {
+                assert!((a[k] - b[k]).abs() < 4e-3, "{a:?} vs {b:?}");
+            }
+        }
     }
 }

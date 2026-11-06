@@ -5,6 +5,7 @@ import developWgsl from './wgsl/client_develop.wgsl?raw';
 import densityDownWgsl from './wgsl/client_density_down.wgsl?raw';
 import densityBlurWgsl from './wgsl/client_density_blur.wgsl?raw';
 import defringeWgsl from './wgsl/client_defringe.wgsl?raw';
+import lookWgsl from './wgsl/client_look.wgsl?raw';
 import { DEVELOP_UNIFORM_BYTES } from '$lib/color/pack';
 import { fromHalf } from '$lib/color/transfer';
 import { kernel } from './depth';
@@ -70,8 +71,14 @@ export class DevelopPass {
 	private defringeUbo?: GPUBuffer;
 	private defringed?: GPUTexture;
 	private boundInput?: GPUTexture;
+	/** The LUT pass (`client/look.wgsl`): its uniform and table when on, and what develop renders into before it. */
+	private lookPipeline: GPUComputePipeline;
+	private lookUbo?: GPUBuffer;
+	private lookTable?: GPUTexture;
+	private lookRgba?: Float32Array;
+	private beforeLook?: GPUTexture;
 
-	private constructor(device: GPUDevice, pipeline: GPURenderPipeline, layout: GPUBindGroupLayout, maskLayout: GPUBindGroupLayout, densityDown: GPUComputePipeline, densityBlur: GPUComputePipeline, defringePipeline: GPUComputePipeline) {
+	private constructor(device: GPUDevice, pipeline: GPURenderPipeline, layout: GPUBindGroupLayout, maskLayout: GPUBindGroupLayout, densityDown: GPUComputePipeline, densityBlur: GPUComputePipeline, defringePipeline: GPUComputePipeline, lookPipeline: GPUComputePipeline) {
 		this.device = device;
 		this.pipeline = pipeline;
 		this.layout = layout;
@@ -79,6 +86,7 @@ export class DevelopPass {
 		this.densityDown = densityDown;
 		this.densityBlur = densityBlur;
 		this.defringePipeline = defringePipeline;
+		this.lookPipeline = lookPipeline;
 		this.ubo = device.createBuffer({ label: 'develop params', size: DEVELOP_UNIFORM_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 		// Zeroed on creation: no masks until `setMasks` says otherwise.
 		this.maskUbo = device.createBuffer({ label: 'develop masks', size: MASK_UNIFORM_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
@@ -126,12 +134,13 @@ export class DevelopPass {
 			fragment: { module, entryPoint: 'fs', targets: [{ format: 'rgba16float' }] },
 			primitive: { topology: 'triangle-list' }
 		});
-		const [densityDown, densityBlur, defringePipeline] = await Promise.all([
+		const [densityDown, densityBlur, defringePipeline, lookPipeline] = await Promise.all([
 			kernel(device, 'density down', densityDownWgsl, ['uniform', 'texture', 'storage']),
 			kernel(device, 'density blur', densityBlurWgsl, ['uniform', 'texture', 'storage']),
-			kernel(device, 'defringe', defringeWgsl, ['uniform', 'texture', 'storage'])
+			kernel(device, 'defringe', defringeWgsl, ['uniform', 'texture', 'storage']),
+			kernel(device, 'look', lookWgsl, ['uniform', 'texture', 'storage', 'texture3d'])
 		]);
-		return new DevelopPass(device, pipeline, layout, maskLayout, densityDown, densityBlur, defringePipeline);
+		return new DevelopPass(device, pipeline, layout, maskLayout, densityDown, densityBlur, defringePipeline, lookPipeline);
 	}
 
 	get output(): GPUTexture | undefined {
@@ -161,9 +170,29 @@ export class DevelopPass {
 			label: 'developed',
 			size: [width, height],
 			format: 'rgba16float',
-			usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC
+			usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.STORAGE_BINDING
 		});
 		this.bindGroup = undefined;
+	}
+
+	/**
+	 * A 3D LUT after develop (`LookLut::uniform` and its table, RGBA floats `size` on a side), or null for none.
+	 * The table uploads once for as long as the same one is passed.
+	 */
+	setLook(look: { uniform: Uint8Array; size: number; rgba: Float32Array } | null) {
+		if (!look) {
+			this.lookUbo?.destroy();
+			this.lookUbo = undefined;
+			return;
+		}
+		this.lookUbo ??= this.device.createBuffer({ label: 'look params', size: look.uniform.byteLength, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+		this.device.queue.writeBuffer(this.lookUbo, 0, look.uniform);
+		if (look.rgba === this.lookRgba) return;
+		this.lookTable?.destroy();
+		const n = look.size;
+		this.lookTable = this.device.createTexture({ label: 'look lut', size: [n, n, n], dimension: '3d', format: 'rgba32float', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+		this.device.queue.writeTexture({ texture: this.lookTable }, look.rgba, { bytesPerRow: n * 16, rowsPerImage: n }, [n, n, n]);
+		this.lookRgba = look.rgba;
 	}
 
 	/** The defringe pass's uniform (`Packed.defringe`), or null for none: run over develop's input on every render. */
@@ -365,7 +394,29 @@ export class DevelopPass {
 		if (input !== this.boundInput) this.bindGroup = undefined;
 		this.boundInput = input;
 		this.bindGroup ??= this.groupFor(this.ubo, input, density);
-		this.drawWith(this.bindGroup, target, masks);
+		if (!this.lookUbo || !this.lookTable) return this.drawWith(this.bindGroup, target, masks);
+		// The look last, over the developed picture, as the worker applies it.
+		if (this.beforeLook?.width !== target.width || this.beforeLook?.height !== target.height) {
+			this.beforeLook?.destroy();
+			this.beforeLook = this.device.createTexture({ label: 'developed, before the look', size: [target.width, target.height], format: 'rgba16float', usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
+		}
+		this.drawWith(this.bindGroup, this.beforeLook, masks);
+		const encoder = this.device.createCommandEncoder();
+		const bind = this.device.createBindGroup({
+			layout: this.lookPipeline.getBindGroupLayout(0),
+			entries: [
+				{ binding: 0, resource: { buffer: this.lookUbo } },
+				{ binding: 1, resource: this.beforeLook.createView() },
+				{ binding: 2, resource: target.createView() },
+				{ binding: 3, resource: this.lookTable.createView() }
+			]
+		});
+		const pass = encoder.beginComputePass();
+		pass.setPipeline(this.lookPipeline);
+		pass.setBindGroup(0, bind);
+		pass.dispatchWorkgroups(Math.ceil(target.width / 16), Math.ceil(target.height / 16));
+		pass.end();
+		this.device.queue.submit([encoder.finish()]);
 	}
 
 	private drawWith(group: GPUBindGroup, target: GPUTexture, masks: GPUBindGroup) {
@@ -388,7 +439,7 @@ export class DevelopPass {
 	/** A texture of the developed picture's size and format, for `renderVariant`. */
 	variantTarget(label: string): GPUTexture {
 		const t = this.target!;
-		return this.device.createTexture({ label, size: [t.width, t.height], format: 'rgba16float', usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
+		return this.device.createTexture({ label, size: [t.width, t.height], format: 'rgba16float', usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING });
 	}
 
 	/**

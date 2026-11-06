@@ -9,6 +9,7 @@
 pub mod camera;
 pub mod export;
 pub mod lensfun;
+pub mod luts;
 pub mod masks;
 pub mod ml;
 pub mod stocks;
@@ -168,6 +169,7 @@ impl Worker {
         std::fs::create_dir_all(cache.join("masks"))?;
         sweep_stale_cache(&cache);
         stocks::set_cache_dir(&cache);
+        luts::set_cache_dir(&cache)?;
         let lensfun = Arc::new(lensfun::Lensfun::open(cache.join("lensfun")));
         let kit = sidecar_engine::Gpu::new_headless().and_then(|gpu| {
             let ingest = sidecar_engine::Ingest::new(&gpu)?;
@@ -637,6 +639,7 @@ fn preview_jpeg(
     let packed = rendering.pack(&req.edit, req.color_space);
     let profile = stocks::for_edit(&req.edit);
     let slide_response = stocks::response(&profile);
+    let look = luts::for_edit(&req.edit, req.color_space)?;
     // The proxy is oriented already, as the masks are.
     let mask_textures = rendering.mask_textures(kit, &req.edit, masks, 0, [width, height]);
     let developed = kit.develop.render(
@@ -644,7 +647,13 @@ fn preview_jpeg(
         &source,
         &packed.uniform,
         &packed.lut,
-        &export::masks_for(&packed, &mask_textures, [0.0; 4], slide_response),
+        &export::masks_for(
+            &packed,
+            &mask_textures,
+            [0.0; 4],
+            slide_response,
+            look.as_ref(),
+        ),
     )?;
     let developed = rendering
         .warp(kit, &req.edit, &developed, 0)
@@ -765,6 +774,7 @@ fn loupe_png(
     let packed = rendering.pack(&req.edit, req.color_space);
     let profile = stocks::for_edit(&req.edit);
     let slide_response = stocks::response(&profile);
+    let look = luts::for_edit(&req.edit, req.color_space)?;
     // Masks cover the whole frame; each develop below says where its tile sits in it.
     let mask_textures = rendering.mask_textures(kit, &req.edit, masks, flip, [sw, sh]);
     // Black and white's adjacency map covers the whole frame too: averaged down, lens-corrected at that size as
@@ -783,7 +793,7 @@ fn loupe_png(
                 [sw, sh],
                 &packed.uniform,
                 &packed.lut,
-                &export::masks_for(&packed, &mask_textures, [0.0; 4], slide_response),
+                &export::masks_for(&packed, &mask_textures, [0.0; 4], slide_response, None),
             )?)
         }
         false => None,
@@ -795,6 +805,7 @@ fn loupe_png(
             &mask_textures,
             [x as f32, y as f32, sw as f32, sh as f32],
             slide_response,
+            look.as_ref(),
         )
     };
     // The whole frame's source, before any tile is cut from it: the refinement reads the photo and the map
@@ -1123,6 +1134,12 @@ pub fn router(worker: Arc<Worker>) -> Router {
         .route("/v1/assets/{key}/camera", get(camera_handler))
         .route("/v1/film/stocks", get(film_stocks))
         .route("/v1/film/stocks/{id}", get(film_stock))
+        .route(
+            "/v1/luts/{id}",
+            axum::routing::put(lut_put)
+                .delete(lut_delete)
+                .layer(axum::extract::DefaultBodyLimit::max(64 << 20)),
+        )
         .route("/v1/lensfun", get(lensfun_status))
         .route("/v1/lensfun/done", post(lensfun_done))
         .route("/v1/lensfun/{name}", axum::routing::put(lensfun_put))
@@ -1171,6 +1188,21 @@ async fn lensfun_put(
         Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
         Ok(Err(e)) => (StatusCode::BAD_REQUEST, format!("{e:#}")).into_response(),
         Err(e) => internal(e.into()),
+    }
+}
+
+async fn lut_put(Path(id): Path<String>, body: String) -> Response {
+    match tokio::task::spawn_blocking(move || luts::put(&id, &body)).await {
+        Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
+        Ok(Err(e)) => (StatusCode::BAD_REQUEST, format!("{e:#}")).into_response(),
+        Err(e) => internal(e.into()),
+    }
+}
+
+async fn lut_delete(Path(id): Path<String>) -> Response {
+    match luts::remove(&id) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
     }
 }
 

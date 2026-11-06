@@ -74,6 +74,11 @@ pub struct EditParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub defringe: Option<Defringe>,
+    /// A 3D LUT applied after develop as a look (DESIGN.md §15, "3D LUTs"). Absent, and left out of the
+    /// serialized edit, is none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub lut: Option<crate::lut::LookLut>,
 }
 
 /// Axial chromatic aberration: a lens focuses the colours at slightly different distances, so beside a high-contrast
@@ -202,6 +207,7 @@ impl Default for EditParams {
             lens_blur: None,
             haze: 0.0,
             defringe: None,
+            lut: None,
         }
     }
 }
@@ -1208,7 +1214,7 @@ pub struct Packed {
 }
 
 /// Row-major 3×3 → WGSL `mat3x3f` columns.
-fn to_mat3(m: &M3) -> [[f32; 4]; 3] {
+pub(crate) fn to_mat3(m: &M3) -> [[f32; 4]; 3] {
     [0, 1, 2].map(|j| [m[0][j] as f32, m[1][j] as f32, m[2][j] as f32, 0.0])
 }
 
