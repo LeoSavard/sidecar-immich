@@ -9,6 +9,7 @@ import type { LensBlur } from "./LensBlur";
 import type { MaskAdjustment } from "./MaskAdjustment";
 import type { Mixer } from "./Mixer";
 import type { Monochrome } from "./Monochrome";
+import type { Negative } from "./Negative";
 import type { Tone } from "./Tone";
 import type { WhiteBalance } from "./WhiteBalance";
 
@@ -58,4 +59,9 @@ lensBlur?: LensBlur,
  * Haze by distance, from the depth mask: −100 takes it away, 100 adds it; 0, left out of the serialized
  * edit, is none.
  */
-haze?: number, };
+haze?: number, 
+/**
+ * The photo is a film negative to invert (DESIGN.md §7, "Negatives"). Absent, and left out of the serialized
+ * edit, is a positive.
+ */
+negative?: Negative, };

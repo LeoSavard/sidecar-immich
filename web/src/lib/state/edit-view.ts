@@ -167,6 +167,8 @@ export function describeChanges(from: EditParams, to: EditParams): string[] {
 	if (!!from.lens !== !!to.lens) out.push(to.lens ? 'Lens correction on' : 'Lens correction off');
 	else if (from.lens && to.lens && JSON.stringify(from.lens) !== JSON.stringify(to.lens)) out.push('Lens correction adjusted');
 	out.push(...describeMasks(from.masks ?? [], to.masks ?? []));
+	if (!from.negative !== !to.negative) out.push(to.negative ? 'Film negative' : 'Positive');
+	else if (from.negative && to.negative && JSON.stringify(from.negative) !== JSON.stringify(to.negative)) out.push('Negative adjusted');
 	return out;
 }
 
@@ -261,6 +263,9 @@ export const PICKS: { id: string; label: string; take: (into: EditParams, from: 
 			else delete e.monochrome;
 			if (f.grain) e.grain = structuredClone(f.grain);
 			else delete e.grain;
+			// A roll's base and contrast are the same frame to frame.
+			if (f.negative) e.negative = structuredClone(f.negative);
+			else delete e.negative;
 		}
 	},
 	{ id: 'curve', label: 'Curve', take: (e, f) => (e.tone.curve = structuredClone(f.tone.curve)) },

@@ -365,6 +365,32 @@ export class DevelopPass {
 		this.draw(target, this.maskGroup(ubo, textures));
 	}
 
+	/** The source's camera RGB, box-averaged to at most `edge` on its long side: a negative's starting base and balance. */
+	async sourcePixels(edge: number): Promise<[number, number, number][]> {
+		const t = this.source!;
+		const k = Math.max(1, Math.ceil(Math.max(t.width, t.height) / edge));
+		const [w, h] = [Math.floor(t.width / k), Math.floor(t.height / k)];
+		const bytesPerRow = 256 * Math.ceil((t.width * 8) / 256);
+		const buf = this.device.createBuffer({ size: bytesPerRow * t.height, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+		const encoder = this.device.createCommandEncoder();
+		encoder.copyTextureToBuffer({ texture: t }, { buffer: buf, bytesPerRow }, [t.width, t.height]);
+		this.device.queue.submit([encoder.finish()]);
+		await buf.mapAsync(GPUMapMode.READ);
+		const all = new Uint16Array(buf.getMappedRange());
+		const stride = bytesPerRow / 2;
+		const out: [number, number, number][] = [];
+		for (let by = 0; by < h; by++)
+			for (let bx = 0; bx < w; bx++) {
+				const c = [0, 0, 0];
+				for (let y = by * k; y < (by + 1) * k; y++)
+					for (let x = bx * k; x < (bx + 1) * k; x++) for (let ch = 0; ch < 3; ch++) c[ch] += fromHalf(all[y * stride + x * 4 + ch]);
+				out.push([c[0] / (k * k), c[1] / (k * k), c[2] / (k * k)]);
+			}
+		buf.unmap();
+		buf.destroy();
+		return out;
+	}
+
 	/**
 	 * The camera RGB around a point of the source (0…1), averaged over a square `radius` pixels out from it,
 	 * leaving out pixels the ingest flagged as clipped (alpha above 0): the white balance eyedropper's patch.

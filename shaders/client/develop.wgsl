@@ -4,6 +4,9 @@
 // Develop pass: full-screen triangle into developedTex (rgba16float, proxy size). Output is display-linear.
 
 @group(0) @binding(0) var<uniform> P: DevelopParams;
+
+// `sidecar_color::params::NEGATIVE_SCALE`: an inverted negative's grey to about 0.18.
+const NEGATIVE_SCALE = 0.0018;
 @group(0) @binding(1) var source_tex: texture_2d<f32>;
 @group(0) @binding(2) var tone_lut: texture_1d<f32>;
 // Black and white's table over the colour cube; 1×1×1 in colour.
@@ -54,7 +57,14 @@ fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
 
 @fragment
 fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
-  let src = textureLoad(source_tex, vec2i(pos.xy), 0);
+  var src = textureLoad(source_tex, vec2i(pos.xy), 0);
+  // A film negative (`Negative`): the scene's light from the film's density above its base, before anything else —
+  // develop then treats it as any photo's light. The clip flag means nothing on a negative's dense end.
+  if (P.negative.w > 0.0) {
+    let base = P.negative.rgb;
+    let t = max(src.rgb, base * 1e-6);
+    src = vec4f(max(pow(base / t, vec3f(P.negative.w)) - 1.0, vec3f(0.0)) * NEGATIVE_SCALE, 0.0);
+  }
   let developed = P.display_referred > 0.5;
   var local = mask_start(P.tone, P.mixer, P.saturation);
   let weights = mask_weights(pos.xy);

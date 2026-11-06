@@ -9,7 +9,22 @@ sees the light, through a filter. -->
 	import { stocks as offeredStocks } from '$lib/film';
 	import type { SectionProps } from './section';
 
-	let { edit, onchange, oncommit, developed }: SectionProps & { developed: boolean } = $props();
+	let {
+		edit,
+		onchange,
+		oncommit,
+		developed,
+		onnegative,
+		pickingBase,
+		onpickbase
+	}: SectionProps & {
+		developed: boolean;
+		/** Treat the photo as a film negative, or not; the page sets the base and the balance it starts from. */
+		onnegative?: (on: boolean) => void;
+		/** The film-base eyedropper waiting for a tap; undefined where it can't work. */
+		pickingBase?: boolean;
+		onpickbase?: (on: boolean) => void;
+	} = $props();
 
 	type Rendering = 'neutral' | 'film' | 'mono';
 	const rendering: Rendering = $derived(edit.monochrome ? 'mono' : edit.film ? 'film' : 'neutral');
@@ -229,6 +244,19 @@ sees the light, through a filter. -->
 		<p class="text-xs text-muted">This picture was already rendered by whatever wrote it, so film rendering, which works on a RAW's light, isn't offered. Black and white is.</p>
 	{:else}
 		<p class="text-xs text-muted">Neutral keeps every colour's hue through the tone curve. Film renders each colour channel through it separately, as film does. Black and white sees the light as a film type would.</p>
+	{/if}
+	{#if !developed && onnegative}
+		<p class="pt-1 text-[11px] font-medium tracking-wide text-muted uppercase">Negative</p>
+		<div class="flex flex-wrap items-center gap-1.5 text-xs">
+			<button type="button" aria-pressed={!!edit.negative} class="rounded-full px-2.5 py-1 {edit.negative ? 'bg-fg text-ground' : 'bg-raised text-fg'}" onclick={() => onnegative(!edit.negative)}>Film negative</button>
+			{#if edit.negative && pickingBase !== undefined}
+				<button type="button" aria-pressed={pickingBase} class="rounded-full px-2.5 py-1 {pickingBase ? 'bg-fg text-ground' : 'bg-raised text-fg'}" onclick={() => onpickbase?.(!pickingBase)}>Pick the film base</button>
+			{/if}
+		</div>
+		{#if edit.negative}
+			<Slider id="negative-gamma" label="Film contrast (γ)" value={edit.negative.gamma} min={0.3} max={1.5} step={0.01} defaultValue={0.6} format={(v) => decimals(v, 2)} onchange={(v) => onchange((e) => { if (e.negative) e.negative.gamma = v; })} {oncommit} />
+			<p class="text-xs text-muted">{pickingBase ? 'Tap the film between frames, or its unexposed edge.' : 'Inverted by density: the base (the clear film, orange mask and all) is divided out and γ, the film\'s contrast, undone. Colour negative is about 0.6. Set the white balance on something grey afterwards.'}</p>
+		{/if}
 	{/if}
 	<p class="pt-1 text-[11px] font-medium tracking-wide text-muted uppercase">Grain</p>
 	<Slider id="grain-amount" label="Amount" value={edit.grain?.amount ?? 0} min={0} max={100} defaultValue={0} format={(v) => decimals(v)} onchange={(v) => setGrain('amount', v)} {oncommit} />

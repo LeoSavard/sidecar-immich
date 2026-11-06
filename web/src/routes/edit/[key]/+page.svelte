@@ -48,6 +48,8 @@
 	let status = $state('Opening…');
 	/** The white balance eyedropper is waiting for a tap on the photo. */
 	let pickingWhite = $state(false);
+	/** The film-base eyedropper (`Negative::base`), waiting for a tap. */
+	let pickingBase = $state(false);
 	/** Tap-to-focus (the lens blur) is waiting for a tap on the photo. */
 	let pickingFocus = $state(false);
 	let error = $state('');
@@ -851,10 +853,63 @@
 			return;
 		}
 		pickingWhite = false;
-		const wb = packer.whiteFromNeutral(cameraColor(), rgb);
+		// On a negative, the neutral is what develop makes of the sample: inverted.
+		const neutral = edit?.negative ? invertNegative(rgb, edit.negative) : rgb;
+		const wb = packer.whiteFromNeutral(cameraColor(), neutral);
 		const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, Math.round(v)));
 		update((ed) => {
 			ed.whiteBalance = { mode: 'custom', temperatureK: clamp(wb.temperatureK, 2000, 12000), tint: clamp(wb.tint, -150, 150) };
+		});
+		committed();
+	}
+
+	/** A camera colour of the negative as develop inverts it (`Negative::invert`). */
+	function invertNegative(c: [number, number, number], n: { base: [number, number, number]; gamma: number }): [number, number, number] {
+		const g = 1 / Math.min(3, Math.max(0.2, n.gamma));
+		return c.map((v, k) => Math.max(0, (Math.max(n.base[k], 1e-6) / Math.max(v, 1e-6 * Math.max(n.base[k], 1e-6))) ** g - 1) * 0.0018) as [number, number, number];
+	}
+
+	/**
+	 * Turn a film negative on or off. On, it starts from the clearest film in the frame as its base (each channel's
+	 * 99.5th percentile, the rebate if it shows) and a white balance that makes the inverted picture's mean grey —
+	 * the mask is gone once the base is divided out, and what is left is the light's and the stock's balance.
+	 */
+	async function setNegative(on: boolean) {
+		if (!edit || !packer) return;
+		if (!on) {
+			update((ed) => {
+				delete ed.negative;
+				ed.whiteBalance = { ...ed.whiteBalance, mode: 'asShot' };
+			});
+			committed();
+			return;
+		}
+		const px = await develop.sourcePixels(256);
+		const pick = (k: number) => {
+			const v = px.map((p) => p[k]).sort((a, b) => a - b);
+			return v[Math.floor(v.length * 0.995)] ?? 1;
+		};
+		const negative = { base: [pick(0), pick(1), pick(2)] as [number, number, number], gamma: 0.6 };
+		const mean = [0, 0, 0];
+		for (const p of px) invertNegative(p, negative).forEach((v, k) => (mean[k] += v / px.length));
+		const wb = packer.whiteFromNeutral(cameraColor(), mean as [number, number, number]);
+		const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, Math.round(v)));
+		update((ed) => {
+			ed.negative = negative;
+			ed.whiteBalance = { mode: 'custom', temperatureK: clamp(wb.temperatureK, 2000, 12000), tint: clamp(wb.tint, -150, 150) };
+		});
+		committed();
+	}
+
+	/** The film-base eyedropper: the camera RGB around the tap becomes the negative's base. */
+	async function pickBase(e: PointerEvent) {
+		pickingBase = false;
+		const p = screenToSource(px(e));
+		if (!p || !edit?.negative || p.some((v) => v < 0 || v > 1)) return;
+		const rgb = await develop.sampleSource(p, 4);
+		if (!rgb || rgb.some((v) => v <= 0)) return;
+		update((ed) => {
+			if (ed.negative) ed.negative.base = rgb;
 		});
 		committed();
 	}
@@ -1629,6 +1684,10 @@
 				pickWhite(e);
 				return;
 			}
+			if (pickingBase && !fallback && develop?.output) {
+				pickBase(e);
+				return;
+			}
 			if (pickingFocus && !fallback && develop?.output) {
 				pickFocus(e);
 				return;
@@ -1796,7 +1855,7 @@
 {/snippet}
 
 {#snippet filmSection()}
-	{#if edit}<FilmSection {edit} onchange={update} oncommit={committed} {developed} />{/if}
+	{#if edit}<FilmSection {edit} onchange={update} oncommit={committed} {developed} onnegative={fallback || readOnly ? undefined : setNegative} pickingBase={fallback || readOnly ? undefined : pickingBase} onpickbase={(on) => (pickingBase = on)} />{/if}
 {/snippet}
 
 {#snippet curveSection()}
