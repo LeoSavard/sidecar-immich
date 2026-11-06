@@ -1,0 +1,15 @@
+[package]
+name = "sidecar-uniform"
+description = "Uniform structs written once, in Rust: their WGSL declarations are generated from them"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+publish = false
+
+[features]
+# The tests' half: compare the generated files with the source tree, and check each layout with naga.
+check = ["dep:naga"]
+
+[dependencies]
+naga = { workspace = true, optional = true }
+sidecar-uniform-derive = { path = "../uniform-derive" }

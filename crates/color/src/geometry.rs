@@ -13,6 +13,7 @@
 //! isotropic in between: one unit is the picture's height, so a rotation is a rotation however wide it is.
 
 use serde::{Deserialize, Serialize};
+use sidecar_uniform::Uniform;
 
 use crate::mat::{self, M3};
 
@@ -437,11 +438,14 @@ pub fn sensor_from_oriented(flip: i32) -> M3 {
     mat::mul(&mat::mul(&fx, &fy), &swap)
 }
 
-/// Byte-for-byte mirror of `struct WarpParams` in shaders/server/warp.wgsl (64 bytes); checked by naga.
+/// The export warp's uniform (64 bytes). Its WGSL declaration, `shaders/uniforms/warp_params.wgsl`,
+/// is generated from this struct (`sidecar-uniform`); the `uniforms` test checks the file and every
+/// offset.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable, Uniform)]
 pub struct WarpParams {
-    /// Output pixel (its centre) → input texel coordinates, as WGSL `mat3x3f` columns.
+    /// Output pixel (its centre) → input texel coordinates, homogeneous, as WGSL `mat3x3f` columns.
+    #[uniform(wgsl = "mat3x3f")]
     pub m: [[f32; 4]; 3],
     pub out_size: [u32; 2],
     pub _pad: [u32; 2],
@@ -819,29 +823,5 @@ mod tests {
             close(o, [s[0] * 200.0 - 10.0, s[1] * 400.0 - 20.0]),
             "{o:?}"
         );
-    }
-
-    #[test]
-    fn warp_layout_matches_wgsl() {
-        let src = sidecar_shaders::compose("server/warp.wgsl").unwrap();
-        let module = naga::front::wgsl::parse_str(&src).unwrap();
-        let (_, ty) = module
-            .types
-            .iter()
-            .find(|(_, t)| t.name.as_deref() == Some("WarpParams"))
-            .unwrap();
-        let naga::TypeInner::Struct { members, span } = &ty.inner else {
-            panic!("not a struct")
-        };
-        assert_eq!(*span as usize, std::mem::size_of::<WarpParams>());
-        let off = |n: &str| {
-            members
-                .iter()
-                .find(|m| m.name.as_deref() == Some(n))
-                .unwrap()
-                .offset as usize
-        };
-        assert_eq!(off("m"), std::mem::offset_of!(WarpParams, m));
-        assert_eq!(off("out_size"), std::mem::offset_of!(WarpParams, out_size));
     }
 }

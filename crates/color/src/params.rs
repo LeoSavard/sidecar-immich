@@ -2,6 +2,7 @@
 //! Edit parameters as stored in `sc:Sidecar`, and their packing into the develop uniform buffer.
 
 use serde::{Deserialize, Serialize};
+use sidecar_uniform::Uniform;
 
 use crate::camera::{self, CameraColor};
 use crate::mat::{self, M3};
@@ -818,16 +819,24 @@ impl MaskEdge {
     }
 }
 
-/// Byte-for-byte mirror of `struct EdgeParams` in shaders/client/mask_edge.wgsl (48 bytes); checked by naga.
+/// The mask edge passes' uniform (48 bytes). Its WGSL declaration,
+/// `shaders/uniforms/edge_params.wgsl`, is generated from this struct (`sidecar-uniform`); the
+/// `uniforms` test checks the file and every offset.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable, Uniform)]
 pub struct EdgeParams {
+    /// The target, in pixels.
     pub size: [f32; 2],
+    /// 0 average down, 1 blur along `dir`, 2 threshold at full size.
     pub mode: u32,
+    /// Mode 0: how many source pixels one texel averages, each way.
     pub scale: f32,
+    /// Mode 1: one texel across (1, 0) or down (0, 1).
     pub dir: [f32; 2],
+    /// Mode 1: the Gaussian's reach in texels (sigma is half of it).
     pub radius: f32,
     pub _pad: f32,
+    /// Mode 2: x the threshold (0.5 keeps the edge where it was; lower grows the mask), y the ramp's width.
     pub ramp: [f32; 4],
 }
 
@@ -923,9 +932,10 @@ impl MaskAdjustment {
     }
 }
 
-/// One mask layer as the shader takes it. Mirrors `struct MaskLayer` in shaders/develop/masks.wgsl.
+/// One mask layer as the shader takes it, in `MaskParams`. Its WGSL declaration,
+/// `shaders/uniforms/mask_layer.wgsl`, is generated from this struct (`sidecar-uniform`).
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable, Uniform)]
 pub struct MaskLayer {
     /// rgb: white-balance gains in camera space at full weight; w: exposure in stops.
     pub gain: [f32; 4],
@@ -940,9 +950,11 @@ pub struct MaskLayer {
     pub mixer: [[f32; 4]; 8],
 }
 
-/// Byte-for-byte mirror of `struct MaskParams` in shaders/develop/masks.wgsl (1,568 bytes); checked by naga.
+/// The mask layers' uniform (1,568 bytes). Its WGSL declaration,
+/// `shaders/uniforms/mask_params.wgsl`, is generated from this struct (`sidecar-uniform`); the
+/// `uniforms` test checks the file and every offset.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable, Uniform)]
 pub struct MaskParams {
     /// xy: where the texture being developed sits in the frame the masks cover, in its pixels; zw: that
     /// frame's size (0 for the texture's own size — a whole image). A loupe tile sets both.
@@ -997,16 +1009,26 @@ pub enum DisplaySpace {
     DisplayP3,
 }
 
-/// Byte-for-byte mirror of `struct DevelopParams` in shaders/develop/params.wgsl. A `mat3x3f` is three
-/// columns, each padded to 16 bytes. The test below parses the WGSL with naga and checks every offset.
+/// The develop modules' uniform (432 bytes). Its WGSL declaration,
+/// `shaders/uniforms/develop_params.wgsl`, is generated from this struct (`sidecar-uniform`); the
+/// `uniforms` test checks the file and every offset.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable, Uniform)]
 pub struct DevelopParams {
+    /// Camera-space white balance multipliers, green = 1.
     pub wb_mul: [f32; 3],
+    /// 2^EV.
     pub exposure: f32,
+    /// Camera RGB → linear Rec.2020, recomputed on every white balance change. A `mat3x3f` is three columns,
+    /// each padded to 16 bytes.
+    #[uniform(wgsl = "mat3x3f")]
     pub cam_to_work: [[f32; 4]; 3],
+    /// Linear Rec.2020 → the display's primaries (sRGB or Display P3).
+    #[uniform(wgsl = "mat3x3f")]
     pub work_to_disp: [[f32; 4]; 3],
+    /// A RAW: black EV, white EV, steepness, pivot. A developed file: blacks, whites, contrast, knee.
     pub tone: [f32; 4],
+    /// Highlight blend strength.
     pub hl_strength: f32,
     /// 0 for a RAW, 1 for a developed file — see `SourceKind`.
     pub display_referred: f32,
@@ -1014,10 +1036,12 @@ pub struct DevelopParams {
     pub saturation: f32,
     /// How completely colour fades to neutral as a rendered value approaches display white.
     pub highlight_bleach: f32,
+    /// Per band: hue shift (radians), chroma gain − 1, lightness shift, unused.
     pub mixer: [[f32; 4]; 8],
     /// Film rendering: amount 0…1 (0 is the neutral rendering), interlayer spread in log exposure, unused ×2.
     pub film: [f32; 4],
-    /// Black and white: x 1 when on, y the side of `Packed::mono_lut`'s cube, unused ×2.
+    /// Black and white: x 1 when on, y the side of `Packed::mono_lut`'s cube, z 1 to output the adjacency
+    /// map's log exposure, w unused.
     pub mono: [f32; 4],
     /// Grain (`Grain::uniform`): standard deviation in stops (0 none), size as a share of the long edge, the
     /// share a staining developer hides at the white point, unused.
@@ -1439,73 +1463,7 @@ mod tests {
     }
 
     #[test]
-    fn uniform_layout_matches_wgsl() {
-        let src = sidecar_shaders::compose("develop/params.wgsl").unwrap();
-        let module = naga::front::wgsl::parse_str(&src).unwrap();
-        let mut layouter = naga::proc::Layouter::default();
-        layouter.update(module.to_ctx()).unwrap();
-        let (handle, ty) = module
-            .types
-            .iter()
-            .find(|(_, t)| t.name.as_deref() == Some("DevelopParams"))
-            .unwrap();
-        let naga::TypeInner::Struct { members, span } = &ty.inner else {
-            panic!("not a struct")
-        };
-        assert_eq!(*span as usize, std::mem::size_of::<DevelopParams>());
-        assert_eq!(layouter[handle].size as usize, 432);
-        let rust = [
-            ("wb_mul", std::mem::offset_of!(DevelopParams, wb_mul)),
-            ("exposure", std::mem::offset_of!(DevelopParams, exposure)),
-            (
-                "cam_to_work",
-                std::mem::offset_of!(DevelopParams, cam_to_work),
-            ),
-            (
-                "work_to_disp",
-                std::mem::offset_of!(DevelopParams, work_to_disp),
-            ),
-            ("tone", std::mem::offset_of!(DevelopParams, tone)),
-            (
-                "hl_strength",
-                std::mem::offset_of!(DevelopParams, hl_strength),
-            ),
-            (
-                "display_referred",
-                std::mem::offset_of!(DevelopParams, display_referred),
-            ),
-            (
-                "saturation",
-                std::mem::offset_of!(DevelopParams, saturation),
-            ),
-            ("mixer", std::mem::offset_of!(DevelopParams, mixer)),
-            ("film", std::mem::offset_of!(DevelopParams, film)),
-            ("mono", std::mem::offset_of!(DevelopParams, mono)),
-            ("grain", std::mem::offset_of!(DevelopParams, grain)),
-            ("developer", std::mem::offset_of!(DevelopParams, developer)),
-            ("stock", std::mem::offset_of!(DevelopParams, stock)),
-            ("shoulder", std::mem::offset_of!(DevelopParams, shoulder)),
-            ("slide", std::mem::offset_of!(DevelopParams, slide)),
-            (
-                "slide_log_h",
-                std::mem::offset_of!(DevelopParams, slide_log_h),
-            ),
-            (
-                "slide_tone",
-                std::mem::offset_of!(DevelopParams, slide_tone),
-            ),
-            (
-                "tone_shape",
-                std::mem::offset_of!(DevelopParams, tone_shape),
-            ),
-        ];
-        for (name, off) in rust {
-            let m = members
-                .iter()
-                .find(|m| m.name.as_deref() == Some(name))
-                .unwrap();
-            assert_eq!(m.offset as usize, off, "{name}");
-        }
+    fn a_raw_packs_the_baseline_into_exposure_and_a_developed_file_does_not() {
         let p = pack(
             &EditParams::default(),
             &crate::camera::nikon_d850(),
@@ -1748,39 +1706,6 @@ mod tests {
             [0.5, FILM_INTERLAYER as f32, 0.0, 0.0]
         );
         assert_eq!(at(&edit, SourceKind::Developed).film, [0.0; 4]);
-    }
-
-    #[test]
-    fn edge_params_layout_matches_wgsl() {
-        let src = sidecar_shaders::compose("client/mask_edge.wgsl").unwrap();
-        let module = naga::front::wgsl::parse_str(&src).unwrap();
-        let (_, ty) = module
-            .types
-            .iter()
-            .find(|(_, t)| t.name.as_deref() == Some("EdgeParams"))
-            .unwrap();
-        let naga::TypeInner::Struct { members, span } = &ty.inner else {
-            panic!("not a struct")
-        };
-        assert_eq!(*span as usize, std::mem::size_of::<EdgeParams>());
-        for (name, off) in [
-            ("size", std::mem::offset_of!(EdgeParams, size)),
-            ("mode", std::mem::offset_of!(EdgeParams, mode)),
-            ("scale", std::mem::offset_of!(EdgeParams, scale)),
-            ("dir", std::mem::offset_of!(EdgeParams, dir)),
-            ("radius", std::mem::offset_of!(EdgeParams, radius)),
-            ("ramp", std::mem::offset_of!(EdgeParams, ramp)),
-        ] {
-            assert_eq!(
-                members
-                    .iter()
-                    .find(|m| m.name.as_deref() == Some(name))
-                    .unwrap()
-                    .offset as usize,
-                off,
-                "{name}"
-            );
-        }
     }
 
     /// An edge's reach follows the mask's size; it is blurred at a scale that keeps the radius within 16
@@ -2145,53 +2070,6 @@ mod tests {
             "warmer: more red, less blue, green fixed: {:?}",
             m.layers[1].gain
         );
-    }
-
-    #[test]
-    fn mask_layout_matches_wgsl() {
-        let src = sidecar_shaders::compose("develop/masks.wgsl").unwrap();
-        let module = naga::front::wgsl::parse_str(&src).unwrap();
-        let (_, ty) = module
-            .types
-            .iter()
-            .find(|(_, t)| t.name.as_deref() == Some("MaskParams"))
-            .unwrap();
-        let naga::TypeInner::Struct { members, span } = &ty.inner else {
-            panic!("not a struct")
-        };
-        assert_eq!(*span as usize, std::mem::size_of::<MaskParams>());
-        assert_eq!(std::mem::size_of::<MaskParams>(), 1568);
-        let off = |n: &str| {
-            members
-                .iter()
-                .find(|m| m.name.as_deref() == Some(n))
-                .unwrap()
-                .offset as usize
-        };
-        assert_eq!(off("frame"), std::mem::offset_of!(MaskParams, frame));
-        assert_eq!(off("count"), std::mem::offset_of!(MaskParams, count));
-        assert_eq!(off("layers"), std::mem::offset_of!(MaskParams, layers));
-        let (_, ty) = module
-            .types
-            .iter()
-            .find(|(_, t)| t.name.as_deref() == Some("MaskLayer"))
-            .unwrap();
-        let naga::TypeInner::Struct { members, span } = &ty.inner else {
-            panic!("not a struct")
-        };
-        assert_eq!(*span as usize, std::mem::size_of::<MaskLayer>());
-        let off = |n: &str| {
-            members
-                .iter()
-                .find(|m| m.name.as_deref() == Some(n))
-                .unwrap()
-                .offset as usize
-        };
-        assert_eq!(off("gain"), std::mem::offset_of!(MaskLayer, gain));
-        assert_eq!(off("tone"), std::mem::offset_of!(MaskLayer, tone));
-        assert_eq!(off("tone_map"), std::mem::offset_of!(MaskLayer, tone_map));
-        assert_eq!(off("flags"), std::mem::offset_of!(MaskLayer, flags));
-        assert_eq!(off("mixer"), std::mem::offset_of!(MaskLayer, mixer));
     }
 
     #[test]

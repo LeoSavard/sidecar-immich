@@ -1,16 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright Sidecar contributors
+//! requires: uniforms/composite_params.wgsl
 // Composite one stroke's coverage onto a mask: paint (b + (1 − b)·c) or erase (b·(1 − c)), or copy the base
 // alone to start a mask from the one the models made — through the layer's range when it has one, so a depth
 // mask becomes a band of distance before any stroke is painted on it. The base may be any size; it is read
 // through a linear sampler at this target's pixel centres.
-
-struct CompositeParams {
-  size: vec2f,           // the target, pixels
-  mode: u32,             // 0 paint, 1 erase, 2 copy the base
-  _pad: u32,
-  range: vec4f,          // copying: x..y the values kept, z the feather beyond each end, w 1 to apply (0: as is)
-}
 
 @group(0) @binding(0) var<uniform> C: CompositeParams;
 @group(0) @binding(1) var base: texture_2d<f32>;

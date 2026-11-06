@@ -45,7 +45,7 @@ export type Packed = {
 /** A spectral colour stock's profile, as `GET /api/film/stocks/{id}` sends it (`slide::SlideProfile`). */
 export type SlideProfile = { offsets: [number, number, number]; scale: number; side: number; response: Float32Array };
 
-/** `DevelopParams` (shaders/develop/params.wgsl), mirrored in crates/color. Checked against the wasm on load, so a
+/** `DevelopParams` (crates/color/src/params.rs). Checked against the wasm on load, so a
  *  struct that grew on one side fails here, by name, rather than as a garbled render. */
 export const DEVELOP_UNIFORM_BYTES = 432;
 const MASK_UNIFORM_BYTES = 1568;

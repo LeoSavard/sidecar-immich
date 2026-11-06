@@ -3,25 +3,38 @@
 //! 3×3 binning for X-Trans proxies) → clip coverage → downsampled RGBA16F proxy, camera-native linear RGB.
 
 use anyhow::{Context, Result, bail};
+use sidecar_uniform::Uniform;
 use wgpu::util::DeviceExt;
 
 use crate::compute::{B, Kernel, Res, texture, view};
 use crate::{Gpu, RgbaF32};
 
-/// Mirrors `struct IngestParams` in shaders/ingest/common.wgsl (224 bytes).
+/// The ingest passes' uniform (224 bytes). Its WGSL declaration,
+/// `shaders/uniforms/ingest_params.wgsl`, is generated from this struct (`sidecar-uniform`); the
+/// `uniforms` test checks the file and every offset.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable, Uniform)]
 pub struct IngestParams {
+    /// Size of the texture being read.
     pub in_size: [u32; 2],
+    /// Size of the texture being written.
     pub out_size: [u32; 2],
+    /// Raw black level per CFA colour index (R, G, B, G2).
     pub black: [f32; 4],
+    /// As-shot white balance multipliers, green = 1.
     pub wb: [f32; 4],
+    /// Raw saturation level.
     pub white: f32,
+    /// Normalized clipping threshold.
     pub clip: f32,
+    /// Highlight desaturation.
     pub desat: f32,
+    /// Was vkdt's `soft`; the fill no longer blends measured pixels.
     pub _unused: f32,
+    /// 0 = Bayer cropped to RGGB, 1 = X-Trans cropped to the vkdt block phase.
     pub sensor: u32,
     pub _p: [u32; 3],
+    /// 6×6 CFA colour indices, row-major.
     pub pattern: [[u32; 4]; 9],
 }
 
@@ -475,31 +488,6 @@ impl Ingest {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn ingest_params_layout_matches_wgsl() {
-        let src = sidecar_shaders::compose("ingest/common.wgsl").unwrap();
-        let module = naga::front::wgsl::parse_str(&src).unwrap();
-        let (_, ty) = module
-            .types
-            .iter()
-            .find(|(_, t)| t.name.as_deref() == Some("IngestParams"))
-            .unwrap();
-        let naga::TypeInner::Struct { members, span } = &ty.inner else {
-            panic!()
-        };
-        assert_eq!(*span as usize, std::mem::size_of::<IngestParams>());
-        let off = |n: &str| {
-            members
-                .iter()
-                .find(|m| m.name.as_deref() == Some(n))
-                .unwrap()
-                .offset as usize
-        };
-        assert_eq!(off("wb"), std::mem::offset_of!(IngestParams, wb));
-        assert_eq!(off("sensor"), std::mem::offset_of!(IngestParams, sensor));
-        assert_eq!(off("pattern"), std::mem::offset_of!(IngestParams, pattern));
-    }
 
     /// D14: half a frame blown, beside a measured half with no blue in it at all. Before, the fill's ratios
     /// against the estimate's empty blue multiplied level by level until `exp` overflowed and NaN covered the

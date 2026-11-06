@@ -34,5 +34,6 @@ Sidecar is published as an Apache-2.0 image. Every file you add must keep that p
 
 - Shaders: modules take values as arguments; only entry files (`shaders/client/*`, `shaders/server/*`) read
   bindings. Declare dependencies with `//! requires:`.
-- Uniform layouts are mirrored by hand in Rust and verified against the WGSL by naga in tests.
+- Uniform structs are written once, in Rust, with `#[derive(Uniform)]`; their WGSL in `shaders/uniforms/` is
+  generated (`npm run uniforms`), committed, and checked against the struct and by naga in tests.
 - Parity: `web/scripts/parity-browser.mjs` + `sidecar-dev parity …`; mean ΔE2000 ≤ 0.5, p99 ≤ 2.

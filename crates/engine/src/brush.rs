@@ -6,6 +6,7 @@
 use anyhow::Result;
 use sidecar_color::lens::LensParams;
 use sidecar_color::params::Stroke;
+use sidecar_uniform::Uniform;
 use wgpu::util::DeviceExt;
 
 use crate::Gpu;
@@ -54,23 +55,36 @@ pub fn stroke_px(
     }
 }
 
+/// A brush stroke's uniform (32 bytes). Its WGSL declaration, `shaders/uniforms/brush_params.wgsl`,
+/// is generated from this struct (`sidecar-uniform`); the `uniforms` test checks the file and every
+/// offset.
 #[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct BrushParams {
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, Uniform)]
+pub(crate) struct BrushParams {
+    /// The target, in pixels.
     size: [f32; 2],
+    /// In pixels.
     radius: f32,
+    /// 0 hard … 1 soft from the centre.
     feather: f32,
+    /// 0…1.
     flow: f32,
     _pad: [f32; 3],
 }
 
+/// The brush composite's uniform (32 bytes). Its WGSL declaration,
+/// `shaders/uniforms/composite_params.wgsl`, is generated from this struct (`sidecar-uniform`); the
+/// `uniforms` test checks the file and every offset.
 #[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct CompositeParams {
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, Uniform)]
+pub(crate) struct CompositeParams {
+    /// The target, in pixels.
     size: [f32; 2],
+    /// 0 paint, 1 erase, 2 copy the base.
     mode: u32,
     _pad: u32,
-    /// Copying the base: `MaskRange::uniform`.
+    /// Copying the base: `MaskRange::uniform` — x..y the values kept, z the feather beyond each end, w 1 to
+    /// apply (0: as is).
     range: [f32; 4],
 }
 

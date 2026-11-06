@@ -1,16 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright Sidecar contributors
-//! requires: lens/remap.wgsl
+//! requires: lens/remap.wgsl uniforms/warp_params.wgsl
 // Warp pass (worker): crop, straighten, keystone and quarter turns (DESIGN.md §15), applied to a developed
 // texture for export, the fallback preview and loupe tiles. One projective map, computed by
 // sidecar_color::geometry, takes each output pixel to where it reads; the editor's view pass applies the same
 // map on screen. Bicubic (Catmull-Rom) reads, clamped at the edge.
-
-struct WarpParams {
-  m: mat3x3f,            // output pixel centre → input texel coordinates, homogeneous
-  out_size: vec2u,
-  _pad: vec2u,
-}
 
 @group(0) @binding(0) var<uniform> W: WarpParams;
 @group(0) @binding(1) var src: texture_2d<f32>;

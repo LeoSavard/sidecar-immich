@@ -2,6 +2,7 @@
 //! Lens blur and haze by distance (DESIGN.md §15, "Depth effects"): the uniform the depth passes take
 //! (`shaders/depth/effects.wgsl`), from the edit, the photo's airlight, and where the texture being processed
 //! sits in the frame the depth map covers. One packing for the browser (through wasm) and the worker.
+use sidecar_uniform::Uniform;
 
 use crate::params::EditParams;
 
@@ -13,9 +14,11 @@ pub const MAX_HAZE: f64 = 3.0;
 /// blur costs the same as a narrow one, at any picture size.
 pub const GATHER_RADIUS: f64 = 16.0;
 
-/// Byte-for-byte mirror of `struct DepthParams` in shaders/depth/effects.wgsl (64 bytes); checked by naga.
+/// The depth effects' uniform (64 bytes). Its WGSL declaration,
+/// `shaders/uniforms/depth_params.wgsl`, is generated from this struct (`sidecar-uniform`); the
+/// `uniforms` test checks the file and every offset.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable, Uniform)]
 pub struct DepthParams {
     /// xy: this texture's offset in the depth map's frame, in its pixels; zw: that frame's size.
     pub frame: [f32; 4],
@@ -58,14 +61,15 @@ pub fn refined_size(frame: [u32; 2]) -> [u32; 2] {
 /// sensor noise and a texture's own variation do not chop a smooth surface into pieces.
 pub const REFINE_SIGMA: f64 = 0.08;
 
-/// Byte-for-byte mirror of `struct DepthRefineParams` in shaders/client/depth_refine.wgsl (16 bytes); checked
-/// by naga.
+/// The depth map refinement's uniform (16 bytes). Its WGSL declaration,
+/// `shaders/uniforms/depth_refine_params.wgsl`, is generated from this struct (`sidecar-uniform`);
+/// the `uniforms` test checks the file and every offset.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable, Uniform)]
 pub struct DepthRefineParams {
     /// The distance between taps, in the texture being refined: one texel of the model's own map.
     pub spacing: f32,
-    /// `REFINE_SIGMA`.
+    /// The luminance difference that halves a tap's weight, in the photo's linear light: `REFINE_SIGMA`.
     pub sigma_range: f32,
     pub _pad: [f32; 2],
 }
@@ -167,69 +171,6 @@ pub fn pack(
 mod tests {
     use super::*;
     use crate::params::LensBlur;
-
-    #[test]
-    fn layout_matches_wgsl() {
-        let src = sidecar_shaders::compose("depth/effects.wgsl").unwrap();
-        let module = naga::front::wgsl::parse_str(&src).unwrap();
-        let (_, ty) = module
-            .types
-            .iter()
-            .find(|(_, t)| t.name.as_deref() == Some("DepthParams"))
-            .unwrap();
-        let naga::TypeInner::Struct { members, span } = &ty.inner else {
-            panic!("not a struct")
-        };
-        assert_eq!(*span as usize, std::mem::size_of::<DepthParams>());
-        for (name, off) in [
-            ("frame", std::mem::offset_of!(DepthParams, frame)),
-            ("haze", std::mem::offset_of!(DepthParams, haze)),
-            ("blur", std::mem::offset_of!(DepthParams, blur)),
-            ("scale", std::mem::offset_of!(DepthParams, scale)),
-        ] {
-            assert_eq!(
-                members
-                    .iter()
-                    .find(|m| m.name.as_deref() == Some(name))
-                    .unwrap()
-                    .offset as usize,
-                off,
-                "{name}"
-            );
-        }
-    }
-
-    #[test]
-    fn refine_layout_matches_wgsl() {
-        let src = sidecar_shaders::compose("client/depth_refine.wgsl").unwrap();
-        let module = naga::front::wgsl::parse_str(&src).unwrap();
-        let (_, ty) = module
-            .types
-            .iter()
-            .find(|(_, t)| t.name.as_deref() == Some("DepthRefineParams"))
-            .unwrap();
-        let naga::TypeInner::Struct { members, span } = &ty.inner else {
-            panic!("not a struct")
-        };
-        assert_eq!(*span as usize, std::mem::size_of::<DepthRefineParams>());
-        for (name, off) in [
-            ("spacing", std::mem::offset_of!(DepthRefineParams, spacing)),
-            (
-                "sigma_range",
-                std::mem::offset_of!(DepthRefineParams, sigma_range),
-            ),
-        ] {
-            assert_eq!(
-                members
-                    .iter()
-                    .find(|m| m.name.as_deref() == Some(name))
-                    .unwrap()
-                    .offset as usize,
-                off,
-                "{name}"
-            );
-        }
-    }
 
     /// The taps are a texel of the model's own map apart, whatever the frame is stretched to, and a frame no
     /// bigger than the model's output has nothing to repair.

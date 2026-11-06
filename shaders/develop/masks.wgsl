@@ -1,28 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright Sidecar contributors
-//! requires: common/transfer.wgsl common/color.wgsl develop/tone.wgsl
+//! requires: common/transfer.wgsl common/color.wgsl develop/tone.wgsl uniforms/mask_params.wgsl
 // Mask layers (DESIGN.md §15). Each mask weights its layer at every pixel, and the weighted layers add up on
 // top of the global edit: white balance as camera-space gains, exposure in stops, the tone map's parameters
 // and the colour mixer's blended toward the layer's, each layer's own curve after the global curve, and
 // contrast and saturation after the tone map. No masks is exactly the global edit.
-// Layout mirrored by hand in crates/color/src/params.rs (MaskParams, 1,568 bytes), checked by naga.
-
-struct MaskLayer {
-  gain: vec4f,               // rgb: white-balance gains at full weight; w: exposure in stops
-  tone: vec4f,               // x: contrast, y: saturation (−1…1), z: amount (0…1), w: 1 to invert
-  tone_map: vec4f,           // the tone map's parameters at full weight, as DevelopParams.tone
-  flags: vec4f,              // x: has a curve (row of the layer curves), y: moves the mixer, z: moves the tone map
-  mixer: array<vec4f, 8>,    // added to DevelopParams.mixer at full weight
-}
-
-struct MaskParams {
-  frame: vec4f,              // xy: the developed texture's offset in the masks' frame; zw: that frame's size (0: its own)
-  count: u32,
-  _pad0: u32,
-  _pad1: u32,
-  _pad2: u32,
-  layers: array<MaskLayer, 8>,
-}
 
 // What the layers add up to at one pixel.
 struct MaskMix {

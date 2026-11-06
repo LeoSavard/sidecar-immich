@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright Sidecar contributors
+//! requires: uniforms/depth_refine_params.wgsl
 // Depth pass 0 of 3: make the depth map's edges the photo's edges (ROADMAP, "Depth, beyond what shipped").
 //
 // Depth Anything gives a 518² map of relative depth. Stretched to the frame it is smooth where the photo is
@@ -18,12 +19,6 @@
 // input and their products — several passes and intermediate textures — for a result that differs mainly in
 // how it handles gradients *within* a region, which a depth map does not have much of. This is one pass, it
 // is the same arithmetic in both engines, and it is where the halo actually comes from.
-
-struct DepthRefineParams {
-  spacing: f32,      // distance between taps, in this texture's pixels
-  sigma_range: f32,  // luminance difference that halves a tap's weight, in the photo's linear light
-  _pad: vec2f,
-}
 
 @group(0) @binding(0) var<uniform> D: DepthRefineParams;
 @group(0) @binding(1) var photo: texture_2d<f32>;

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright Sidecar contributors
-//! requires: lens/params.wgsl lens/remap.wgsl
+//! requires: uniforms/lens_params.wgsl lens/remap.wgsl
 // Lens pass: distortion, lateral chromatic aberration and vignetting, from camera-native linear RGBA into a
 // texture of the output's size. Runs before develop — in the browser only when a lens setting changes, on the
 // server after denoise and sharpening. Bicubic (Catmull-Rom) reads, clamped at the image edge.
