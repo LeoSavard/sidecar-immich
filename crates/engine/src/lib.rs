@@ -10,6 +10,7 @@ pub mod depth;
 pub mod detail;
 pub mod develop;
 pub mod focus;
+pub mod guided;
 pub mod ingest;
 pub mod lens;
 pub mod warp;
@@ -354,6 +355,7 @@ mod uniforms {
                 R::of::<crate::detail::DetailParams>(),
                 R::of::<crate::brush::BrushParams>(),
                 R::of::<crate::brush::CompositeParams>(),
+                R::of::<crate::guided::GuidedParams>(),
             ],
         );
     }
