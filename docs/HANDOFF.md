@@ -37,7 +37,7 @@ primitives first, because several features stand on each:
 | 17 | 3D LUT loading; defringe; film-negative inversion | an A/B on fringing; where LUTs belong | #80 negatives, #81 defringe, #82 3D LUTs (on #81; log-footage LUTs to come) |
 | 18 | Rec.2020 export with a synthesised ICC; soft proofing with a gamut check | a printer profile to check against a print; whether the warning should follow the intent | #66 Rec.2020, #83 soft proofing (on #82) |
 | **Workflow** ||||
-| 19 | Presets and styles; copy-paste of a settings subset; sync across a selection | — | |
+| 19 | Presets and styles; copy-paste of a settings subset; sync across a selection | per person or shared presets | #84 (auto-sync to come) |
 | 20 | Snapshots and virtual copies | — | |
 | 21 | Browsing the editing folder; other folder layouts (name-walk fallback, tokens, locales) | — | |
 | 22 | Histogram and overlays in the no-WebGPU fallback | — | |
