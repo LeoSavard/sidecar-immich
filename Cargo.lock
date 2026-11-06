@@ -6475,6 +6475,8 @@ dependencies = [
  "sidecar-engine",
  "sidecar-raw",
  "sidecar-shaders",
+ "sidecar-template",
+ "sidecar-xmp",
  "zune-jpeg",
 ]
 
