@@ -147,7 +147,7 @@ impl Geometry {
 }
 
 /// Plane coordinates (0…1 of the picture) → isotropic, centred, in picture heights. `a` is width ÷ height.
-fn to_iso(a: f64) -> M3 {
+pub(crate) fn to_iso(a: f64) -> M3 {
     [[a, 0.0, -a / 2.0], [0.0, 1.0, -0.5], [0.0, 0.0, 1.0]]
 }
 
@@ -162,7 +162,7 @@ fn ry(t: f64) -> M3 {
 }
 
 /// Straightened plane → picture, isotropic: undo the straighten, the aspect, then the keystone.
-fn plane_to_picture(g: &Geometry, a: f64) -> M3 {
+pub(crate) fn plane_to_picture(g: &Geometry, a: f64) -> M3 {
     let f = FOCAL_DIAGONALS * (a * a + 1.0).sqrt();
     let k = mat::diag([f, f, 1.0]);
     let k_inv = mat::diag([1.0 / f, 1.0 / f, 1.0]);

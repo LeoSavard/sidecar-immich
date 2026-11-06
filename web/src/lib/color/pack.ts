@@ -16,6 +16,7 @@ type Exports = {
 	sc_geometry(ptr: number, len: number): number;
 	sc_adopt_rendering(ptr: number, len: number): number;
 	sc_geometry_fit(ptr: number, len: number): number;
+	sc_upright(ptr: number, len: number): number;
 	sc_default_edit(): number;
 	sc_last_error(): number;
 	sc_develop_uniform_bytes(): number;
@@ -115,6 +116,19 @@ export class ColorPacker {
 	/** `geometry` with its crop fitted after a change from `before` (`sidecar_color::geometry::fit`). */
 	fit(geometry: Geometry, before: Geometry, size: [number, number]): Geometry {
 		return JSON.parse(new TextDecoder().decode(this.call(this.x.sc_geometry_fit, { geometry, before, size })));
+	}
+
+	/**
+	 * `geometry` stood up by the photo's own lines (`sidecar_color::upright::solve`): `lum` is the picture's
+	 * luminance at `lumSize`, `focal` the lens in picture diagonals when known. Null when the photo hasn't the
+	 * straight lines `mode` needs.
+	 */
+	upright(geometry: Geometry, size: [number, number], lum: Float32Array, lumSize: [number, number], mode: 'level' | 'vertical' | 'full', focal: number | null): Geometry | null {
+		try {
+			return JSON.parse(new TextDecoder().decode(this.call(this.x.sc_upright, { geometry, size, lum: Array.from(lum, (v) => Math.round(v * 1e4) / 1e4), lumSize, mode, focal })));
+		} catch {
+			return null;
+		}
 	}
 
 	/**
