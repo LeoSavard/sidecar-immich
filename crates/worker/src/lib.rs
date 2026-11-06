@@ -951,10 +951,8 @@ fn loupe_png(
         let mut info = png::Info::with_size(img.width, img.height);
         info.color_type = png::ColorType::Rgb;
         info.bit_depth = png::BitDepth::Eight;
-        if req.color_space == sidecar_color::DisplaySpace::DisplayP3 {
-            info.icc_profile = Some(std::borrow::Cow::Borrowed(include_bytes!(
-                "../../../assets/icc/DisplayP3-v4.icc"
-            )));
+        if req.color_space != sidecar_color::DisplaySpace::Srgb {
+            info.icc_profile = Some(std::borrow::Cow::Borrowed(export::icc_for(req.color_space)));
         }
         png::Encoder::with_info(&mut out, info)?
             .write_header()?

@@ -177,8 +177,10 @@ fn settings_suffix(req: &ExportRequest) -> String {
     if let Some(edge) = req.long_edge {
         s += &format!("-{edge}px");
     }
-    if req.color_space == DisplaySpace::DisplayP3 {
-        s += "-p3";
+    match req.color_space {
+        DisplaySpace::DisplayP3 => s += "-p3",
+        DisplaySpace::Rec2020 => s += "-rec2020",
+        DisplaySpace::Srgb => {}
     }
     if req.format == "jpeg" && req.quality != quality() {
         s += &format!("-q{}", req.quality);
