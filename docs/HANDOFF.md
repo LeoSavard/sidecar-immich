@@ -17,14 +17,14 @@ primitives first, because several features stand on each:
 | # | Item | Needs from the owner | Status |
 |---|---|---|---|
 | **Primitives** ||||
-| 1 | Guided filter (WGSL), first used for the depth map's second refinement pass | an A/B on depth edges | |
-| 2 | Gaussian/Laplacian pyramid on the GPU | — | |
-| 3 | Noise model per camera and ISO, and a variance-stabilising transform around the wavelet denoiser | an A/B on high-ISO frames | |
-| 4 | Linear float DNG writer (what every merge produces) | — | |
-| 5 | Highlight-aware demosaic (clip mask inside RCD) | — (measured against `hilite-truth`) | |
+| 1 | Guided filter (WGSL), first used for the depth map's second refinement pass | an A/B on depth edges | #59 |
+| 2 | Gaussian/Laplacian pyramid on the GPU | — | #60 |
+| 3 | Noise model per camera and ISO, and a variance-stabilising transform around the wavelet denoiser | an A/B on high-ISO frames | #61 (A/B pending) |
+| 4 | Linear float DNG writer (what every merge produces) | — | #62 |
+| 5 | Highlight-aware demosaic (clip mask inside RCD) | — (measured against `hilite-truth`) | #63 — measured, closed |
 | **Editing** ||||
-| 6 | Gradients: linear and radial mask layers | — | |
-| 7 | Colour grading wheels (lift/gamma/gain on tonal ranges) | — | |
+| 6 | Gradients: linear and radial mask layers | — | #64 |
+| 7 | Colour grading wheels (lift/gamma/gain on tonal ranges) | — | #65 |
 | 8 | Clarity, texture, local contrast (local Laplacian, on #2) | an A/B | |
 | 9 | Dehaze without depth (dark channel prior, on #1) | an A/B | |
 | 10 | ACES reference gamut compression | an A/B on LED and neon | |
@@ -35,7 +35,7 @@ primitives first, because several features stand on each:
 | 15 | Heal, clone and spot removal; red-eye | — | |
 | 16 | Camera profiles (DCP forward matrix, HueSatMap, LookTable) | which profiles to test | |
 | 17 | 3D LUT loading; defringe; film-negative inversion | — | |
-| 18 | Rec.2020 export with a synthesised ICC; soft proofing with a gamut check | — | |
+| 18 | Rec.2020 export with a synthesised ICC; soft proofing with a gamut check | — | #66 (Rec.2020 done; soft proofing to come) |
 | **Workflow** ||||
 | 19 | Presets and styles; copy-paste of a settings subset; sync across a selection | — | |
 | 20 | Snapshots and virtual copies | — | |
@@ -47,8 +47,8 @@ primitives first, because several features stand on each:
 | 26 | Apple's own disparity as a second depth source | an A/B on a Portrait capture | |
 | 27 | iPhone parity: the harness runs on the phone and posts back | the owner opens one URL on the iPhone | |
 | **Multi-frame** ||||
-| 28 | Alignment and features (shared) | test sets, chosen by the owner | |
-| 29 | HDR merge → linear DNG | a bracket set | |
+| 28 | Alignment and features (shared) | test sets, chosen by the owner | #67 |
+| 29 | HDR merge → linear DNG | a bracket set | #68 (tool; editor to come) |
 | 30 | Panorama → linear DNG | a pano set | |
 | 31 | HDRI → OpenEXR and Radiance HDR | a 360° set, if one exists | |
 | 32 | Focus stacking | a focus stack, if one exists | |
