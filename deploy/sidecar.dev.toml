@@ -8,8 +8,13 @@ secure_cookies = false
 allow_path_open = true
 
 [immich]
-# Empty: no sign-in, no Immich lookups (local development). Set to http://immich_server:2283 to use Immich.
+# Empty: no Immich lookups (local development). Set to http://immich_server:2283 to use Immich.
 url = ""
+
+# Without Immich, Sidecar's own accounts ask for sign-in. Off here, on a loopback-only development server, so
+# the smoke and parity scripts can drive it; a real deployment leaves this section out.
+[sign_in]
+enabled = false
 
 # A writable copy for testing sidecar writes. The real library below is mounted read-only.
 [[roots]]

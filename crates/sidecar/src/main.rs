@@ -25,6 +25,13 @@ enum Command {
         #[arg(long, default_value = "/cache")]
         cache: PathBuf,
     },
+    /// Local accounts, from the server itself: the way back in when nobody remembers a password.
+    Account {
+        #[arg(long, default_value = "/etc/sidecar.toml")]
+        config: PathBuf,
+        #[command(subcommand)]
+        action: AccountAction,
+    },
     /// Development: api and worker in one process.
     Dev {
         #[arg(long)]
@@ -32,6 +39,48 @@ enum Command {
         #[arg(long, default_value = "/cache/sidecar-dev")]
         cache: PathBuf,
     },
+}
+
+#[derive(Subcommand)]
+enum AccountAction {
+    /// The accounts there are.
+    List,
+    /// Set a password, signing that account out everywhere. An account that doesn't exist yet is created, as
+    /// an administrator. Asks for the password; piped in, it reads one line.
+    SetPassword { username: String },
+}
+
+async fn account(config: PathBuf, action: AccountAction) -> Result<()> {
+    let config = sidecar_api::config::Config::load(&config)?;
+    let store = sidecar_api::store::Store::new(config.server.state_dir.clone())?;
+    match action {
+        AccountAction::List => {
+            for a in sidecar_api::accounts::all(&store).await {
+                let role = if a.is_admin { "administrator" } else { "" };
+                println!("{:<24} {:<32} {role}", a.username, a.name);
+            }
+        }
+        AccountAction::SetPassword { username } => {
+            let password = if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                let first = rpassword::prompt_password(format!("New password for {username}: "))?;
+                if rpassword::prompt_password("Again: ")? != first {
+                    anyhow::bail!("the two passwords differ; nothing was changed");
+                }
+                first
+            } else {
+                let mut line = String::new();
+                std::io::stdin().read_line(&mut line)?;
+                line.trim_end_matches(['\r', '\n']).to_string()
+            };
+            let a = sidecar_api::accounts::set_password(&store, &username, &password).await?;
+            println!(
+                "{}'s password is set{}.",
+                a.username,
+                if a.is_admin { " (administrator)" } else { "" }
+            );
+        }
+    }
+    Ok(())
 }
 
 async fn serve(listen: &str, router: axum::Router) -> Result<()> {
@@ -61,6 +110,7 @@ async fn main() -> Result<()> {
             )
             .await
         }
+        Command::Account { config, action } => account(config, action).await,
         Command::Dev { config, cache } => {
             let app = api_app(config)?;
             let worker = sidecar_worker::Worker::new(cache)?;

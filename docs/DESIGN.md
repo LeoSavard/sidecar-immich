@@ -7,6 +7,15 @@ Source: the architecture plan (PWA entry, XMP sidecars, server-side demosaic, We
 
 Where the code differs from the text below, the code and these notes win.
 
+- **Sign-in without Immich** (§10, "Without Immich"): a Sidecar with no Immich used to have no sign-in at all —
+  authentication *was* the Immich key — so the standalone deployment was safe only behind something else that
+  checked. It now has local accounts for one person or a household, first-run setup by a code from the
+  server's log, administration in Settings → People, and `sidecar account` on the server for recovery. The
+  owner's scope, 2026-11-05: comprehensive for a single user or a family, no second factor. Checked by
+  `web/scripts/signin-smoke.mjs` end to end (twenty steps, from a refused setup code to signing out), unit
+  tests for usernames, hashing, the lockout and the last administrator, and the recovery command against
+  the same state.
+
 - **D1 and D5 are both closed, neither merged** (pull request #46, closed 2026-10-29). The owner's rule,
   2026-10-27: what is merged and deployed should be what has been tested. Both were written, and neither
   earned its way in.
@@ -1584,12 +1593,20 @@ misses an entry, and the file the person asked for still arrives.
 | GET | `/api/assets/{key}/edit` | Params + `ETag` |
 | PUT | `/api/assets/{key}/edit` | Commit; `If-Match` required; `412` on conflict |
 | POST | `/api/intake` | multipart `file` → upload to Immich, `{ assetKey }`; `501` without a library |
+| GET | `/api/sign-in` | Public: `{ method: immich \| password \| none, setup }` — how this Sidecar signs people in |
+| POST | `/api/session` | `{ apiKey }` (Immich) or `{ username, password }` (local accounts) → session cookie |
+| POST | `/api/accounts/setup` | `{ code, username, name?, password }` → the first account, an administrator; `409` once one exists |
+| GET, POST | `/api/accounts` | Administrators: list, or add `{ username, name?, password, isAdmin? }` |
+| PUT, DELETE | `/api/accounts/{id}` | Administrators: `{ name?, password?, isAdmin? }` (a password signs them out everywhere), or remove |
+| PUT | `/api/account/password` | `{ current, password }`: your own; other browsers are signed out, this one gets a fresh session |
 | POST | `/api/exports` | `202` new job, or `200` existing version; `Idempotency-Key`; `destination` |
 | GET | `/api/exports/{id}/events` | `text/event-stream` |
 | GET | `/api/exports/{id}` | Status snapshot |
 | DELETE | `/api/exports/{id}` | Cancel |
 
 **Auth.** The user signs in once per browser (Safari, Home Screen app, desktop) with an Immich API key holding `asset.read`, `asset.view` (thumbnails in the picker), `asset.upload`, `asset.update` and `stack.create` — stack creation in 3.1.0 checks `asset.update` on each asset. The admin key for internal-library sidecar discovery (§4) is separate, holds only `job.create`, and is read from a Docker secret. It's stored server-side, encrypted at rest; the browser gets an HttpOnly, `SameSite=Lax` session cookie — `Lax` so the cookie comes along on the top-level navigation from the Shortcut. Every resolve goes through that key, so nobody opens a photo Immich wouldn't show them.
+
+**Without Immich**, sign-in is Sidecar's own local accounts (`crates/api/src/accounts.rs`), sized for one person or a household: a username and an Argon2id-hashed password per account, administrators who add people, set a forgotten password and remove an account, and no e-mail, self-registration or second factor. The first account is made in the browser with a setup code the server prints to its log, so reaching a fresh server first is not enough to claim it; `sidecar account set-password` on the server is the way back in when no administrator remembers theirs. A session carries the account's *credential*, which changes with every password set, so a reset or a change signs that account out everywhere and a removed account's sessions belong to nothing. Five wrong passwords on one username make it wait 30 s, doubling per further failure up to 15 min; an unknown username is checked against a decoy hash, so timing doesn't reveal which names exist. `[sign_in] enabled = false` turns sign-in off for development on loopback, where everyone is *Developer*. With an Immich, Immich's accounts are Sidecar's and this is not read.
 
 ```ts
 type Band = 'red' | 'orange' | 'yellow' | 'green' | 'aqua' | 'blue' | 'purple' | 'magenta';

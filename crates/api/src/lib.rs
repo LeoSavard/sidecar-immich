@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Public HTTP surface. The worker is reached over the internal network only.
 
+pub mod accounts;
 pub mod config;
 pub mod export;
 pub mod immich;
@@ -38,10 +39,22 @@ pub struct App {
     pub http: reqwest::Client,
     /// `None` when no `[immich] url` is configured: a folder-only deployment.
     pub immich: Option<immich::Immich>,
+    /// Who may use this Sidecar, and how they say who they are.
+    pub sign_in: SignInMode,
     pub store: Store,
     pub secret: [u8; 32],
     pub jobs: export::Jobs,
     discovery: Mutex<Discovery>,
+}
+
+/// How people sign in, decided once from the configuration.
+pub enum SignInMode {
+    /// With an Immich API key: Sidecar's accounts are Immich's.
+    Immich,
+    /// With a username and password (`accounts.rs`): no Immich, one person or a household.
+    Accounts(accounts::Accounts),
+    /// Nobody signs in (`[sign_in] enabled = false`, for development on loopback).
+    Open,
 }
 
 #[derive(Default)]
@@ -72,10 +85,16 @@ impl App {
                 admin_key,
             })
         };
+        let sign_in = match (&immich, config.sign_in.enabled) {
+            (Some(_), _) => SignInMode::Immich,
+            (None, true) => SignInMode::Accounts(accounts::Accounts::default()),
+            (None, false) => SignInMode::Open,
+        };
         Ok(Arc::new(Self {
             config,
             http,
             immich,
+            sign_in,
             store,
             secret,
             jobs: export::Jobs::default(),
@@ -128,6 +147,28 @@ impl App {
                 tokio::time::sleep(Duration::from_secs(3600)).await;
             }
         });
+    }
+
+    /// A Sidecar with local accounts and none yet prints the code that makes the first one, so only someone
+    /// who can read the server's output can claim it. Without accounts, say how it is open.
+    fn announce_setup(self: &Arc<Self>) {
+        match &self.sign_in {
+            SignInMode::Accounts(acc) => {
+                let app = self.clone();
+                let code = acc.setup_code().to_string();
+                tokio::spawn(async move {
+                    if accounts::all(&app.store).await.is_empty() {
+                        tracing::warn!(
+                            "No accounts yet: open Sidecar in a browser and create the first one with the setup code {code}"
+                        );
+                    }
+                });
+            }
+            SignInMode::Open => tracing::warn!(
+                "Sign-in is off ([sign_in] enabled = false): anyone who can reach this server can use it"
+            ),
+            SignInMode::Immich => {}
+        }
     }
 
     /// Ask Immich to discover a newly created internal-library sidecar: at most one run an hour.
@@ -1652,6 +1693,7 @@ async fn preview(
 
 pub fn router(app: Arc<App>) -> Router {
     app.start_housekeeping();
+    app.announce_setup();
     app.start_lensfun_sync();
     let web = &app.config.server.web_root;
     let spa = ServeDir::new(web).fallback(ServeFile::new(web.join("index.html")));
@@ -1663,6 +1705,17 @@ pub fn router(app: Arc<App>) -> Router {
             get(session::session)
                 .post(session::sign_in)
                 .delete(session::sign_out),
+        )
+        .route("/api/sign-in", get(accounts::method))
+        .route("/api/accounts/setup", axum::routing::post(accounts::setup))
+        .route("/api/accounts", get(accounts::list).post(accounts::create))
+        .route(
+            "/api/accounts/{id}",
+            axum::routing::put(accounts::update).delete(accounts::remove),
+        )
+        .route(
+            "/api/account/password",
+            axum::routing::put(accounts::change_own),
         )
         .route("/api/recent", get(recent))
         .route("/api/settings", get(get_settings).put(put_settings))

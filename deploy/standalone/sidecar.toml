@@ -5,8 +5,9 @@ listen = "0.0.0.0:8080"
 worker_url = "http://sidecar-worker:8081"
 web_root = "/usr/share/sidecar/web"
 state_dir = "/state"
-# No Immich means no sign-in, so there is no session cookie to mark Secure either way. Leave this on if a
-# proxy terminates HTTPS in front; it costs nothing.
+# Sign-in is Sidecar's own accounts (docs/INSTALL.md). Mark the session cookie Secure: on behind a proxy that
+# terminates HTTPS, which is where this belongs once it leaves the machine. Off only for plain-HTTP testing on
+# loopback, or the browser drops the cookie and every sign-in seems to fail.
 secure_cookies = true
 # `/open?path=…` is how you open a photo already in the folder, since there is no library to browse yet.
 # Access is still confined to the roots below: a path outside them is refused.

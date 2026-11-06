@@ -13,7 +13,8 @@ server (wgpu on Vulkan). What the phone previews is what export renders. Parity 
 
 ```
 sidecar (the binary: `api`, `worker`, `dev`)
-├── sidecar-api      HTTP, sessions, /open and resolve, the XMP writer, exports + SSE, Immich client
+├── sidecar-api      HTTP, sessions and local accounts, /open and resolve, the XMP writer, exports + SSE,
+│                    Immich client
 │   ├── sidecar-xmp      sc:Sidecar inside XMP, the edit history tree
 │   ├── sidecar-template storage-template rendering, date/name lookup
 │   └── sidecar-color

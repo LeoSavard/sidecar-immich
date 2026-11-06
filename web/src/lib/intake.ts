@@ -5,7 +5,18 @@ import { api } from '$lib/api';
 import { keepOriginal } from '$lib/local/originals';
 
 /** What `GET /api/session` says about this deployment. */
-export type Who = { name: string; authRequired: boolean; immich: boolean; intakeFolder: string | null; mobile?: boolean };
+export type Who = {
+	id: string;
+	name: string;
+	authRequired: boolean;
+	/** How this Sidecar signs people in. */
+	signIn: 'immich' | 'password' | 'none';
+	/** May manage the local accounts. */
+	isAdmin: boolean;
+	immich: boolean;
+	intakeFolder: string | null;
+	mobile?: boolean;
+};
 
 export type Destination = 'immich' | 'folder';
 

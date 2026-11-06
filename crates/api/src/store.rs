@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Small JSON files under the state directory: sessions, asset records, recent lists, picker tokens.
-//! Everything here is rebuildable or disposable; edit state lives in the sidecars, never here.
+//! Small JSON files under the state directory: sessions, asset records, recent lists, picker tokens, and the
+//! local accounts. Everything but the accounts is rebuildable or disposable; edit state lives in the sidecars,
+//! never here.
 
 use anyhow::{Context, Result};
 use serde::{Serialize, de::DeserializeOwned};
@@ -26,7 +27,7 @@ fn safe(segment: &str) -> bool {
 
 impl Store {
     pub fn new(dir: PathBuf) -> Result<Self> {
-        for sub in ["sessions", "assets", "users", "picks"] {
+        for sub in ["sessions", "assets", "users", "picks", "accounts"] {
             std::fs::create_dir_all(dir.join(sub))
                 .with_context(|| format!("creating {}", dir.join(sub).display()))?;
         }
@@ -63,6 +64,23 @@ impl Store {
         let value = change(self.get(kind, id).await);
         self.put(kind, id, &value).await?;
         Ok(value)
+    }
+
+    /// Every record of `kind` that parses. For the few kinds small enough to read whole (accounts).
+    pub async fn list<T: DeserializeOwned>(&self, kind: &str) -> Vec<T> {
+        let mut out = Vec::new();
+        let Ok(mut entries) = tokio::fs::read_dir(self.dir.join(kind)).await else {
+            return out;
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            if entry.path().extension().is_some_and(|e| e == "json")
+                && let Ok(bytes) = tokio::fs::read(entry.path()).await
+                && let Ok(v) = serde_json::from_slice(&bytes)
+            {
+                out.push(v);
+            }
+        }
+        out
     }
 
     /// Delete records of `kind` last written more than `age` ago. Returns how many went.

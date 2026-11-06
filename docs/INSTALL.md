@@ -94,10 +94,26 @@ inspect sidecar_sidecar-photos` says where that is on the host, which is what yo
 
 Three things to know before you rely on it.
 
-**There is no sign-in.** Authentication *is* the Immich API key, so with no Immich every request is the same
-anonymous user. That is fine on a private network, over a VPN, or behind a proxy that authenticates. It is
-not fine on the open internet. The example binds to `127.0.0.1` for that reason — move it only once
-something in front is checking who is asking.
+**Sign-in is Sidecar's own.** With no Immich, people sign in with a username and password: one person, or a
+household. On first start the server prints a line beginning *No accounts yet* with a setup code
+(`docker logs sidecar-sidecar-api-1`); open Sidecar in a browser, enter the code, and make the first account,
+which is an administrator. That account adds everyone else in Settings → People, sets a new password for
+someone who forgot theirs (which signs them out everywhere), and can make others administrators. There is no
+e-mail, no self-registration and no second factor — it is a family's sign-in, not an office's. Wrong guesses
+on one username make it wait, from half a minute after the fifth up to fifteen minutes.
+
+If no administrator remembers their password, set one from the server itself:
+
+```bash
+docker exec -it sidecar-sidecar-api-1 sidecar account set-password <username>
+```
+
+That creates the account, as an administrator, if it doesn't exist. `sidecar account list` shows who there
+is. Passwords are stored as Argon2id hashes in the state directory's `accounts/`; back that directory up with
+the photos.
+
+Still serve it over HTTPS before it leaves your network — a password crosses the wire at sign-in. The example
+binds to `127.0.0.1`; put a proxy that terminates TLS in front before moving it.
 
 **The folder is write-once from the api, read-only from the worker.** The api writes the imported original
 and the XMP beside it; the worker only hashes, reads metadata and builds proxies. Both containers must see

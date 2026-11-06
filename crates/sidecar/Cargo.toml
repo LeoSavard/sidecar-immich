@@ -9,6 +9,8 @@ version.workspace = true
 anyhow.workspace = true
 axum.workspace = true
 clap.workspace = true
+# The recovery command reads a new password without echoing it.
+rpassword = "7"
 reqwest.workspace = true
 tokio.workspace = true
 tracing.workspace = true

@@ -14,6 +14,8 @@ repository = "https://github.com/LeoSavard/sidecar-immich"
 
 [workspace.dependencies]
 anyhow = "1"
+# Local accounts' passwords (Argon2id), for a Sidecar with no Immich to sign in to.
+argon2 = "0.5"
 # `multipart` for `POST /api/intake`: a photo handed straight to Sidecar from the device being edited on.
 axum = { version = "0.8", features = ["multipart"] }
 base64 = "0.22"

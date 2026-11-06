@@ -3,13 +3,17 @@ Settings: one choice of output space drives the viewport, the loupe and the expo
 judge on screen is what the exported file holds. -->
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { api } from '$lib/api';
+	import type { Who } from '$lib/intake';
 	import { DEFAULTS, saveSettings, settings, SPACE_LABELS } from '$lib/settings';
 	import type { DisplaySpace, Settings } from '$lib/types';
+	import AccountSettings from '$lib/ui/AccountSettings.svelte';
 
 	let current = $state<Settings>({ ...DEFAULTS });
 	let status = $state<'loading' | 'idle' | 'saving' | 'saved' | 'failed'>('loading');
 	let error = $state('');
 	let wideDisplay = $state(false);
+	let who = $state<Who | null>(null);
 
 	const SPACES: { value: DisplaySpace; blurb: string }[] = [
 		{ value: 'srgb', blurb: 'The safe choice. Every screen and app shows it the same way.' },
@@ -19,6 +23,7 @@ judge on screen is what the exported file holds. -->
 	onMount(async () => {
 		current = await settings();
 		status = 'idle';
+		who = await (await api('/api/session')).json();
 		wideDisplay = matchMedia('(color-gamut: p3)').matches;
 	});
 
@@ -87,6 +92,10 @@ judge on screen is what the exported file holds. -->
 			{/each}
 		</div>
 	</section>
+
+	{#if who?.signIn === 'password'}
+		<AccountSettings isAdmin={who.isAdmin} name={who.name} me={who.id} />
+	{/if}
 
 	<p class="mt-6 h-5 text-xs text-fg-2" role="status">
 		{#if status === 'saving'}Saving…{:else if status === 'saved'}Saved{:else if status === 'failed'}Couldn't save: {error}{/if}
