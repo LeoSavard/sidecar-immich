@@ -42,7 +42,7 @@ primitives first, because several features stand on each:
 | 21 | Browsing the editing folder; other folder layouts (name-walk fallback, tokens, locales) | whether a root can opt out of browsing | #87 layouts and the name walk, #88 browsing (on #87) |
 | 22 | Histogram and overlays in the no-WebGPU fallback | — | #89 (AF marker and Measure still hidden) |
 | 23 | Models on demand (Settings → Models) | which model goes on demand first | #90 (registry, scan, Settings; download with the first on-demand model) |
-| 24 | Parametric auto-edit (grey-world/edge WB, percentile tone anchoring, face-aware exposure) | an A/B | |
+| 24 | Parametric auto-edit (grey-world/edge WB, percentile tone anchoring, face-aware exposure) | whether an Auto is wanted despite the measurements | #91 (measured; nothing beats the defaults, so not wired) |
 | 25 | Colour ranges and skin; hair-edge refinement; subject- and depth-weighted peaking | — | |
 | 26 | Apple's own disparity as a second depth source | an A/B on a Portrait capture | |
 | 27 | iPhone parity: the harness runs on the phone and posts back | the owner opens one URL on the iPhone | |
