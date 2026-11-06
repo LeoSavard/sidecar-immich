@@ -10,6 +10,7 @@ pub mod developer;
 mod film_data;
 pub mod geometry;
 pub mod lens;
+pub mod mask_refine;
 pub mod mat;
 pub mod params;
 pub mod slide;
