@@ -6,6 +6,7 @@ pub mod export;
 pub mod immich;
 mod lensfun;
 pub mod luts;
+pub mod proof;
 pub mod resolve;
 pub mod session;
 pub mod store;
@@ -1686,6 +1687,14 @@ pub fn router(app: Arc<App>) -> Router {
                 .layer(axum::extract::DefaultBodyLimit::max(luts::LUT_LIMIT)),
         )
         .route("/api/luts/{id}", get(luts::table).delete(luts::remove))
+        .route(
+            "/api/proofs",
+            get(proof::list)
+                .post(proof::upload)
+                .layer(axum::extract::DefaultBodyLimit::max(proof::PROFILE_LIMIT)),
+        )
+        .route("/api/proofs/{id}", axum::routing::delete(proof::remove))
+        .route("/api/proofs/{id}/table", get(proof::table))
         .route("/api/assets/{key}/meta", get(meta))
         .route("/api/assets/{key}/proxy", get(proxy))
         .route("/api/assets/{key}/thumb", get(thumb))

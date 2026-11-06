@@ -56,8 +56,8 @@ export function loadTable(id: string, ready: () => void) {
 		.finally(ready);
 }
 
-/** `GET /api/luts/{id}`'s body: the side (u32), the domain's six floats, then RGBA floats. */
-function parse(bytes: ArrayBuffer): LutTable | undefined {
+/** `GET /api/luts/{id}`'s body, and a proof's (`GET /api/proofs/{id}/table`): the side (u32), the domain's six floats, then RGBA floats. */
+export function parse(bytes: ArrayBuffer): LutTable | undefined {
 	if (bytes.byteLength < 28) return undefined;
 	const v = new DataView(bytes);
 	const size = v.getUint32(0, true);
