@@ -87,6 +87,7 @@ pub fn detail_settings(edit: &EditParams) -> sidecar_engine::detail::DetailSetti
         sharpen_amount: d.sharpen_amount as f32,
         sharpen_radius: d.sharpen_radius as f32,
         sharpen_iterations: d.sharpen_iterations,
+        noise_model: d.noise_model,
     }
 }
 
@@ -578,8 +579,8 @@ pub fn render(
     let settings = detail_settings(&req.edit);
     if !settings.is_noop() {
         stage(tx, "detail", 0.35);
-        let sigma = kit.detail.noise_sigma(&kit.gpu, &source)?;
-        source = kit.detail.apply(&kit.gpu, source, sigma, &settings);
+        let noise = kit.detail.noise(&kit.gpu, &source)?;
+        source = kit.detail.apply(&kit.gpu, source, &noise, &settings);
     }
     if req.edit.lens.is_some() {
         stage(tx, "lens", 0.42);
