@@ -162,6 +162,7 @@ export function describeChanges(from: EditParams, to: EditParams): string[] {
 		if (from.lensBlur.range !== to.lensBlur.range) out.push(`Depth of field ${decimals(to.lensBlur.range)}`);
 	}
 	if ((from.haze ?? 0) !== (to.haze ?? 0)) out.push(`Haze ${signed(to.haze ?? 0)}`);
+	if (JSON.stringify(from.colorGrading ?? null) !== JSON.stringify(to.colorGrading ?? null)) out.push(to.colorGrading ? 'Colour grading adjusted' : 'No colour grading');
 	if (ownCurve(from) !== ownCurve(to)) out.push('Curve edited');
 	out.push(...describeGeometry(from.geometry ?? NO_GEOMETRY, to.geometry ?? NO_GEOMETRY));
 	if (!!from.lens !== !!to.lens) out.push(to.lens ? 'Lens correction on' : 'Lens correction off');
@@ -235,6 +236,14 @@ export const PICKS: { id: string; label: string; take: (into: EditParams, from: 
 		}
 	},
 	{ id: 'wb', label: 'White balance', take: (e, f) => (e.whiteBalance = structuredClone(f.whiteBalance)) },
+	{
+		id: 'grading',
+		label: 'Colour grading',
+		take: (e, f) => {
+			if (f.colorGrading) e.colorGrading = structuredClone(f.colorGrading);
+			else delete e.colorGrading;
+		}
+	},
 	{
 		id: 'light',
 		label: 'Light',
