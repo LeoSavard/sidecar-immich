@@ -51,6 +51,11 @@ export class ViewPass {
 	private boundTexture?: GPUTexture;
 	private boundFocusMask?: GPUTexture;
 	private boundOverlay?: GPUTexture;
+	/** The split view's other rendering, and the bind group made for it with the focus mask and overlay of the time. */
+	private splitGroup?: GPUBindGroup;
+	private splitTexture?: GPUTexture;
+	private splitFocusMask?: GPUTexture;
+	private splitOverlay?: GPUTexture;
 	/** The mask SHOW_MASK shows, in the developed texture's frame; a 1×1 placeholder when none. */
 	private overlay: GPUTexture;
 	private noOverlay: GPUTexture;
@@ -119,8 +124,12 @@ export class ViewPass {
 		this.context.configure({ device: this.device, format: this.format, alphaMode: 'opaque', colorSpace: displayP3 ? 'display-p3' : 'srgb' });
 	}
 
-	/** Fit the output in the canvas, then apply zoom (1 = fit) and pan (canvas pixels). */
-	render(developed: GPUTexture, canvas: HTMLCanvasElement, view: Viewport, flags: number, geometry?: ViewGeometry) {
+	/**
+	 * Fit the output in the canvas, then apply zoom (1 = fit) and pan (canvas pixels). With `split`, the canvas
+	 * left of `at` (0…1 of its width) shows `split.texture` — another rendering of the same picture, framed alike —
+	 * with a hairline between the two.
+	 */
+	render(developed: GPUTexture, canvas: HTMLCanvasElement, view: Viewport, flags: number, geometry?: ViewGeometry, split?: { texture: GPUTexture; at: number }) {
 		const [ow, oh] = geometry?.size ?? [developed.width, developed.height];
 		const cw = canvas.width;
 		const ch = canvas.height;
@@ -163,8 +172,38 @@ export class ViewPass {
 			colorAttachments: [{ view: this.context.getCurrentTexture().createView(), loadOp: 'clear', storeOp: 'store', clearValue: [0.086, 0.086, 0.086, 1] }]
 		});
 		pass.setPipeline(this.pipeline);
-		pass.setBindGroup(0, this.bindGroup!);
-		pass.draw(3);
+		if (split) {
+			if (this.splitTexture !== split.texture || this.splitFocusMask !== this.focusMask || this.splitOverlay !== this.overlay) {
+				this.splitGroup = this.device.createBindGroup({
+					layout: this.pipeline.getBindGroupLayout(0),
+					entries: [
+						{ binding: 0, resource: { buffer: this.ubo } },
+						{ binding: 1, resource: split.texture.createView() },
+						{ binding: 2, resource: this.sampler },
+						{ binding: 3, resource: this.focusMask.createView() },
+						{ binding: 4, resource: this.overlay.createView() }
+					]
+				});
+				this.splitTexture = split.texture;
+				this.splitFocusMask = this.focusMask;
+				this.splitOverlay = this.overlay;
+			}
+			const x = Math.round(Math.min(Math.max(split.at, 0), 1) * cw);
+			// The clear colour shows through one device pixel either side of the line.
+			if (x > 1) {
+				pass.setScissorRect(0, 0, x - 1, ch);
+				pass.setBindGroup(0, this.splitGroup!);
+				pass.draw(3);
+			}
+			if (x + 1 < cw) {
+				pass.setScissorRect(x + 1, 0, cw - x - 1, ch);
+				pass.setBindGroup(0, this.bindGroup!);
+				pass.draw(3);
+			}
+		} else {
+			pass.setBindGroup(0, this.bindGroup!);
+			pass.draw(3);
+		}
 		pass.end();
 		this.device.queue.submit([encoder.finish()]);
 	}
