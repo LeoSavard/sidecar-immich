@@ -1263,4 +1263,55 @@ mod tests {
             }
         }
     }
+
+    /// A soft proof's gamut warning: where the table's alpha marks a colour, the warning paints it mid grey, and
+    /// with the warning off the proof is the table's colour alone.
+    #[test]
+    fn proof_warning_paints_what_the_table_marks() {
+        use sidecar_color::lut::{CubeHeader, proof_uniform, srgb_decode};
+        let Ok(gpu) = crate::test_gpu() else {
+            return eprintln!("skipping: no GPU");
+        };
+        let pass = DevelopPass::new(gpu).unwrap();
+        let n = 9u32;
+        let m = (n - 1) as f32;
+        // An identity, its alpha marking every node with red over three quarters.
+        let table: Vec<f32> = (0..n * n * n)
+            .flat_map(|i| {
+                let c = [i % n, (i / n) % n, i / (n * n)].map(|v| v as f32 / m);
+                [c[0], c[1], c[2], if c[0] > 0.75 { 1.0 } else { 0.0 }]
+            })
+            .collect();
+        let header = CubeHeader {
+            size: n,
+            domain_min: [0.0; 3],
+            domain_max: [1.0; 3],
+        };
+        let colours = [[0.9f32, 0.1, 0.1], [0.2, 0.3, 0.4]];
+        let src = RgbaF32 {
+            width: 2,
+            height: 1,
+            data: colours
+                .iter()
+                .flat_map(|c| [c[0], c[1], c[2], 0.0])
+                .collect(),
+        };
+        let tex = crate::upload_rgba16(gpu, &src);
+        let run = |warn: bool| {
+            let u = proof_uniform(sidecar_color::DisplaySpace::Srgb, &header, warn);
+            let look = Look {
+                uniform: &u,
+                size: n,
+                table: &table,
+            };
+            crate::read_rgba16(gpu, &pass.apply_look(gpu, &tex, &look)).unwrap()
+        };
+        let (on, off) = (run(true), run(false));
+        let grey = srgb_decode(0.5);
+        for (k, (&marked, &kept)) in colours[0].iter().zip(&colours[1]).enumerate() {
+            assert!((on.data[k] - grey).abs() < 2e-3, "{:?}", &on.data[..3]);
+            assert!((off.data[k] - marked).abs() < 4e-3, "{:?}", &off.data[..3]);
+            assert!((on.data[4 + k] - kept).abs() < 4e-3, "{:?}", &on.data[4..7]);
+        }
+    }
 }

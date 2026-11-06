@@ -5,12 +5,13 @@
 // four corners of the one it is in, so a grey stays on the table's greys. `sidecar_color::lut::sample` is the
 // same on the CPU.
 
-fn lut3d_at(table: texture_3d<f32>, p: vec3u) -> vec3f {
-  return textureLoad(table, p, 0).rgb;
+fn lut3d_at(table: texture_3d<f32>, p: vec3u) -> vec4f {
+  return textureLoad(table, p, 0);
 }
 
-// `t` is the input normalised to the table's domain (0…1 on each axis); `n` the table's size on a side.
-fn lut3d_tetrahedral(table: texture_3d<f32>, n: u32, t: vec3f) -> vec3f {
+// `t` is the input normalised to the table's domain (0…1 on each axis); `n` the table's size on a side. Alpha is
+// interpolated with the colour: a proof's table carries its gamut warning there.
+fn lut3d_tetrahedral(table: texture_3d<f32>, n: u32, t: vec3f) -> vec4f {
   let p = clamp(t, vec3f(0.0), vec3f(1.0)) * f32(n - 1u);
   let base = min(vec3u(floor(p)), vec3u(n - 2u));
   let f = p - vec3f(base);

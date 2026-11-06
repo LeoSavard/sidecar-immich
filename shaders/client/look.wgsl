@@ -4,7 +4,9 @@
 // A 3D LUT as a look (DESIGN.md §15, "3D LUTs"; `sidecar_color::lut`), after develop: display-linear colour into
 // the LUT's own space and encoding, held to that space's gamut as the tool that built the table held it, through
 // the table, and back. The amount mixes in the LUT's encoding, where a grading tool's opacity does; what the
-// gamut held back is returned in proportion to what the LUT left, so an amount of 0 changes nothing.
+// gamut held back is returned in proportion to what the LUT left, so an amount of 0 changes nothing. A soft proof
+// (DESIGN.md §15, "Soft proofing") is this pass with the proof's table, whose alpha marks the colours the print can't
+// hold; with the warning on they show as mid grey, as the proof itself computed them.
 
 @group(0) @binding(0) var<uniform> L: LookParams;
 @group(0) @binding(1) var src: texture_2d<f32>;
@@ -33,6 +35,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let graded = lut3d_tetrahedral(table, u32(L.size.x), t);
   let amount = L.domain_min.w;
   let held = here.rgb - L.from_lut * inside;
-  let out = L.from_lut * look_decode(mix(e, graded, amount)) + (1.0 - amount) * held;
+  var out = L.from_lut * look_decode(mix(e, graded.rgb, amount)) + (1.0 - amount) * held;
+  if (L.size.y > 0.5 && graded.a > 0.5) { out = vec3f(srgb_decode1(0.5)); }
   textureStore(dst, p, vec4f(out, here.a));
 }

@@ -32,6 +32,10 @@ function slideTexture(device: GPUDevice, label: string, side: number): GPUTextur
 	});
 }
 
+/** A pass after develop through a 3D table (`client/look.wgsl`): its uniform and the table, RGBA floats `size` on a side. */
+export type PostTable = { uniform: Uint8Array; size: number; rgba: Float32Array };
+type Post = { ubo: GPUBuffer; table: GPUTexture; rgba: Float32Array };
+
 export class DevelopPass {
 	readonly device: GPUDevice;
 	private pipeline: GPURenderPipeline;
@@ -71,12 +75,14 @@ export class DevelopPass {
 	private defringeUbo?: GPUBuffer;
 	private defringed?: GPUTexture;
 	private boundInput?: GPUTexture;
-	/** The LUT pass (`client/look.wgsl`): its uniform and table when on, and what develop renders into before it. */
+	/**
+	 * The LUT pass (`client/look.wgsl`), run after develop for the edit's LUT and then for a soft proof, each with
+	 * its uniform and table when on; and the textures develop and the first of them render into on the way.
+	 */
 	private lookPipeline: GPUComputePipeline;
-	private lookUbo?: GPUBuffer;
-	private lookTable?: GPUTexture;
-	private lookRgba?: Float32Array;
-	private beforeLook?: GPUTexture;
+	private look?: Post;
+	private proof?: Post;
+	private stages: GPUTexture[] = [];
 
 	private constructor(device: GPUDevice, pipeline: GPURenderPipeline, layout: GPUBindGroupLayout, maskLayout: GPUBindGroupLayout, densityDown: GPUComputePipeline, densityBlur: GPUComputePipeline, defringePipeline: GPUComputePipeline, lookPipeline: GPUComputePipeline) {
 		this.device = device;
@@ -179,20 +185,32 @@ export class DevelopPass {
 	 * A 3D LUT after develop (`LookLut::uniform` and its table, RGBA floats `size` on a side), or null for none.
 	 * The table uploads once for as long as the same one is passed.
 	 */
-	setLook(look: { uniform: Uint8Array; size: number; rgba: Float32Array } | null) {
-		if (!look) {
-			this.lookUbo?.destroy();
-			this.lookUbo = undefined;
-			return;
+	setLook(look: PostTable | null) {
+		this.look = this.post(this.look, look, 'look');
+	}
+
+	/**
+	 * A soft proof after the look (`lut::proof_uniform` and the proof's table from `GET /api/proofs/{id}/table`),
+	 * or null for none. It changes only what is shown; the export never sees it.
+	 */
+	setProof(proof: PostTable | null) {
+		this.proof = this.post(this.proof, proof, 'proof');
+	}
+
+	private post(old: Post | undefined, next: PostTable | null, label: string): Post | undefined {
+		if (!next) {
+			old?.ubo.destroy();
+			old?.table.destroy();
+			return undefined;
 		}
-		this.lookUbo ??= this.device.createBuffer({ label: 'look params', size: look.uniform.byteLength, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-		this.device.queue.writeBuffer(this.lookUbo, 0, look.uniform);
-		if (look.rgba === this.lookRgba) return;
-		this.lookTable?.destroy();
-		const n = look.size;
-		this.lookTable = this.device.createTexture({ label: 'look lut', size: [n, n, n], dimension: '3d', format: 'rgba32float', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
-		this.device.queue.writeTexture({ texture: this.lookTable }, look.rgba, { bytesPerRow: n * 16, rowsPerImage: n }, [n, n, n]);
-		this.lookRgba = look.rgba;
+		const ubo = old?.ubo ?? this.device.createBuffer({ label: `${label} params`, size: next.uniform.byteLength, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+		this.device.queue.writeBuffer(ubo, 0, next.uniform);
+		if (old && old.rgba === next.rgba) return { ...old, ubo };
+		old?.table.destroy();
+		const n = next.size;
+		const table = this.device.createTexture({ label: `${label} table`, size: [n, n, n], dimension: '3d', format: 'rgba32float', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+		this.device.queue.writeTexture({ texture: table }, next.rgba, { bytesPerRow: n * 16, rowsPerImage: n }, [n, n, n]);
+		return { ubo, table, rgba: next.rgba };
 	}
 
 	/** The defringe pass's uniform (`Packed.defringe`), or null for none: run over develop's input on every render. */
@@ -394,28 +412,37 @@ export class DevelopPass {
 		if (input !== this.boundInput) this.bindGroup = undefined;
 		this.boundInput = input;
 		this.bindGroup ??= this.groupFor(this.ubo, input, density);
-		if (!this.lookUbo || !this.lookTable) return this.drawWith(this.bindGroup, target, masks);
-		// The look last, over the developed picture, as the worker applies it.
-		if (this.beforeLook?.width !== target.width || this.beforeLook?.height !== target.height) {
-			this.beforeLook?.destroy();
-			this.beforeLook = this.device.createTexture({ label: 'developed, before the look', size: [target.width, target.height], format: 'rgba16float', usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
-		}
-		this.drawWith(this.bindGroup, this.beforeLook, masks);
+		// The look, then a soft proof, over the developed picture: the look as the worker applies it, the proof
+		// for the screen alone.
+		const posts = [this.look, this.proof].filter((p): p is Post => !!p);
+		if (!posts.length) return this.drawWith(this.bindGroup, target, masks);
+		const stage = (i: number) => {
+			const t = this.stages[i];
+			if (t?.width === target.width && t?.height === target.height) return t;
+			t?.destroy();
+			return (this.stages[i] = this.device.createTexture({ label: `developed, stage ${i}`, size: [target.width, target.height], format: 'rgba16float', usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING }));
+		};
+		let from = stage(0);
+		this.drawWith(this.bindGroup, from, masks);
 		const encoder = this.device.createCommandEncoder();
-		const bind = this.device.createBindGroup({
-			layout: this.lookPipeline.getBindGroupLayout(0),
-			entries: [
-				{ binding: 0, resource: { buffer: this.lookUbo } },
-				{ binding: 1, resource: this.beforeLook.createView() },
-				{ binding: 2, resource: target.createView() },
-				{ binding: 3, resource: this.lookTable.createView() }
-			]
+		posts.forEach((p, i) => {
+			const to = i === posts.length - 1 ? target : stage(i + 1);
+			const bind = this.device.createBindGroup({
+				layout: this.lookPipeline.getBindGroupLayout(0),
+				entries: [
+					{ binding: 0, resource: { buffer: p.ubo } },
+					{ binding: 1, resource: from.createView() },
+					{ binding: 2, resource: to.createView() },
+					{ binding: 3, resource: p.table.createView() }
+				]
+			});
+			const pass = encoder.beginComputePass();
+			pass.setPipeline(this.lookPipeline);
+			pass.setBindGroup(0, bind);
+			pass.dispatchWorkgroups(Math.ceil(to.width / 16), Math.ceil(to.height / 16));
+			pass.end();
+			from = to;
 		});
-		const pass = encoder.beginComputePass();
-		pass.setPipeline(this.lookPipeline);
-		pass.setBindGroup(0, bind);
-		pass.dispatchWorkgroups(Math.ceil(target.width / 16), Math.ceil(target.height / 16));
-		pass.end();
 		this.device.queue.submit([encoder.finish()]);
 	}
 
