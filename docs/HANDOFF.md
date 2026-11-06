@@ -7,6 +7,71 @@ you stop.
 
 *Last updated 2026-11-05.*
 
+## The programme from 2026-11-06: the whole roadmap, one pull request per feature
+
+The owner's call: build every item in ROADMAP, plus a raw denoiser of our own, HDR merge, panoramas and
+HDRIs, **one pull request per feature**. The desktop target is parked. The research for the new work is
+[`research/multi-frame-and-denoise.md`](research/multi-frame-and-denoise.md). Order, by dependency — shared
+primitives first, because several features stand on each:
+
+| # | Item | Needs from the owner | Status |
+|---|---|---|---|
+| **Primitives** ||||
+| 1 | Guided filter (WGSL), first used for the depth map's second refinement pass | an A/B on depth edges | |
+| 2 | Gaussian/Laplacian pyramid on the GPU | — | |
+| 3 | Noise model per camera and ISO, and a variance-stabilising transform around the wavelet denoiser | an A/B on high-ISO frames | |
+| 4 | Linear float DNG writer (what every merge produces) | — | |
+| 5 | Highlight-aware demosaic (clip mask inside RCD) | — (measured against `hilite-truth`) | |
+| **Editing** ||||
+| 6 | Gradients: linear and radial mask layers | — | |
+| 7 | Colour grading wheels (lift/gamma/gain on tonal ranges) | — | |
+| 8 | Clarity, texture, local contrast (local Laplacian, on #2) | an A/B | |
+| 9 | Dehaze without depth (dark channel prior, on #1) | an A/B | |
+| 10 | ACES reference gamut compression | an A/B on LED and neon | |
+| 11 | Hue-preserving tone mapping / a scene-to-display transform | the look is the owner's | |
+| 12 | Detail per layer (sharpening and noise reduction through a mask) | — | |
+| 13 | Sky mask from the depth map, guided-filter edges (on #1) | an A/B | |
+| 14 | Upright: keystone from the photo's lines | — | |
+| 15 | Heal, clone and spot removal; red-eye | — | |
+| 16 | Camera profiles (DCP forward matrix, HueSatMap, LookTable) | which profiles to test | |
+| 17 | 3D LUT loading; defringe; film-negative inversion | — | |
+| 18 | Rec.2020 export with a synthesised ICC; soft proofing with a gamut check | — | |
+| **Workflow** ||||
+| 19 | Presets and styles; copy-paste of a settings subset; sync across a selection | — | |
+| 20 | Snapshots and virtual copies | — | |
+| 21 | Browsing the editing folder; other folder layouts (name-walk fallback, tokens, locales) | — | |
+| 22 | Histogram and overlays in the no-WebGPU fallback | — | |
+| 23 | Models on demand (Settings → Models) | — | |
+| 24 | Parametric auto-edit (grey-world/edge WB, percentile tone anchoring, face-aware exposure) | an A/B | |
+| 25 | Colour ranges and skin; hair-edge refinement; subject- and depth-weighted peaking | — | |
+| 26 | Apple's own disparity as a second depth source | an A/B on a Portrait capture | |
+| 27 | iPhone parity: the harness runs on the phone and posts back | the owner opens one URL on the iPhone | |
+| **Multi-frame** ||||
+| 28 | Alignment and features (shared) | test sets, chosen by the owner | |
+| 29 | HDR merge → linear DNG | a bracket set | |
+| 30 | Panorama → linear DNG | a pano set | |
+| 31 | HDRI → OpenEXR and Radiance HDR | a 360° set, if one exists | |
+| 32 | Focus stacking | a focus stack, if one exists | |
+| **Denoiser** ||||
+| 33 | burn-on-wgpu training benchmark; noise synthesis from dark frames; training; a Denoise job | dark frames per camera; whether the library may train published weights | |
+| **Film** ||||
+| 34 | Halation; grain per dye layer | — | |
+| 35 | A print stock, so colour negatives render as seen | which print stock, and its data sheet | |
+| 36 | Alternative processes: tintype, cyanotype, cyanotype digital negatives | the step tablet scan for the last | |
+| **Studies** ||||
+| 37 | `DEFAULT_WHITE_EV` across a few hundred library files | the verdict, by eye | |
+| 38 | Highlight reconstruction on real blown frames, generation 3 | the verdict, by eye | |
+
+**Not in the programme, and why:** X-Trans at full resolution (parked by the owner, 2026-10-16); the HDR gain
+map's stages 2–4 (blocked on checking a formula against an HDR display — `dev/hdr-gainmap-probe`); AI
+upscaling (the weights carry no licence); the desktop app (parked, 2026-11-06); support claims for AMD and
+Intel GPUs (needs that hardware — a `/dev/dri` compose profile can be written, not verified).
+
+**How each item is built:** a branch off `main`, one pull request, the CI gate run locally, parity when a
+shader changes, a browser check when the editor changes — and where the result is a look rather than a
+fact, an A/B on two ports for the owner (the working conventions below). Pixels change only behind a new
+control or a `PROCESS_VERSION` bump with its migration.
+
 ## Where it stands, 2026-11-05
 
 **The order is V2's** (owner's call, 2026-11-05): the maintenance items first, then sign-in, then what V2
