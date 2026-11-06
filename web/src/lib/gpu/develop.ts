@@ -15,7 +15,7 @@ const MAX_MASKS = 8;
 const LUT = 4096;
 /** The adjacency map's long edge, at most: `sidecar_color::developer::MAP_LONG`. */
 const MAP_LONG = 1024;
-/** Float offsets in `DevelopParams` (shaders/develop/params.wgsl): `mono` and `developer`. */
+/** Float offsets in `DevelopParams` (crates/color/src/params.rs): `mono` and `developer`. */
 const MONO = 72;
 const DEVELOPER = 80;
 

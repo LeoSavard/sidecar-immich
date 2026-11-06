@@ -6444,10 +6444,9 @@ name = "sidecar-color"
 version = "0.5.0"
 dependencies = [
  "bytemuck",
- "naga",
  "serde",
  "serde_json",
- "sidecar-shaders",
+ "sidecar-uniform",
  "thiserror 2.0.20",
  "ts-rs",
 ]
@@ -6486,10 +6485,10 @@ dependencies = [
  "anyhow",
  "bytemuck",
  "half",
- "naga",
  "pollster",
  "sidecar-color",
  "sidecar-shaders",
+ "sidecar-uniform",
  "wgpu",
 ]
 
@@ -6554,6 +6553,23 @@ version = "0.5.0"
 dependencies = [
  "anyhow",
  "tempfile",
+]
+
+[[package]]
+name = "sidecar-uniform"
+version = "0.5.0"
+dependencies = [
+ "naga",
+ "sidecar-uniform-derive",
+]
+
+[[package]]
+name = "sidecar-uniform-derive"
+version = "0.5.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]

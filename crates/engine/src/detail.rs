@@ -4,18 +4,24 @@
 //! tiles and for export, with the same noise estimate for both.
 
 use anyhow::Result;
+use sidecar_uniform::Uniform;
 use wgpu::TextureFormat as F;
 
 use crate::compute::{B, Kernel, Res, texture, view};
 use crate::{Gpu, read_rgba16};
 
-/// Mirrors `struct DetailParams` in shaders/detail/common.wgsl (32 bytes).
+/// The detail passes' uniform (32 bytes). Its WGSL declaration,
+/// `shaders/uniforms/detail_params.wgsl`, is generated from this struct (`sidecar-uniform`); the
+/// `uniforms` test checks the file and every offset.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable, Uniform)]
 pub struct DetailParams {
     pub size: [u32; 2],
+    /// À-trous dilation (1, 2, 4, …) or blur radius.
     pub step: u32,
+    /// 0 = horizontal, 1 = vertical.
     pub axis: u32,
+    /// Pass-specific, as are `b`, `c` and `d`.
     pub a: f32,
     pub b: f32,
     pub c: f32,
@@ -459,21 +465,6 @@ impl Detail {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn detail_params_layout_matches_wgsl() {
-        let src = sidecar_shaders::compose("detail/common.wgsl").unwrap();
-        let module = naga::front::wgsl::parse_str(&src).unwrap();
-        let (_, ty) = module
-            .types
-            .iter()
-            .find(|(_, t)| t.name.as_deref() == Some("DetailParams"))
-            .unwrap();
-        let naga::TypeInner::Struct { span, .. } = &ty.inner else {
-            panic!()
-        };
-        assert_eq!(*span as usize, std::mem::size_of::<DetailParams>());
-    }
 
     #[test]
     fn denoise_reduces_noise_and_keeps_the_mean() {

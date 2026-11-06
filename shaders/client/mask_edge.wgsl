@@ -1,20 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright Sidecar contributors
+//! requires: uniforms/edge_params.wgsl
 // A mask layer's edge (DESIGN.md §15, "Mask edges"): blurred over the edge's width, then thresholded again, so
 // the threshold moves the edge out or in and the ramp around it sets how soft it is. The blur runs at a
 // resolution where its radius is at most 16 texels: 0 averages the mask down, 1 blurs along `dir` (a Gaussian,
 // run across then down), 2 reads the blurred mask back at full size through the ramp. Render passes, as the
-// brush's, since r8unorm can't be a storage texture in WebGPU. Layout mirrored in crates/color (EdgeParams).
-
-struct EdgeParams {
-  size: vec2f,    // the target, pixels
-  mode: u32,      // 0 average down, 1 blur along dir, 2 threshold at full size
-  scale: f32,     // mode 0: how many source pixels one texel averages, each way
-  dir: vec2f,     // mode 1: one texel across (1, 0) or down (0, 1)
-  radius: f32,    // mode 1: the Gaussian's reach in texels (sigma is half of it)
-  _pad: f32,
-  ramp: vec4f,    // mode 2: x the threshold (0.5 keeps the edge where it was; lower grows the mask), y the ramp's width
-}
+// brush's, since r8unorm can't be a storage texture in WebGPU.
 
 @group(0) @binding(0) var<uniform> E: EdgeParams;
 @group(0) @binding(1) var src: texture_2d<f32>;

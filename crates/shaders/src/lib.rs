@@ -128,7 +128,7 @@ mod tests {
         let s = compose("client/develop.wgsl").unwrap();
         assert_eq!(s.matches("// ---- common/color.wgsl").count(), 1);
         assert!(
-            s.find("// ---- develop/params.wgsl").unwrap()
+            s.find("// ---- uniforms/develop_params.wgsl").unwrap()
                 < s.find("// ---- client/develop.wgsl").unwrap()
         );
     }

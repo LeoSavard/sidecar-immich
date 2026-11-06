@@ -340,6 +340,26 @@ impl Gpu {
 /// One device for every GPU test in the crate. Tests run on parallel threads, and NVIDIA's Vulkan driver
 /// deadlocks when several of them create an instance and device at the same moment.
 #[cfg(test)]
+mod uniforms {
+    use sidecar_uniform::Requirement as R;
+
+    /// `shaders/uniforms/` holds this crate's uniform structs as WGSL, generated from them, and naga lays
+    /// each one out as Rust does. `npm run uniforms` in `web/` rewrites the files after a change.
+    #[test]
+    fn uniforms() {
+        sidecar_uniform::check::uniforms(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../shaders"),
+            &[
+                R::of::<crate::ingest::IngestParams>(),
+                R::of::<crate::detail::DetailParams>(),
+                R::of::<crate::brush::BrushParams>(),
+                R::of::<crate::brush::CompositeParams>(),
+            ],
+        );
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn test_gpu() -> Result<&'static Gpu, String> {
     static GPU: std::sync::OnceLock<Result<Gpu, String>> = std::sync::OnceLock::new();
     GPU.get_or_init(|| Gpu::new_headless().map_err(|e| format!("{e:#}")))

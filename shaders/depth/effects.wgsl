@@ -1,17 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright Sidecar contributors
-// Lens blur and haze by distance (DESIGN.md §15, "Depth effects"): the uniform block and the maths the three
+//! requires: uniforms/depth_params.wgsl
+// Lens blur and haze by distance (DESIGN.md §15, "Depth effects"): the maths the three
 // depth passes share. They run on camera-native linear light after the lens pass and before develop, so a
 // blurred highlight spreads as the light it is, and haze is light in the scene before white balance sees it.
-// Layout mirrored by hand in crates/color/src/depth.rs (DepthParams, 64 bytes), checked by naga.
-
-struct DepthParams {
-  frame: vec4f,  // xy: this texture's offset in the depth map's frame, in its pixels; zw: that frame's size
-  haze: vec4f,   // rgb: the airlight, camera RGB; w: optical depth at the farthest point, + adds haze, − removes it
-  blur: vec4f,   // x: the largest blur radius, in this texture's pixels; y: focus, as nearness 0…1; z: half the
-                 // in-focus band; w: 1 when blurring
-  scale: vec4f,  // x: how many pixels of this texture one low-resolution texel covers (k ≥ 1); yzw unused
-}
 
 // How near the point at `p` (pixels of the texture being processed) is, 0 farthest … 1 nearest.
 fn depth_nearness(depth: texture_2d<f32>, samp: sampler, p: vec2f, frame: vec4f) -> f32 {

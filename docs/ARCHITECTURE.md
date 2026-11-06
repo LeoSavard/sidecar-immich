@@ -28,6 +28,8 @@ sidecar-color        the hub: EditParams, white balance, camera matrices, curve 
                      EditParams → the develop uniform. Also compiled to wasm (sidecar-color-wasm)
                      so the browser packs uniforms with the same code.
 sidecar-shaders      embeds shaders/ and composes `//! requires:`; its binary writes the browser's WGSL
+sidecar-uniform      `#[derive(Uniform)]` (sidecar-uniform-derive): a uniform struct's WGSL, written from Rust
+                     into shaders/uniforms/; used by sidecar-color and sidecar-engine
 sidecar-ml           its own program (burn on Vulkan), started by the worker on demand; not a library dep
 sidecar-devtools     sidecar-dev: parity fixtures, lens checks, ad hoc develops
 ```
@@ -94,8 +96,11 @@ The global Saturation slider (PR #4: one commit for the core, one for the UI) is
 1. `crates/color/src/params.rs` — the field on `EditParams` (or a sub-struct), its default, and
    `#[serde(skip_serializing_if = …)]` at the default so existing edits keep their ETag.
 2. If the shader needs it: the `DevelopParams` (or `MaskParams`) field — use padding before growing the struct —
-   set in `pack()`, mirrored in `shaders/develop/params.wgsl`, and added to the `uniform_layout_matches_wgsl`
-   test's offset list. That test, run by naga, is what catches a layout mismatch. If the struct grows, change
+   set in `pack()`, then `npm run uniforms` in `web/` (part of `npm run generate`), which rewrites
+   `shaders/uniforms/develop_params.wgsl` from the struct; commit it. The field's doc comment becomes its comment
+   in the WGSL. The `uniforms` test fails while the file is stale, and checks every offset with naga. A
+   `mat3x3f` field needs `#[uniform(wgsl = "mat3x3f")]`, since `[[f32; 4]; 3]` could also be an array of
+   vectors. If the struct grows, change
    `DEVELOP_UNIFORM_BYTES` in `web/src/lib/color/pack.ts` too: the browser checks it against the wasm's
    `sc_develop_uniform_bytes` on load, and the engine takes its size from Rust.
 3. The stage in `shaders/develop/` taking the value as an argument; only `shaders/client/develop.wgsl` reads

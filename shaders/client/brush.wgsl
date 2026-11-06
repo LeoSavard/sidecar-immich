@@ -1,19 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright Sidecar contributors
+//! requires: uniforms/brush_params.wgsl
 // Brush strokes onto a mask (DESIGN.md §15), one stroke at a time: each segment of the path is drawn as a
 // capsule — a quad around it, the fragment measuring its distance to the segment — into a coverage target
 // blended with `max`, so a stroke lays down its flow once however its segments overlap. The composite pass
 // (brush_composite.wgsl) then paints that coverage onto the mask, or erases with it. The browser draws at the
 // proxy's size and the worker at the export's, with this same file.
-
-struct BrushParams {
-  size: vec2f,           // the target, pixels
-  radius: f32,           // pixels
-  feather: f32,          // 0 hard … 1 soft from the centre
-  flow: f32,             // 0…1
-  _pad0: f32,
-  _pad1: vec2f,
-}
 
 @group(0) @binding(0) var<uniform> B: BrushParams;
 

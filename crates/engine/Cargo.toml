@@ -8,6 +8,7 @@ version.workspace = true
 [dependencies]
 anyhow.workspace = true
 bytemuck.workspace = true
+sidecar-uniform.workspace = true
 half.workspace = true
 pollster.workspace = true
 wgpu.workspace = true
@@ -15,4 +16,4 @@ sidecar-shaders.workspace = true
 sidecar-color.workspace = true
 
 [dev-dependencies]
-naga.workspace = true
+sidecar-uniform = { workspace = true, features = ["check"] }

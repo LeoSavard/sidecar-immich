@@ -11,6 +11,7 @@
 //! - vignetting: the gain that flattens the falloff; 1 at the centre, above 1 towards the corners.
 
 use serde::{Deserialize, Serialize};
+use sidecar_uniform::Uniform;
 
 use crate::params::Lens;
 
@@ -207,21 +208,28 @@ fn fill_zoom(e: &Effective, center: [f64; 2], aspect: f64) -> f64 {
     lo
 }
 
-/// Byte-for-byte mirror of `struct LensParams` in shaders/lens/params.wgsl (1,072 bytes); checked by naga.
+/// The lens correction's uniform (1,072 bytes). Its WGSL declaration,
+/// `shaders/uniforms/lens_params.wgsl`, is generated from this struct (`sidecar-uniform`); the
+/// `uniforms` test checks the file and every offset.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable, Uniform)]
 pub struct LensParams {
     /// Optical centre, in frame pixels.
     pub center: [f32; 2],
-    /// Frame pixel of the output texture's top-left texel, and of the input texture's.
+    /// Frame pixel of the output texture's top-left texel.
     pub out_offset: [f32; 2],
+    /// Frame pixel of the input texture's top-left texel.
     pub in_offset: [f32; 2],
+    /// The frame's half-diagonal in pixels: radius 1.
     pub half_diag: f32,
+    /// Corrected-frame scale about the optical centre that keeps blank edges out.
     pub zoom: f32,
     /// Knots per unit radius.
     pub r_scale: f32,
+    /// Bit 0 distortion, bit 1 lateral CA, bit 2 vignetting.
     pub flags: u32,
     pub _pad: [f32; 2],
+    /// Per radius: distortion, red CA, blue CA, vignetting gain.
     pub knots: [[f32; 4]; KNOTS],
 }
 
@@ -409,45 +417,5 @@ mod tests {
         assert!((r[0] - 0.8).abs() < 1e-12 && (r[1] - 0.3).abs() < 1e-12);
         let r = oriented_center(c, 6); // 90° clockwise: x' = 1 − y, y' = x
         assert!((r[0] - 0.3).abs() < 1e-12 && (r[1] - 0.2).abs() < 1e-12);
-    }
-
-    #[test]
-    fn uniform_layout_matches_wgsl() {
-        let src = sidecar_shaders::compose("lens/params.wgsl").unwrap();
-        let module = naga::front::wgsl::parse_str(&src).unwrap();
-        let (_, ty) = module
-            .types
-            .iter()
-            .find(|(_, t)| t.name.as_deref() == Some("LensParams"))
-            .unwrap();
-        let naga::TypeInner::Struct { members, span } = &ty.inner else {
-            panic!("not a struct")
-        };
-        assert_eq!(*span as usize, std::mem::size_of::<LensParams>());
-        assert_eq!(std::mem::size_of::<LensParams>(), 1072);
-        let off = |n: &str| {
-            members
-                .iter()
-                .find(|m| m.name.as_deref() == Some(n))
-                .unwrap()
-                .offset as usize
-        };
-        assert_eq!(off("center"), std::mem::offset_of!(LensParams, center));
-        assert_eq!(
-            off("out_offset"),
-            std::mem::offset_of!(LensParams, out_offset)
-        );
-        assert_eq!(
-            off("in_offset"),
-            std::mem::offset_of!(LensParams, in_offset)
-        );
-        assert_eq!(
-            off("half_diag"),
-            std::mem::offset_of!(LensParams, half_diag)
-        );
-        assert_eq!(off("zoom"), std::mem::offset_of!(LensParams, zoom));
-        assert_eq!(off("r_scale"), std::mem::offset_of!(LensParams, r_scale));
-        assert_eq!(off("flags"), std::mem::offset_of!(LensParams, flags));
-        assert_eq!(off("knots"), std::mem::offset_of!(LensParams, knots));
     }
 }

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright Sidecar contributors
-//! requires: lens/params.wgsl lens/remap.wgsl
+//! requires: uniforms/lens_params.wgsl lens/remap.wgsl
 // The lens pass for a mask: the same geometry as client/lens.wgsl (green channel, no vignetting — that would
 // change a mask's values rather than move them), as a render pass so it can write the one-channel textures
 // masks are kept in. Bilinear reads, which is all a mask needs.
