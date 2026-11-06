@@ -25,6 +25,7 @@ export const MASK_LABELS: Record<string, string> = {
 	hair: 'Hair',
 	clothes: 'Clothes',
 	depth: 'Depth',
+	sky: 'Sky',
 	brush: 'Brush'
 };
 
