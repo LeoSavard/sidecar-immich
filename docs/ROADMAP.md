@@ -769,6 +769,36 @@ and "the code is Apache-2.0" is never sufficient.** Track them in `NOTICE` and `
 source, with three acceptable statuses — an explicit permissive licence in the weights' own repository or
 model card, trained in-house, or not shipped. The dataset underneath is the least examined layer of all.
 
+**Models on demand — the owner's call, 2026-11-05.** A fourth status, for weights that are none of those:
+*downloaded by the user, never shipped.* The models already cleared and in use (BiRefNet lite, MediaPipe's
+multi-class model, YuNet, Depth Anything V2 Small) keep shipping in the `-ml` image. Anything else is offered
+in a **Models** section of Settings — beside the output space — listing the models Sidecar can run, what each
+one enables, its licence and what that licence restricts, with a *Download* button. The pattern is the owner's
+from another project (weights as data, not image), adapted:
+
+- Weights live in a models folder in the data volume. Sidecar scans it, so a file copied in by hand (from
+  another install, or onto a server with no internet) counts the same as a download.
+- Downloads come from the publisher's own URL, pinned by SHA-256 — Sidecar hosting a converted copy would be
+  shipping it again. `sidecar-dev models fetch <name>` does the same from a terminal.
+- **Only weights download; the model's structure is compiled in.** burn-onnx generates a model's graph as
+  Rust at build time, so what Sidecar can run is a fixed list each release carries. The generated code takes
+  the licence of the *architecture's* code (often permissive where the weights are not — Real-ESRGAN's
+  RRDBNet is BSD-3, SegFormer's code Apache-2.0), checked per model rather than copied from the weights.
+- Conversion to `.bpk` happens on the server, in Rust: ONNX or safetensors only. A PyTorch `.pth` is a pickle
+  — loading one runs code — so a model published only that way is not offered.
+- Weights are stamped with the model and converter version they were converted for; after an upgrade a stale
+  file reads as *needs update* rather than loading into a structure that changed under it.
+- No load/unload controls: `sidecar-ml` already starts per task and exits when idle, which is the only way
+  burn hands GPU memory back.
+- The download button changes the server, so it is an administrator's (local accounts or Immich's own
+  administrators) and is shown to nobody else.
+- Weights with **no licence at all** (Real-ESRGAN's) are still not offered: downloading does not create a
+  permission nobody granted.
+
+What this unlocks is mostly research-only and non-commercial weights for a personal server — SegFormer for
+sky, Zero-DCE and Deep White-Balance for auto-edit. Raw denoise does not need it: its weights are to be the
+project's own.
+
 **Panorama stitching — viable, with a patent caveat.** OpenCV has been Apache-2.0 since 4.5, `stitching`
 module included. Hugin and Enblend/Enfuse — the traditional open-source stitching stack — are GPL, excluded.
 The caveat is patents, not copyright: OpenCV's SURF feature finder sits behind `OPENCV_ENABLE_NONFREE`; use

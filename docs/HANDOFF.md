@@ -5,7 +5,38 @@ For whoever picks this up next, person or agent. [`ARCHITECTURE.md`](ARCHITECTUR
 checked), [`ROADMAP.md`](ROADMAP.md) what's known to be missing. This page is the state of play; update it when
 you stop.
 
-*Last updated 2026-10-27.*
+*Last updated 2026-11-05.*
+
+## Where it stands, 2026-11-05
+
+**The order is V2's** (owner's call, 2026-11-05): the maintenance items first, then sign-in, then what V2
+puts next. Both are done, as four pull requests. Merge them in this order:
+
+| # | What | Base |
+|---|---|---|
+| 52 | **A3**, the three silent traps made loud: `client/` shaders listed from the directory, the wasm request structs' serde attributes asserted by a test, `npm run check` regenerating first | `main` |
+| 53 | **A5**, `App.immich` as `Option<Immich>` instead of a non-empty-string test | `main` |
+| 54 | **A4**, `#[derive(Uniform)]`: the twelve uniform structs' WGSL generated into `shaders/uniforms/`, checked by naga; nine hand-kept offset lists gone | `main` |
+| 55 | **Sign-in without Immich**: local accounts for one person or a household (the owner's scope: no second factor), setup code from the server log, Settings → People, `sidecar account set-password` for recovery | `a5-immich-adapter` (#53) |
+
+None changes a pixel; parity passed on #54, which is the one that touches every shader. They merge together
+cleanly (checked by merging all four into a scratch branch and running the CI gate there). `V2.md` and
+`ARCHITECTURE.md` collide in no hunk.
+
+Two more of the owner's calls from that day, recorded where they belong: **models beyond the cleared four are
+downloaded by the user, never shipped** (ROADMAP, "Models on demand", which adds a fourth licence status for
+weights), and the order above.
+
+What V2 puts next, after these: Workstream B's one real piece is effectively done (a configuration with no
+Immich runs, now with sign-in), so **Workstream C, the desktop target**, starting with the shell experiment.
+The standalone deployment's remaining gap is **browsing the editing folder** (#28's `find_by_name`, on
+`library-name-search`).
+
+**Branches left on purpose:** `xtrans-highlight-gate` (#46's D1 and D5, closed), `library-name-search` (#28),
+`worktree-depth-spike`. Probably stale, to delete once someone has looked: `worktree-lens-correction` (41
+commits from September), `clip-histogram`'s 6 local commits past what #47 merged, and the remote
+`claude/pensive-edison-xnk4wl` and `claude/sweet-maxwell-s67it6`. Nine worktrees under `.claude/worktrees/`
+belong to merged work.
 
 ## Where it stands, 2026-10-22
 
@@ -136,7 +167,7 @@ what a filesystem *editor* needs. The filesystem flavour itself stays, for use c
 an editor, never a second library. #28 (`find_by_name`, searching a folder library) was closed under that
 decision; its branch keeps the code and its six tests.
 
-**As of 2026-10-30 two pull requests are open.** **#50** retires the Highlight recovery slider: it existed to
+**#50 and #51 were merged on 2026-10-30.** **#50** retires the Highlight recovery slider: it existed to
 suppress the magenta cast on a clipped highlight, and the pyramid now prevents that cast rather than covering
 it, so the control answered a problem the shipped app no longer has (the review, "The slider that outlived
 its problem"). The field and the shader path stay, so an edit that stored 0.5 renders as it did. **#51** fixes
@@ -286,7 +317,8 @@ code.
 **Features are paused**, so don't start one. [`V2.md`](V2.md) is the agreed direction and says what order to
 work in; the queue below it in ROADMAP keeps its places but is not what is being worked through.
 
-The live work is **Workstream A**. A1 and A2 — rustfmt and its CI gate — are done; what is left is:
+The live work was **Workstream A**. A1 and A2 — rustfmt and its CI gate — are done, and A3–A5 are #52–#54
+(2026-11-05; see the top of this page). What they were:
 
 1. **The three silent traps**, the maintainability target because no test catches them: a
    `shaders/client/*.wgsl` missing from `WEB_ENTRIES`, a wasm request struct without
