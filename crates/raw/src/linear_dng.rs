@@ -8,6 +8,10 @@
 //! `AsShotNeutral`, colour from `ColorMatrix1/2`. Only what that needs is read from the TIFF structure; the
 //! rest of the EXIF comes from ExifTool, as for any file LibRaw doesn't handle.
 //!
+//! The same module reads what Sidecar writes itself (`dng_write`): linear RGB as 16- or 32-bit IEEE floats in
+//! Deflate tiles with the floating-point predictor, the DNG specification's float layout. There white is 1.0
+//! and a value above it is light, not clipping.
+//!
 //! A merge can be far larger than any GPU texture (a 23,474 × 13,049 panorama is 306 MP), so decoding takes a
 //! size bound and averages tiles down into it as they are decoded: the whole image is never held at full size.
 
@@ -171,7 +175,18 @@ fn first(tags: &Tags, tag: u16) -> Option<f64> {
     tags.get(&tag)?.values.first().copied()
 }
 
-/// True for a DNG whose full-resolution image is linear RGB in JPEG XL tiles — what this module decodes.
+/// Linear RGB this module decodes: JPEG XL tiles (Lightroom's merges, Apple's ProRAW), or float samples in
+/// Deflate tiles (Sidecar's own).
+fn decodable(main: &Tags) -> bool {
+    first(main, 262) == Some(34892.0)
+        && match first(main, 259) {
+            Some(52546.0) => true,
+            Some(8.0) | Some(32946.0) => first(main, 339) == Some(3.0),
+            _ => false,
+        }
+}
+
+/// True for a DNG whose full-resolution image is linear RGB this module decodes (`decodable`).
 pub fn is_supported(path: &Path) -> bool {
     if !path
         .extension()
@@ -183,9 +198,7 @@ pub fn is_supported(path: &Path) -> bool {
     let Ok(head) = read_head(path, 1 << 20) else {
         return false;
     };
-    layout(&head).is_some_and(|l| {
-        first(&l.main, 259) == Some(52546.0) && first(&l.main, 262) == Some(34892.0)
-    })
+    layout(&head).is_some_and(|l| decodable(&l.main))
 }
 
 fn read_head(path: &Path, n: usize) -> std::io::Result<Vec<u8>> {
@@ -283,6 +296,47 @@ pub fn info(path: &Path, exif: &crate::decoded::Exif) -> Result<RawInfo, LinearD
     })
 }
 
+/// One Deflate tile of IEEE floats, `tw × th` pixels of `spp` samples at `bps` bits, undone through
+/// `predictor` (1 none, 3 or 34894 floating point — TIFF Technical Note 3, which DNG adopts).
+fn float_tile(
+    bytes: &[u8],
+    tw: usize,
+    th: usize,
+    spp: usize,
+    bps: usize,
+    predictor: f64,
+) -> Result<Vec<f32>, LinearDngError> {
+    use std::io::Read;
+    let per = bps / 8;
+    if !(per == 2 || per == 4) || spp == 0 {
+        return Err(bad(format!("{bps}-bit float samples")));
+    }
+    let row_len = tw * spp * per;
+    let mut raw = Vec::with_capacity(row_len * th);
+    flate2::read::ZlibDecoder::new(bytes)
+        .read_to_end(&mut raw)
+        .map_err(|e| LinearDngError::Tile(e.to_string()))?;
+    if raw.len() < row_len * th {
+        return Err(LinearDngError::Tile("a short tile".into()));
+    }
+    let mut out = Vec::with_capacity(tw * th * spp);
+    for row in raw.chunks_mut(row_len).take(th) {
+        match predictor {
+            1.0 => {}
+            3.0 | 34894.0 => crate::dng_write::decode_float_row(row, tw * spp, per, spp),
+            p => return Err(bad(format!("predictor {p}"))),
+        }
+        for s in row.chunks(per) {
+            out.push(if per == 2 {
+                half::f16::from_bits(u16::from_le_bytes([s[0], s[1]])).to_f32()
+            } else {
+                f32::from_le_bytes([s[0], s[1], s[2], s[3]])
+            });
+        }
+    }
+    Ok(out)
+}
+
 /// Linear camera RGB, alpha = 1 where a channel reached the white level. Unoriented.
 pub struct Linear {
     pub width: u32,
@@ -296,9 +350,13 @@ pub fn decode(path: &Path, max_edge: u32) -> Result<Linear, LinearDngError> {
     let data = std::fs::read(path).map_err(|e| bad(e.to_string()))?;
     let l = layout(&data).ok_or(LinearDngError::NotThisKind)?;
     let m = &l.main;
-    if first(m, 259) != Some(52546.0) || first(m, 262) != Some(34892.0) {
+    if !decodable(m) {
         return Err(LinearDngError::NotThisKind);
     }
+    let float = first(m, 339) == Some(3.0);
+    // Where a float file says its response stopped being linear (`LinearResponseLimit`, in IFD 0), samples at
+    // that level are clipped, as an integer file's are at its top; without it every float value is light.
+    let limit = first(&l.ifd0, 50734).or_else(|| first(m, 50734));
     let (w, h) = (
         first(m, 256).ok_or_else(|| bad("no width"))? as usize,
         first(m, 257).ok_or_else(|| bad("no height"))? as usize,
@@ -314,8 +372,16 @@ pub fn decode(path: &Path, max_edge: u32) -> Result<Linear, LinearDngError> {
         return Err(bad("tile table shorter than the image"));
     }
     let black = first(m, 50714).unwrap_or(0.0);
-    let white = first(m, 50717).unwrap_or(65535.0);
-    let range = (white - black).max(1.0);
+    // The specification's defaults: 1.0 for floating-point samples, the full integer range otherwise.
+    let white = first(m, 50717).unwrap_or(if float { 1.0 } else { 65535.0 });
+    let range = if float {
+        (white - black).max(1e-9)
+    } else {
+        (white - black).max(1.0)
+    };
+    let bps = first(m, 258).unwrap_or(16.0) as usize;
+    let predictor = first(m, 317).unwrap_or(1.0);
+    let spp = first(m, 277).unwrap_or(3.0) as usize;
     // `LinearizationTable` (DNG 50712): where it is present the stored codes are *indices* into it rather
     // than linear values, and black, white and the table's own output all speak the same units. Apple's
     // ProRAW companded 10-bit codes through a 1,024-entry table reaching 65535; read as linear they are both
@@ -334,6 +400,10 @@ pub fn decode(path: &Path, max_edge: u32) -> Result<Linear, LinearDngError> {
         let bytes = data
             .get(o..o + c)
             .ok_or_else(|| bad("tile past the end of the file"))?;
+        if float {
+            return float_tile(bytes, tw, th, spp, bps, predictor)
+                .map(|buf| (tw, th, spp, buf, 1.0));
+        }
         let mut img = jxl_oxide::JxlImage::builder()
             .read(std::io::Cursor::new(bytes))
             .map_err(|e| LinearDngError::Tile(e.to_string()))?;
@@ -395,7 +465,13 @@ pub fn decode(path: &Path, max_edge: u32) -> Result<Linear, LinearDngError> {
                     let s = &buf[(y * fw + x) * ch..(y * fw + x) * ch + 3];
                     let v = [s[0], s[1], s[2]]
                         .map(|v| ((linearize(curve, v as f64 * scale) - black) / range) as f32);
-                    let clip = v.iter().any(|&c| c >= 0.99) as u8 as f32;
+                    // An integer file's top is clipping; a float file's is wherever it says its response
+                    // stopped being linear, and nowhere if it says nothing.
+                    let clip = match (float, limit) {
+                        (false, _) => v.iter().any(|&c| c >= 0.99),
+                        (true, Some(l)) => v.iter().any(|&c| c as f64 >= 0.99 * l),
+                        (true, None) => false,
+                    } as u8 as f32;
                     let d = (gy / factor) * ow + gx / factor;
                     for (k, c) in v.iter().enumerate() {
                         sum[d * 4 + k] += c.max(0.0);

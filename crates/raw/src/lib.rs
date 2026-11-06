@@ -10,6 +10,7 @@ use std::path::Path;
 
 pub mod af;
 pub mod decoded;
+pub mod dng_write;
 pub mod gain_map;
 pub mod heif_aux;
 pub mod lens;
