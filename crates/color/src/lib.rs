@@ -14,6 +14,7 @@ pub mod geometry;
 pub mod icc;
 pub mod lens;
 pub mod lut;
+pub mod mask_refine;
 pub mod mat;
 pub mod params;
 pub mod slide;

@@ -320,11 +320,28 @@ impl Worker {
         if !NAMES.contains(&name) || !self.masks(key).await?.available {
             return Ok(None);
         }
-        Ok(Some(
-            tokio::fs::read(self.mask_path(key, &format!("{name}.png")))
-                .await
-                .context("mask was not written")?,
-        ))
+        let coarse = tokio::fs::read(self.mask_path(key, &format!("{name}.png")))
+            .await
+            .context("mask was not written")?;
+        if !REFINED.contains(&name) {
+            return Ok(Some(coarse));
+        }
+        // A part mask is served with its edges put where the photo's are, made once and kept beside it.
+        let path = self.mask_path(key, &format!("{name}-refined.png"));
+        if let Ok(bytes) = tokio::fs::read(&path).await {
+            return Ok(Some(bytes));
+        }
+        let refined = self.refined(key, decode_grey(&coarse)?).await;
+        let bytes: Vec<u8> = refined
+            .data
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|p| (p[0] * 255.0).round() as u8)
+            .collect();
+        let png = grey_png(refined.width, refined.height, &bytes)?;
+        write_atomic(&path, &png)?;
+        Ok(Some(png))
     }
 }
 
@@ -364,7 +381,62 @@ impl Worker {
     }
 }
 
+/// The masks from the 256² multi-class model, whose edges are refined against the photo: what `mask` serves, to
+/// the browser and to every render, for these names.
+const REFINED: [&str; 5] = ["hair", "skin", "face-skin", "body-skin", "clothes"];
+
 impl Worker {
+    /// `coarse` with its edges put where the photo's are (`sidecar_color::mask_refine`), at the proxy's
+    /// `color_range::SIZE`, the colour guide judged as shot — so a refined mask depends on the photo alone. Kept
+    /// as it came when the proxy can't be had.
+    async fn refined(
+        self: &Arc<Self>,
+        key: &str,
+        coarse: sidecar_engine::RgbaF32,
+    ) -> sidecar_engine::RgbaF32 {
+        let made = async {
+            let (width, height, bytes) = self.proxy(key, sidecar_color::color_range::SIZE).await?;
+            let proxy = sidecar_engine::RgbaF32::from_f16_bytes(width, height, &bytes);
+            let meta = self.cached_meta(key).await?;
+            let packed = crate::export::Rendering::of(&meta.info)
+                .pack(&Default::default(), sidecar_color::DisplaySpace::Srgb);
+            let develop: sidecar_color::DevelopParams =
+                bytemuck::pod_read_unaligned(&packed.uniform);
+            let mask: Vec<u8> = coarse
+                .data
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|p| (p[0] * 255.0).round() as u8)
+                .collect();
+            let (mw, mh) = (coarse.width, coarse.height);
+            let out = tokio::task::spawn_blocking(move || {
+                sidecar_color::mask_refine::refine(
+                    &mask,
+                    mw,
+                    mh,
+                    &proxy.data,
+                    width,
+                    height,
+                    &develop,
+                )
+            })
+            .await?;
+            anyhow::Ok(sidecar_engine::RgbaF32 {
+                width,
+                height,
+                data: out.iter().flat_map(|&v| [v as f32 / 255.0; 4]).collect(),
+            })
+        };
+        match made.await {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!("refining a mask for {key}: {e:#}");
+                coarse
+            }
+        }
+    }
+
     /// A colour-range layer's mask (`sidecar_color::color_range::select`): the proxy at the selection's size,
     /// judged through the edit's own white balance and camera matrix, within its model mask when it names one.
     async fn color_selection(
