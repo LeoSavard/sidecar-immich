@@ -439,6 +439,35 @@ export class DevelopPass {
 	}
 
 	/**
+	 * The developed picture's luminance, box-averaged to at most `edge` on its long side: what Upright finds lines
+	 * in. Read back once per request.
+	 */
+	async luminance(edge: number): Promise<{ lum: Float32Array; size: [number, number] }> {
+		const t = this.target!;
+		const k = Math.max(1, Math.ceil(Math.max(t.width, t.height) / edge));
+		const [w, h] = [Math.floor(t.width / k), Math.floor(t.height / k)];
+		const bytesPerRow = 256 * Math.ceil((t.width * 8) / 256);
+		const buf = this.device.createBuffer({ size: bytesPerRow * t.height, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+		const encoder = this.device.createCommandEncoder();
+		encoder.copyTextureToBuffer({ texture: t }, { buffer: buf, bytesPerRow }, [t.width, t.height]);
+		this.device.queue.submit([encoder.finish()]);
+		await buf.mapAsync(GPUMapMode.READ);
+		const lum = new Float32Array(w * h);
+		const all = new Uint16Array(buf.getMappedRange());
+		const stride = bytesPerRow / 2;
+		for (let y = 0; y < h * k; y++) {
+			for (let x = 0; x < w * k; x++) {
+				const i = y * stride + x * 4;
+				lum[Math.floor(y / k) * w + Math.floor(x / k)] += 0.2126 * fromHalf(all[i]) + 0.7152 * fromHalf(all[i + 1]) + 0.0722 * fromHalf(all[i + 2]);
+			}
+		}
+		buf.unmap();
+		buf.destroy();
+		for (let i = 0; i < lum.length; i++) lum[i] /= k * k;
+		return { lum, size: [w, h] };
+	}
+
+	/**
 	 * The camera RGB around a point of the source (0…1), averaged over a square `radius` pixels out from it,
 	 * leaving out pixels the ingest flagged as clipped (alpha above 0): the white balance eyedropper's patch.
 	 * Null when every pixel there is clipped.

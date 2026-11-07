@@ -213,6 +213,47 @@ pub unsafe extern "C" fn sc_geometry_fit(ptr: *const u8, len: usize) -> *const u
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct UprightRequest {
+    geometry: sidecar_color::geometry::Geometry,
+    /// The picture's size in pixels (its proportions are what matter).
+    size: [u32; 2],
+    /// The picture's luminance, row-major, at `lum_size` (any scale).
+    lum: Vec<f32>,
+    lum_size: [u32; 2],
+    mode: sidecar_color::upright::Mode,
+    /// The lens's focal length in picture diagonals, when the photo says it: for Aspect.
+    #[serde(default)]
+    focal: Option<f64>,
+}
+
+/// `{ geometry, size, lum, lumSize, mode, focal }` → the geometry stood up (`sidecar_color::upright::solve`), as
+/// JSON; an error when the picture hasn't the lines the mode needs.
+///
+/// # Safety
+/// `ptr` must point to `len` readable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sc_upright(ptr: *const u8, len: usize) -> *const u8 {
+    let input = unsafe { std::slice::from_raw_parts(ptr, len) };
+    respond(
+        serde_json::from_slice::<UprightRequest>(input)
+            .map_err(|e| e.to_string())
+            .and_then(|req| {
+                use sidecar_color::upright;
+                let [lw, lh] = req.lum_size.map(|v| v as usize);
+                if req.lum.len() != lw * lh {
+                    return Err("lum is not lumSize".into());
+                }
+                let a = req.size[0] as f64 / req.size[1].max(1) as f64;
+                let segs = upright::segments(&req.lum, lw, lh);
+                let g = upright::solve(&req.geometry, a, &segs, req.mode, req.focal)
+                    .ok_or("not enough straight lines in this photo")?;
+                serde_json::to_vec(&g).map_err(|e| e.to_string())
+            }),
+    )
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct LensRequest {
     profile: sidecar_color::lens::LensProfile,
     lens: sidecar_color::params::Lens,

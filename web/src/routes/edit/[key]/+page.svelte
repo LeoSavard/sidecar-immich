@@ -547,6 +547,27 @@
 		changed();
 	}
 
+	/**
+	 * Upright: the picture as developed, its lines found and the geometry solved so they stand true
+	 * (`sidecar_color::upright`). The lens's focal length, in picture diagonals, sets Aspect when the photo
+	 * gives it with a crop factor. False when the photo hasn't the lines for the mode.
+	 */
+	async function upright(mode: 'level' | 'vertical' | 'full'): Promise<boolean> {
+		const size = pictureSize();
+		if (!edit || !size || !develop) return false;
+		const { lum, size: lumSize } = await develop.luminance(800);
+		const info = meta?.info;
+		const crop = info?.lensIdentity?.cropFactor;
+		const focal = info && info.focalLengthMm > 0 && crop ? (info.focalLengthMm * crop) / 43.27 : null;
+		const was: Geometry = $state.snapshot(edit.geometry) ?? NO_GEOMETRY;
+		const next = packer.upright(was, size, lum, lumSize, mode, focal);
+		if (!next) return false;
+		edit.geometry = next;
+		changed();
+		committed();
+		return true;
+	}
+
 	/** A quarter turn. A locked ratio turns with the photo, so the same part of it stays cropped. */
 	function turn(by: 1 | -1) {
 		const g = edit?.geometry ?? NO_GEOMETRY;
@@ -1834,7 +1855,7 @@
 {/snippet}
 
 {#snippet cropSection()}
-	{#if edit && meta}<CropSection {edit} {readOnly} originalRatio={originalRatio()} ongeometry={setGeometry} onturn={turn} onreset={resetGeometry} oncommit={committed} />{/if}
+	{#if edit && meta}<CropSection {edit} {readOnly} originalRatio={originalRatio()} ongeometry={setGeometry} onturn={turn} onreset={resetGeometry} oncommit={committed} onupright={fallback ? undefined : upright} />{/if}
 {/snippet}
 
 {#snippet wbSection()}

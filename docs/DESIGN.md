@@ -351,6 +351,30 @@ Where the code differs from the text below, the code and these notes win.
     is left out, and only the sky between its branches kept. A blown window behind a cat is partly taken —
     far, white and above, so genuinely ambiguous. A blown window behind a portrait is barely touched.
 
+- **Upright** (§15, `sidecar_color::upright`, Crop → Upright: Level · Vertical · Full): straighten and keystone
+  from the photo's own lines.
+  - **Segments:** found by gradient-orientation region growing, as LSD does (written from the paper; its
+    reference code is AGPL), each region's principal axis.
+  - **The two families:** near-vertical segments (20°) and near-horizontal ones (15°). Only the segments that
+    share their family's vanishing point are kept: RANSAC over pairs, a segment pointing at the candidate within
+    1°, scored by length. A photo's fur, hair and car flanks lean without converging.
+  - **The solve:** the editor's own sliders (Straighten; Vertical and Horizontal, its K·R·K⁻¹ virtual camera) by
+    Nelder–Mead through `geometry`'s own map, so the mapped lines stand true with no sign convention to get
+    wrong. The cost weights each segment by its length in the picture: by its mapped length, keystone could
+    lower the cost by shrinking lines, and it did.
+  - **Aspect:** when EXIF gives the focal length and the crop factor, the real lens's own correction sets it.
+    A rotation stretches the centre vertically by 1/cos(tilt), and the real camera needed a different tilt for
+    the same vanishing point than the fixed virtual one does.
+  - The crop is refitted. In the browser, it runs on the developed picture's luminance, through wasm.
+  Checked:
+  - A synthetic facade rendered through a known geometry, supersampled (aliased edges pulled every angle toward
+    the pixel grid and under-corrected): Full recovers 3.01°, 34.6, −15.1 against 3.00°, 35, −15.
+  - Among 60 random stray segments, the consensus keeps 126 of 130 facade lines and 2 strays; the strays
+    alone give no answer.
+  - `web/scripts/upright-smoke.mjs` in Chromium: Vertical on an overcast street stands its building up. On a
+    cat at a window, it makes the blurred window posts vertical (vertical 40, a heavy crop). On a night
+    portrait it says there aren't enough straight lines and leaves the geometry alone.
+
 - **D1 and D5 are both closed, neither merged** (pull request #46, closed 2026-10-29). The owner's rule,
   2026-10-27: what is merged and deployed should be what has been tested. Both were written, and neither
   earned its way in.

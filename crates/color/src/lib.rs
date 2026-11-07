@@ -18,6 +18,7 @@ mod spectral_data;
 pub mod spline;
 pub mod stock;
 pub mod tone;
+pub mod upright;
 
 pub use params::{DevelopParams, DisplaySpace, EditParams, Packed, SourceKind, pack};
 
