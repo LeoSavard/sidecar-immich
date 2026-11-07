@@ -2143,4 +2143,118 @@ mod tests {
             );
         }
     }
+
+    /// A colour range's uniformity at full strength, through a mask covering everything: patches of different
+    /// hues all come out at the range's centre hue, their saturations closer together, their lightness kept.
+    #[test]
+    fn uniformity_pulls_hue_and_saturation_to_the_centre() {
+        use sidecar_color::color_range::{COLOR, ColorRange, oklch};
+        use sidecar_color::params::MaskAdjustment;
+        let Ok(gpu) = crate::test_gpu() else {
+            return eprintln!("skipping: no GPU");
+        };
+        let pass = DevelopPass::new(gpu).unwrap();
+        let patches = [
+            [0.30f32, 0.15, 0.10],
+            [0.30, 0.20, 0.08],
+            [0.25, 0.12, 0.14],
+            [0.20, 0.16, 0.10],
+        ];
+        let (w, h) = (patches.len() as u32 * 8, 8u32);
+        let src = RgbaF32 {
+            width: w,
+            height: h,
+            data: (0..w * h)
+                .flat_map(|i| {
+                    let c = patches[((i % w) / 8) as usize];
+                    [c[0], c[1], c[2], 0.0]
+                })
+                .collect(),
+        };
+        let cam = sidecar_color::camera::SourceSpace::Srgb.camera_color();
+        let render = |uniform: f64| {
+            let layer = MaskAdjustment {
+                mask: COLOR.into(),
+                amount: 100.0,
+                color: Some(ColorRange {
+                    hue: 45.0,
+                    uniformity_hue: uniform,
+                    uniformity_saturation: uniform,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            let edit = sidecar_color::EditParams {
+                masks: vec![layer],
+                ..Default::default()
+            };
+            let p = sidecar_color::pack(
+                &edit,
+                &cam,
+                sidecar_color::SourceKind::Raw,
+                sidecar_color::DisplaySpace::Srgb,
+            );
+            let white = crate::upload_rgba16(
+                gpu,
+                &RgbaF32 {
+                    width: 4,
+                    height: 4,
+                    data: vec![1.0; 64],
+                },
+            );
+            let masks = Masks {
+                params: p.masks,
+                textures: vec![Some(&white)],
+                curves: &p.mask_curves,
+                ..Masks::none()
+            };
+            let out = crate::read_rgba16(
+                gpu,
+                &pass
+                    .render(
+                        gpu,
+                        &crate::upload_rgba16(gpu, &src),
+                        &p.uniform,
+                        &p.lut,
+                        &masks,
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
+            (0..patches.len())
+                .map(|k| {
+                    let i = ((4 * w + k as u32 * 8 + 4) * 4) as usize;
+                    oklch([out.data[i], out.data[i + 1], out.data[i + 2]])
+                })
+                .collect::<Vec<_>>()
+        };
+        let (before, after) = (render(0.0), render(100.0));
+        println!("before {before:?}\nafter  {after:?}");
+        let spread = |v: &[[f32; 3]], k: usize| {
+            v.iter().map(|c| c[k]).fold(f32::MIN, f32::max)
+                - v.iter().map(|c| c[k]).fold(f32::MAX, f32::min)
+        };
+        for c in &after {
+            let d = ((c[2] - 45.0 + 540.0).rem_euclid(360.0) - 180.0).abs();
+            assert!(d < 1.5, "hue {} isn't the centre's", c[2]);
+        }
+        let sat = |v: &[[f32; 3]]| v.iter().map(|c| c[1] / c[0]).collect::<Vec<_>>();
+        let (sb, sa) = (sat(&before), sat(&after));
+        let range = |v: &[f32]| {
+            v.iter().cloned().fold(f32::MIN, f32::max) - v.iter().cloned().fold(f32::MAX, f32::min)
+        };
+        assert!(
+            range(&sa) < range(&sb) * 0.2,
+            "saturations closer: {sb:?} → {sa:?}"
+        );
+        for (b, a) in before.iter().zip(&after) {
+            assert!(
+                (a[0] - b[0]).abs() < 0.01,
+                "lightness kept: {} → {}",
+                b[0],
+                a[0]
+            );
+        }
+        assert!(spread(&before, 2) > 10.0, "the patches did differ in hue");
+    }
 }

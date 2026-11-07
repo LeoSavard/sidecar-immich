@@ -18,6 +18,12 @@ saturation: [number, number],
  */
 feather: number, 
 /**
+ * 0…100: uniformity — how far the hue, and the saturation, of what the range selects are pulled toward the
+ * range's centre (its hue, the middle of its saturation band): blotches and redness evened out, the colour's
+ * depth kept. Applied after the mixer, by the layer's weight.
+ */
+uniformityHue?: number, uniformitySaturation?: number, 
+/**
  * Only within this model mask (`skin` for the skin preset); none for anywhere.
  */
 within?: string, };

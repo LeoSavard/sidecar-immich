@@ -149,6 +149,10 @@ added on top of it where the mask is. "Show" greys out what the selected mask le
 				<Slider id="range-sat-from" label="Saturation from" value={c.saturation[0]} min={0} max={100} defaultValue={8} {disabled} format={(v) => decimals(v)} onchange={(v) => onchange(i, { color: { ...c, saturation: [v, c.saturation[1]] } })} {oncommit} />
 				<Slider id="range-sat-to" label="to" value={c.saturation[1]} min={0} max={100} defaultValue={60} {disabled} format={(v) => decimals(v)} onchange={(v) => onchange(i, { color: { ...c, saturation: [c.saturation[0], v] } })} {oncommit} />
 				<Slider id="range-feather" label="Softness" value={c.feather} min={1} max={40} defaultValue={10} {disabled} format={(v) => decimals(v)} onchange={(v) => onchange(i, { color: { ...c, feather: v } })} {oncommit} />
+				{@render group('Uniformity')}
+				<Slider id="range-uniform-hue" label="Hue" value={c.uniformityHue ?? 0} min={0} max={100} defaultValue={0} {disabled} format={(v) => decimals(v)} onchange={(v) => onchange(i, { color: { ...c, uniformityHue: v } })} {oncommit} />
+				<Slider id="range-uniform-sat" label="Saturation" value={c.uniformitySaturation ?? 0} min={0} max={100} defaultValue={0} {disabled} format={(v) => decimals(v)} onchange={(v) => onchange(i, { color: { ...c, uniformitySaturation: v } })} {oncommit} />
+				<p class="text-xs text-muted">Uniformity pulls the hue and saturation of what the range selects toward its centre, evening out blotches and redness while keeping lightness.</p>
 				{#if set?.names?.includes('skin')}
 					<div class="flex items-center gap-1.5 text-xs" role="radiogroup" aria-label="Where">
 						<span class="text-fg-2">Where</span>
