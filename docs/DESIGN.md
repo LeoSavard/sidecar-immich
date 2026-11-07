@@ -1294,6 +1294,18 @@ dyes beyond 388–719 nm hold their end values, where the eye sees under 0.1 % o
 table at the display's white, so the slide keeps its density: a slide's middle grey is darker than Sidecar's
 neutral rendering of the same exposure, as it is on a light table.
 
+**Alternative processes** (`Monochrome.process`, Film → Print, `sidecar_color::process`). Black and white printed
+as a **cyanotype** or made as a **tintype**, each in colours computed from a model of its materials under D65, not
+picked. A cyanotype is Prussian blue formed in cotton-rag paper (reflectance 0.80 → 0.86 across the spectrum); its
+absorbance is a broad band centred at 700 nm (σ 110 nm) over a weak 15 % everywhere, and its peak density is solved
+so the print's visual density reaches the ≈ 1.3 measured on cyanotypes — the band's shape decides the colour, the
+measurement the range. The photo's luminance picks a density by Beer–Lambert, per channel. A tintype is collodion
+silver (a warm grey, 30 % → 50 % reflectance) beside black japan (4 %), mixed additively, about 3.5 stops. Each
+process's lightest surface is shown at 0.9 of white. Generic processes, so the materials are approximations of
+their published characteristics, every number in `process.rs`. Checked: `cyanotype_is_prussian_blue_on_white` (deepest
+tone hue 249°, visual Dmax 1.30), `tintype_is_warm_silver_on_black`, parity cases `cyanotype` and `tintype` (ΔE 0).
+Digital negatives for real cyanotypes need a step tablet scan and are still to come.
+
 **Grain.** `EditParams.grain { amount, size }` makes each spot's exposure flicker as a negative's grains make
 it, before the tone map, in colour or black and white, on a RAW or a developed file (`develop/grain.wgsl`). The
 noise is procedural, not a stored map: two octaves of value noise — clumps at the grain's size, grains at half

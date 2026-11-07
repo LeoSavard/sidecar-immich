@@ -58,4 +58,11 @@ struct DevelopParams {
   // `PROCESS_VERSION` 6), y Contrast as an exponent for the S-curve that grades the straight segment,
   // since a fixed segment has no steepness of its own for Contrast to set. z, w unused.
   tone_shape: vec4f,
+  // An alternative process (`process::uniform`): x 1 cyanotype, 2 tintype, 0 none; y the cyanotype's peak
+  // density, z its luminance absorbance per unit density. `process_dark`: the cyanotype's absorbance per channel
+  // per unit density, or the tintype's black japan; w their luminance. `process_light`: the paper or the
+  // silver, w its luminance. Linear Rec.2020, as shown.
+  process: vec4f,
+  process_dark: vec4f,
+  process_light: vec4f,
 }
