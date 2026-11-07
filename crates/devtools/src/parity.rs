@@ -451,6 +451,43 @@ fn cases() -> Vec<Fixture> {
             None,
         ),
         (
+            // Colour grading's three ranges and the global wheel, with the crossover moved.
+            "grading".into(),
+            nikon_d850(),
+            SourceKind::Raw,
+            {
+                use sidecar_color::params::{ColorGrading, GradeWheel};
+                let mut e = graded.clone();
+                e.color_grading = Some(ColorGrading {
+                    shadows: GradeWheel {
+                        hue: 230.0,
+                        saturation: 60.0,
+                        luminance: -20.0,
+                    },
+                    midtones: GradeWheel {
+                        hue: 60.0,
+                        saturation: 25.0,
+                        luminance: 5.0,
+                    },
+                    highlights: GradeWheel {
+                        hue: 70.0,
+                        saturation: 45.0,
+                        luminance: 10.0,
+                    },
+                    global: GradeWheel {
+                        hue: 150.0,
+                        saturation: 10.0,
+                        luminance: 0.0,
+                    },
+                    blending: 70.0,
+                    balance: -30.0,
+                });
+                e
+            },
+            DisplaySpace::Srgb,
+            None,
+        ),
+        (
             "film-layers".into(),
             nikon_d850(),
             SourceKind::Raw,

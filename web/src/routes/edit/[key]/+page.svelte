@@ -24,6 +24,7 @@
 	import MasksPanel from '$lib/ui/MasksPanel.svelte';
 	import CropOverlay from '$lib/ui/CropOverlay.svelte';
 	import GradientHandles from '$lib/ui/GradientHandles.svelte';
+	import GradingSection from '$lib/ui/sections/GradingSection.svelte';
 	import LensSection from '$lib/ui/sections/LensSection.svelte';
 	import CropSection from '$lib/ui/sections/CropSection.svelte';
 	import WhiteBalanceSection from '$lib/ui/sections/WhiteBalanceSection.svelte';
@@ -40,7 +41,7 @@
 
 	const SPACES: DisplaySpace[] = ['srgb', 'display-p3'];
 
-	type Section = 'lens' | 'crop' | 'wb' | 'light' | 'film' | 'curve' | 'color' | 'depth' | 'masks' | 'detail' | 'history';
+	type Section = 'lens' | 'crop' | 'wb' | 'light' | 'film' | 'curve' | 'color' | 'grading' | 'depth' | 'masks' | 'detail' | 'history';
 
 	const key = page.params.key!;
 	let canvas: HTMLCanvasElement;
@@ -1794,6 +1795,7 @@
 		{ id: 'film', label: 'Film', short: 'Film' },
 		// Not "Colour": that is the group it sits in, and a section named after its group reads as the same thing.
 		{ id: 'color', label: 'Mixer', short: 'Mixer' },
+		{ id: 'grading', label: 'Colour grading', short: 'Grading' },
 		{ id: 'light', label: 'Light', short: 'Light' },
 		{ id: 'curve', label: 'Curve', short: 'Curve' },
 		{ id: 'crop', label: 'Crop and straighten', short: 'Crop' },
@@ -1806,7 +1808,7 @@
 	const sectionById = (id: Section) => allSections.find((x) => x.id === id)!;
 	/** The tools as the panel groups them: a group with one section is that section. */
 	const allGroups: { id: string; label: string; short: string; children: Section[] }[] = [
-		{ id: 'colour', label: 'Colour', short: 'Colour', children: ['wb', 'film', 'color'] },
+		{ id: 'colour', label: 'Colour', short: 'Colour', children: ['wb', 'film', 'color', 'grading'] },
 		{ id: 'light', label: 'Light', short: 'Light', children: ['light', 'curve'] },
 		{ id: 'crop', label: 'Crop and straighten', short: 'Crop', children: ['crop'] },
 		{ id: 'processing', label: 'Processing', short: 'Processing', children: ['depth', 'masks', 'detail', 'lens'] },
@@ -1910,13 +1912,17 @@
 	>
 		<summary class="cursor-pointer py-1 text-xs font-medium">{s.label}</summary>
 		<div class="pt-2">
-			{#if s.id === 'lens'}{@render lensSection()}{:else if s.id === 'crop'}{@render cropSection()}{:else if s.id === 'wb'}{@render wbSection()}{:else if s.id === 'light'}{@render lightSection()}{:else if s.id === 'film'}{@render filmSection()}{:else if s.id === 'curve'}{@render curveSection()}{:else if s.id === 'color'}{@render colorSection()}{:else if s.id === 'depth'}{@render depthSection()}{:else if s.id === 'masks'}{@render masksSection()}{:else if s.id === 'history'}{@render historySection()}{:else if detailOpen}{@render detailSection()}{/if}
+			{#if s.id === 'lens'}{@render lensSection()}{:else if s.id === 'crop'}{@render cropSection()}{:else if s.id === 'wb'}{@render wbSection()}{:else if s.id === 'light'}{@render lightSection()}{:else if s.id === 'film'}{@render filmSection()}{:else if s.id === 'curve'}{@render curveSection()}{:else if s.id === 'color'}{@render colorSection()}{:else if s.id === 'grading'}{@render gradingSection()}{:else if s.id === 'depth'}{@render depthSection()}{:else if s.id === 'masks'}{@render masksSection()}{:else if s.id === 'history'}{@render historySection()}{:else if detailOpen}{@render detailSection()}{/if}
 		</div>
 	</details>
 {/snippet}
 
 {#snippet colorSection()}
 	{#if edit}<ColorSection {edit} onchange={update} oncommit={committed} />{/if}
+{/snippet}
+
+{#snippet gradingSection()}
+	{#if edit}<GradingSection {edit} onchange={update} oncommit={committed} />{/if}
 {/snippet}
 
 <div class="flex h-dvh flex-col overflow-hidden bg-ground text-fg select-none [-webkit-touch-callout:none] lg:flex-row">
@@ -2269,7 +2275,7 @@
 			{/if}
 			{#if !toolsHidden}
 			<div class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-6 pt-1">
-				{#if section === 'lens'}{@render lensSection()}{:else if section === 'crop'}{@render cropSection()}{:else if section === 'wb'}{@render wbSection()}{:else if section === 'light'}{@render lightSection()}{:else if section === 'film'}{@render filmSection()}{:else if section === 'curve'}{@render curveSection()}{:else if section === 'color'}{@render colorSection()}{:else if section === 'depth'}{@render depthSection()}{:else if section === 'masks'}{@render masksSection()}{:else if section === 'history'}{@render historySection()}{:else}{@render detailSection()}{/if}
+				{#if section === 'lens'}{@render lensSection()}{:else if section === 'crop'}{@render cropSection()}{:else if section === 'wb'}{@render wbSection()}{:else if section === 'light'}{@render lightSection()}{:else if section === 'film'}{@render filmSection()}{:else if section === 'curve'}{@render curveSection()}{:else if section === 'color'}{@render colorSection()}{:else if section === 'grading'}{@render gradingSection()}{:else if section === 'depth'}{@render depthSection()}{:else if section === 'masks'}{@render masksSection()}{:else if section === 'history'}{@render historySection()}{:else}{@render detailSection()}{/if}
 			</div>
 			{/if}
 

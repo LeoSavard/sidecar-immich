@@ -69,6 +69,92 @@ pub struct EditParams {
     #[serde(skip_serializing_if = "is_zero")]
     #[cfg_attr(feature = "ts", ts(as = "Option<f64>", optional))]
     pub haze: f64,
+    /// Colour grading wheels (DESIGN.md §7, "Colour grading"): a colour and a lightness for the shadows,
+    /// midtones and highlights, and one for all of it. Absent, and left out of the serialized edit, is none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub color_grading: Option<ColorGrading>,
+}
+
+/// One grading wheel: a colour to push toward and how far, and a lightness change.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "edit/"))]
+pub struct GradeWheel {
+    /// Degrees, 0…360, around OKLCh's hue circle (0 a pinkish red, about 140 green, 265 blue).
+    pub hue: f64,
+    /// 0…100: how far toward that hue, up to `GRADE_CHROMA` in OKLab chroma.
+    pub saturation: f64,
+    /// −100…100: lighter or darker, up to `GRADE_LIGHTNESS` in OKLab lightness.
+    pub luminance: f64,
+}
+
+/// Colour grading: the picture's tonal ranges each pushed toward a colour, after the tone map and the mixer,
+/// in OKLab — so a wheel's colour moves chroma only, never lightness, and its luminance moves lightness only.
+/// The three ranges are smooth weights over lightness that always sum to one.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "edit/"))]
+pub struct ColorGrading {
+    pub shadows: GradeWheel,
+    pub midtones: GradeWheel,
+    pub highlights: GradeWheel,
+    /// Everywhere, whatever the lightness.
+    pub global: GradeWheel,
+    /// 0…100: how much the ranges overlap; 50 is the default.
+    pub blending: f64,
+    /// −100…100: where shadows give way to highlights; negative favours the highlights (the split moves
+    /// darker), positive the shadows.
+    pub balance: f64,
+}
+
+impl Default for ColorGrading {
+    fn default() -> Self {
+        Self {
+            shadows: GradeWheel::default(),
+            midtones: GradeWheel::default(),
+            highlights: GradeWheel::default(),
+            global: GradeWheel::default(),
+            blending: 50.0,
+            balance: 0.0,
+        }
+    }
+}
+
+/// The furthest a wheel at 100 moves OKLab chroma: about what separates a neutral from a clearly tinted grey.
+pub const GRADE_CHROMA: f64 = 0.06;
+/// The furthest a wheel's luminance at ±100 moves OKLab lightness.
+pub const GRADE_LIGHTNESS: f64 = 0.15;
+
+impl ColorGrading {
+    /// The uniform's four wheels (a, b and lightness shifts) and its split (on, crossover lightness, overlap
+    /// exponent): what `develop/grading.wgsl` takes. All zero when every wheel is at rest.
+    pub fn uniform(g: Option<&ColorGrading>) -> ([[f32; 4]; 4], [f32; 4]) {
+        let Some(g) = g else {
+            return ([[0.0; 4]; 4], [0.0; 4]);
+        };
+        let wheel = |w: &GradeWheel| {
+            let c = w.saturation.clamp(0.0, 100.0) / 100.0 * GRADE_CHROMA;
+            let h = w.hue.to_radians();
+            [
+                (c * h.cos()) as f32,
+                (c * h.sin()) as f32,
+                (w.luminance.clamp(-100.0, 100.0) / 100.0 * GRADE_LIGHTNESS) as f32,
+                0.0,
+            ]
+        };
+        let wheels = [
+            wheel(&g.shadows),
+            wheel(&g.midtones),
+            wheel(&g.highlights),
+            wheel(&g.global),
+        ];
+        let on = wheels.iter().any(|w| w.iter().any(|v| *v != 0.0));
+        // The crossover in OKLab lightness, 0.5 at balance 0; the overlap exponent from 2 (narrow) to 0.5 (wide).
+        let mid = 0.5 - g.balance.clamp(-100.0, 100.0) / 100.0 * 0.25;
+        let q = 2.0 * 0.25f64.powf(g.blending.clamp(0.0, 100.0) / 100.0);
+        (wheels, [on as u8 as f32, mid as f32, q as f32, 0.0])
+    }
 }
 
 /// A lens blur by distance: how far it reaches, where the focus is, and how deep the sharp band around it is.
@@ -112,6 +198,7 @@ impl Default for EditParams {
             masks: Vec::new(),
             lens_blur: None,
             haze: 0.0,
+            color_grading: None,
         }
     }
 }
@@ -1166,7 +1253,7 @@ pub enum DisplaySpace {
     DisplayP3,
 }
 
-/// The develop modules' uniform (432 bytes). Its WGSL declaration,
+/// The develop modules' uniform (512 bytes). Its WGSL declaration,
 /// `shaders/uniforms/develop_params.wgsl`, is generated from this struct (`sidecar-uniform`); the
 /// `uniforms` test checks the file and every offset.
 #[repr(C)]
@@ -1229,6 +1316,11 @@ pub struct DevelopParams {
     /// `PROCESS_VERSION` 6), y Contrast as an exponent for the S-curve that grades the straight segment,
     /// since a fixed segment has no steepness of its own for Contrast to set. z, w unused.
     pub tone_shape: [f32; 4],
+    /// Colour grading (`ColorGrading::uniform`): per wheel — shadows, midtones, highlights, global — the OKLab a
+    /// and b to add and the lightness shift.
+    pub grade: [[f32; 4]; 4],
+    /// Colour grading: x 1 on, y the shadows/highlights crossover in OKLab lightness, z the overlap exponent.
+    pub grade_split: [f32; 4],
 }
 
 /// Contrast slider value → logistic steepness.
@@ -1417,6 +1509,7 @@ fn pack_inner(
         })
         .flatten();
     let tone = tone_params(edit, developed);
+    let (grade, grade_split) = ColorGrading::uniform(edit.color_grading.as_ref());
     let mut params = DevelopParams {
         wb_mul: wb.mul.map(|v| v as f32),
         // A developed file is already a picture — its own maker placed its grey — so the baseline is a RAW's
@@ -1492,6 +1585,8 @@ fn pack_inner(
             0.0,
             0.0,
         ],
+        grade,
+        grade_split,
         slide_tone: match &slide {
             Some(_) => {
                 let mut t = display_tone(edit);
@@ -1691,6 +1786,52 @@ mod tests {
         );
     }
 
+    /// At rest, grading is off and packs to zeros; a wheel pushes chroma along its hue with no lightness
+    /// change, and Balance moves the crossover.
+    #[test]
+    fn grading_packs_its_wheels() {
+        assert_eq!(ColorGrading::uniform(None).1[0], 0.0);
+        assert_eq!(
+            ColorGrading::uniform(Some(&ColorGrading::default())).1[0],
+            0.0
+        );
+        let g = ColorGrading {
+            shadows: GradeWheel {
+                hue: 90.0,
+                saturation: 50.0,
+                luminance: 0.0,
+            },
+            balance: 100.0,
+            ..Default::default()
+        };
+        let (w, split) = ColorGrading::uniform(Some(&g));
+        assert_eq!(split[0], 1.0);
+        assert!(w[0][0].abs() < 1e-6 && (w[0][1] - (0.5 * GRADE_CHROMA) as f32).abs() < 1e-6);
+        assert_eq!(w[0][2], 0.0, "a colour, not a lightness");
+        assert!(
+            (split[1] - 0.25).abs() < 1e-6,
+            "balance 100 puts the crossover in the darks"
+        );
+        let e = EditParams {
+            color_grading: Some(g),
+            ..Default::default()
+        };
+        let p = pack(
+            &e,
+            &crate::camera::nikon_d850(),
+            SourceKind::Raw,
+            DisplaySpace::Srgb,
+        );
+        let d: &DevelopParams = bytemuck::from_bytes(&p.uniform);
+        assert_eq!(d.grade_split[0], 1.0);
+        assert!(
+            serde_json::to_value(EditParams::default())
+                .unwrap()
+                .get("colorGrading")
+                .is_none()
+        );
+    }
+
     /// Default settings on a developed file must be the identity: every tone value at its neutral, and the
     /// RAW-only highlight blend off whatever the stored strength says.
     #[test]
@@ -1733,7 +1874,7 @@ mod tests {
             SourceKind::Raw,
             DisplaySpace::Srgb,
         );
-        assert_eq!(p.uniform.len(), 432);
+        assert_eq!(p.uniform.len(), 512);
         assert_eq!(p.lut.len(), LUT_SIZE);
         // exposure sits at byte 12, and for a RAW at default it is the baseline, not 1.0
         let gain = |p: &Packed| f32::from_le_bytes(p.uniform[12..16].try_into().unwrap());
