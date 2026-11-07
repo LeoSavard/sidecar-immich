@@ -176,6 +176,8 @@ export function describeChanges(from: EditParams, to: EditParams): string[] {
 	else if (s1.length < s0.length) out.push(s0.length - s1.length === 1 ? 'Spot removed' : `${s0.length - s1.length} spots removed`);
 	else if (JSON.stringify(s0) !== JSON.stringify(s1)) out.push('Spots adjusted');
 	if ((from.cameraProfile ?? null) !== (to.cameraProfile ?? null)) out.push(to.cameraProfile ? "The file's camera profile" : 'Camera matrix');
+	if (!from.negative !== !to.negative) out.push(to.negative ? 'Film negative' : 'Positive');
+	else if (from.negative && to.negative && JSON.stringify(from.negative) !== JSON.stringify(to.negative)) out.push('Negative adjusted');
 	return out;
 }
 
@@ -290,6 +292,9 @@ export const PICKS: { id: string; label: string; take: (into: EditParams, from: 
 			else delete e.monochrome;
 			if (f.grain) e.grain = structuredClone(f.grain);
 			else delete e.grain;
+			// A roll's base and contrast are the same frame to frame.
+			if (f.negative) e.negative = structuredClone(f.negative);
+			else delete e.negative;
 		}
 	},
 	{ id: 'curve', label: 'Curve', take: (e, f) => (e.tone.curve = structuredClone(f.tone.curve)) },

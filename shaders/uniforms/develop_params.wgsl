@@ -67,4 +67,6 @@ struct DevelopParams {
   // Texture and Clarity (`Presence::uniform`): the fine and middle bands' change in contrast, −1…1; z 1 when
   // either is on, so develop reads the local-contrast map; w Dehaze, −1…1 (0: no haze map is read).
   local: vec4f,
+  // A film negative inverted (`Negative::uniform`): the film base's camera RGB, and 1/γ; all zero for a positive.
+  negative: vec4f,
 }

@@ -426,6 +426,27 @@ Where the code differs from the text below, the code and these notes win.
     placement instead of the file's baseline, the D7000 went the other way (0.276), which is how the right
     exposure was settled. An X100F's preview matched neither (0.94), so it isn't a usable reference.
 
+- **Film negatives** (§7, `EditParams::negative`, Film → Negative): a negative photographed or scanned is
+  inverted by its density, at the start of develop, before anything else.
+  - **The model:** transmittance is 10^−D, and above the base a negative's density is γ·log₁₀ of the
+    exposure. So the scene's light per channel is (T_base / T)^(1/γ). Dividing by the base removes the orange
+    mask and the light it was lit by exactly, and γ (about 0.6 for colour negative) undoes the film's contrast.
+    The base's own level is subtracted so unexposed film is black, and grey is scaled into place
+    (`NEGATIVE_SCALE`).
+  - **Turning it on:** the base starts at the clearest film in the frame (each channel's 99.5th percentile; the
+    rebate if it shows), and the white balance starts so the inverted picture's mean is grey: with the mask
+    divided out, only the light's and the stock's balance is left. "Pick the film base" takes it from the rebate
+    instead.
+  - **White-balance eyedropper:** on a negative, it inverts what it samples first.
+  - **Copied with the Film settings:** a roll's base and γ are the same frame to frame.
+  Checked:
+  - A scene exposed onto film of γ 0.6 through two different masks inverts to the same light, in proportion to
+    the exposure above the threshold, to 1e-9.
+  - Parity case `negative`: ΔE 0.0000.
+  - `web/scripts/negative-smoke.mjs` in Chromium: Film negative saves a base, γ 0.6 and a custom white
+    balance. It inverts the canvas (luminance correlation with before −0.97) and the worker's preview (−0.95),
+    and turning it off leaves a positive as shot.
+
 - **D1 and D5 are both closed, neither merged** (pull request #46, closed 2026-10-29). The owner's rule,
   2026-10-27: what is merged and deployed should be what has been tested. Both were written, and neither
   earned its way in.

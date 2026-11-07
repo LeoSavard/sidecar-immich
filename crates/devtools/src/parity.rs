@@ -646,6 +646,22 @@ fn cases() -> Vec<Fixture> {
             None,
         ),
         (
+            // A film negative inverted by its density, its base an orange mask.
+            "negative".into(),
+            nikon_d850(),
+            SourceKind::Raw,
+            {
+                let mut e = graded.clone();
+                e.negative = Some(sidecar_color::params::Negative {
+                    base: [0.9, 0.55, 0.3],
+                    gamma: 0.6,
+                });
+                e
+            },
+            DisplaySpace::Srgb,
+            None,
+        ),
+        (
             "film-layers".into(),
             nikon_d850(),
             SourceKind::Raw,
