@@ -471,6 +471,98 @@ pub fn homography(
     })
 }
 
+/// Refine where a point `p` of `a` lies in `b`, starting from `h`'s mapping of it, by Gauss–Newton on the
+/// patch around it (Lucas and Kanade, IJCAI 1981): the patch of `a` mapped through `h`, then shifted by a
+/// translation and offset by a constant (log luminance: an exposure difference) until it matches `b` best.
+/// The detector's corner positions slide along curved edges as a view changes; the patch's content does not.
+/// `None` when the patch has too little texture, the shift runs away, or the match stays poor.
+pub fn refine(a: &Grey, b: &Grey, h: &H, p: [f64; 2]) -> Option<[f64; 2]> {
+    const R: i32 = 7;
+    let bil = |g: &Grey, x: f64, y: f64| -> f64 {
+        let (x0, y0) = (x.floor(), y.floor());
+        let (fx, fy) = (x - x0, y - y0);
+        let (x0, y0) = (x0 as i32, y0 as i32);
+        let v = |i, j| g.at(i, j) as f64;
+        (v(x0, y0) * (1.0 - fx) + v(x0 + 1, y0) * fx) * (1.0 - fy)
+            + (v(x0, y0 + 1) * (1.0 - fx) + v(x0 + 1, y0 + 1) * fx) * fy
+    };
+    let samples: Vec<([f64; 2], f64)> = (-R..=R)
+        .flat_map(|dy| (-R..=R).map(move |dx| (dx, dy)))
+        .map(|(dx, dy)| {
+            let q = [p[0] + dx as f64, p[1] + dy as f64];
+            (apply(h, q), a.at(q[0] as i32, q[1] as i32) as f64)
+        })
+        .collect();
+    let start = apply(h, p);
+    if start[0] < (R + 2) as f64
+        || start[1] < (R + 2) as f64
+        || start[0] > (b.w as i32 - R - 3) as f64
+        || start[1] > (b.h as i32 - R - 3) as f64
+    {
+        return None;
+    }
+    let mut t = [0.0f64; 2];
+    let mut c = 0.0;
+    let mut err = f64::MAX;
+    for _ in 0..10 {
+        // Normal equations over (tx, ty, c).
+        let mut m = [[0.0f64; 3]; 3];
+        let mut g = [0.0f64; 3];
+        let mut e2 = 0.0;
+        for (q, va) in &samples {
+            let (x, y) = (q[0] + t[0], q[1] + t[1]);
+            let vb = bil(b, x, y);
+            let gx = 0.5 * (bil(b, x + 1.0, y) - bil(b, x - 1.0, y));
+            let gy = 0.5 * (bil(b, x, y + 1.0) - bil(b, x, y - 1.0));
+            let r = vb - va - c;
+            let jac = [gx, gy, -1.0];
+            for i in 0..3 {
+                for j in 0..3 {
+                    m[i][j] += jac[i] * jac[j];
+                }
+                g[i] += jac[i] * r;
+            }
+            e2 += r * r;
+        }
+        err = (e2 / samples.len() as f64).sqrt();
+        // Too little texture in one direction: the patch can't fix a position.
+        let det = m[0][0] * m[1][1] - m[0][1] * m[0][1];
+        if det < 1e-6 * (m[0][0] + m[1][1]).powi(2) || m[0][0] + m[1][1] < 1e-3 {
+            return None;
+        }
+        let x = solve3(m, g.map(|v| -v))?;
+        t[0] += x[0];
+        t[1] += x[1];
+        c += x[2];
+        if t[0].hypot(t[1]) > 3.0 {
+            return None;
+        }
+        if x[0].hypot(x[1]) < 1e-3 {
+            break;
+        }
+    }
+    (err < 0.25).then(|| [start[0] + t[0], start[1] + t[1]])
+}
+
+fn solve3(m: [[f64; 3]; 3], b: [f64; 3]) -> Option<[f64; 3]> {
+    let det = |m: &[[f64; 3]; 3]| {
+        m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+            - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+            + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
+    };
+    let d = det(&m);
+    if d.abs() < 1e-300 {
+        return None;
+    }
+    Some(std::array::from_fn(|k| {
+        let mut mk = m;
+        for (row, v) in mk.iter_mut().zip(b) {
+            row[k] = v;
+        }
+        det(&mk) / d
+    }))
+}
+
 /// The share of frame `a` (`aw × ah`) that lands inside frame `b` under `h`.
 pub fn overlap(h: &H, aw: usize, ah: usize, bw: usize, bh: usize) -> f64 {
     let n = 40;

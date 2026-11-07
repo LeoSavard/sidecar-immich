@@ -112,6 +112,30 @@ Where the code differs from the text below, the code and these notes win.
   `sidecar-dev align` aligns a 9-frame ZV-1 bracket across 8 EV with 366–528 inliers and sub-pixel error — and
   shows a 2 px handheld drift per frame — and finds a four-frame D3 panorama by its overlaps.
 
+- **Panoramas** (`sidecar_merge::pano`, `sidecar-dev pano <out.dng> <raw>… [--projection …] [--scale s]
+  [--no-crop] [--lensfun <dir>] [--png <out>]`): frames turned about one point, stitched into one linear DNG,
+  after Brown and Lowe (IJCV 2007), from the papers. Every pair is matched on proxies and kept when its inliers
+  pass Brown–Lowe's test; each inlier is then **refined by Lucas–Kanade** on its 15 × 15 patch (translation and
+  a log-luminance offset), because FAST's corner positions slide along curved edges as the view changes —
+  that alone took the synthetic rig's residual from 0.60 to 0.10 px and its focal-length error from 2 % to
+  0.05 %. The camera only turns: focal length starts from the homographies (Shum–Szeliski's orthogonality
+  conditions), rotations from a spanning tree by Horn's absolute orientation, then Levenberg–Marquardt over
+  every rotation and the focal length (Huber loss, outliers dropped, adjusted again). Distortion, lateral CA
+  and vignetting are the file's or lensfun's profile; without one the adjustment fits k₁ and the exposure
+  solve fits vignetting. **Wave correction** levels the horizon from the plane of the cameras' horizontal axes
+  (each frame's EXIF orientation says which sensor axis that is). **Exposure** is one gain per frame — exact
+  in linear raw — solved by robust least squares on log luminance sampled over every overlap, EXIF as a weak
+  prior. Seams follow the nearest optical axis; **multi-band blending** (Burt–Adelson, push–pull fill outside
+  each frame, bands up to 2⁷) runs in linear light, so noise stays unbiased. Projections: rectilinear,
+  cylindrical, spherical (equirectangular, wrapping a full turn), chosen by coverage when not given; the
+  output is cropped to the largest covered rectangle; one full frame is held at a time. Checked on synthetic
+  rigs rendered from a scene on the sphere, with barrel distortion, 25 % vignetting and 2 EV of exposure:
+  focal to 0.05 %, k₁ to 0.0001, rotations to 0.05°, gains to 0.01 %, a level horizon, and the canvas matching
+  the scene's radiance to a median 0.00 %, p95 1.2 % — and 2.9 % across the join of an eight-frame full
+  turn. On the library's D3 panorama (2024-08-16, 60 mm Micro-Nikkor, portrait frames): the solved focal
+  length is 60.8 mm against EXIF's 60, gains within 0.06 EV, no visible seam, 6880 × 4152 in 11 s — and
+  LSP_1020 is left out, rightly: 9 % overlap of defocused grass gives 10 agreeing matches of 54.
+
 - **HDR merge** (`sidecar_merge::hdr`, `sidecar-dev hdr <out.dng> <raw>…`): a bracket merged into one linear
   DNG. Raw is linear, so no response curve is estimated; each frame is scaled into the reference's radiance and
   the frames are averaged with inverse-variance weights from each frame's *measured* noise model (Granados et
