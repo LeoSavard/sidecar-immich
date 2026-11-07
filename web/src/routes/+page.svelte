@@ -5,6 +5,7 @@
 	import { ACCEPT_RAW, isRaw } from '$lib/formats';
 	import { showPreview, type ShownPreview } from '$lib/local/preview';
 	import SelectionBar from '$lib/ui/SelectionBar.svelte';
+	import FolderBrowser from '$lib/ui/FolderBrowser.svelte';
 
 	type Recent = { assetKey: string; fileName: string; immichAssetId: string | null; openedAt: string };
 	let recent = $state<Recent[] | null>(null);
@@ -388,6 +389,7 @@
 	{#if selecting && selected.length}
 		<SelectionBar keys={selected} {names} onclear={stopSelecting} ondone={(changed) => (thumbVersion = { ...thumbVersion, ...Object.fromEntries(changed.map((k) => [k, Date.now()])) })} />
 	{/if}
+	<FolderBrowser />
 </main>
 
 {#snippet selectToggle()}
