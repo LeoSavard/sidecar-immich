@@ -22,6 +22,11 @@ pub struct DevelopPass {
     density_blur: Kernel,
     /// Every layer's curve the identity, for a develop whose layers have none.
     identity_curves: wgpu::Texture,
+    /// Texture and Clarity's map: the guided filter's coefficients, packed (`client/local_pack.wgsl`), and
+    /// what binds when there is none (1×1, RGBA32F).
+    guided: crate::guided::GuidedFilter,
+    local_pack: Kernel,
+    no_local: wgpu::Texture,
 }
 
 /// What one develop takes beside its uniform and tone curve: the masks' uniforms, a texture per layer in the
@@ -35,6 +40,9 @@ pub struct Masks<'a> {
     pub curves: &'a [f32],
     pub mono: &'a [f32],
     pub density: Option<&'a wgpu::Texture>,
+    /// Texture and Clarity's map over the whole frame (`DevelopPass::local_map`); like the adjacency map, a
+    /// develop of the whole frame makes its own and a tile has to be given it.
+    pub local: Option<&'a wgpu::Texture>,
     /// A spectral colour stock's two tables (`Packed::slide_exposure` and the stock profile's response table);
     /// both empty unless one is being rendered.
     pub slide_exposure: &'a [f32],
@@ -49,10 +57,17 @@ impl Masks<'_> {
             curves: &[],
             mono: &[],
             density: None,
+            local: None,
             slide_exposure: &[],
             slide_response: &[],
         }
     }
+}
+
+/// Whether a develop with this uniform reads the local-contrast map: Texture or Clarity is on.
+pub fn needs_local_map(uniform: &[u8]) -> bool {
+    let p: &DevelopParams = bytemuck::from_bytes(uniform);
+    p.local[2] > 0.5
 }
 
 /// Whether a develop with this uniform reads the adjacency map: black and white, a developer with adjacency, and
@@ -220,6 +235,17 @@ impl DevelopPass {
                         },
                         count: None,
                     },
+                    // Texture and Clarity's map.
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 7,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
                 ],
             });
         // Mirrors web/src/lib/gpu/develop.ts: the mask uniforms, a linear sampler, and a texture per slot.
@@ -331,6 +357,35 @@ impl DevelopPass {
             "client/density_blur.wgsl",
             &[B::Uniform, B::Tex, store],
         )?;
+        let local_pack = Kernel::new(
+            gpu,
+            "client/local_pack.wgsl",
+            &[
+                B::Uniform,
+                B::Tex,
+                B::Tex,
+                B::Store(wgpu::TextureFormat::Rgba32Float),
+            ],
+        )?;
+        let no_local = gpu.device.create_texture_with_data(
+            &gpu.queue,
+            &wgpu::TextureDescriptor {
+                label: Some("no local map"),
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba32Float,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            bytemuck::cast_slice(&[0.0f32; 4]),
+        );
         Ok(Self {
             pipeline,
             layout,
@@ -340,6 +395,9 @@ impl DevelopPass {
             density_down,
             density_blur,
             identity_curves,
+            guided: crate::guided::GuidedFilter::new(gpu)?,
+            local_pack,
+            no_local,
         })
     }
 
@@ -383,6 +441,8 @@ impl DevelopPass {
     ) -> Result<wgpu::Texture> {
         let mut own: DevelopParams = *bytemuck::from_bytes(uniform);
         own.mono[2] = 1.0;
+        // The film's exposure, without Texture and Clarity: the browser's map is made the same way.
+        own.local = [0.0; 4];
         let mut whole = masks.params;
         whole.frame = [0.0; 4];
         let whole = Masks {
@@ -417,6 +477,56 @@ impl DevelopPass {
         );
         gpu.queue.submit([enc.finish()]);
         Ok(map)
+    }
+
+    /// Texture and Clarity's map for a frame `frame` pixels across, from `small` (`density_source`'s: the whole
+    /// frame averaged down to at most 1,024 on the long edge): two self-guided filters of its log luminance, the
+    /// texture band's and the clarity band's (`sidecar_color::params::TEXTURE_RADIUS` and the rest, shares of
+    /// the long edge), their coefficients side by side in one RGBA32F texel. It depends on the photo alone, not
+    /// on the edit, so a caller may keep it while the sliders move.
+    pub fn local_map(&self, gpu: &Gpu, small: &wgpu::Texture, frame: [u32; 2]) -> wgpu::Texture {
+        use crate::guided::{GUIDE, Guided};
+        use sidecar_color::params::{CLARITY_EPS, CLARITY_RADIUS, TEXTURE_EPS, TEXTURE_RADIUS};
+        let size = [small.width(), small.height()];
+        // Radii in the map's own texels.
+        let texels =
+            frame[0].max(frame[1]) as f64 / sidecar_color::developer::map_scale(frame) as f64;
+        let band = |radius: f64, eps: f64| {
+            self.guided
+                .coefficients(
+                    gpu,
+                    small,
+                    small,
+                    size,
+                    Guided {
+                        radius: (radius * texels).max(1.0) as f32,
+                        eps: eps as f32,
+                        subsample: 1,
+                        channel: GUIDE,
+                        log_guide: true,
+                    },
+                )
+                .0
+        };
+        let (fine, mid) = (
+            band(TEXTURE_RADIUS, TEXTURE_EPS),
+            band(CLARITY_RADIUS, CLARITY_EPS),
+        );
+        let map = texture(gpu, size[0], size[1], wgpu::TextureFormat::Rgba32Float);
+        let mut enc = gpu.device.create_command_encoder(&Default::default());
+        self.local_pack.run(
+            gpu,
+            &mut enc,
+            &[0.0f32; 4],
+            size,
+            &[
+                Res::View(&view(&fine)),
+                Res::View(&view(&mid)),
+                Res::View(&view(&map)),
+            ],
+        );
+        gpu.queue.submit([enc.finish()]);
+        map
     }
 
     /// Develop a source texture into a new RGBA16F texture (display-linear).
@@ -454,6 +564,13 @@ impl DevelopPass {
             _ => None,
         };
         let density = masks.density.or(own_map.as_ref()).unwrap_or(&self.no_mask);
+        let own_local =
+            (masks.local.is_none() && needs_local_map(uniform) && masks.params.frame[2] == 0.0)
+                .then(|| {
+                    let small = self.density_source(gpu, src_tex);
+                    self.local_map(gpu, &small, [src_tex.width(), src_tex.height()])
+                });
+        let local = masks.local.or(own_local.as_ref()).unwrap_or(&self.no_local);
         let (w, h) = (src_tex.width(), src_tex.height());
         let size = wgpu::Extent3d {
             width: w,
@@ -542,6 +659,12 @@ impl DevelopPass {
                     binding: 6,
                     resource: wgpu::BindingResource::TextureView(
                         &slide_responses.create_view(&Default::default()),
+                    ),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::TextureView(
+                        &local.create_view(&Default::default()),
                     ),
                 },
             ],
@@ -797,6 +920,137 @@ mod tests {
         .unwrap();
         let worst = (0..128)
             .map(|x| (at(&tile, x) - at(&whole, 960 + x)).abs())
+            .fold(0.0, f32::max);
+        assert!(worst < 1e-3, "worst difference {worst}");
+    }
+
+    /// Clarity raises middle-scale detail in stops and leaves a hard edge with little halo; at rest the pass is the
+    /// one before, bit for bit; a tile given the whole frame's map develops as that part of the whole does.
+    #[test]
+    fn clarity_raises_middle_detail_without_halos() {
+        let Ok(gpu) = crate::test_gpu() else {
+            return eprintln!("skipping: no GPU");
+        };
+        let pass = DevelopPass::new(gpu).unwrap();
+        let (w, h) = (2048u32, 128u32);
+        // Left: a ripple of ±0.15 stop, 60 px across, round mid grey. Right: two flats meeting at a 3.3-stop edge.
+        let level = |x: u32| -> f32 {
+            if x < 700 {
+                0.18 * (0.15 * (x as f32 * std::f32::consts::TAU / 60.0).sin()).exp2()
+            } else if x < 1400 {
+                0.05
+            } else {
+                0.5
+            }
+        };
+        let src = RgbaF32 {
+            width: w,
+            height: h,
+            data: (0..w * h)
+                .flat_map(|i| {
+                    let v = level(i % w);
+                    [1.3 * v, v, 0.8 * v, 0.0]
+                })
+                .collect(),
+        };
+        let uniform = |local: [f32; 4]| {
+            let mut p: DevelopParams = bytemuck::Zeroable::zeroed();
+            p.wb_mul = [1.0; 3];
+            p.exposure = 1.0;
+            p.cam_to_work = [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+            ];
+            p.work_to_disp = p.cam_to_work;
+            p.tone = [-10.0, 6.5, 7.0, 0.5];
+            p.local = local;
+            bytemuck::bytes_of(&p).to_vec()
+        };
+        let lut: Vec<f32> = (0..4096).map(|i| i as f32 / 4095.0).collect();
+        let tex = crate::upload_rgba16(gpu, &src);
+        let develop = |u: &[u8]| {
+            crate::read_rgba16(
+                gpu,
+                &pass.render(gpu, &tex, u, &lut, &Masks::none()).unwrap(),
+            )
+            .unwrap()
+        };
+        let at = |img: &RgbaF32, x: u32| img.data[((64 * img.width + x) * 4 + 1) as usize];
+        let rest = develop(&uniform([0.0, 0.0, 0.0, 0.0]));
+        let off = develop(&uniform([0.0, 0.0, 1.0, 0.0]));
+        assert!(
+            (0..w).all(|x| at(&rest, x) == at(&off, x)),
+            "both bands at 0 change nothing"
+        );
+        let clear = develop(&uniform([0.0, 1.0, 1.0, 0.0]));
+        // The ripple's swing, in stops of the output, over two periods away from the ends.
+        let swing = |img: &RgbaF32| {
+            let v: Vec<f32> = (300..420).map(|x| at(img, x).log2()).collect();
+            v.iter().cloned().fold(f32::MIN, f32::max) - v.iter().cloned().fold(f32::MAX, f32::min)
+        };
+        let (before, after) = (swing(&rest), swing(&clear));
+        // Each side of the edge, 8 px from it, against its own interior.
+        let halo = |img: &RgbaF32| {
+            (
+                at(img, 1392) / at(img, 1000) - 1.0,
+                at(img, 1408) / at(img, 1800) - 1.0,
+            )
+        };
+        eprintln!(
+            "ripple {before:.3} → {after:.3} stops; edge {:?} → {:?}",
+            halo(&rest),
+            halo(&clear)
+        );
+        assert!(
+            after > 1.6 * before,
+            "clarity raised the ripple {before} → {after}"
+        );
+        // A 3.3-stop edge at full Clarity: the guided filter's windows that straddle it leave about a tenth of a
+        // stop on the dark side, 8 px out — measured, and bounded here so it can't grow unnoticed.
+        let (d, b) = halo(&clear);
+        assert!(d.abs() < 0.1 && b.abs() < 0.05, "halo {d} {b}");
+        let fine = develop(&uniform([1.0, 0.0, 1.0, 0.0]));
+        eprintln!(
+            "texture: ripple {:.3} stops, edge {:?}",
+            swing(&fine),
+            halo(&fine)
+        );
+        let (d, b) = halo(&fine);
+        assert!(d.abs() < 0.05 && b.abs() < 0.05, "texture halo {d} {b}");
+        // A tile at 1300, 256 wide, given the whole frame's map.
+        let small = pass.density_source(gpu, &tex);
+        let map = pass.local_map(gpu, &small, [w, h]);
+        let cut = RgbaF32 {
+            width: 256,
+            height: h,
+            data: (0..h)
+                .flat_map(|y| {
+                    src.data[((y * w + 1300) * 4) as usize..((y * w + 1556) * 4) as usize].to_vec()
+                })
+                .collect(),
+        };
+        let mut params: sidecar_color::params::MaskParams = bytemuck::Zeroable::zeroed();
+        params.frame = [1300.0, 0.0, w as f32, h as f32];
+        let tile = crate::read_rgba16(
+            gpu,
+            &pass
+                .render(
+                    gpu,
+                    &crate::upload_rgba16(gpu, &cut),
+                    &uniform([0.0, 1.0, 1.0, 0.0]),
+                    &lut,
+                    &Masks {
+                        params,
+                        local: Some(&map),
+                        ..Masks::none()
+                    },
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        let worst = (0..256)
+            .map(|x| (at(&tile, x) - at(&clear, 1300 + x)).abs())
             .fold(0.0, f32::max);
         assert!(worst < 1e-3, "worst difference {worst}");
     }

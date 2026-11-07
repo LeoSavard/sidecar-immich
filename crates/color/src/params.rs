@@ -74,6 +74,44 @@ pub struct EditParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub color_grading: Option<ColorGrading>,
+    /// Texture and Clarity (DESIGN.md §7, "Local contrast"): fine and middle detail in log luminance, raised or
+    /// lowered against an edge-preserving base. Absent, and left out of the serialized edit, is none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub presence: Option<Presence>,
+}
+
+/// Local contrast at two scales, each −100…100: 0 leaves the picture alone, 100 doubles the band's contrast in
+/// stops, −100 removes it.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "edit/"))]
+pub struct Presence {
+    /// Fine detail: what lies within `TEXTURE_RADIUS` of the long edge, of up to about a fifth of a stop.
+    pub texture: f64,
+    /// Middle detail: between `TEXTURE_RADIUS` and `CLARITY_RADIUS`, of up to about half a stop.
+    pub clarity: f64,
+}
+
+/// The texture band's guided-filter radius and ε (in log₂ units squared): detail finer than this share of the
+/// long edge, and gentler than √ε stops, is the band; anything stronger is an edge and kept as it is.
+pub const TEXTURE_RADIUS: f64 = 0.003;
+pub const TEXTURE_EPS: f64 = 0.04;
+/// The clarity band's: out to this share of the long edge, gentler than √ε stops.
+pub const CLARITY_RADIUS: f64 = 0.025;
+pub const CLARITY_EPS: f64 = 0.25;
+
+impl Presence {
+    /// The uniform's `local`: each band's change in contrast (−1…1), and 1 when either is non-zero.
+    pub fn uniform(p: Option<&Presence>) -> [f32; 4] {
+        let Some(p) = p else { return [0.0; 4] };
+        let (t, c) = (
+            (p.texture.clamp(-100.0, 100.0) / 100.0) as f32,
+            (p.clarity.clamp(-100.0, 100.0) / 100.0) as f32,
+        );
+        let on = if t != 0.0 || c != 0.0 { 1.0 } else { 0.0 };
+        [t, c, on, 0.0]
+    }
 }
 
 /// One grading wheel: a colour to push toward and how far, and a lightness change.
@@ -199,6 +237,7 @@ impl Default for EditParams {
             lens_blur: None,
             haze: 0.0,
             color_grading: None,
+            presence: None,
         }
     }
 }
@@ -1257,7 +1296,7 @@ pub enum DisplaySpace {
     Rec2020,
 }
 
-/// The develop modules' uniform (512 bytes). Its WGSL declaration,
+/// The develop modules' uniform (528 bytes). Its WGSL declaration,
 /// `shaders/uniforms/develop_params.wgsl`, is generated from this struct (`sidecar-uniform`); the
 /// `uniforms` test checks the file and every offset.
 #[repr(C)]
@@ -1325,6 +1364,9 @@ pub struct DevelopParams {
     pub grade: [[f32; 4]; 4],
     /// Colour grading: x 1 on, y the shadows/highlights crossover in OKLab lightness, z the overlap exponent.
     pub grade_split: [f32; 4],
+    /// Texture and Clarity (`Presence::uniform`): the fine and middle bands' change in contrast, −1…1; z 1 when
+    /// either is on, so develop reads the local-contrast map; w unused.
+    pub local: [f32; 4],
 }
 
 /// Contrast slider value → logistic steepness.
@@ -1592,6 +1634,7 @@ fn pack_inner(
         ],
         grade,
         grade_split,
+        local: Presence::uniform(edit.presence.as_ref()),
         slide_tone: match &slide {
             Some(_) => {
                 let mut t = display_tone(edit);
@@ -1869,6 +1912,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn presence_packs_its_bands_and_is_absent_at_rest() {
+        assert_eq!(Presence::uniform(None), [0.0; 4]);
+        assert_eq!(Presence::uniform(Some(&Presence::default()))[2], 0.0);
+        let e = EditParams {
+            presence: Some(Presence {
+                texture: -50.0,
+                clarity: 250.0,
+            }),
+            ..Default::default()
+        };
+        let p = pack(
+            &e,
+            &crate::camera::nikon_d850(),
+            SourceKind::Raw,
+            DisplaySpace::Srgb,
+        );
+        let d: &DevelopParams = bytemuck::from_bytes(&p.uniform);
+        assert_eq!(d.local, [-0.5, 1.0, 1.0, 0.0]);
+        assert!(
+            serde_json::to_value(EditParams::default())
+                .unwrap()
+                .get("presence")
+                .is_none()
+        );
+    }
+
     /// Default settings on a developed file must be the identity: every tone value at its neutral, and the
     /// RAW-only highlight blend off whatever the stored strength says.
     #[test]
@@ -1911,7 +1981,7 @@ mod tests {
             SourceKind::Raw,
             DisplaySpace::Srgb,
         );
-        assert_eq!(p.uniform.len(), 512);
+        assert_eq!(p.uniform.len(), 528);
         assert_eq!(p.lut.len(), LUT_SIZE);
         // exposure sits at byte 12, and for a RAW at default it is the baseline, not 1.0
         let gain = |p: &Packed| f32::from_le_bytes(p.uniform[12..16].try_into().unwrap());

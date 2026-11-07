@@ -488,6 +488,23 @@ fn cases() -> Vec<Fixture> {
             None,
         ),
         (
+            // Texture raised and Clarity lowered, then the other way: the browser builds the local-contrast map
+            // with the same guided passes the server does.
+            "local".into(),
+            nikon_d850(),
+            SourceKind::Raw,
+            {
+                let mut e = graded.clone();
+                e.presence = Some(sidecar_color::params::Presence {
+                    texture: 60.0,
+                    clarity: 80.0,
+                });
+                e
+            },
+            DisplaySpace::Srgb,
+            None,
+        ),
+        (
             "film-layers".into(),
             nikon_d850(),
             SourceKind::Raw,
@@ -792,6 +809,7 @@ pub fn native(dir: &Path, out: &Path) -> Result<()> {
                 curves: &curves,
                 mono: &mono,
                 density: None,
+                local: None,
                 slide_exposure: &slide_exposure,
                 slide_response: &slide_response,
             }

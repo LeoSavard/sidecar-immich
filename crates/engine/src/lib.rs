@@ -17,7 +17,7 @@ pub mod pyramid;
 pub mod noise;
 pub mod noise;
 pub mod warp;
-pub use develop::{DevelopPass, Masks, needs_density_map};
+pub use develop::{DevelopPass, Masks, needs_density_map, needs_local_map};
 pub use focus::focus_energy;
 pub use ingest::{Ingest, MosaicInput};
 
@@ -360,6 +360,7 @@ mod uniforms {
                 R::of::<crate::brush::CompositeParams>(),
                 R::of::<crate::guided::GuidedParams>(),
                 R::of::<crate::pyramid::PyramidParams>(),
+                R::of::<crate::guided::GuidedParams>(),
             ],
         );
     }
