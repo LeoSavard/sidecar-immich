@@ -9,6 +9,7 @@
 	let results = $state<Result[]>([]);
 	let adapterName = $state('');
 	let error = $state('');
+	let sent = $state('');
 
 	const toBase64 = (bytes: Uint8Array) => {
 		let s = '';
@@ -63,6 +64,18 @@
 			error = e instanceof Error ? e.message : String(e);
 		}
 		(window as unknown as { __parity: unknown }).__parity = { adapter: adapterName, error, images: out };
+		// On a phone no automation can collect these: `?post` sends them to the server, which keeps them as a run
+		// for `sidecar-dev parity compare` (the server must have `parity_uploads` on).
+		if (!error && new URLSearchParams(location.search).has('post')) {
+			sent = 'Sending…';
+			try {
+				const r = await fetch('/api/debug/parity', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ adapter: adapterName, userAgent: navigator.userAgent, images: out }) });
+				const done = r.ok ? await r.json() : null;
+				sent = done ? `Sent ${done.cases} renders as run ${done.run}. On the server: sidecar-dev parity compare web/static/parity testdata/parity-out ${done.dir}` : `The server refused them (${r.status}).`;
+			} catch (e) {
+				sent = `Couldn't send them: ${e instanceof Error ? e.message : String(e)}`;
+			}
+		}
 	}
 
 	$effect(() => {
@@ -74,6 +87,7 @@
 	<h1 class="mb-2 text-lg font-semibold">WebGPU parity</h1>
 	<p class="mb-4 text-neutral-500">{adapterName}</p>
 	{#if error}<p class="text-red-600">{error}</p>{/if}
+	{#if sent}<p class="mb-4 break-all" role="status">{sent}</p>{/if}
 	<ul>
 		{#each results as r (r.name)}<li>{r.name}: {r.status}</li>{/each}
 	</ul>
