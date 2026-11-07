@@ -27,6 +27,13 @@ sees the light, through a filter. -->
 		onpickbase?: (on: boolean) => void;
 	} = $props();
 
+	/** Black and white printed or made as (`sidecar_color::process`). */
+	const PROCESSES = [
+		{ id: '', label: 'Silver gelatin', note: 'A black-and-white print on paper, as the film renders it.' },
+		{ id: 'cyanotype', label: 'Cyanotype', note: 'Prussian blue on cotton paper: the iron process, its blue and its short range of tones computed from the pigment and the paper.' },
+		{ id: 'tintype', label: 'Tintype', note: 'Collodion silver on black-japanned iron, a direct positive: warm grey on black, three and a half stops. Collodion saw only blue — pair it with the Blue-sensitive film type.' }
+	];
+
 	type Rendering = 'neutral' | 'film' | 'mono';
 	const rendering: Rendering = $derived(edit.monochrome ? 'mono' : edit.film ? 'film' : 'neutral');
 
@@ -209,6 +216,13 @@ sees the light, through a filter. -->
 		</div>
 		<Slider id="mono-development" label="Development" value={mono.development ?? 0} min={-2} max={2} step={0.5} defaultValue={0} bipolar format={zone} onchange={(v) => onchange((e) => { if (!e.monochrome) return; if (v === 0) delete e.monochrome.development; else e.monochrome.development = v; })} {oncommit} />
 		<p class="text-xs text-muted">Longer development (N+) gives the negative more contrast above the shadows and coarser grain; shorter (N−) less, for a scene too contrasty to hold.</p>
+		<p class="pt-1 text-[11px] font-medium tracking-wide text-muted uppercase">Print</p>
+		<div class="flex flex-wrap items-center gap-1.5 text-xs" role="radiogroup" aria-label="Print">
+			{#each PROCESSES as p (p.id)}
+				<button type="button" role="radio" aria-checked={(mono.process ?? '') === p.id} class={choice((mono.process ?? '') === p.id)} onclick={() => { onchange((e) => { if (!e.monochrome) return; if (p.id) e.monochrome.process = p.id; else delete e.monochrome.process; }); oncommit(); }}>{p.label}</button>
+			{/each}
+		</div>
+		<p class="text-xs text-muted">{PROCESSES.find((p) => p.id === (mono.process ?? ''))?.note}</p>
 		<p class="text-xs text-muted">Each colour's spectrum is estimated from the photo, then seen as the film type would. The types are the classes' sensitivities; a named stock is its maker's measured curve.</p>
 	{:else if edit.film}
 		{@const stock = slides.find((s) => s.id === edit.film?.stock)}

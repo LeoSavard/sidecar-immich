@@ -500,6 +500,14 @@ fn cases() -> Vec<Fixture> {
         ..Default::default()
     });
 
+    // Alternative processes: the black and white printed as a cyanotype, and made as a tintype.
+    let process = |name: &str| {
+        let mut e = graded_mono.clone();
+        e.monochrome.as_mut().unwrap().process = name.into();
+        e
+    };
+    let (cyanotype, tintype) = (process("cyanotype"), process("tintype"));
+
     let mut cases: Vec<Fixture> = vec![
         (
             "look".into(),
@@ -570,6 +578,22 @@ fn cases() -> Vec<Fixture> {
             nikon_d850(),
             SourceKind::Raw,
             uniformity,
+            DisplaySpace::Srgb,
+            None,
+        ),
+        (
+            "cyanotype".into(),
+            nikon_d850(),
+            SourceKind::Raw,
+            cyanotype,
+            DisplaySpace::Srgb,
+            None,
+        ),
+        (
+            "tintype".into(),
+            nikon_d850(),
+            SourceKind::Raw,
+            tintype,
             DisplaySpace::Srgb,
             None,
         ),

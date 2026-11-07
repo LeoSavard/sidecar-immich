@@ -17,6 +17,7 @@ pub mod lut;
 pub mod mask_refine;
 pub mod mat;
 pub mod params;
+pub mod process;
 pub mod slide;
 pub mod spectral;
 mod spectral_data;

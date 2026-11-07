@@ -70,4 +70,11 @@ struct DevelopParams {
   local: vec4f,
   // A film negative inverted (`Negative::uniform`): the film base's camera RGB, and 1/γ; all zero for a positive.
   negative: vec4f,
+  // An alternative process (`process::uniform`): x 1 cyanotype, 2 tintype, 0 none; y the cyanotype's peak
+  // density, z its luminance absorbance per unit density. `process_dark`: the cyanotype's absorbance per channel
+  // per unit density, or the tintype's black japan; w their luminance. `process_light`: the paper or the
+  // silver, w its luminance. Linear Rec.2020, as shown.
+  process: vec4f,
+  process_dark: vec4f,
+  process_light: vec4f,
 }
