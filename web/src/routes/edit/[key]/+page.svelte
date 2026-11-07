@@ -18,7 +18,7 @@
 	import type { Reading } from '$lib/measure';
 	import { saveSettings, settings, SPACE_LABELS } from '$lib/settings';
 	import { EditSession, type EditState } from '$lib/state/edit-session.svelte';
-	import { copyLook, pasteLook, readLookClipboard, type LookClipboard } from '$lib/state/look-clipboard';
+	import LookTools from '$lib/ui/LookTools.svelte';
 	import Histogram from '$lib/ui/Histogram.svelte';
 	import Loupe from '$lib/ui/Loupe.svelte';
 	import Readout from '$lib/ui/Readout.svelte';
@@ -96,7 +96,6 @@
 	 */
 	let deviceColor: CameraColor | null = null;
 	const cameraColor = () => deviceColor ?? meta!.info.color;
-	let lookClipboard = $state<LookClipboard | null>(readLookClipboard());
 	let lut = $state<Float32Array | null>(null);
 	/** The profile of the spectral colour stock this edit names, once the server has sent it. */
 	let slideProfile: SlideProfile | undefined;
@@ -2144,13 +2143,8 @@
 {/snippet}
 
 {#snippet historySection()}
-	<!-- The colour sections as a look: copied here, pasted onto another photo (`$lib/state/look-clipboard`). -->
-	<div class="mb-2 flex flex-wrap items-center gap-1.5 text-xs">
-		<span class="text-fg-2">Look</span>
-		<button type="button" class="rounded-full bg-raised px-2.5 py-1 text-fg disabled:opacity-40" disabled={!edit} title="Copy this photo's white balance, light, curve, colour and detail" onclick={() => { if (edit && meta) { copyLook($state.snapshot(edit), meta.fileName); lookClipboard = readLookClipboard(); } }}>Copy look</button>
-		<button type="button" class="rounded-full bg-raised px-2.5 py-1 text-fg disabled:opacity-40" disabled={!edit || !lookClipboard || readOnly} onclick={() => { if (edit && pasteLook(edit)) { changed(); committed(); } }}>Paste look</button>
-		{#if lookClipboard}<span class="min-w-0 truncate text-fg-2">from {lookClipboard.from}</span>{/if}
-	</div>
+	<!-- The look taken elsewhere: copied, pasted, kept as presets (`$lib/ui/LookTools`). -->
+	{#if edit && meta}<LookTools edit={() => $state.snapshot(edit!)} defaults={() => defaults} fileName={meta.fileName} {readOnly} onchange={update} oncommit={committed} />{/if}
 	{#if session.versions}
 		<HistoryPanel history={session.versions} compareId={compare?.id ?? null} busy={session.versionsBusy || session.saving} onopen={(id) => session.openVersion(id)} oncompare={(id) => session.setCompare(id)} onpick={(id, section) => session.pickFrom(id, section)} onlabel={(id, label) => session.labelVersion(id, label)} />
 
