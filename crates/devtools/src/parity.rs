@@ -412,7 +412,11 @@ fn cases() -> Vec<Fixture> {
 
     // Grain: the hash and both octaves, in black and white, in film colour and on a developed file.
     let grain = |e: &EditParams, amount: f64, size: f64| EditParams {
-        grain: Some(sidecar_color::params::Grain { amount, size }),
+        grain: Some(sidecar_color::params::Grain {
+            amount,
+            size,
+            layered: false,
+        }),
         ..e.clone()
     };
     let (grain_mono, grain_film, grain_heic) = (
@@ -420,6 +424,9 @@ fn cases() -> Vec<Fixture> {
         grain(&graded_film, 60.0, 30.0),
         grain(&phone, 100.0, 100.0),
     );
+    // Colour film's grain per dye layer: three noises, each by its own layer's density.
+    let mut grain_film_layers = grain(&graded_film, 70.0, 40.0);
+    grain_film_layers.grain.as_mut().unwrap().layered = true;
 
     // Developers: adjacency through the map (built by each side from the picture), development, compensation,
     // the stain's grain masking; and a light other than daylight.
@@ -765,6 +772,14 @@ fn cases() -> Vec<Fixture> {
             nikon_d850(),
             SourceKind::Raw,
             grain_film,
+            DisplaySpace::Srgb,
+            None,
+        ),
+        (
+            "grain-film-layers".into(),
+            nikon_d850(),
+            SourceKind::Raw,
+            grain_film_layers,
             DisplaySpace::Srgb,
             None,
         ),

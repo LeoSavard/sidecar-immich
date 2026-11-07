@@ -930,6 +930,13 @@ pub struct Grain {
     pub amount: f64,
     /// 0–100: the grain's size on a 35 mm frame (`Grain::microns`), 5 µm to 40 µm.
     pub size: f64,
+    /// In colour film rendering, a grain of its own in each dye layer — red, green and blue each flickering
+    /// independently, each by its own layer's density — as colour film's three emulsions are grained apart.
+    /// Off (and absent, so an edit made before it keeps its grain) is one grain for all three, as black and white
+    /// has and a print is left with.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<bool>", optional))]
+    pub layered: bool,
 }
 
 impl Default for Grain {
@@ -937,6 +944,7 @@ impl Default for Grain {
         Self {
             amount: 40.0,
             size: 50.0,
+            layered: false,
         }
     }
 }
@@ -1615,7 +1623,7 @@ pub struct DevelopParams {
     /// map's log exposure, w unused.
     pub mono: [f32; 4],
     /// Grain (`Grain::uniform`): standard deviation in stops (0 none), size as a share of the long edge, the
-    /// share a staining developer hides at the white point, unused.
+    /// share a staining developer hides at the white point, 1 for a grain per dye layer.
     pub grain: [f32; 4],
     /// Black and white's developer (`crate::developer`): adjacency, its reach as a share of the long edge,
     /// development's contrast factor, compensation. `[0, 0, 1, 0]` does nothing; all zero in colour.
@@ -1908,7 +1916,16 @@ fn pack_inner(
         } else {
             [0.0; 4]
         },
-        grain: Grain::uniform(edit.grain.as_ref()),
+        // Grain per dye layer only where colour film is rendered from a RAW: black and white has one emulsion, and
+        // a developed file is a print.
+        grain: {
+            let mut g = Grain::uniform(edit.grain.as_ref());
+            let colour_film = !developed && !mono && (edit.film.is_some() || slide.is_some());
+            if colour_film && edit.grain.as_ref().is_some_and(|g| g.layered) {
+                g[3] = 1.0;
+            }
+            g
+        },
         developer: [0.0; 4],
         stock: match stock_curve(edit, developed) {
             Some(c) => [1.0, c.toe_at as f32, c.toe_width as f32, c.shoulder as f32],
@@ -2834,6 +2851,7 @@ mod tests {
         let grain = Some(Grain {
             amount: 50.0,
             size: 50.0,
+            ..Default::default()
         });
         assert_eq!(
             at(&EditParams {
@@ -2904,20 +2922,23 @@ mod tests {
         assert_eq!(
             at(Some(Grain {
                 amount: 0.0,
-                size: 50.0
+                size: 50.0,
+                ..Default::default()
             })),
             [0.0; 4]
         );
         let g = at(Some(Grain {
             amount: 50.0,
             size: 100.0,
+            ..Default::default()
         }));
         assert!((g[0] - 0.3).abs() < 1e-6);
         assert!((g[1] as f64 - 40.0 / 36_000.0).abs() < 1e-9);
         assert!(
             (Grain {
                 amount: 0.0,
-                size: 0.0
+                size: 0.0,
+                ..Default::default()
             }
             .microns()
                 - 5.0)
@@ -3406,5 +3427,46 @@ mod tests {
         let at_rest = tone_of(&e);
         e.tone.highlights = -100.0;
         assert_eq!(tone_of(&e), at_rest, "its tone parameters do not move");
+    }
+
+    /// A grain per dye layer only where colour film is rendered from a RAW, and only when asked for: an edit that
+    /// predates it, black and white, the neutral rendering and a developed file all keep one grain.
+    #[test]
+    fn grain_per_dye_layer_only_in_colour_film() {
+        let cam = crate::camera::SourceSpace::Srgb.camera_color();
+        let layered = |edit: &EditParams, source: SourceKind| {
+            let d: DevelopParams =
+                bytemuck::pod_read_unaligned(&pack(edit, &cam, source, DisplaySpace::Srgb).uniform);
+            d.grain[3]
+        };
+        let grain = Grain {
+            amount: 50.0,
+            layered: true,
+            ..Default::default()
+        };
+        let film = EditParams {
+            film: Some(Film::default()),
+            grain: Some(grain.clone()),
+            ..Default::default()
+        };
+        assert_eq!(layered(&film, SourceKind::Raw), 1.0);
+        assert_eq!(
+            layered(&film, SourceKind::Developed),
+            0.0,
+            "a print has one grain"
+        );
+        let neutral = EditParams {
+            grain: Some(grain.clone()),
+            ..Default::default()
+        };
+        assert_eq!(layered(&neutral, SourceKind::Raw), 0.0);
+        let mono = EditParams {
+            monochrome: Some(Default::default()),
+            ..film.clone()
+        };
+        assert_eq!(layered(&mono, SourceKind::Raw), 0.0);
+        // An edit saved before the field existed reads it as off.
+        let old: Grain = serde_json::from_str(r#"{"amount":40,"size":50}"#).unwrap();
+        assert!(!old.layered);
     }
 }
