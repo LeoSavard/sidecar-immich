@@ -13,7 +13,7 @@ use crate::tone;
 /// `migrate_highlight_shadow_anchors`) — an edit saved under version 1 needs its curve read differently, not
 /// just a field that defaults to off, so this is a real bump rather than an additive field. See
 /// docs/ROADMAP.md, "Curve editor: Highlights and Shadows stop sharing points with the manual curve".
-pub const PROCESS_VERSION: u32 = 8;
+pub const PROCESS_VERSION: u32 = 9;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
@@ -252,6 +252,10 @@ impl EditParams {
         if self.process_version < 2 {
             self.migrate_highlight_shadow_anchors();
         }
+        if self.process_version < 9 {
+            // Its saturated lights were compressed in Rec.2020 and that is the colour the person approved.
+            self.tone.gamut_ap1 = false;
+        }
         if self.process_version < 8
             && (self.detail.denoise_luminance > 0.0 || self.detail.denoise_chroma > 0.0)
         {
@@ -318,6 +322,7 @@ impl EditParams {
             self.tone.shoulder_order = DEFAULT_SHOULDER_ORDER;
             self.tone.highlight_bleach = Tone::default().highlight_bleach;
             self.tone.highlight_reach_ev = HIGHLIGHT_REACH_EV;
+            self.tone.gamut_ap1 = true;
         }
         self.detail.noise_model = true;
         self.process_version = PROCESS_VERSION;
@@ -489,6 +494,13 @@ pub struct Tone {
     /// scene's top end into the picture, and the shoulder compresses it. Stored per edit, so an edit from
     /// before `PROCESS_VERSION` 7 keeps the Highlights it was approved with.
     pub highlight_reach_ev: f64,
+    /// Compress out-of-gamut colour in ACEScg (AP1), the space the ACES Reference Gamut Compression's thresholds
+    /// were derived for, rather than in the working Rec.2020 it ran in before `PROCESS_VERSION` 9. Stored per
+    /// edit so an older one keeps the saturated colours it was approved with; left out of the serialized edit
+    /// when on.
+    #[serde(skip_serializing_if = "is_true")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<bool>", optional))]
+    pub gamut_ap1: bool,
     pub contrast: f64,
     /// Control points over display-encoded values, `[x, y]` in 0…1. Manually drawn only, as of
     /// `PROCESS_VERSION` 2 — Highlights and Shadows are `highlights`/`shadows` below, not points in here.
@@ -537,6 +549,7 @@ impl Default for Tone {
             shoulder_order: DEFAULT_SHOULDER_ORDER,
             highlight_bleach: 1.0,
             highlight_reach_ev: HIGHLIGHT_REACH_EV,
+            gamut_ap1: true,
             contrast: 1.0,
             curve: vec![[0.0, 0.0], [1.0, 1.0]],
             highlights: 0.0,
@@ -1359,7 +1372,8 @@ pub struct DevelopParams {
     pub slide_tone: [f32; 4],
     /// The base curve's shape above middle grey: x the shoulder's order (0 = the logistic, as before
     /// `PROCESS_VERSION` 6), y Contrast as an exponent for the S-curve that grades the straight segment,
-    /// since a fixed segment has no steepness of its own for Contrast to set. z, w unused.
+    /// since a fixed segment has no steepness of its own for Contrast to set. z 1 to compress out-of-gamut
+    /// colour in ACEScg (`Tone::gamut_ap1`), 0 in Rec.2020 as before `PROCESS_VERSION` 9. w unused.
     pub tone_shape: [f32; 4],
     /// Colour grading (`ColorGrading::uniform`): per wheel — shadows, midtones, highlights, global — the OKLab a
     /// and b to add and the lightness shift.
@@ -1631,7 +1645,8 @@ fn pack_inner(
                 edit.tone.shoulder_order.clamp(0.0, 8.0) as f32
             },
             edit.tone.contrast.max(0.1) as f32,
-            0.0,
+            // A developed file is never gamut-compressed (it is already in its display's gamut).
+            if edit.tone.gamut_ap1 { 1.0 } else { 0.0 },
             0.0,
         ],
         grade,
@@ -1940,6 +1955,36 @@ mod tests {
                 .get("presence")
                 .is_none()
         );
+    }
+
+    /// An edit from before `PROCESS_VERSION` 9 keeps compressing in Rec.2020; a new one, or one that takes up
+    /// today's rendering, compresses in ACEScg; the flag reaches the uniform for a RAW and is left out of the
+    /// serialized edit when on.
+    #[test]
+    fn older_edits_keep_their_gamut_compression() {
+        assert!(EditParams::default().tone.gamut_ap1);
+        let mut old = EditParams {
+            process_version: 8,
+            ..Default::default()
+        };
+        old.migrate();
+        assert!(!old.tone.gamut_ap1);
+        let packed = |e: &EditParams| {
+            let p = pack(
+                e,
+                &crate::camera::nikon_d850(),
+                SourceKind::Raw,
+                DisplaySpace::Srgb,
+            );
+            bytemuck::from_bytes::<DevelopParams>(&p.uniform).tone_shape[2]
+        };
+        assert_eq!(packed(&old), 0.0);
+        assert!(old.behind_current_rendering(false));
+        old.adopt_current_rendering(false);
+        assert!(old.tone.gamut_ap1);
+        assert_eq!(packed(&old), 1.0);
+        let json = serde_json::to_value(EditParams::default()).unwrap();
+        assert!(json["tone"].get("gamutAp1").is_none(), "left out when on");
     }
 
     /// Default settings on a developed file must be the identity: every tone value at its neutral, and the

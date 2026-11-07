@@ -138,7 +138,7 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     // Already inside its own display gamut and already tone-mapped: neither step is the file's to take again.
     e = tone_display_curve_in(c, local.tone);                  // 4
   } else {
-    c = gamut_compress(c);
+    c = gamut_compress(c, P.tone_shape.z > 0.5);
     e = tone_map_curve_in(c, local.tone, P.tone_shape);                      // 4
     if (film) { ef = film_curve_in(c, local.tone, P.film.y); }
   }

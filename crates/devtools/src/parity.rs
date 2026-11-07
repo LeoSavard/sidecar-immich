@@ -523,6 +523,19 @@ fn cases() -> Vec<Fixture> {
             None,
         ),
         (
+            // An edit from before `PROCESS_VERSION` 9: gamut compression in Rec.2020, as it was.
+            "gamut-legacy".into(),
+            nikon_d850(),
+            SourceKind::Raw,
+            {
+                let mut e = graded.clone();
+                e.tone.gamut_ap1 = false;
+                e
+            },
+            DisplaySpace::DisplayP3,
+            None,
+        ),
+        (
             "film-layers".into(),
             nikon_d850(),
             SourceKind::Raw,
