@@ -21,5 +21,7 @@ sidecar-color.workspace = true
 sidecar-engine.workspace = true
 sidecar-merge.workspace = true
 sidecar-raw = { path = "../raw" }
+sidecar-template = { path = "../template" }
+sidecar-xmp = { path = "../xmp" }
 sidecar-shaders.workspace = true
 zune-jpeg.workspace = true

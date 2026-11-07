@@ -89,6 +89,8 @@ fn main() -> Result<()> {
         ["pano", out, args @ ..] if args.len() >= 2 => pano(out.as_ref(), args),
         ["hdri", out, args @ ..] if !args.is_empty() => hdri(out.as_ref(), args),
         ["stack", out, args @ ..] if args.len() >= 2 => stack(out.as_ref(), args),
+        ["autowb", limit, dirs @ ..] if !dirs.is_empty() => autowb(limit.parse()?, dirs),
+        ["autotone", limit, dirs @ ..] if !dirs.is_empty() => autotone(limit.parse()?, dirs),
         ["linear-dng", input, out, rest @ ..] => {
             let input: &std::path::Path = input.as_ref();
             let edge: u32 = rest.first().map_or(Ok(1600), |v| v.parse())?;
@@ -3260,6 +3262,211 @@ fn ingest(input: &std::path::Path, out: &std::path::Path, long_edge: u32) -> Res
         t_open.as_secs_f64() * 1e3,
         (t_mosaic - t_open).as_secs_f64() * 1e3,
         (t_gpu - t_mosaic).as_secs_f64() * 1e3
+    );
+    Ok(())
+}
+
+/// The automatic white balance's estimators measured against the cameras' own (`sidecar_color::auto`): every RAW
+/// under `dirs`, up to `limit` of them spread across the folders, half-size, the light each estimator finds against
+/// the light the camera's as-shot multipliers say, as an angle. The camera's estimate is not the truth — it is
+/// another estimator, with more to go on (its own metering, a white balance sensor on some bodies) — but it is
+/// the reference a person compares an Auto button with, and a method far from it on ordinary photos is wrong far
+/// more often than the camera is.
+fn autowb(limit: usize, dirs: &[&str]) -> Result<()> {
+    use sidecar_color::auto::{Estimator, Picture, angular_error, illuminant};
+    let mut files = Vec::new();
+    for d in dirs {
+        let mut stack = vec![std::path::PathBuf::from(d)];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            let mut entries: Vec<_> = entries.flatten().map(|e| e.path()).collect();
+            entries.sort();
+            for p in entries {
+                if p.is_dir() {
+                    stack.push(p);
+                } else if sidecar_template::is_raw(&p) {
+                    files.push(p);
+                }
+            }
+        }
+    }
+    // Spread over everything found rather than the first folder's worth.
+    let step = (files.len() / limit.max(1)).max(1);
+    let files: Vec<_> = files.into_iter().step_by(step).take(limit).collect();
+    let methods = [
+        Estimator::GreyWorld,
+        Estimator::WhitePatch,
+        Estimator::ShadesOfGrey(4.0),
+        Estimator::ShadesOfGrey(6.0),
+        Estimator::GreyEdge(1.0),
+        Estimator::GreyEdge(6.0),
+    ];
+    let mut errors: Vec<Vec<f64>> = vec![Vec::new(); methods.len()];
+    let mut used = 0;
+    for f in &files {
+        let Ok(mut raw) = sidecar_raw::RawFile::open(f) else {
+            continue;
+        };
+        let info = raw.info();
+        let m = info.color.as_shot_mul;
+        if m.iter().any(|v| *v <= 0.0) {
+            continue;
+        }
+        let Ok(linear) = raw.develop_linear(true) else {
+            continue;
+        };
+        let img = sidecar_engine::RgbaF32 {
+            width: linear.width,
+            height: linear.height,
+            data: linear.rgba(),
+        }
+        .downsampled(768);
+        let pic = Picture {
+            width: img.width as usize,
+            height: img.height as usize,
+            rgba: &img.data,
+        };
+        // The camera's light: what its multipliers make neutral.
+        let camera = [1.0 / m[0], 1.0, 1.0 / m[2]];
+        let mut row = Vec::new();
+        for (i, est) in methods.iter().enumerate() {
+            match illuminant(&pic, *est) {
+                Some(e) => {
+                    let err = angular_error(e, camera);
+                    errors[i].push(err);
+                    row.push(format!("{err:5.1}"));
+                }
+                None => row.push("    -".into()),
+            }
+        }
+        used += 1;
+        println!("{}  {}", row.join(" "), f.display());
+    }
+    println!("\n{used} photos; angle to the camera's as-shot light, degrees");
+    println!(
+        "{:<20} {:>6} {:>6} {:>6} {:>6}  {:>5}",
+        "method", "median", "mean", "p90", "max", "<3°"
+    );
+    for (est, e) in methods.iter().zip(&mut errors) {
+        if e.is_empty() {
+            continue;
+        }
+        e.sort_by(f64::total_cmp);
+        let q = |f: f64| e[((e.len() - 1) as f64 * f) as usize];
+        let mean = e.iter().sum::<f64>() / e.len() as f64;
+        let within = e.iter().filter(|v| **v < 3.0).count() as f64 / e.len() as f64;
+        println!(
+            "{:<20} {:>6.2} {:>6.2} {:>6.2} {:>6.2}  {:>4.0}%",
+            est.name(),
+            q(0.5),
+            mean,
+            q(0.9),
+            e[e.len() - 1],
+            within * 100.0
+        );
+    }
+    Ok(())
+}
+
+/// The automatic exposure measured against a person's own (`sidecar_color::auto::key_ev`): every RAW under `dirs`
+/// with a Lightroom sidecar that sets `crs:Exposure2012`, up to `limit`, the exposure its key asks for against the
+/// exposure that person chose. Lightroom's default rendering and Sidecar's both put a correctly exposed grey at
+/// display grey, so the two exposures are comparable stop for stop, if not exactly. Reported against doing
+/// nothing (0 EV), and for the key damped by a factor, since an auto exposure that agrees in direction but
+/// overshoots is worse than a gentler one.
+fn autotone(limit: usize, dirs: &[&str]) -> Result<()> {
+    use sidecar_color::auto::{key_ev, luminance};
+    let mut files = Vec::new();
+    for d in dirs {
+        let mut stack = vec![std::path::PathBuf::from(d)];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for p in entries.flatten().map(|e| e.path()) {
+                if p.is_dir() {
+                    stack.push(p);
+                } else if sidecar_template::is_raw(&p) {
+                    files.push(p);
+                }
+            }
+        }
+    }
+    files.sort();
+    let chosen = |raw: &std::path::Path| -> Option<f64> {
+        let xmp = std::fs::read_to_string(sidecar_xmp::sidecar_path_for(raw)).ok()?;
+        let at = xmp.find("crs:Exposure2012")? + "crs:Exposure2012".len();
+        let rest = xmp[at..].trim_start_matches(['=', '"', '>', ' ']);
+        rest.split(['"', '<'])
+            .next()?
+            .trim()
+            .trim_start_matches('+')
+            .parse()
+            .ok()
+    };
+    let with: Vec<(std::path::PathBuf, f64)> = files
+        .iter()
+        .filter_map(|f| Some((f.clone(), chosen(f)?)))
+        .collect();
+    let step = (with.len() / limit.max(1)).max(1);
+    let mut pairs = Vec::new();
+    for (f, person) in with.into_iter().step_by(step).take(limit) {
+        let Ok(mut raw) = sidecar_raw::RawFile::open(&f) else {
+            continue;
+        };
+        let info = raw.info();
+        let Ok(linear) = raw.develop_linear(true) else {
+            continue;
+        };
+        let img = sidecar_engine::RgbaF32 {
+            width: linear.width,
+            height: linear.height,
+            data: linear.rgba(),
+        }
+        .downsampled(512);
+        let packed = sidecar_color::pack(
+            &Default::default(),
+            &info.color,
+            info.source_kind,
+            sidecar_color::DisplaySpace::Srgb,
+        );
+        let d: sidecar_color::DevelopParams = bytemuck::pod_read_unaligned(&packed.uniform);
+        let Some(auto) = key_ev(&luminance(&d, &img.data), None) else {
+            continue;
+        };
+        println!("{person:+5.2} {auto:+5.2}  {}", f.display());
+        pairs.push((person, auto));
+    }
+    let n = pairs.len() as f64;
+    println!(
+        "\n{} photos; the person's exposure against the key's, stops",
+        pairs.len()
+    );
+    let mae =
+        |f: &dyn Fn(f64) -> f64| pairs.iter().map(|(p, a)| (p - f(*a)).abs()).sum::<f64>() / n;
+    println!("leave at 0:            mean |error| {:.2}", mae(&|_| 0.0));
+    for k in [0.25, 0.5, 0.75, 1.0] {
+        println!(
+            "key × {k:<4}            mean |error| {:.2}",
+            mae(&|a| k * a)
+        );
+    }
+    let (mp, ma) = (
+        pairs.iter().map(|p| p.0).sum::<f64>() / n,
+        pairs.iter().map(|p| p.1).sum::<f64>() / n,
+    );
+    let cov: f64 = pairs.iter().map(|(p, a)| (p - mp) * (a - ma)).sum();
+    let (vp, va): (f64, f64) = (
+        pairs.iter().map(|(p, _)| (p - mp).powi(2)).sum(),
+        pairs.iter().map(|(_, a)| (a - ma).powi(2)).sum(),
+    );
+    println!(
+        "correlation {:.2}; the person's mean {:+.2}, the key's {:+.2}",
+        cov / (vp * va).sqrt(),
+        mp,
+        ma
     );
     Ok(())
 }

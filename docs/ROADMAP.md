@@ -862,7 +862,7 @@ open raw denoiser at full resolution on a consumer or integrated GPU — measure
 is a useful precedent (Apache-2.0 *including its weights repository*) but is trained for render noise, needs
 auxiliary buffers and has no Vulkan backend, so it does not transfer.
 
-**Context-aware auto-edit — thin, and implement the papers rather than the repos.** OpenCV's `xphoto` auto
+**Context-aware auto-edit — measured, and not wired in** (2026-11-06; DESIGN.md build log, "Auto-edit, measured before it was built"): every statistical white balance sits 4–5° from the camera's own, and Reinhard's key does worse against the owner's exposures than leaving them at 0. What follows is the survey that set it up. **Context-aware auto-edit — thin, and implement the papers rather than the repos.** OpenCV's `xphoto` auto
 white balance (gray-world, simple, learning-based) is Apache-2.0 and genuinely shippable, and grey-world,
 white-patch and grey-edge are textbook. The obvious learned route is closed: Afifi and Brown's Deep White-
 Balance Editing says it is for research purposes and cannot be used commercially, and has no LICENSE file at

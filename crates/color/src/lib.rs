@@ -2,6 +2,7 @@
 //! Colour maths shared by the worker and the browser (via wasm32). Everything the develop shaders need that
 //! is cheaper to compute once per edit than once per pixel lives here.
 
+pub mod auto;
 pub mod camera;
 pub mod cct;
 pub mod dcp;
