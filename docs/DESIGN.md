@@ -112,6 +112,69 @@ Where the code differs from the text below, the code and these notes win.
   `sidecar-dev align` aligns a 9-frame ZV-1 bracket across 8 EV with 366–528 inliers and sub-pixel error — and
   shows a 2 px handheld drift per frame — and finds a four-frame D3 panorama by its overlaps.
 
+- **HDR merge** (`sidecar_merge::hdr`, `sidecar-dev hdr <out.dng> <raw>…`): a bracket merged into one linear
+  DNG. Raw is linear, so no response curve is estimated; each frame is scaled into the reference's radiance and
+  the frames are averaged with inverse-variance weights from each frame's *measured* noise model (Granados et
+  al., CVPR 2010) — a sample at or near saturation weighs nothing. A second pass drops samples further than
+  4σ from the first estimate, so something that moved is taken from fewer frames instead of smeared (after
+  Granados et al. 2013). The reference is the median exposure; frames are aligned to it on proxies
+  (`sidecar_merge::align`) and the homography carried to full resolution; the exposure steps are *measured*
+  as a chain outward from the reference, each frame against its neighbour (far apart, too few pixels are well
+  exposed in both), with EXIF as the fallback when a measurement strays more than half a stop. It streams —
+  frames demosaiced one at a time into running sums, twice — so memory is two accumulators, not nine frames.
+  A pixel no frame measured takes the darkest frame's saturated value, and the DNG's `LinearResponseLimit`
+  then says where that is. Checked on a synthetic bracket (14 → 11.5 stops of scene, Poisson–Gaussian noise,
+  clipping): highlights two frames clipped come back within 3 %, shadows less noisy than the best single frame,
+  a moving patch in one frame removed by the second pass. On a 9-frame, 8 EV ZV-1 bracket from the library:
+  every frame aligned (174–504 inliers, rms ≤ 1.06 px), steps measured at 1.00 ± 0.04 EV where EXIF said
+  0.97–1.09, 35 s for 9 × 20 MP, and the DNG develops clean.
+
+- **Aligning frames** (`sidecar_merge::align`, a new crate for the multi-frame work): FAST-9 corners scored and
+  spread over a grid, oriented by intensity centroid, described by steered BRIEF with BRIEF's Gaussian sampling
+  pattern from a fixed seed, matched by Hamming distance with the ratio test and a cross-check, and a
+  homography by RANSAC over normalised four-point DLTs refined on its inliers — all from the papers. It runs on
+  log luminance, so a bracket's exposure difference is an offset both FAST and BRIEF ignore: one aligner for
+  brackets and panoramas, and a homography is the exact model for a camera turning about its lens. Checked: a
+  known homography (pan, turn, perspective) recovered from a copy two stops darker to under 0.75 px at the
+  corners; unrelated frames don't align (the same frame turned half round does, as it should). On the library,
+  `sidecar-dev align` aligns a 9-frame ZV-1 bracket across 8 EV with 366–528 inliers and sub-pixel error — and
+  shows a 2 px handheld drift per frame — and finds a four-frame D3 panorama by its overlaps.
+
+- **Noise reduction against each photo's measured noise** (`PROCESS_VERSION` 8, `Detail::noise_model`):
+  `sidecar_engine::noise` fits σ² = a·y + b to the luminance of a central 1024² crop — 5×5 local mean as the
+  level, a 4-neighbour high-pass (noise gain √1.25) as the noise, the flattest 40 % of each of 24 log-spaced
+  level bins, a robust MAD per bin, weighted least squares with a and b held non-negative (Foi, Trimeche,
+  Katkovnik and Egiazarian 2008). `to_opponent.wgsl` then applies the generalized Anscombe transform for
+  that model, chroma scaled by its derivative as before, and `from_opponent.wgsl` inverts luminance with
+  Mäkitalo and Foi's closed-form exact unbiased inverse (2013), falling back to the algebraic one below D = 1.
+  The noise level after the transform is still measured, so a model that is a little off changes only the
+  balance across levels, never the overall strength. Checked: a known model is recovered from synthetic
+  Poisson-Gaussian patches (gain within 0.3 %, read within 2 %); the transform gives unit variance at every
+  level and the inverse returns the mean; on eight bands a stop apart, 6 to 800 photo-electrons, the model
+  denoises every band by the same factor (0.06–0.10 of its noise) where the fixed transform kept 59 % of the
+  deepest band's noise and 6.5 % of the brightest's; every band's mean moves by under a tenth of its noise (the
+  deepest by +14 % of its level at about six photo-electrons, where soft thresholding of skewed noise is not
+  quite unbiased; the fixed transform moved it −7 %). `sidecar-dev noise` and `denoise-truth` are the tools.
+  An edit saved before version 8 that denoised keeps the fixed transform (`migrate`); one that never did gets
+  the model if it starts to; "take up today's rendering" switches it on.
+
+- **Writing a linear DNG** (`sidecar_raw::dng_write`; read back by `linear_dng`): what every merge will
+  produce, so its result is an original like any other (docs/research/multi-frame-and-denoise.md).
+  Camera-native linear RGB as 16-bit IEEE floats — `PhotometricInterpretation` LinearRaw, `SampleFormat` 3 —
+  in 256² tiles, Deflate with TIFF Technical Note 3's floating-point predictor, the directory first so readers
+  that look for it near the start find it. The source camera's `ColorMatrix1/2` with their illuminants and
+  `AsShotNeutral`, `BaselineExposure`, the measured noise in DNG's own `NoiseProfile`, and `WhiteLevel` 1 —
+  the specification's default for floats, stated because LibRaw otherwise assumes 65535 and scales every
+  sample to zero. `LinearResponseLimit` says where a sample stops being a measurement (1.0 for a single
+  frame; absent for a merge with nothing saturated, whose every value is light), and the reader flags clipping
+  there and nowhere else for a float file. Checked: written and read back to half-float precision at an odd
+  size with light up to 5× white; LibRaw — an independent decoder — opens it and reads the same picture
+  (bright/dark ratio 21.95 against 21.91 after its integer conversion; LibRaw only takes a file as tiled when
+  a tile fits inside the image both ways, so nothing smaller than 256 px an edge); ExifTool validates it.
+  `sidecar-dev to-dng <raw> <out.dng> [png]` writes one from a raw's full-resolution demosaic, and the DNG
+  develops identically to that demosaic (ΔE2000 mean 0.000, p99 0.000, max 1.1). `sidecar-dev compare-png`
+  is the measure. A 20.8 MP frame is 69 MB and takes 9–17 s to write.
+
 - **D1 and D5 are both closed, neither merged** (pull request #46, closed 2026-10-29). The owner's rule,
   2026-10-27: what is merged and deployed should be what has been tested. Both were written, and neither
   earned its way in.

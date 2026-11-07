@@ -1837,6 +1837,38 @@ mod tests {
         );
     }
 
+    /// An edit that denoised under the fixed transform keeps it; one that never denoised, and every new edit,
+    /// uses the photo's measured noise; taking up today's rendering switches it on.
+    #[test]
+    fn denoising_edits_keep_their_transform_and_new_ones_measure() {
+        assert!(EditParams::default().detail.noise_model);
+        let mut old = EditParams {
+            process_version: 7,
+            ..Default::default()
+        };
+        old.detail.denoise_luminance = 30.0;
+        old.migrate();
+        assert!(!old.detail.noise_model);
+        assert!(old.behind_current_rendering(false));
+        old.adopt_current_rendering(false);
+        assert!(old.detail.noise_model);
+
+        let mut plain = EditParams {
+            process_version: 7,
+            ..Default::default()
+        };
+        plain.migrate();
+        assert!(
+            plain.detail.noise_model,
+            "nothing denoised, nothing to keep"
+        );
+        let json = serde_json::to_value(EditParams::default()).unwrap();
+        assert!(
+            json["detail"].get("noiseModel").is_none(),
+            "left out when on"
+        );
+    }
+
     /// Default settings on a developed file must be the identity: every tone value at its neutral, and the
     /// RAW-only highlight blend off whatever the stored strength says.
     #[test]
