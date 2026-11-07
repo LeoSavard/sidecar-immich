@@ -594,6 +594,13 @@ isn't also on that card. Worth testing on real AMD and Intel hardware before doc
 Mesa's compute-shader support has historically lagged NVIDIA's on some corner cases the ingest and develop
 passes might hit, and that needs checking with pictures, not assumed from the driver's feature flags.
 
+**A desktop app — parked** (owner's call, 2026-11-06: no personal need for desktop integration; kept for the
+day someone needs it). Everything learned so far is in
+[`research/shell-experiment.md`](research/shell-experiment.md): Electron gives WebGPU on Linux only under
+X11/XWayland; the colour-managed route is a native window owning a wgpu canvas with the web UI embedded in the
+same process (on Wayland, embedding across processes isn't possible); macOS looks the easiest platform for
+colour and Windows the hardest to sign. `dev/shell-probe/` reruns the measurements on a desktop.
+
 ## Image processing: primitives first
 
 Surveyed on 2026-10-17 (see [`research/desktop-port-survey.md`](research/desktop-port-survey.md) for the

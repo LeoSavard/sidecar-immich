@@ -1,0 +1,79 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- V2's shell experiment: what WebGPU this window has, and whether a WebGPU canvas reaches the screen. -->
+<meta charset="utf-8" />
+<title>shell probe</title>
+<body style="margin:0;background:#000">
+<canvas id="c" width="256" height="256" style="position:absolute;left:0;top:0;width:256px;height:256px"></canvas>
+<script type="module">
+	const r = { userAgent: navigator.userAgent };
+	try {
+		r.hasGpu = 'gpu' in navigator;
+		const adapter = r.hasGpu ? await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' }) : null;
+		r.adapter = adapter && { ...pick(adapter.info, ['vendor', 'architecture', 'device', 'description']), fallback: adapter.info.isFallbackAdapter ?? adapter.isFallbackAdapter ?? null };
+		if (adapter) {
+			r.features = [...adapter.features].sort();
+			r.limits = pick(adapter.limits, ['maxTextureDimension2D', 'maxBufferSize', 'maxStorageBufferBindingSize', 'maxComputeWorkgroupStorageSize']);
+			const device = await adapter.requestDevice({ requiredLimits: { maxTextureDimension2D: adapter.limits.maxTextureDimension2D, maxBufferSize: adapter.limits.maxBufferSize } });
+			r.compute = await compute(device);
+			r.preferredFormat = navigator.gpu.getPreferredCanvasFormat();
+			const ctx = document.getElementById('c').getContext('webgpu');
+			// The configurations the editor uses: sRGB, Display P3, and the deep (rgba16float) path.
+			r.canvas = {};
+			for (const [name, cfg] of Object.entries({
+				srgb: { format: r.preferredFormat, colorSpace: 'srgb' },
+				p3: { format: r.preferredFormat, colorSpace: 'display-p3' },
+				deepP3: { format: 'rgba16float', colorSpace: 'display-p3' },
+				extended: { format: 'rgba16float', colorSpace: 'display-p3', toneMapping: { mode: 'extended' } }
+			})) {
+				try {
+					ctx.configure({ device, alphaMode: 'opaque', ...cfg });
+					const got = ctx.getConfiguration?.();
+					r.canvas[name] = got ? { format: got.format, colorSpace: got.colorSpace, toneMapping: got.toneMapping?.mode ?? null } : 'configured';
+				} catch (e) {
+					r.canvas[name] = 'refused: ' + e.message;
+				}
+			}
+			// Paint a known sRGB colour, (200, 40, 40), and leave it on screen for the main process to read back.
+			ctx.configure({ device, format: r.preferredFormat, alphaMode: 'opaque', colorSpace: 'srgb' });
+			const enc = device.createCommandEncoder();
+			const lin = (c) => ((c / 255 + 0.055) / 1.055) ** 2.4;
+			const srgbFormat = r.preferredFormat.endsWith('-srgb');
+			const v = (c) => (srgbFormat ? lin(c) : c / 255);
+			enc.beginRenderPass({ colorAttachments: [{ view: ctx.getCurrentTexture().createView(), loadOp: 'clear', storeOp: 'store', clearValue: { r: v(200), g: v(40), b: v(40), a: 1 } }] }).end();
+			device.queue.submit([enc.finish()]);
+			await device.queue.onSubmittedWorkDone();
+			r.paint = { want: [200, 40, 40], rect: { x: 0, y: 0, width: 256, height: 256 } };
+		}
+	} catch (e) {
+		r.error = String(e?.stack ?? e);
+	}
+	window.__probe = r;
+
+	function pick(o, keys) {
+		return Object.fromEntries(keys.map((k) => [k, o?.[k]]));
+	}
+
+	async function compute(device) {
+		const n = 1 << 20;
+		const buf = device.createBuffer({ size: n * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+		const read = device.createBuffer({ size: n * 4, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+		const module = device.createShaderModule({ code: `@group(0) @binding(0) var<storage, read_write> b: array<f32>;
+			@compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id: vec3u) { b[id.x] = sqrt(f32(id.x)); }` });
+		const pipeline = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'main' } });
+		const bind = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: buf } }] });
+		const t0 = performance.now();
+		const enc = device.createCommandEncoder();
+		const pass = enc.beginComputePass();
+		pass.setPipeline(pipeline);
+		pass.setBindGroup(0, bind);
+		pass.dispatchWorkgroups(n / 64);
+		pass.end();
+		enc.copyBufferToBuffer(buf, 0, read, 0, n * 4);
+		device.queue.submit([enc.finish()]);
+		await read.mapAsync(GPUMapMode.READ);
+		const a = new Float32Array(read.getMappedRange());
+		return { ok: a[4] === 2 && Math.abs(a[n - 1] - Math.sqrt(n - 1)) < 1e-3, ms: Math.round(performance.now() - t0) };
+	}
+</script>
+</body>
