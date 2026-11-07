@@ -498,6 +498,24 @@ fn cases() -> Vec<Fixture> {
                 e.presence = Some(sidecar_color::params::Presence {
                     texture: 60.0,
                     clarity: 80.0,
+                    dehaze: 0.0,
+                });
+                e
+            },
+            DisplaySpace::Srgb,
+            None,
+        ),
+        (
+            // Dehaze: the dark channel, the airlight found on the GPU, the transmission refined — the browser's
+            // passes against the server's.
+            "dehaze".into(),
+            nikon_d850(),
+            SourceKind::Raw,
+            {
+                let mut e = graded.clone();
+                e.presence = Some(sidecar_color::params::Presence {
+                    dehaze: 70.0,
+                    ..Default::default()
                 });
                 e
             },
@@ -810,6 +828,7 @@ pub fn native(dir: &Path, out: &Path) -> Result<()> {
                 mono: &mono,
                 density: None,
                 local: None,
+                haze: None,
                 slide_exposure: &slide_exposure,
                 slide_response: &slide_response,
             }

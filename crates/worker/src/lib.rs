@@ -791,9 +791,14 @@ fn loupe_png(
     // Texture and Clarity's map is the whole frame's as well, at the same size and corrected the same way.
     let local = sidecar_engine::needs_local_map(&packed.uniform)
         .then(|| kit.develop.local_map(&kit.gpu, &small_whole(), [sw, sh]));
+    let haze = sidecar_engine::needs_haze_map(&packed.uniform).then(|| {
+        kit.develop
+            .haze_map(&kit.gpu, &small_whole(), [sw, sh], &packed.uniform)
+    });
     let masks_at = |x: u32, y: u32| sidecar_engine::Masks {
         density: density.as_ref(),
         local: local.as_ref(),
+        haze: haze.as_ref().map(|(m, a)| (m, a)),
         ..export::masks_for(
             &packed,
             &mask_textures,

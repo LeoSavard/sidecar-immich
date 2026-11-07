@@ -64,6 +64,6 @@ struct DevelopParams {
   // Colour grading: x 1 on, y the shadows/highlights crossover in OKLab lightness, z the overlap exponent.
   grade_split: vec4f,
   // Texture and Clarity (`Presence::uniform`): the fine and middle bands' change in contrast, −1…1; z 1 when
-  // either is on, so develop reads the local-contrast map; w unused.
+  // either is on, so develop reads the local-contrast map; w Dehaze, −1…1 (0: no haze map is read).
   local: vec4f,
 }

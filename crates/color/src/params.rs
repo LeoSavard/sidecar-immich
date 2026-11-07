@@ -81,8 +81,8 @@ pub struct EditParams {
     pub presence: Option<Presence>,
 }
 
-/// Local contrast at two scales, each −100…100: 0 leaves the picture alone, 100 doubles the band's contrast in
-/// stops, −100 removes it.
+/// Local contrast at two scales and haze, each −100…100. Texture and Clarity: 0 leaves the picture alone, 100
+/// doubles the band's contrast in stops, −100 removes it.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase", default)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "edit/"))]
@@ -91,6 +91,9 @@ pub struct Presence {
     pub texture: f64,
     /// Middle detail: between `TEXTURE_RADIUS` and `CLARITY_RADIUS`, of up to about half a stop.
     pub clarity: f64,
+    /// Haze, by the dark channel prior (DESIGN.md §7, "Dehaze"): 100 removes what the prior finds, −100 doubles
+    /// it. Works without the depth model; the Depth section's Haze is the same air with distance from the model.
+    pub dehaze: f64,
 }
 
 /// The texture band's guided-filter radius and ε (in log₂ units squared): detail finer than this share of the
@@ -102,15 +105,14 @@ pub const CLARITY_RADIUS: f64 = 0.025;
 pub const CLARITY_EPS: f64 = 0.25;
 
 impl Presence {
-    /// The uniform's `local`: each band's change in contrast (−1…1), and 1 when either is non-zero.
+    /// The uniform's `local`: each band's change in contrast (−1…1), 1 when either is non-zero, and Dehaze
+    /// (−1…1).
     pub fn uniform(p: Option<&Presence>) -> [f32; 4] {
         let Some(p) = p else { return [0.0; 4] };
-        let (t, c) = (
-            (p.texture.clamp(-100.0, 100.0) / 100.0) as f32,
-            (p.clarity.clamp(-100.0, 100.0) / 100.0) as f32,
-        );
+        let unit = |v: f64| (v.clamp(-100.0, 100.0) / 100.0) as f32;
+        let (t, c) = (unit(p.texture), unit(p.clarity));
         let on = if t != 0.0 || c != 0.0 { 1.0 } else { 0.0 };
-        [t, c, on, 0.0]
+        [t, c, on, unit(p.dehaze)]
     }
 }
 
@@ -1365,7 +1367,7 @@ pub struct DevelopParams {
     /// Colour grading: x 1 on, y the shadows/highlights crossover in OKLab lightness, z the overlap exponent.
     pub grade_split: [f32; 4],
     /// Texture and Clarity (`Presence::uniform`): the fine and middle bands' change in contrast, −1…1; z 1 when
-    /// either is on, so develop reads the local-contrast map; w unused.
+    /// either is on, so develop reads the local-contrast map; w Dehaze, −1…1 (0: no haze map is read).
     pub local: [f32; 4],
 }
 
@@ -1920,6 +1922,7 @@ mod tests {
             presence: Some(Presence {
                 texture: -50.0,
                 clarity: 250.0,
+                dehaze: 40.0,
             }),
             ..Default::default()
         };
@@ -1930,7 +1933,7 @@ mod tests {
             DisplaySpace::Srgb,
         );
         let d: &DevelopParams = bytemuck::from_bytes(&p.uniform);
-        assert_eq!(d.local, [-0.5, 1.0, 1.0, 0.0]);
+        assert_eq!(d.local, [-0.5, 1.0, 1.0, 0.4]);
         assert!(
             serde_json::to_value(EditParams::default())
                 .unwrap()

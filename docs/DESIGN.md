@@ -77,6 +77,34 @@ Where the code differs from the text below, the code and these notes win.
   `web/scripts/gradient-smoke.mjs` end to end — added in the editor, two stops down, its handle dragged, saved —
   with the browser's canvas and the worker's `/preview` both darker at the top and unchanged at the bottom.
 
+- **Dehaze without depth** (§7, `Presence::dehaze`, `sidecar_engine::haze`, `client/haze_*.wgsl`,
+  `develop/haze.wgsl`; a slider under Clarity): Koschmieder's I = J·t + A·(1 − t) on the scene's light, where it
+  holds. This works without the depth model; the Depth section's Haze is the same air, with distance from the
+  model.
+  - **Transmission:** the dark channel prior (He, Sun and Tang), computed on the white-balanced working space at
+    the adjacency map's grid: a patch of 1.2 % of the long edge, ω 0.95.
+  - **Airlight:** the colour where the patch-minimum dark channel is greatest. One workgroup reduces it on the
+    GPU, so the browser reads nothing back.
+  - **Refinement:** the guided filter's coefficients against log luminance (radius 4 %, ε 0.01), applied inside
+    develop at each pixel's own value.
+  - **The amount** changes the air's extinction: t → t^e, e = 1 − amount. +100 removes the haze the prior
+    finds, −100 doubles the optical depth, and removing and adding are the same physics. It is written
+    without division: I' = A + (I − A)·t^(e−1), with t ≥ 0.1.
+  - **Per-pixel boundary constraint** (Meng et al., ICCV 2013): the scene's radiance can't be negative, so
+    t ≥ 1 − min(I/A). It never exceeds the true transmission. It removed an orange tint that the guided map's
+    too-low transmission put into lit hair against a blown sky, by over-inverting it past zero.
+  - **Bindings:** develop was at the fragment stage's sixteen sampled textures, so the whole-frame maps (local
+    contrast, Dehaze's, the airlight) now travel as one three-layer array (`MAP_LAYERS`) in both renderers.
+  Checked:
+  - A synthetic scene hazed over a depth ramp under a sky: the airlight is found to within 0.1 %, and the
+    dehazed render's error from the clear scene falls from 0.200 to 0.027. Doubling the haze raises the error
+    1.28×. A tile matches the whole frame.
+  - Parity case `dehaze`: ΔE 0.0000.
+  - `local-smoke.mjs`: Dehaze +80 raises local contrast in the canvas (+27 %) and in the worker's preview
+    (+30 %), and the saved edit holds it.
+  - On a real overcast frame, +60 restores distant colour and contrast. It also deepens near subjects, since
+    the prior removes airlight wherever it thinks it sees some. That is a look for the owner's A/B.
+
 - **Texture and Clarity — local contrast** (§7, `EditParams::presence`, `develop/local.wgsl`, sliders at the
   foot of Light): detail in log luminance at two scales, raised or lowered. Each band is the difference
   between edge-preserving bases: self-guided filters of the source's log luminance (the guided filter, #59,
