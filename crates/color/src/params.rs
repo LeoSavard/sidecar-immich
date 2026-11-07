@@ -79,6 +79,11 @@ pub struct EditParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub presence: Option<Presence>,
+    /// Heal, clone and red-eye spots (DESIGN.md §15, "Retouch"), applied in order to the photo before anything
+    /// else. Empty, and left out of the serialized edit, is none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<Vec<Spot>>", optional))]
+    pub spots: Vec<Spot>,
 }
 
 /// Local contrast at two scales and haze, each −100…100. Texture and Clarity: 0 leaves the picture alone, 100
@@ -197,6 +202,51 @@ impl ColorGrading {
     }
 }
 
+/// What a spot does.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "edit/"))]
+pub enum SpotKind {
+    /// The source's texture, its light matched to the target's surroundings (gradient-domain cloning).
+    #[default]
+    Heal,
+    /// The source as it is.
+    Clone,
+    /// A red pupil's red taken down to its green and blue.
+    RedEye,
+}
+
+/// One retouch spot. Positions are in the photo as the masks are — oriented, before lens correction — as fractions
+/// of its width and height; the radius is a share of the long edge.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "edit/"))]
+pub struct Spot {
+    pub kind: SpotKind,
+    /// The place retouched.
+    pub at: [f64; 2],
+    /// Where heal and clone take from (unused by red eye).
+    pub from: [f64; 2],
+    pub radius: f64,
+    /// 0…100: how much of the radius the edge fades over.
+    pub feather: f64,
+    /// 0…100.
+    pub opacity: f64,
+}
+
+impl Default for Spot {
+    fn default() -> Self {
+        Self {
+            kind: SpotKind::Heal,
+            at: [0.5, 0.5],
+            from: [0.6, 0.5],
+            radius: 0.02,
+            feather: 0.0,
+            opacity: 100.0,
+        }
+    }
+}
+
 /// A lens blur by distance: how far it reaches, where the focus is, and how deep the sharp band around it is.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
@@ -240,6 +290,7 @@ impl Default for EditParams {
             haze: 0.0,
             color_grading: None,
             presence: None,
+            spots: Vec::new(),
         }
     }
 }

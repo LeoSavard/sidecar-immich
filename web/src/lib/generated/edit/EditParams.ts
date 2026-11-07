@@ -11,6 +11,7 @@ import type { MaskAdjustment } from "./MaskAdjustment";
 import type { Mixer } from "./Mixer";
 import type { Monochrome } from "./Monochrome";
 import type { Presence } from "./Presence";
+import type { Spot } from "./Spot";
 import type { Tone } from "./Tone";
 import type { WhiteBalance } from "./WhiteBalance";
 

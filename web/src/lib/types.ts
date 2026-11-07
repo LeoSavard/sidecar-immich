@@ -8,6 +8,8 @@ import type { EditParams } from './generated/edit/EditParams';
 import type { LensProfile } from './generated/edit/LensProfile';
 import type { Mixer } from './generated/edit/Mixer';
 export type { ColorGrading } from './generated/edit/ColorGrading';
+export type { Spot } from './generated/edit/Spot';
+export type { SpotKind } from './generated/edit/SpotKind';
 export type { Crop } from './generated/edit/Crop';
 export type { Detail } from './generated/edit/Detail';
 export type { DisplaySpace } from './generated/edit/DisplaySpace';

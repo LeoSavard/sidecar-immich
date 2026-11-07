@@ -76,7 +76,37 @@ pub struct Kit {
     pub warp: sidecar_engine::warp::WarpPass,
     pub brush: sidecar_engine::brush::Brush,
     pub depth: sidecar_engine::depth::DepthPass,
+    pub retouch: sidecar_engine::retouch::RetouchPass,
     pub lensfun: std::sync::Arc<crate::lensfun::Lensfun>,
+}
+
+/// The edit's retouch spots applied to `source`, a texture `flip` away from the edit's oriented frame (0 for an
+/// oriented one), as a new texture; `None` when the edit has none. First of all, before detail and the lens.
+pub fn retouch(
+    kit: &Kit,
+    rendering: &Rendering,
+    edit: &EditParams,
+    source: &wgpu::Texture,
+    flip: i32,
+) -> Option<wgpu::Texture> {
+    if edit.spots.is_empty() {
+        return None;
+    }
+    let m = sidecar_color::geometry::sensor_from_oriented(flip);
+    let size = [source.width(), source.height()];
+    let spots: Vec<_> = edit
+        .spots
+        .iter()
+        .map(|s| {
+            sidecar_engine::retouch::PixelSpot::new(s, size, |p| {
+                sidecar_color::geometry::map(&m, p)
+            })
+        })
+        .collect();
+    // Red eye judges red in white-balanced light: the camera's as-shot balance, as the browser does.
+    let m = rendering.color.as_shot_mul;
+    let wb = [m[0] as f32, m[1] as f32, m[2] as f32];
+    Some(kit.retouch.apply(&kit.gpu, source, &spots, wb))
 }
 
 pub fn detail_settings(edit: &EditParams) -> sidecar_engine::detail::DetailSettings {
@@ -613,6 +643,10 @@ pub fn render(
     stage(tx, "decode", 0.02);
     stage(tx, "demosaic", 0.15);
     let (mut source, flip, rendering) = full_source_for(kit, &req.path)?;
+    if let Some(retouched) = retouch(kit, &rendering, &req.edit, &source, flip) {
+        stage(tx, "retouch", 0.3);
+        source = retouched;
+    }
 
     // Masks cover the whole frame, here and in develop: the detail pass reads them for its layers.
     let mask_textures = rendering.mask_textures(

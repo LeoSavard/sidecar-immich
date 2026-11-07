@@ -3,7 +3,7 @@
 	import { DevelopPass, requestDevice } from '$lib/gpu/develop';
 	import { LensPass } from '$lib/gpu/lens';
 
-	type Case = { name: string; width: number; height: number; lens?: boolean; masks?: number; maskSize?: [number, number]; mono?: boolean; slide?: boolean };
+	type Case = { name: string; width: number; height: number; lens?: boolean; masks?: number; maskSize?: [number, number]; mono?: boolean; slide?: boolean; spots?: boolean };
 	type Result = { name: string; status: string };
 
 	let results = $state<Result[]>([]);
@@ -28,6 +28,10 @@
 			for (const c of cases) {
 				const get = async (suffix: string) => (await fetch(`/parity/${c.name}.${suffix}`)).arrayBuffer();
 				pass.setSource(c.width, c.height, await get('src.f16'));
+				if (c.spots) {
+					const { spots, wb } = JSON.parse(new TextDecoder().decode(await get('spots.json')));
+					pass.setSpots(spots, wb);
+				}
 				if (c.lens) {
 					const target = lens.target(pass.proxy!, 'lens corrected');
 					lens.run(pass.proxy!, target, new Uint8Array(await get('lens.bin')));
