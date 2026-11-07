@@ -12,6 +12,7 @@ pub mod lensfun;
 pub mod luts;
 pub mod masks;
 pub mod ml;
+pub mod overlays;
 pub mod stocks;
 
 use anyhow::{Context, Result};
@@ -603,6 +604,9 @@ pub struct PreviewRequest {
     /// Long edge of the returned JPEG. The cached proxy at this size is developed — not the original — so
     /// this costs a develop pass over a small image, not a decode.
     pub long_edge: Option<u32>,
+    /// The overlays to paint in (`overlays::CLIP_HIGHS`, `CLIP_LOWS`, `PEAKING`), as the view would draw them.
+    #[serde(default)]
+    pub overlays: u32,
 }
 
 /// The develop pass the browser would have run, run here instead, over the same cached proxy and with the
@@ -615,7 +619,8 @@ fn preview_jpeg(
     proxy: (u32, u32, Bytes),
     masks: &[Option<sidecar_engine::RgbaF32>],
     depth: Option<&masks::DepthMap>,
-) -> Result<Vec<u8>> {
+    focus: Option<sidecar_engine::RgbaF32>,
+) -> Result<(Vec<u8>, Vec<u32>)> {
     let (width, height, bytes) = proxy;
     let source = sidecar_engine::upload_rgba16(
         &kit.gpu,
@@ -662,8 +667,22 @@ fn preview_jpeg(
     let developed = rendering
         .warp(kit, &req.edit, &developed, 0)
         .unwrap_or(developed);
-    let img = sidecar_engine::read_rgba16(&kit.gpu, &developed)?;
-    export::jpeg_bytes(&img, 88, req.color_space)
+    let mut img = sidecar_engine::read_rgba16(&kit.gpu, &developed)?;
+    // The histogram before any overlay is painted in, as the browser counts the developed picture.
+    let histogram = overlays::histogram(&img);
+    // The focus mask goes where the picture went: through the lens correction and the geometry.
+    let focus = focus.map(|mask| -> Result<sidecar_engine::RgbaF32> {
+        let tex = rendering.correct(
+            kit,
+            &req.edit,
+            sidecar_engine::upload_rgba16(&kit.gpu, &mask),
+        );
+        let tex = rendering.warp(kit, &req.edit, &tex, 0).unwrap_or(tex);
+        sidecar_engine::read_rgba16(&kit.gpu, &tex)
+    });
+    let focus = focus.transpose()?;
+    overlays::paint(&mut img, req.overlays, focus.as_ref());
+    Ok((export::jpeg_bytes(&img, 88, req.color_space)?, histogram))
 }
 
 async fn preview(State(w): State<Arc<Worker>>, Json(req): Json<PreviewRequest>) -> Response {
@@ -701,19 +720,37 @@ async fn preview(State(w): State<Arc<Worker>>, Json(req): Json<PreviewRequest>) 
     };
     let masks = w.mask_images(&req.key, &req.edit).await;
     let depth = w.depth_map(&req.key, &req.edit).await;
+    // Focus peaking reads the focus mask made with this proxy.
+    let focus = match req.overlays & overlays::PEAKING {
+        0 => None,
+        _ => w
+            .focus(&req.key, edge)
+            .await
+            .ok()
+            .and_then(|png| masks::decode_grey(&png).ok()),
+    };
     match tokio::task::spawn_blocking(move || {
-        preview_jpeg(&kit, &rendering, &req, proxy, &masks, depth.as_ref())
+        preview_jpeg(&kit, &rendering, &req, proxy, &masks, depth.as_ref(), focus)
     })
     .await
     {
-        Ok(Ok(jpeg)) => (
-            [
-                ("content-type", "image/jpeg"),
-                ("cache-control", "no-store"),
-            ],
-            jpeg,
-        )
-            .into_response(),
+        Ok(Ok((jpeg, histogram))) => {
+            use base64::Engine;
+            let bytes: Vec<u8> = histogram.iter().flat_map(|v| v.to_le_bytes()).collect();
+            (
+                [
+                    ("content-type", "image/jpeg".to_string()),
+                    ("cache-control", "no-store".to_string()),
+                    // `histogram.wgsl`'s 1,026 counts, little-endian u32s, base64.
+                    (
+                        "x-histogram",
+                        base64::engine::general_purpose::STANDARD.encode(bytes),
+                    ),
+                ],
+                jpeg,
+            )
+                .into_response()
+        }
         Ok(Err(e)) => internal(e),
         Err(e) => internal(e.into()),
     }

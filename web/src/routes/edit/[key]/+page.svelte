@@ -1534,6 +1534,22 @@
 	 * one is running sets a flag and is served by another round after it, so dragging a slider can't queue a
 	 * render per frame.
 	 */
+	/** The server's histogram (`x-histogram`: `histogram.wgsl`'s 1,026 counts, base64), as the GPU pass reports one. */
+	function histogramFromHeader(b64: string | null): HistogramData | null {
+		if (!b64) return null;
+		const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+		if (bytes.byteLength !== 1026 * 4) return null;
+		const v = new Uint32Array(bytes.buffer);
+		const luma = v.slice(768, 1024);
+		return { r: v.slice(0, 256), g: v.slice(256, 512), b: v.slice(512, 768), luma, clippedHigh: v[1024], clippedLow: v[1025], total: luma.reduce((a, x) => a + x, 0) };
+	}
+
+	// Without WebGPU, an overlay switched on or off is a new preview from the server.
+	$effect(() => {
+		void [clipHigh, clipLow, peaking];
+		if (fallback) untrack(() => renderPreview());
+	});
+
 	async function renderPreview() {
 		if (!edit || !meta) return;
 		if (previewBusy) {
@@ -1551,9 +1567,13 @@
 				const body = JSON.stringify({
 					edit: shownEdit,
 					colorSpace: display,
-					longEdge: Math.round(Math.min(Math.max(innerWidth, innerHeight) * devicePixelRatio, 2560))
+					longEdge: Math.round(Math.min(Math.max(innerWidth, innerHeight) * devicePixelRatio, 2560)),
+					// Painted in by the server, as the view pass would draw them; none while cropping.
+					overlays: cropping ? 0 : (clipHigh ? CLIP_HIGHS : 0) | (clipLow ? CLIP_LOWS : 0) | (peaking ? PEAKING : 0)
 				});
 				const r = await api(`/api/assets/${key}/preview`, { method: 'POST', headers: { 'content-type': 'application/json' }, body });
+				const counted = histogramFromHeader(r.headers.get('x-histogram'));
+				if (counted) histogram = counted;
 				const url = URL.createObjectURL(await r.blob());
 				if (previewUrl) URL.revokeObjectURL(previewUrl);
 				previewUrl = url;
@@ -2410,15 +2430,17 @@
 		{/if}
 		{#if before}<span class="absolute top-[max(1rem,env(safe-area-inset-top))] left-24 rounded bg-ground/80 px-2 py-1 text-xs">{compare?.label ?? (developed ? 'As saved' : 'As shot')}</span>{/if}
 		<div class="absolute top-[max(0.75rem,env(safe-area-inset-top))] right-3 grid justify-items-end gap-1.5">
-			{#if !wide && showPhoneHistogram && !fallback}
+			{#if !wide && showPhoneHistogram}
 				<div class="transition-opacity {painting ? 'opacity-30' : ''}" title={painting ? 'Paused while painting' : undefined}>
 					<Histogram data={histogram} {clipHigh} {clipLow} compact ontoggle={(w) => { if (w === 'high') clipHigh = !clipHigh; else clipLow = !clipLow; schedule(); }} />
 				</div>
 			{/if}
-			{#if !wide && !fallback}
+			{#if !wide}
 				<!-- With the photo's other toggles, above them: in the tool row it was pushed off a 390-pixel screen. -->
 				<button type="button" aria-pressed={showPhoneHistogram} class="rounded-full px-2.5 py-1 text-[0.6875rem] {showPhoneHistogram ? 'bg-fg text-ground' : 'bg-ground/80 text-fg-2'}" onclick={() => (showPhoneHistogram = !showPhoneHistogram)}>Histogram</button>
 				<button type="button" aria-pressed={peaking} class="rounded-full px-2.5 py-1 text-[0.6875rem] {peaking ? 'bg-fg text-ground' : 'bg-ground/80 text-fg-2'}" onclick={() => { peaking = !peaking; schedule(); }}>Focus</button>
+			{/if}
+			{#if !wide && !fallback}
 				<!-- Beside Focus, because checking detail is something one does at any time, not only while sharpening
 				     (the October interface review, item 8). Detail keeps its own loupe. -->
 				<button type="button" aria-pressed={loupeOver} class="rounded-full px-2.5 py-1 text-[0.6875rem] {loupeOver ? 'bg-fg text-ground' : 'bg-ground/80 text-fg-2'}" onclick={() => (loupeOver = !loupeOver)}>Loupe</button>
@@ -2560,12 +2582,12 @@
 
 			{#if wide}
 			<div class="px-4 pb-2">
-				<!-- Without WebGPU there's no histogram or overlay (the view pass draws them), but it's still the
-				     desktop layout: the phone's tab bar below isn't for it. -->
-				{#if !fallback}
+				<!-- Without WebGPU the server counts the histogram and paints the overlays into its preview
+				     (`sidecar_worker::overlays`); the measuring tools still need the picture here. -->
 				<div class="transition-opacity {painting ? 'opacity-30' : ''}" title={painting ? 'Paused while painting' : undefined}>
 					<Histogram data={histogram} {clipHigh} {clipLow} ontoggle={(w) => { if (w === 'high') clipHigh = !clipHigh; else clipLow = !clipLow; schedule(); }} />
 				</div>
+				{#if !fallback}
 				<details class="mt-1">
 					<summary class="cursor-pointer text-[0.6875rem] text-fg-2">Measure</summary>
 					<div class="mt-1">
@@ -2582,8 +2604,8 @@
 				{/if}
 				<div class="mt-1 flex flex-wrap items-center justify-between gap-2 text-[0.6875rem]">
 					<div class="flex flex-wrap items-center gap-2">
-						{#if !fallback}
 						<button type="button" aria-pressed={peaking} class="rounded-full px-2 py-0.5 {peaking ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" onclick={() => { peaking = !peaking; schedule(); }}>Focus peaking</button>
+						{#if !fallback}
 							<button type="button" aria-pressed={loupeOver} class="rounded-full px-2 py-0.5 {loupeOver ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" title="The detail at full resolution, over the photo (Z opens Detail's own)" onclick={() => (loupeOver = !loupeOver)}>Loupe</button>
 							<button type="button" aria-pressed={proofOn} class="rounded-full px-2 py-0.5 {proofOn ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" title="Soft proof: how the photo will look printed through a printer profile, and what the print can't hold" onclick={() => { proofOn = !proofOn; schedule(true); }}>Proof</button>
 							<button type="button" aria-pressed={split} class="rounded-full px-2 py-0.5 {split ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" title="The compared version — as shot until you choose one in History — left of a line you can drag, the edit right of it" onclick={() => setSplit(!split)}>Split</button>

@@ -353,7 +353,7 @@ impl Worker {
     }
 }
 
-fn decode_grey(png_bytes: &[u8]) -> Result<sidecar_engine::RgbaF32> {
+pub(crate) fn decode_grey(png_bytes: &[u8]) -> Result<sidecar_engine::RgbaF32> {
     let mut reader = png::Decoder::new(std::io::Cursor::new(png_bytes)).read_info()?;
     let mut buf = vec![0; reader.output_buffer_size().context("mask too large")?];
     let info = reader.next_frame(&mut buf)?;
