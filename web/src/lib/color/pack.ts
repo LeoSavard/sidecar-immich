@@ -2,6 +2,8 @@
 // The Rust colour maths (crates/color) running as WebAssembly. Same code the worker uses for export.
 import wasmUrl from './sidecar_color.wasm?url';
 import type { CameraColor, DisplaySpace, EditParams, Frame, Geometry, Gradient, Lens, LensProfile, MaskEdge, SourceKind } from '$lib/types';
+import type { LookLut } from '$lib/generated/edit/LookLut';
+import type { LutTable } from '$lib/luts';
 
 /** Mirrors `sidecar_color::params::EdgePlan`: the mask edge passes for one mask size. */
 export type EdgePlan = { scale: number; small: [number, number]; radius: number; threshold: number; ramp: number };
@@ -24,6 +26,7 @@ type Exports = {
 	sc_source_color(ptr: number, len: number): number;
 	sc_camera_color(ptr: number, len: number): number;
 	sc_pack_depth(ptr: number, len: number): number;
+	sc_pack_look(ptr: number, len: number): number;
 	sc_mask_edge(ptr: number, len: number): number;
 	sc_gradient(ptr: number, len: number): number;
 };
@@ -164,6 +167,16 @@ export class ColorPacker {
 		const ptr = this.x.sc_alloc(input.length);
 		new Uint8Array(this.x.memory.buffer, ptr, input.length).set(input);
 		const out = this.framed(this.x.sc_pack_depth(ptr, input.length));
+		this.x.sc_free(ptr, input.length);
+		return out.length ? out.slice() : undefined;
+	}
+
+	/** The LUT pass's uniform (128 bytes) for develop's output in `display`, or `undefined` when the amount leaves nothing to do. */
+	packLook(lut: LookLut, display: DisplaySpace, header: LutTable['header']): Uint8Array | undefined {
+		const input = new TextEncoder().encode(JSON.stringify({ lut, display, header }));
+		const ptr = this.x.sc_alloc(input.length);
+		new Uint8Array(this.x.memory.buffer, ptr, input.length).set(input);
+		const out = this.framed(this.x.sc_pack_look(ptr, input.length));
 		this.x.sc_free(ptr, input.length);
 		return out.length ? out.slice() : undefined;
 	}

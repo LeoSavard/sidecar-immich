@@ -11,6 +11,7 @@ mod film_data;
 pub mod geometry;
 pub mod icc;
 pub mod lens;
+pub mod lut;
 pub mod mat;
 pub mod params;
 pub mod slide;
@@ -39,6 +40,7 @@ mod uniforms {
                 R::of::<crate::params::MaskParams>(),
                 R::of::<crate::params::ProfileParams>(),
                 R::of::<crate::params::DefringeParams>(),
+                R::of::<crate::lut::LookParams>(),
                 R::of::<crate::params::EdgeParams>(),
                 R::of::<crate::params::GradientParams>(),
                 R::of::<crate::depth::DepthParams>(),

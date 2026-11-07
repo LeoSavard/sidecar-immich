@@ -8,6 +8,7 @@ import type { Geometry } from "./Geometry";
 import type { Grain } from "./Grain";
 import type { Lens } from "./Lens";
 import type { LensBlur } from "./LensBlur";
+import type { LookLut } from "./LookLut";
 import type { MaskAdjustment } from "./MaskAdjustment";
 import type { Mixer } from "./Mixer";
 import type { Monochrome } from "./Monochrome";

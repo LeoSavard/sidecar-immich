@@ -47,6 +47,32 @@ struct Case {
     /// `<name>.defringe.bin` holds the defringe pass's uniform, run over develop's input.
     #[serde(default)]
     defringe: bool,
+    /// `<name>.look.bin` holds the LUT pass's uniform and `<name>.look.f32` its table, RGBA floats this many on
+    /// a side; 0 for no LUT.
+    #[serde(default)]
+    look: u32,
+}
+
+/// The parity case's LUT: a warm, contrasty grade that mixes channels, 17 on a side.
+fn parity_lut() -> sidecar_color::lut::CubeLut {
+    let n = 17u32;
+    let m = (n - 1) as f32;
+    sidecar_color::lut::CubeLut {
+        title: Some("parity".into()),
+        size: n,
+        domain_min: [0.0; 3],
+        domain_max: [1.0; 3],
+        table: (0..n * n * n)
+            .map(|i| {
+                let c = [i % n, (i / n) % n, i / (n * n)].map(|v| v as f32 / m);
+                [
+                    (c[0] * 0.9 + c[1] * 0.15).powf(1.2).min(1.0),
+                    (c[1] * 0.95 + 0.03 * c[2]).powf(1.1),
+                    (c[2] * 0.8 + 0.1 * c[0]).powf(0.9),
+                ]
+            })
+            .collect(),
+    }
 }
 
 /// Masks for the parity case, at half the image's size so both renderers interpolate them: a soft disc and a
@@ -438,7 +464,26 @@ fn cases() -> Vec<Fixture> {
         ..graded.clone()
     };
 
+    // A LUT at most of its strength, built for video (Rec.709, γ 2.4), over a P3 display.
+    let look = EditParams {
+        lut: Some(sidecar_color::lut::LookLut {
+            id: "0000000000000000".into(),
+            name: "parity".into(),
+            amount: 80.0,
+            space: sidecar_color::lut::LutSpace::Rec709,
+        }),
+        ..graded.clone()
+    };
+
     let mut cases: Vec<Fixture> = vec![
+        (
+            "look".into(),
+            nikon_d850(),
+            SourceKind::Raw,
+            look,
+            DisplaySpace::DisplayP3,
+            None,
+        ),
         (
             "defringe".into(),
             nikon_d850(),
@@ -895,6 +940,19 @@ pub fn fixtures(dir: &Path) -> Result<()> {
                 bytemuck::cast_slice(&stock.response),
             )?;
         }
+        let look = match &edit.lut {
+            Some(l) => {
+                let lut = parity_lut();
+                let u = l.uniform(display, &lut.header()).unwrap();
+                std::fs::write(dir.join(format!("{name}.look.bin")), u)?;
+                std::fs::write(
+                    dir.join(format!("{name}.look.f32")),
+                    bytemuck::cast_slice(&lut.rgba()),
+                )?;
+                lut.size
+            }
+            None => 0,
+        };
         let defringe = packed.defringe.is_some();
         if let Some(u) = &packed.defringe {
             std::fs::write(dir.join(format!("{name}.defringe.bin")), u)?;
@@ -936,6 +994,7 @@ pub fn fixtures(dir: &Path) -> Result<()> {
             spots,
             profile: has_profile,
             defringe,
+            look,
         });
     }
     std::fs::write(dir.join("index.json"), serde_json::to_vec_pretty(&index)?)?;
@@ -1044,6 +1103,20 @@ pub fn native(dir: &Path, out: &Path) -> Result<()> {
             )?),
             false => None,
         };
+        let (look_uniform, look_table) = match case.look {
+            0 => (Vec::new(), Vec::new()),
+            _ => (
+                std::fs::read(dir.join(format!("{}.look.bin", case.name)))?,
+                bytemuck::pod_collect_to_vec::<u8, f32>(&std::fs::read(
+                    dir.join(format!("{}.look.f32", case.name)),
+                )?),
+            ),
+        };
+        let look = (case.look > 0).then_some(sidecar_engine::develop::Look {
+            uniform: &look_uniform,
+            size: case.look,
+            table: &look_table,
+        });
         let masks = if case.masks > 0 {
             let params: sidecar_color::params::MaskParams = bytemuck::pod_read_unaligned(
                 &std::fs::read(dir.join(format!("{}.masks.bin", case.name)))?,
@@ -1058,6 +1131,7 @@ pub fn native(dir: &Path, out: &Path) -> Result<()> {
                 haze: None,
                 profile: profile.as_ref(),
                 defringe: defringe.as_deref(),
+                look,
                 slide_exposure: &slide_exposure,
                 slide_response: &slide_response,
             }
@@ -1066,6 +1140,7 @@ pub fn native(dir: &Path, out: &Path) -> Result<()> {
                 mono: &mono,
                 profile: profile.as_ref(),
                 defringe: defringe.as_deref(),
+                look,
                 slide_exposure: &slide_exposure,
                 slide_response: &slide_response,
                 ..sidecar_engine::Masks::none()

@@ -4,6 +4,7 @@ characteristic curve on its own as a colour film's layers each have theirs; or b
 sees the light, through a filter. -->
 <script lang="ts">
 	import Slider from '$lib/ui/Slider.svelte';
+	import LutControls from './LutControls.svelte';
 	import { decimals } from '$lib/ui/format';
 	import { grainMicrons } from '$lib/state/edit-view';
 	import { stocks as offeredStocks } from '$lib/film';
@@ -262,4 +263,5 @@ sees the light, through a filter. -->
 	<Slider id="grain-amount" label="Amount" value={edit.grain?.amount ?? 0} min={0} max={100} defaultValue={0} format={(v) => decimals(v)} onchange={(v) => setGrain('amount', v)} {oncommit} />
 	<Slider id="grain-size" label="Size" value={edit.grain?.size ?? 50} min={0} max={100} defaultValue={50} format={(v) => `${Math.round(grainMicrons(v))} µm`} onchange={(v) => setGrain('size', v)} {oncommit} />
 	<p class="text-xs text-muted">Size is a grain on a 35 mm negative, so it keeps its share of the picture at any size. The preview, smaller than the photo, shows grain softer than the export does; zoom in to see it as exported.</p>
+	<LutControls {edit} {onchange} {oncommit} />
 </div>

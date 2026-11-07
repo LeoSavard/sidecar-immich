@@ -6428,6 +6428,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "sidecar-color",
  "sidecar-template",
  "sidecar-xmp",

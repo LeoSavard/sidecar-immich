@@ -178,6 +178,8 @@ export function describeChanges(from: EditParams, to: EditParams): string[] {
 	if ((from.cameraProfile ?? null) !== (to.cameraProfile ?? null)) out.push(to.cameraProfile ? "The file's camera profile" : 'Camera matrix');
 	if (!from.negative !== !to.negative) out.push(to.negative ? 'Film negative' : 'Positive');
 	else if (from.negative && to.negative && JSON.stringify(from.negative) !== JSON.stringify(to.negative)) out.push('Negative adjusted');
+	if ((from.lut?.id ?? '') !== (to.lut?.id ?? '')) out.push(to.lut ? `LUT ${to.lut.name}` : 'No LUT');
+	else if (from.lut && to.lut && JSON.stringify(from.lut) !== JSON.stringify(to.lut)) out.push(`LUT ${to.lut.name} adjusted`);
 	if (JSON.stringify(from.defringe ?? null) !== JSON.stringify(to.defringe ?? null)) out.push(to.defringe ? 'Defringe adjusted' : 'No defringe');
 	return out;
 }
@@ -304,6 +306,8 @@ export const PICKS: { id: string; label: string; take: (into: EditParams, from: 
 			// A roll's base and contrast are the same frame to frame.
 			if (f.negative) e.negative = structuredClone(f.negative);
 			else delete e.negative;
+			if (f.lut) e.lut = structuredClone(f.lut);
+			else delete e.lut;
 		}
 	},
 	{ id: 'curve', label: 'Curve', take: (e, f) => (e.tone.curve = structuredClone(f.tone.curve)) },

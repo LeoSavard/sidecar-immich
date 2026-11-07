@@ -442,6 +442,33 @@ pub unsafe extern "C" fn sc_pack_depth(ptr: *const u8, len: usize) -> *const u8 
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LookRequest {
+    lut: sidecar_color::lut::LookLut,
+    display: DisplaySpace,
+    header: sidecar_color::lut::CubeHeader,
+}
+
+/// `{ lut, display, header }` → the LUT pass's uniform (`LookLut::uniform`, 128 bytes), or no bytes when the
+/// amount leaves nothing to do.
+///
+/// # Safety
+/// `ptr` must point to `len` readable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sc_pack_look(ptr: *const u8, len: usize) -> *const u8 {
+    let input = unsafe { std::slice::from_raw_parts(ptr, len) };
+    respond(
+        serde_json::from_slice::<LookRequest>(input)
+            .map_err(|e| e.to_string())
+            .map(|req| {
+                req.lut
+                    .uniform(req.display, &req.header)
+                    .unwrap_or_default()
+            }),
+    )
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct EdgeRequest {
     edge: sidecar_color::params::MaskEdge,
     size: [u32; 2],
