@@ -5,6 +5,7 @@
 	import { DevelopPass, requestDevice } from '$lib/gpu/develop';
 	import { CLIP_HIGHS, CLIP_LOWS, MASK_INVERTED, PEAKING, SHOW_MASK, ViewPass, type ViewGeometry, type Viewport } from '$lib/gpu/view';
 	import { ColorSelections } from '$lib/color-range';
+	import { decodeGrey, rateEyes, weighByMask, type Eye, type Grey } from '$lib/peaking';
 	import { BRUSH, COLOR, DEPTH, GRADIENT, MaskLibrary, brushStroke, rangeUniform, type BrushSettings, type MaskSet } from '$lib/masks';
 	import { DepthPass } from '$lib/gpu/depth';
 	import { MaskPainter, simplify } from '$lib/gpu/brush';
@@ -202,6 +203,11 @@
 	let layoutTick = $state(0);
 	/** Screen position (CSS px, relative to the canvas's positioned ancestor) of the AF point marker. */
 	let markerPos = $state<{ x: number; y: number } | null>(null);
+	/** Focus peaking on the subject alone, and each face's eyes rated for sharpness (`$lib/peaking`). */
+	let peakSubject = $state(false);
+	let focusGrey: Grey | null = null;
+	let eyes = $state<Eye[]>([]);
+	let eyeMarks = $state<{ x: number; y: number; sharp: boolean; label: string }[]>([]);
 	let showAfPoint = $state(true);
 	/** A JPEG, HEIC, PNG or TIFF: something else already developed it, so some controls have nothing to act on. */
 	const developed = $derived(meta?.info.sourceKind === 'developed');
@@ -504,6 +510,12 @@
 		view.render(develop.output, canvas, viewport, (clipHigh ? CLIP_HIGHS : 0) | (clipLow ? CLIP_LOWS : 0) | (peaking ? PEAKING : 0) | maskFlags, geometry, split && !before && splitTexture ? { texture: splitTexture, at: splitAt } : undefined);
 		markerPos = cropping ? null : imageToScreen(afPoint());
 		spotMarks = !cropping && (section === 'retouch' || retouchTool !== 'off') ? markSpots() : [];
+		eyeMarks = peaking && !cropping
+			? eyes.flatMap((e) => {
+					const p = imageToScreen({ x: e.at[0], y: e.at[1] });
+					return p ? [{ ...p, sharp: e.sharp, label: `${e.side === 'right' ? 'Right' : 'Left'} eye of face ${e.face + 1}: ${e.sharp ? 'sharp' : 'soft'} (${Math.round(e.score * 100)} %)` }] : [];
+				})
+			: [];
 		// The zoom readout: device pixels per output pixel, which is what the double tap's 100 % means. 0 at fit,
 		// where there is nothing to say and nothing to go back to.
 		zoomPercent = viewport.zoom > 1.001 ? Math.round(imageRect().fit * viewport.zoom * 100) : 0;
@@ -1028,6 +1040,8 @@
 		if (!maskLibrary || maskSet) return;
 		maskLibrary.manifest().then((set) => {
 			maskSet = set;
+			// Faces arrived: the eyes can be rated.
+			if (set.faces.length) applyPeaking();
 			schedule(true);
 		});
 	}
@@ -1657,7 +1671,33 @@
 
 	function useFocusMask(png: ArrayBuffer) {
 		focusMaskBytes = png;
+		decodeGrey(png)
+			.then((g) => {
+				focusGrey = g;
+				applyPeaking();
+			})
+			.catch(() => {});
 		return view.loadFocusMask(png);
+	}
+
+	/**
+	 * The focus mask the view peaks with: the photo's own, or weighted by the subject mask when Subject is on; and
+	 * the eyes rated from the photo's own (an eye is sharp or not whatever else is).
+	 */
+	async function applyPeaking() {
+		if (!focusGrey || !focusMaskBytes) return;
+		eyes = maskSet?.faces?.length ? rateEyes(focusGrey, maskSet.faces) : [];
+		if (peakSubject && maskSet?.names.includes('subject')) {
+			try {
+				const subject = await decodeGrey(await (await api(`/api/assets/${key}/masks/subject`)).blob());
+				view.setFocusMaskPixels(weighByMask(focusGrey, subject));
+			} catch {
+				await view.loadFocusMask(focusMaskBytes);
+			}
+		} else await view.loadFocusMask(focusMaskBytes);
+		// The lens pass corrects whichever mask is current: make it run again.
+		lensMadeFrom = '';
+		schedule(true);
 	}
 
 	/**
@@ -2392,6 +2432,10 @@
 				<button type="button" class="absolute h-4 w-4 -translate-x-1/2 -translate-y-1/2 touch-none rounded-full border-2 border-dashed border-white bg-black/30" style="left: {m.from.x}px; top: {m.from.y}px;" aria-label="Spot {i + 1}'s source" onpointerdown={(e) => dragSpot(e, i, 'from')}></button>
 			{/if}
 		{/each}
+		{#each eyeMarks as m, k (k)}
+			<!-- Each face's eyes, rated by the focus measure: green is sharp, amber soft (`$lib/peaking`). -->
+			<span class="pointer-events-none absolute h-5 w-5 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 {m.sharp ? 'border-[#3ddc84]' : 'border-dashed border-[#f5a524]'} shadow-[0_0_0_1px_rgba(0,0,0,0.4)]" style="left: {m.x}px; top: {m.y}px;" role="img" aria-label={m.label} title={m.label}></span>
+		{/each}
 		{#if markerPos && showAfPoint}
 			<!-- While a tool is armed the marker steps aside: it is 28 px over the autofocus point, which on most
 			     cameras is the middle of the frame, and that is exactly where someone aims to sample a neutral.
@@ -2625,6 +2669,9 @@
 					<div class="flex flex-wrap items-center gap-2">
 						<button type="button" aria-pressed={peaking} class="rounded-full px-2 py-0.5 {peaking ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" onclick={() => { peaking = !peaking; schedule(); }}>Focus peaking</button>
 						{#if !fallback}
+						{#if peaking && maskSet?.names.includes('subject')}
+							<button type="button" aria-pressed={peakSubject} class="rounded-full px-2 py-0.5 {peakSubject ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" title="Peak only on the subject: is the subject sharp?" onclick={() => { peakSubject = !peakSubject; applyPeaking(); }}>Subject</button>
+						{/if}
 							<button type="button" aria-pressed={loupeOver} class="rounded-full px-2 py-0.5 {loupeOver ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" title="The detail at full resolution, over the photo (Z opens Detail's own)" onclick={() => (loupeOver = !loupeOver)}>Loupe</button>
 							<button type="button" aria-pressed={proofOn} class="rounded-full px-2 py-0.5 {proofOn ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" title="Soft proof: how the photo will look printed through a printer profile, and what the print can't hold" onclick={() => { proofOn = !proofOn; schedule(true); }}>Proof</button>
 							<button type="button" aria-pressed={split} class="rounded-full px-2 py-0.5 {split ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" title="The compared version — as shot until you choose one in History — left of a line you can drag, the edit right of it" onclick={() => setSplit(!split)}>Split</button>

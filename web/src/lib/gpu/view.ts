@@ -99,6 +99,15 @@ export class ViewPass {
 		this.focusMask = this.focusSource;
 	}
 
+	/** The focus mask from values already decoded (one byte a pixel): the subject-weighted one (`$lib/peaking`). */
+	setFocusMaskPixels(grey: { width: number; height: number; bytes: Uint8Array }) {
+		const texture = this.device.createTexture({ label: 'focus mask, weighted', size: [grey.width, grey.height], format: 'r8unorm', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+		this.device.queue.writeTexture({ texture }, grey.bytes, { bytesPerRow: grey.width }, [grey.width, grey.height]);
+		this.focusSource.destroy();
+		this.focusSource = texture;
+		this.focusMask = this.focusSource;
+	}
+
 	/** The mask to show with SHOW_MASK, lens-corrected like the picture; `undefined` for none. */
 	useOverlay(texture?: GPUTexture) {
 		this.overlay = texture ?? this.noOverlay;
