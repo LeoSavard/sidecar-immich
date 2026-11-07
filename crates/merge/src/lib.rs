@@ -9,5 +9,6 @@ pub mod align;
 
 pub mod align;
 pub mod hdr;
+pub mod hdri;
 pub mod linalg;
 pub mod pano;

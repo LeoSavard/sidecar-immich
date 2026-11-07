@@ -12,6 +12,9 @@
 //! `sidecar-dev camera-jpeg <list>`       a RAW's lens profile checked against the camera's own JPEG
 //! `sidecar-dev pano <out.dng> <raw>… [--projection rectilinear|cylindrical|spherical] [--scale s]
 //!                  [--no-crop] [--lensfun <dir>] [--png <out.png>]`  frames stitched into one linear DNG
+//! `sidecar-dev hdri <out.exr|out.hdr> <raw>… [--brackets n] [--space rec709|rec2020|acescg] [--half]
+//!                  [--absolute] [--scale s] [--lensfun <dir>] [--png <out.png>]`  brackets merged per
+//!                                        direction, stitched onto the whole sphere
 
 mod parity;
 
@@ -80,6 +83,7 @@ fn main() -> Result<()> {
         ["align", files @ ..] if files.len() >= 2 => align(files),
         ["hdr", out, files @ ..] if files.len() >= 2 => hdr(out.as_ref(), files),
         ["pano", out, args @ ..] if args.len() >= 2 => pano(out.as_ref(), args),
+        ["hdri", out, args @ ..] if !args.is_empty() => hdri(out.as_ref(), args),
         ["linear-dng", input, out, rest @ ..] => {
             let input: &std::path::Path = input.as_ref();
             let edge: u32 = rest.first().map_or(Ok(1600), |v| v.parse())?;
@@ -1898,12 +1902,66 @@ fn compare_png(a: &std::path::Path, b: &std::path::Path) -> Result<()> {
 /// measured, and it is merged in two streaming passes — the second dropping samples that disagree beyond their
 /// noise — then written by `sidecar_raw::dng_write`.
 fn hdr(out: &std::path::Path, files: &[&str]) -> Result<()> {
-    use sidecar_merge::align::{Grey, H};
-    use sidecar_merge::hdr::{Accum, Frame};
     let t0 = std::time::Instant::now();
     let gpu = sidecar_engine::Gpu::new_headless()?;
     let ingest = sidecar_engine::Ingest::new(&gpu)?;
     let detail = sidecar_engine::detail::Detail::new(&gpu)?;
+    let m = merge_bracket(&gpu, &ingest, &detail, files)?;
+    let raw = sidecar_raw::RawFile::open(files[m.reference].as_ref())?;
+    let info = raw.info();
+    let mosaic = raw.mosaic()?;
+    sidecar_raw::dng_write::write(
+        out,
+        m.w as u32,
+        m.h as u32,
+        &m.rgb,
+        &sidecar_raw::dng_write::DngMeta {
+            make: &info.make,
+            model: &info.model,
+            software: "Sidecar (sidecar-dev hdr)",
+            color: &info.color,
+            orientation: sidecar_raw::decoded::orientation_from_flip(mosaic.flip),
+            noise: None,
+            // Where no frame measured the light, the darkest frame's saturation is all there is.
+            linear_response_limit: (m.fell > 0).then_some(m.darkest * 0.95),
+        },
+    )?;
+    let peak = m.rgb.iter().cloned().fold(0f32, f32::max);
+    println!(
+        "merged: peak {:.1}× the reference's white ({:+.1} EV), {} px measured by no frame · {} ({:.0} MB) in {:.0} s",
+        peak,
+        (peak as f64).log2(),
+        m.fell,
+        out.display(),
+        std::fs::metadata(out)?.len() as f64 / 1e6,
+        t0.elapsed().as_secs_f64()
+    );
+    Ok(())
+}
+
+/// A bracket merged: camera-native linear RGB in the reference frame's radiance and geometry.
+struct Merged {
+    w: usize,
+    h: usize,
+    rgb: Vec<f32>,
+    /// Which of the bracket's files is the reference.
+    reference: usize,
+    /// Pixels no frame measured, and the largest scale from a frame into the reference's radiance.
+    fell: usize,
+    darkest: f64,
+}
+
+/// Merge one bracket (`sidecar_merge::hdr`): the reference is the median exposure; every frame is aligned to
+/// it on proxies, its exposure step measured against it, its noise measured, and it is merged in two
+/// streaming passes — the second dropping samples that disagree beyond their noise.
+fn merge_bracket(
+    gpu: &sidecar_engine::Gpu,
+    ingest: &sidecar_engine::Ingest,
+    detail: &sidecar_engine::detail::Detail,
+    files: &[&str],
+) -> Result<Merged> {
+    use sidecar_merge::align::{Grey, H};
+    use sidecar_merge::hdr::{Accum, Frame};
     let raws: Vec<sidecar_raw::RawFile> = files
         .iter()
         .map(|f| sidecar_raw::RawFile::open(f.as_ref()))
@@ -1938,7 +1996,7 @@ fn hdr(out: &std::path::Path, files: &[&str]) -> Result<()> {
     // Alignment on proxies of log luminance, in the sensor's own orientation.
     let proxy = |r: &sidecar_raw::RawFile| -> Result<Grey> {
         let (m, wb) = input(r)?;
-        let p = ingest.proxy(&gpu, &mosaic(&m), wb, 1600)?;
+        let p = ingest.proxy(gpu, &mosaic(&m), wb, 1600)?;
         Ok(Grey::log_luminance(
             p.width as usize,
             p.height as usize,
@@ -1957,9 +2015,9 @@ fn hdr(out: &std::path::Path, files: &[&str]) -> Result<()> {
     );
     let full = |r: &sidecar_raw::RawFile| -> Result<FullFrame> {
         let (m, wb) = input(r)?;
-        let tex = ingest.demosaic(&gpu, &mosaic(&m), wb, true)?;
-        let noise = detail.noise(&gpu, &tex)?;
-        let img = sidecar_engine::read_rgba16(&gpu, &tex)?;
+        let tex = ingest.demosaic(gpu, &mosaic(&m), wb, true)?;
+        let noise = detail.noise(gpu, &tex)?;
+        let img = sidecar_engine::read_rgba16(gpu, &tex)?;
         let rgb = img
             .data
             .chunks(4)
@@ -2088,39 +2146,87 @@ fn hdr(out: &std::path::Path, files: &[&str]) -> Result<()> {
         }
         let (est, fell) = acc.finish();
         if pass == 1 {
-            let info = raws[reference].info();
-            let m = raws[reference].mosaic()?;
-            let darkest = plan.iter().map(|p| p.1).fold(0.0, f64::max);
-            sidecar_raw::dng_write::write(
-                out,
-                rw as u32,
-                rh as u32,
-                &est,
-                &sidecar_raw::dng_write::DngMeta {
-                    make: &info.make,
-                    model: &info.model,
-                    software: "Sidecar (sidecar-dev hdr)",
-                    color: &info.color,
-                    orientation: sidecar_raw::decoded::orientation_from_flip(m.flip),
-                    noise: None,
-                    // Where no frame measured the light, the darkest frame's saturation is all there is.
-                    linear_response_limit: (fell > 0).then_some(darkest * 0.95),
-                },
-            )?;
-            let peak = est.iter().cloned().fold(0f32, f32::max);
-            println!(
-                "merged: peak {:.1}× the reference's white ({:+.1} EV), {} px measured by no frame · {} ({:.0} MB) in {:.0} s",
-                peak,
-                (peak as f64).log2(),
+            return Ok(Merged {
+                w: rw,
+                h: rh,
+                rgb: est,
+                reference,
                 fell,
-                out.display(),
-                std::fs::metadata(out)?.len() as f64 / 1e6,
-                t0.elapsed().as_secs_f64()
-            );
+                darkest: plan.iter().map(|p| p.1).fold(0.0, f64::max),
+            });
         }
         first = Some(est);
     }
-    Ok(())
+    unreachable!("the second pass returns")
+}
+
+/// The lens as the panorama solve wants it: the file's own profile (`info` after `read_extras`), else
+/// lensfun's from `lensfun`, else nothing — and the solve fits distortion and vignetting itself.
+fn pano_optics(
+    info: &sidecar_raw::RawInfo,
+    lensfun: Option<&std::path::Path>,
+) -> (sidecar_merge::pano::Optics, String) {
+    use sidecar_merge::pano::{self, Optics};
+    let profile = info.lens_profile.clone().or_else(|| {
+        let db = sidecar_raw::lensfun::Database::load(lensfun?);
+        db.profile(info, info.lens_identity.as_ref()?)
+    });
+    let sample = |c: &Option<sidecar_color::lens::Curve>| -> Vec<f64> {
+        c.as_ref().map_or(vec![], |c| {
+            (0..=96)
+                .map(|k| c.eval(k as f64 / 96.0 * pano::R_MAX))
+                .collect()
+        })
+    };
+    match &profile {
+        Some(p) => (
+            Optics {
+                center: p.center,
+                distortion: sample(&p.distortion),
+                ca: [sample(&p.ca_red), sample(&p.ca_blue)],
+                vignetting: sample(&p.vignetting),
+            },
+            p.label.clone(),
+        ),
+        None => (
+            Optics {
+                center: [0.5, 0.5],
+                ..Default::default()
+            },
+            "no profile; fitted".into(),
+        ),
+    }
+}
+
+/// Which way is up in the displayed picture, as a direction on the sensor, from LibRaw's flip.
+fn sensor_up(flip: i32) -> [f64; 2] {
+    let flip = flip & 7;
+    if flip & 4 != 0 {
+        [if flip & 1 != 0 { 1.0 } else { -1.0 }, 0.0]
+    } else {
+        [0.0, if flip & 2 != 0 { 1.0 } else { -1.0 }]
+    }
+}
+
+/// Log₂ luminance of camera RGB (three floats a pixel), box-averaged down to at most `edge` on the long side:
+/// a stitch's proxy from a frame already at full resolution.
+fn grey_proxy(w: usize, h: usize, rgb: &[f32], edge: usize) -> sidecar_merge::align::Grey {
+    let f = w.max(h).div_ceil(edge).max(1);
+    let (ow, oh) = (w / f, h / f);
+    let lum: Vec<f32> = (0..ow * oh)
+        .map(|k| {
+            let (bx, by) = (k % ow, k / ow);
+            let mut s = 0.0;
+            for y in by * f..(by + 1) * f {
+                for x in bx * f..(bx + 1) * f {
+                    let i = (y * w + x) * 3;
+                    s += (rgb[i] + rgb[i + 1] + rgb[i + 2]) / 3.0;
+                }
+            }
+            s / (f * f) as f32
+        })
+        .collect();
+    sidecar_merge::align::Grey::log_luminance(ow, oh, lum.into_iter())
 }
 
 /// `pano <out.dng> <raw>… [options]`: frames turned about one point, stitched into one linear DNG
@@ -2128,7 +2234,7 @@ fn hdr(out: &std::path::Path, files: &[&str]) -> Result<()> {
 /// without either the solve fits distortion and vignetting itself. Frames are solved on proxies, then each
 /// is demosaiced at full resolution, warped and blended in turn, so only one full frame is held at a time.
 fn pano(out: &std::path::Path, args: &[&str]) -> Result<()> {
-    use sidecar_merge::pano::{self, Canvas, Input, Optics, Projection};
+    use sidecar_merge::pano::{self, Canvas, Input, Projection};
     let t0 = std::time::Instant::now();
     let mut files = vec![];
     let (mut projection, mut scale, mut crop, mut lensfun, mut png) = (None, 1.0, true, None, None);
@@ -2170,37 +2276,10 @@ fn pano(out: &std::path::Path, args: &[&str]) -> Result<()> {
             files[0]
         );
     }
-    let profile = info.lens_profile.clone().or_else(|| {
-        let db = sidecar_raw::lensfun::Database::load(lensfun.as_deref()?);
-        db.profile(&info, info.lens_identity.as_ref()?)
-    });
-    let sample = |c: &Option<sidecar_color::lens::Curve>| -> Vec<f64> {
-        c.as_ref().map_or(vec![], |c| {
-            (0..=96)
-                .map(|k| c.eval(k as f64 / 96.0 * pano::R_MAX))
-                .collect()
-        })
-    };
-    let optics = match &profile {
-        Some(p) => Optics {
-            center: p.center,
-            distortion: sample(&p.distortion),
-            ca: [sample(&p.ca_red), sample(&p.ca_blue)],
-            vignetting: sample(&p.vignetting),
-        },
-        None => Optics {
-            center: [0.5, 0.5],
-            ..Default::default()
-        },
-    };
+    let (optics, lens_label) = pano_optics(&info, lensfun.as_deref());
     println!(
         "{} {} · {} · {focal} mm · lens: {}",
-        info.make,
-        info.model,
-        info.lens,
-        profile
-            .as_ref()
-            .map_or("no profile; fitted".into(), |p| p.label.clone())
+        info.make, info.model, info.lens, lens_label
     );
     // One white balance for every frame (the middle one's), so the proxies compare alike.
     let mul = raws[raws.len() / 2].info().color.as_shot_mul;
@@ -2221,12 +2300,7 @@ fn pano(out: &std::path::Path, args: &[&str]) -> Result<()> {
         let m = r.mosaic()?;
         let p = ingest.proxy(&gpu, &mosaic(&m), wb, 1600)?;
         let i = r.info();
-        let flip = i.orientation_flip & 7;
-        let up = if flip & 4 != 0 {
-            [if flip & 1 != 0 { 1.0 } else { -1.0 }, 0.0]
-        } else {
-            [0.0, if flip & 2 != 0 { 1.0 } else { -1.0 }]
-        };
+        let up = sensor_up(i.orientation_flip);
         let [sw, sh] = i.sensor_size();
         inputs.push(Input {
             w: sw as usize,
@@ -2238,6 +2312,7 @@ fn pano(out: &std::path::Path, args: &[&str]) -> Result<()> {
             ),
             up,
             light: i.shutter_s as f64 * i.iso as f64 / (i.aperture as f64).max(0.7).powi(2),
+            ceiling: 0.6,
         });
     }
     let sol = pano::solve(&inputs, &optics, None).map_err(anyhow::Error::msg)?;
@@ -2280,8 +2355,8 @@ fn pano(out: &std::path::Path, args: &[&str]) -> Result<()> {
         );
     }
     let sizes: Vec<(usize, usize)> = inputs.iter().map(|i| (i.w, i.h)).collect();
-    let lay =
-        pano::layout(&sol, &sizes, projection, scale, 600_000_000).map_err(anyhow::Error::msg)?;
+    let lay = pano::layout(&sol, &sizes, projection, scale, 600_000_000, false)
+        .map_err(anyhow::Error::msg)?;
     println!(
         "{:?}, {} × {}{}, {} bands",
         lay.projection,
@@ -2397,6 +2472,216 @@ fn pano(out: &std::path::Path, args: &[&str]) -> Result<()> {
         );
         let pass = sidecar_engine::DevelopPass::new(&gpu)?;
         write_png(&pass.run(&gpu, &small, &packed.uniform, &packed.lut)?, &png)?;
+    }
+    Ok(())
+}
+
+/// `hdri <out.exr|.hdr> <raw>… [options]`: an HDRI — brackets merged per direction (`merge_bracket`), the
+/// merged frames stitched onto the whole sphere (`sidecar_merge::pano`), converted to a renderer's colour space
+/// and written as OpenEXR or Radiance RGBE (`sidecar_merge::hdri`). No tone curve and no local contrast: the
+/// result is scene-linear light, relative to the reference frame's saturation, with the absolute scale in the
+/// file's header (or applied to the pixels with `--absolute`).
+fn hdri(out: &std::path::Path, args: &[&str]) -> Result<()> {
+    use sidecar_merge::hdri::{self, Space};
+    use sidecar_merge::pano::{self, Canvas, Input};
+    let t0 = std::time::Instant::now();
+    let mut files = vec![];
+    let (mut period, mut space, mut half, mut absolute, mut scale, mut lensfun, mut png) =
+        (None, Space::Rec709, false, false, 1.0, None, None);
+    let mut it = args.iter();
+    while let Some(&a) = it.next() {
+        let mut value = || {
+            it.next()
+                .copied()
+                .ok_or_else(|| anyhow::anyhow!("{a} needs a value"))
+        };
+        match a {
+            "--brackets" => period = Some(value()?.parse::<usize>()?),
+            "--space" => {
+                let v = value()?;
+                space = Space::parse(v).ok_or_else(|| anyhow::anyhow!("no colour space {v}"))?
+            }
+            "--half" => half = true,
+            "--absolute" => absolute = true,
+            "--scale" => scale = value()?.parse()?,
+            "--lensfun" => lensfun = Some(std::path::PathBuf::from(value()?)),
+            "--png" => png = Some(std::path::PathBuf::from(value()?)),
+            f => files.push(f),
+        }
+    }
+    let raws: Vec<sidecar_raw::RawFile> = files
+        .iter()
+        .map(|f| sidecar_raw::RawFile::open(f.as_ref()))
+        .collect::<Result<_, _>>()?;
+    let light: Vec<f64> = raws
+        .iter()
+        .map(|r| {
+            let i = r.info();
+            i.shutter_s as f64 * i.iso as f64 / (i.aperture as f64).max(0.7).powi(2)
+        })
+        .collect();
+    let p = period.unwrap_or_else(|| hdri::bracket_period(&light));
+    anyhow::ensure!(
+        p >= 1 && files.len() % p == 0,
+        "{} files don't divide into brackets of {p}",
+        files.len()
+    );
+    let groups: Vec<&[&str]> = files.chunks(p).collect();
+    println!(
+        "{} directions, {} frame{} each",
+        groups.len(),
+        p,
+        if p == 1 { "" } else { "s" }
+    );
+    let mut info = raws[0].info().clone();
+    sidecar_raw::read_extras(files[0].as_ref(), &mut info);
+    let (optics, lens_label) = pano_optics(&info, lensfun.as_deref());
+    println!(
+        "{} {} · {} · lens: {lens_label}",
+        info.make, info.model, info.lens
+    );
+    let gpu = sidecar_engine::Gpu::new_headless()?;
+    let ingest = sidecar_engine::Ingest::new(&gpu)?;
+    let detail = sidecar_engine::detail::Detail::new(&gpu)?;
+    // Merge every direction; each merged frame is kept (one per direction) for the stitch.
+    let mut merged = vec![];
+    let mut inputs = vec![];
+    for g in &groups {
+        let m = merge_bracket(&gpu, &ingest, &detail, g)?;
+        let r = sidecar_raw::RawFile::open(g[m.reference].as_ref())?;
+        let ri = r.info();
+        inputs.push(Input {
+            w: m.w,
+            h: m.h,
+            proxy: grey_proxy(m.w, m.h, &m.rgb, 1600),
+            up: sensor_up(ri.orientation_flip),
+            light: ri.shutter_s as f64 * ri.iso as f64 / (ri.aperture as f64).max(0.7).powi(2),
+            // Above what the darkest frame measured, a merge is a guess; otherwise all of it is light.
+            ceiling: if m.fell > 0 {
+                (m.darkest * 0.6) as f32
+            } else {
+                f32::MAX
+            },
+        });
+        println!(
+            "  {}: merged around {} ({:.0} s)",
+            g.join(" "),
+            g[m.reference],
+            t0.elapsed().as_secs_f64()
+        );
+        merged.push((m.reference, m.rgb));
+    }
+    let sol = pano::solve(&inputs, &optics, None).map_err(anyhow::Error::msg)?;
+    println!(
+        "stitch solved: reference direction {} · focal {:.4} half-diagonals · rms {:.3} px of the proxy",
+        sol.reference + 1,
+        sol.lens.focal,
+        sol.rms
+    );
+    for (k, r) in sol.rotations.iter().enumerate() {
+        match r {
+            Some(_) => println!("  direction {}: gain {:+.2} EV", k + 1, sol.gains[k].log2()),
+            None => println!("  direction {}: joins nothing; left out", k + 1),
+        }
+    }
+    let sizes: Vec<(usize, usize)> = inputs.iter().map(|i| (i.w, i.h)).collect();
+    let lay =
+        pano::layout(&sol, &sizes, None, scale, 600_000_000, true).map_err(anyhow::Error::msg)?;
+    println!("equirectangular, {} × {}", lay.w, lay.h);
+    let mut canvas = Canvas::new(&sol, &sizes, lay.clone());
+    for (k, (_, rgb)) in merged.iter().enumerate() {
+        canvas.add(k, rgb);
+    }
+    drop(merged);
+    let (mut img, seen) = canvas.finish();
+    let covered = seen.iter().filter(|&&s| s).count() as f64 / seen.len() as f64;
+    // Camera RGB → white-balanced linear Rec.2020 (the as-shot white of the reference) → the asked space.
+    let reference = &groups[sol.reference];
+    let rr = sidecar_raw::RawFile::open(reference[reference.len() / 2].as_ref())?;
+    let ri = rr.info();
+    let wb = sidecar_color::camera::resolve(&ri.color, ri.color.as_shot_xy());
+    use sidecar_color::mat;
+    let to_space = match space {
+        Space::Rec2020 => mat::diag([1.0, 1.0, 1.0]),
+        Space::Rec709 => mat::REC2020_TO_SRGB,
+        Space::AcesCg => {
+            let c = space.chromaticities();
+            let ap1 = mat::rgb_to_xyz([c[0], c[1], c[2]], c[3]);
+            mat::mul(
+                &mat::inverse(&ap1),
+                &mat::mul(
+                    &mat::bradford(mat::D65, c[3]),
+                    &mat::inverse(&mat::XYZ_TO_REC2020),
+                ),
+            )
+        }
+    };
+    let m = mat::mul(&to_space, &mat::mul(&wb.cam_to_rec2020, &mat::diag(wb.mul)));
+    let lum = hdri::white_luminance(ri.aperture as f64, ri.shutter_s as f64, ri.iso as f64)
+        * sol.gains[sol.reference];
+    let k = if absolute { lum as f32 } else { 1.0 };
+    let mf = m.map(|r| r.map(|v| v as f32));
+    img.chunks_mut(3).for_each(|p| {
+        let c = [p[0], p[1], p[2]];
+        for (o, row) in p.iter_mut().zip(&mf) {
+            *o = k * (row[0] * c[0] + row[1] * c[1] + row[2] * c[2]);
+        }
+    });
+    let white = Some(if absolute { 1.0 } else { lum });
+    match out.extension().and_then(|e| e.to_str()) {
+        Some("hdr") => hdri::write_hdr(out, lay.w, lay.h, &img, space, white)?,
+        _ => hdri::write_exr(out, lay.w, lay.h, &img, space, white, half)?,
+    }
+    let peak = img.iter().cloned().fold(0f32, f32::max) / k;
+    println!(
+        "{:?}, {:.0} % of the sphere covered, peak {:+.1} EV over the reference's white, 1.0 = {:.0} cd/m² (ISO 12232, ±⅓ stop) → {} ({:.0} MB) in {:.0} s",
+        space,
+        covered * 100.0,
+        (peak as f64).log2(),
+        lum,
+        out.display(),
+        std::fs::metadata(out)?.len() as f64 / 1e6,
+        t0.elapsed().as_secs_f64()
+    );
+    if let Some(png) = png {
+        // A look at it, not a rendering: Rec.709, middle grey at the covered median, a soft shoulder.
+        let to709 = if space == Space::Rec709 {
+            mat::diag([1.0, 1.0, 1.0])
+        } else {
+            mat::mul(&mat::REC2020_TO_SRGB, &mat::inverse(&to_space))
+        };
+        let f = lay.w.div_ceil(2048);
+        let (ow, oh) = (lay.w / f, lay.h / f);
+        let mut lums: Vec<f32> = img
+            .chunks(3)
+            .zip(&seen)
+            .filter(|(_, s)| **s)
+            .map(|(p, _)| 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2])
+            .collect();
+        lums.sort_by(f32::total_cmp);
+        let mid = lums.get(lums.len() / 2).copied().unwrap_or(1.0).max(1e-9);
+        let mut data = vec![0f32; ow * oh * 4];
+        for (k, d) in data.chunks_mut(4).enumerate() {
+            let (x, y) = (k % ow * f, k / ow * f);
+            let i = (y * lay.w + x) * 3;
+            let c = mat::apply(
+                &to709,
+                &[img[i] as f64, img[i + 1] as f64, img[i + 2] as f64],
+            );
+            for ch in 0..3 {
+                let v = (c[ch] as f32 / mid * 0.18).max(0.0);
+                d[ch] = v / (1.0 + v) * 1.6;
+            }
+            d[3] = 1.0;
+        }
+        write_png(
+            &sidecar_engine::RgbaF32 {
+                width: ow as u32,
+                height: oh as u32,
+                data,
+            },
+            &png,
+        )?;
     }
     Ok(())
 }

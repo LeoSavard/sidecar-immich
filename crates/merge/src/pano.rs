@@ -241,6 +241,9 @@ pub struct Input {
     pub up: [f64; 2],
     /// What the frame let in by its EXIF (shutter × ISO ÷ f²): the exposure solve's prior.
     pub light: f64,
+    /// The linear level above which the proxy is no longer trusted for the exposure solve: near the sensor's
+    /// saturation for a single raw (0.6), the merged range's top for an HDR merge.
+    pub ceiling: f32,
 }
 
 /// Matched sensor positions between two frames.
@@ -644,13 +647,14 @@ fn exposure(inputs: &[Input], sol: &mut Solution) {
     // Rows: (coefficients, right-hand side).
     let mut rows: Vec<(Vec<f64>, f64)> = vec![];
     let lens = &sol.lens;
-    let (hi, lo) = (0.6f32.log2(), (1.0f32 / 500.0).log2());
+    let lo = (1.0f32 / 500.0).log2();
     let smooth = |g: &Grey, p: [f64; 2]| {
         let d = |a: [f64; 2], b: [f64; 2]| (sample_grey(g, a) - sample_grey(g, b)).abs();
         d([p[0] + 1.0, p[1]], [p[0] - 1.0, p[1]]) + d([p[0], p[1] + 1.0], [p[0], p[1] - 1.0]) < 0.15
     };
     for l in &sol.links {
         let (fi, fj) = (&inputs[l.i], &inputs[l.j]);
+        let hi = fi.ceiling.min(fj.ceiling).log2();
         let (si, sj) = (
             Sensor::new(fi.proxy.w, fi.proxy.h, optics),
             Sensor::new(fj.proxy.w, fj.proxy.h, optics),
@@ -970,13 +974,15 @@ fn round_up(v: usize, m: usize) -> usize {
 }
 
 /// Choose the projection (when not given), the plane's extent and the canvas's size. `scale` 1 keeps the
-/// reference frame's full resolution at the panorama's centre.
+/// reference frame's full resolution at the panorama's centre. `sphere` asks for the whole sphere whatever the
+/// frames cover — an HDRI's 2 : 1 equirectangular canvas, uncovered directions black.
 pub fn layout(
     sol: &Solution,
     sizes: &[(usize, usize)],
     projection: Option<Projection>,
     scale: f64,
     max_pixels: usize,
+    sphere: bool,
 ) -> Result<Layout, String> {
     let lens = &sol.lens;
     let frames: Vec<(usize, Sensor, M3)> = sol
@@ -1028,7 +1034,12 @@ pub fn layout(
     if poles[1] {
         lat1 = std::f64::consts::FRAC_PI_2;
     }
-    let full_turn = bins.iter().all(|&b| b) || poles.iter().any(|&p| p);
+    if sphere {
+        poles = [true, true];
+        lat0 = -std::f64::consts::FRAC_PI_2;
+        lat1 = std::f64::consts::FRAC_PI_2;
+    }
+    let full_turn = sphere || bins.iter().all(|&b| b) || poles.iter().any(|&p| p);
     // The longitude range: everything but the widest uncovered gap.
     let (lon0, lon1) = if full_turn {
         (-std::f64::consts::PI, std::f64::consts::PI)
@@ -1049,6 +1060,11 @@ pub fn layout(
         (lo, lo + (72 - best.1) as f64 * bin)
     };
     let span = lon1 - lon0;
+    let projection = if sphere {
+        Some(Projection::Spherical)
+    } else {
+        projection
+    };
     let projection = projection.unwrap_or(
         if span < 100f64.to_radians() && (lat1 - lat0) < 100f64.to_radians() && !full_turn {
             Projection::Rectilinear
@@ -1112,14 +1128,22 @@ pub fn layout(
     let step = 1usize << levels;
     let wrap = projection.wraps() && full_turn;
     let (w, origin_x) = if wrap {
-        let w = round_up((std::f64::consts::TAU * s).round() as usize, step);
+        // A sphere's canvas is exactly twice as wide as it is high, both multiples of the bands' step.
+        let w = round_up(
+            (std::f64::consts::TAU * s).round() as usize,
+            if sphere { 2 * step } else { step },
+        );
         s = w as f64 / std::f64::consts::TAU;
         (w, lon0)
     } else {
         let w = round_up(((x1 - x0) * s).ceil() as usize, step);
         (w, 0.5 * (x0 + x1) - 0.5 * w as f64 / s)
     };
-    let h = round_up(((y1 - y0) * s).ceil() as usize, step);
+    let h = if sphere {
+        w / 2
+    } else {
+        round_up(((y1 - y0) * s).ceil() as usize, step)
+    };
     let origin = [origin_x, 0.5 * (y0 + y1) - 0.5 * h as f64 / s];
     if w * h > max_pixels {
         return Err(format!(
@@ -1637,6 +1661,7 @@ mod tests {
                 proxy: Grey::log_luminance(w, h, f.iter().copied()),
                 up: [0.0, -1.0],
                 light: t.exposure[i],
+                ceiling: 0.6,
             })
             .collect();
         (inputs, frames)
@@ -1726,7 +1751,7 @@ mod tests {
         let (inputs, frames) = inputs(t, w, h);
         let sol = solve(&inputs, &t.lens.optics, None).expect("solved");
         let sizes = vec![(w, h); t.rot.len()];
-        let lay = layout(&sol, &sizes, Some(projection), 0.5, 50_000_000).unwrap();
+        let lay = layout(&sol, &sizes, Some(projection), 0.5, 50_000_000, false).unwrap();
         eprintln!("{lay:?}");
         let mut canvas = Canvas::new(&sol, &sizes, lay.clone());
         for (i, f) in frames.iter().enumerate() {
@@ -1793,5 +1818,12 @@ mod tests {
         assert!(median < 0.01 && p95 < 0.05, "median {median}, p95 {p95}");
         // Every column is covered somewhere: no gap at the join.
         assert!((0..lay.w).all(|x| (0..lay.h).any(|y| seen[y * lay.w + x])));
+        // As an HDRI: the whole sphere, 2 : 1, the ring in its middle band.
+        let (inputs, _) = inputs(&t, 480, 320);
+        let sol = solve(&inputs, &t.lens.optics, None).unwrap();
+        let sphere = layout(&sol, &[(480, 320); 8], None, 0.5, 50_000_000, true).unwrap();
+        assert_eq!(sphere.projection, Projection::Spherical);
+        assert!(sphere.wrap && sphere.w == 2 * sphere.h, "{sphere:?}");
+        assert!((sphere.origin[1] + std::f64::consts::FRAC_PI_2).abs() < 1e-9);
     }
 }
