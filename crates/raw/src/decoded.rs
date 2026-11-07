@@ -538,7 +538,14 @@ pub struct Exif {
 
 /// EXIF orientation (1…8) → LibRaw's flip bits, the numbering `RgbaF32::oriented` expects. The mirrored
 /// orientations (2, 4, 5, 7) used to fall through to "upright"; some front cameras and scanners write them.
-pub(crate) fn flip_from_orientation(orientation: i64) -> i32 {
+/// The TIFF orientation for a LibRaw `flip`: the inverse of `flip_from_orientation`.
+pub fn orientation_from_flip(flip: i32) -> u16 {
+    (1..=8u16)
+        .find(|&o| flip_from_orientation(o as i64) == flip)
+        .unwrap_or(1)
+}
+
+pub fn flip_from_orientation(orientation: i64) -> i32 {
     match orientation {
         2 => 1,
         3 => 3,

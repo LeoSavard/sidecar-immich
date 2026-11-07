@@ -46,6 +46,23 @@ Where the code differs from the text below, the code and these notes win.
   An edit saved before version 8 that denoised keeps the fixed transform (`migrate`); one that never did gets
   the model if it starts to; "take up today's rendering" switches it on.
 
+- **Writing a linear DNG** (`sidecar_raw::dng_write`; read back by `linear_dng`): what every merge will
+  produce, so its result is an original like any other (docs/research/multi-frame-and-denoise.md).
+  Camera-native linear RGB as 16-bit IEEE floats — `PhotometricInterpretation` LinearRaw, `SampleFormat` 3 —
+  in 256² tiles, Deflate with TIFF Technical Note 3's floating-point predictor, the directory first so readers
+  that look for it near the start find it. The source camera's `ColorMatrix1/2` with their illuminants and
+  `AsShotNeutral`, `BaselineExposure`, the measured noise in DNG's own `NoiseProfile`, and `WhiteLevel` 1 —
+  the specification's default for floats, stated because LibRaw otherwise assumes 65535 and scales every
+  sample to zero. `LinearResponseLimit` says where a sample stops being a measurement (1.0 for a single
+  frame; absent for a merge with nothing saturated, whose every value is light), and the reader flags clipping
+  there and nowhere else for a float file. Checked: written and read back to half-float precision at an odd
+  size with light up to 5× white; LibRaw — an independent decoder — opens it and reads the same picture
+  (bright/dark ratio 21.95 against 21.91 after its integer conversion; LibRaw only takes a file as tiled when
+  a tile fits inside the image both ways, so nothing smaller than 256 px an edge); ExifTool validates it.
+  `sidecar-dev to-dng <raw> <out.dng> [png]` writes one from a raw's full-resolution demosaic, and the DNG
+  develops identically to that demosaic (ΔE2000 mean 0.000, p99 0.000, max 1.1). `sidecar-dev compare-png`
+  is the measure. A 20.8 MP frame is 69 MB and takes 9–17 s to write.
+
 - **D1 and D5 are both closed, neither merged** (pull request #46, closed 2026-10-29). The owner's rule,
   2026-10-27: what is merged and deployed should be what has been tested. Both were written, and neither
   earned its way in.

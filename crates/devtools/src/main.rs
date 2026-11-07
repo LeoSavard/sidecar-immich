@@ -54,6 +54,12 @@ fn main() -> Result<()> {
         ["levels", input] => levels(input.as_ref()),
         ["denoise-truth", clean, noisy] => denoise_truth(clean.as_ref(), noisy.as_ref()),
         ["noise", files @ ..] if !files.is_empty() => noise(files),
+        ["to-dng", input, out, rest @ ..] => to_dng(
+            input.as_ref(),
+            out.as_ref(),
+            rest.first().map(|p| std::path::Path::new(*p)),
+        ),
+        ["compare-png", a, b] => compare_png(a.as_ref(), b.as_ref()),
         ["linear-dng", input, out, rest @ ..] => {
             let input: &std::path::Path = input.as_ref();
             let edge: u32 = rest.first().map_or(Ok(1600), |v| v.parse())?;
@@ -1030,6 +1036,176 @@ fn denoise_truth(clean: &std::path::Path, noisy: &std::path::Path) -> Result<()>
     println!(
         "best mean over bands: fixed {:.1} % at {:.0}, model {:.1} % at {:.0}",
         best[0].0, best[0].1, best[1].0, best[1].1
+    );
+    Ok(())
+}
+
+/// `to-dng <raw> <out.dng>`: the raw's full-resolution demosaic written as a linear float DNG
+/// (`sidecar_raw::dng_write`), with its colour model and orientation — what a merge writes, from one frame, so
+/// the writer can be checked end to end: `develop` the raw and `linear-dng` the result, and the two pictures
+/// should be the same.
+/// With a third argument, also writes there the demosaic developed exactly as `linear-dng` develops the file
+/// (averaged down by the same whole factor to a 1600 px long edge, default edit, sRGB): the two PNGs then
+/// differ only by what the file did to the pixels.
+fn to_dng(
+    input: &std::path::Path,
+    out: &std::path::Path,
+    png: Option<&std::path::Path>,
+) -> Result<()> {
+    let gpu = sidecar_engine::Gpu::new_headless()?;
+    let ingest = sidecar_engine::Ingest::new(&gpu)?;
+    let raw = sidecar_raw::RawFile::open(input)?;
+    let info = raw.info();
+    let m = raw.mosaic()?;
+    let mul = info.color.as_shot_mul;
+    let tex = ingest.demosaic(
+        &gpu,
+        &sidecar_engine::MosaicInput {
+            width: m.width,
+            height: m.height,
+            data: &m.data,
+            black: m.black,
+            white: m.white,
+            pattern: m.pattern,
+            period: m.period,
+        },
+        [mul[0] as f32, 1.0, mul[2] as f32],
+        true,
+    )?;
+    let img = sidecar_engine::read_rgba16(&gpu, &tex)?;
+    let rgb: Vec<f32> = img
+        .data
+        .chunks(4)
+        .flat_map(|p| [p[0], p[1], p[2]])
+        .collect();
+    let t0 = std::time::Instant::now();
+    sidecar_raw::dng_write::write(
+        out,
+        img.width,
+        img.height,
+        &rgb,
+        &sidecar_raw::dng_write::DngMeta {
+            make: &info.make,
+            model: &info.model,
+            software: "Sidecar (sidecar-dev to-dng)",
+            color: &info.color,
+            orientation: sidecar_raw::decoded::orientation_from_flip(m.flip),
+            noise: None,
+            linear_response_limit: Some(1.0),
+        },
+    )?;
+    if let Some(png) = png {
+        let (w, h) = (img.width as usize, img.height as usize);
+        let f = w.max(h).div_ceil(1600);
+        let (ow, oh) = (w.div_ceil(f), h.div_ceil(f));
+        let mut sum = vec![0f32; ow * oh * 4];
+        let mut n = vec![0f32; ow * oh];
+        for y in 0..h {
+            for x in 0..w {
+                let d = (y / f) * ow + x / f;
+                for k in 0..3 {
+                    sum[d * 4 + k] += img.data[(y * w + x) * 4 + k].max(0.0);
+                }
+                n[d] += 1.0;
+            }
+        }
+        for (p, k) in sum.chunks_mut(4).zip(&n) {
+            p.iter_mut().for_each(|v| *v /= k);
+        }
+        let small = sidecar_engine::RgbaF32 {
+            width: ow as u32,
+            height: oh as u32,
+            data: sum,
+        }
+        .oriented(sidecar_raw::decoded::flip_from_orientation(
+            sidecar_raw::decoded::orientation_from_flip(m.flip) as i64,
+        ));
+        let packed = sidecar_color::pack(
+            &Default::default(),
+            &info.color,
+            sidecar_raw::SourceKind::Raw,
+            sidecar_color::DisplaySpace::Srgb,
+        );
+        let pass = sidecar_engine::DevelopPass::new(&gpu)?;
+        write_png(&pass.run(&gpu, &small, &packed.uniform, &packed.lut)?, png)?;
+    }
+    println!(
+        "{} {} · {}×{} → {} ({:.1} MB, {:.1} s)",
+        info.make,
+        info.model,
+        img.width,
+        img.height,
+        out.display(),
+        std::fs::metadata(out)?.len() as f64 / 1e6,
+        t0.elapsed().as_secs_f64()
+    );
+    Ok(())
+}
+
+/// `compare-png <a.png> <b.png>`: two 8-bit sRGB renders of the same picture at different sizes, both
+/// box-averaged in linear light to the smaller one's size, compared by ΔE2000 (mean, p99, max) — the parity
+/// harness's measure, for pictures that took different routes.
+fn compare_png(a: &std::path::Path, b: &std::path::Path) -> Result<()> {
+    use palette::{IntoColor, Lab, LinSrgb, color_difference::Ciede2000};
+    let read = |p: &std::path::Path| -> Result<(u32, u32, Vec<f32>)> {
+        let dec = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(p)?));
+        let mut r = dec.read_info()?;
+        let mut buf = vec![0; r.output_buffer_size().unwrap_or(0)];
+        let info = r.next_frame(&mut buf)?;
+        let ch = info.color_type.samples();
+        let lin = |v: u8| {
+            let v = v as f32 / 255.0;
+            if v <= 0.04045 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        let px = buf[..info.buffer_size()]
+            .chunks(ch)
+            .flat_map(|p| [lin(p[0]), lin(p[1]), lin(p[2])])
+            .collect();
+        Ok((info.width, info.height, px))
+    };
+    let ((aw, ah, ap), (bw, bh, bp)) = (read(a)?, read(b)?);
+    let (w, h) = (aw.min(bw), ah.min(bh));
+    let shrink = |sw: u32, sh: u32, p: &[f32]| -> Vec<[f32; 3]> {
+        let mut sum = vec![[0f32; 4]; (w * h) as usize];
+        for y in 0..sh {
+            for x in 0..sw {
+                let (tx, ty) = ((x * w / sw).min(w - 1), (y * h / sh).min(h - 1));
+                let d = &mut sum[(ty * w + tx) as usize];
+                let i = ((y * sw + x) * 3) as usize;
+                d[0] += p[i];
+                d[1] += p[i + 1];
+                d[2] += p[i + 2];
+                d[3] += 1.0;
+            }
+        }
+        sum.iter()
+            .map(|s| [s[0] / s[3], s[1] / s[3], s[2] / s[3]])
+            .collect()
+    };
+    let (x, y) = (shrink(aw, ah, &ap), shrink(bw, bh, &bp));
+    let mut de: Vec<f32> = x
+        .iter()
+        .zip(&y)
+        .map(|(p, q)| {
+            let l1: Lab = LinSrgb::new(p[0], p[1], p[2]).into_color();
+            let l2: Lab = LinSrgb::new(q[0], q[1], q[2]).into_color();
+            l1.difference(l2)
+        })
+        .collect();
+    de.sort_by(f32::total_cmp);
+    let mean = de.iter().sum::<f32>() / de.len() as f32;
+    println!(
+        "{}×{} vs {}×{} at {w}×{h}: ΔE2000 mean {mean:.3}, p99 {:.3}, max {:.3}",
+        aw,
+        ah,
+        bw,
+        bh,
+        de[de.len() * 99 / 100],
+        de[de.len() - 1]
     );
     Ok(())
 }
