@@ -574,3 +574,64 @@ mod tests {
         );
     }
 }
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SelectRequest {
+    range: sidecar_color::color_range::ColorRange,
+    width: u32,
+    height: u32,
+    #[serde(default)]
+    mask_width: u32,
+    #[serde(default)]
+    mask_height: u32,
+}
+
+/// A colour-range layer's mask (`color_range::select`), one byte a pixel at `width` × `height`: the request as
+/// JSON, the develop uniform the edit packs to (`DevelopParams`), the proxy's camera RGB as little-endian f32 RGBA,
+/// and the `within` model mask's bytes (`mask_width` × `mask_height`), or none.
+///
+/// # Safety
+/// Each pointer must point to its length's readable bytes.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn sc_color_select(
+    req: *const u8,
+    req_len: usize,
+    uniform: *const u8,
+    uniform_len: usize,
+    pixels: *const u8,
+    pixels_len: usize,
+    mask: *const u8,
+    mask_len: usize,
+) -> *const u8 {
+    let req = unsafe { std::slice::from_raw_parts(req, req_len) };
+    let uniform = unsafe { std::slice::from_raw_parts(uniform, uniform_len) };
+    let pixels = unsafe { std::slice::from_raw_parts(pixels, pixels_len) };
+    let mask = (mask_len > 0).then(|| unsafe { std::slice::from_raw_parts(mask, mask_len) });
+    respond(
+        serde_json::from_slice::<SelectRequest>(req)
+            .map_err(|e| e.to_string())
+            .and_then(|r| {
+                if uniform.len() != std::mem::size_of::<sidecar_color::DevelopParams>() {
+                    return Err("the develop uniform is the wrong size".into());
+                }
+                if pixels.len() != (r.width * r.height * 16) as usize {
+                    return Err("the pixels are not width × height RGBA floats".into());
+                }
+                let develop: sidecar_color::DevelopParams = bytemuck::pod_read_unaligned(uniform);
+                let rgba: Vec<f32> = pixels
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|b| f32::from_le_bytes(*b))
+                    .collect();
+                let within = mask
+                    .filter(|m| m.len() == (r.mask_width * r.mask_height) as usize && !m.is_empty())
+                    .map(|m| (m, r.mask_width, r.mask_height));
+                Ok(sidecar_color::color_range::select(
+                    &r.range, &develop, &rgba, r.width, r.height, within,
+                ))
+            }),
+    )
+}

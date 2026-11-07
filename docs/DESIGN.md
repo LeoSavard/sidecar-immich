@@ -2368,6 +2368,13 @@ After V1: lens correction, then crop and straighten, then local masks (§15).
 - **Recent** lists a copy under its own name and key, with a thumbnail of its own edit. **Exports** of a copy render its edit and carry its name: `IMG_1234-mono-v3.jpg`.
 - Checked by `copies-smoke.mjs` and the xmp tests (`a_virtual_copy_saves_beside_the_photo`, `pruning_keeps_a_virtual_copys_head`).
 
+**Colour ranges.** A mask layer that selects by colour (`mask` = `color`, `MaskAdjustment.color`; Capture One's colour editor and Skin Tone tool are the reference): a hue sector — centre and width — with a saturation band and a soft edge, optionally only within a model mask (On skin, which is the skin preset: a range of skin hues times the skin mask, so wood and sand of the same hue are left alone). Every layer adjustment then works through it — exposure, contrast, white balance, the mixer, a curve, strokes and edges.
+
+- **Colour as the edit sees it.** Camera RGB through the edit's own white balance and camera matrix, then OKLab (`sidecar_color::color_range`): hue is perceptual, and saturation is OKLab chroma over lightness, which a change of exposure leaves alone — a face selected stays selected when it is brightened. Pixels below about 0.8 % linear (hue there is noise) and clipped pixels (no colour left) are not selected. The selection follows the white balance: change it and the range is judged again.
+- **One function, both sides.** The worker (`Worker::color_selection`, beside the model masks it would otherwise load) and the browser (`$lib/color-range`, through wasm's `sc_color_select`) run the same Rust on the same input — the proxy at 1,024 px and the model mask — so the selection is the same where the picture is developed. It is a mask, so it then goes through the same composite, lens correction and edge as any other layer.
+- **Still to come:** *uniformity* — pulling hue, chroma and lightness inside the range toward its centre, which evens out blotches and redness — is a develop-stage operation with its own uniform, and an eyedropper that centres the range on a tapped patch.
+- Checked by `color_range` tests (OKLab hues of the primaries, skin selected at two exposures and sky, grey, black and clipped not, a sector across 0°) and `web/scripts/color-range-smoke.mjs`: with the layer's exposure raised, 91 % of what brightens was a warm hue under the default range and 99–100 % was blue once moved to 240°, in the canvas and the worker's preview alike.
+
 **Masks.**
 
 - Weights: gradients (still to come) are analytic in the shader. Brush strokes — normalized points, radius, feather, flow — are rasterized by shared WGSL render passes into `r8unorm` masks, at proxy size on the phone and up to 4,096 px on the server (see the build log).

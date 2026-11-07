@@ -339,6 +339,17 @@ impl Worker {
     ) -> Vec<Option<sidecar_engine::RgbaF32>> {
         let mut out = Vec::new();
         for m in edit.masks.iter().take(sidecar_color::params::MAX_MASKS) {
+            if m.mask == sidecar_color::color_range::COLOR && m.renders() {
+                out.push(
+                    self.color_selection(key, edit, m)
+                        .await
+                        .unwrap_or_else(|e| {
+                            tracing::warn!("colour range for {key}: {e:#}");
+                            None
+                        }),
+                );
+                continue;
+            }
             let png = if m.renders() {
                 self.mask(key, &m.mask).await.unwrap_or_else(|e| {
                     tracing::warn!("mask {} for {key}: {e:#}", m.mask);
@@ -350,6 +361,58 @@ impl Worker {
             out.push(png.and_then(|p| decode_grey(&p).ok()));
         }
         out
+    }
+}
+
+impl Worker {
+    /// A colour-range layer's mask (`sidecar_color::color_range::select`): the proxy at the selection's size,
+    /// judged through the edit's own white balance and camera matrix, within its model mask when it names one.
+    async fn color_selection(
+        self: &Arc<Self>,
+        key: &str,
+        edit: &sidecar_color::EditParams,
+        layer: &sidecar_color::params::MaskAdjustment,
+    ) -> Result<Option<sidecar_engine::RgbaF32>> {
+        use sidecar_color::color_range::{SIZE, select};
+        let range = layer.color.clone().unwrap_or_default();
+        let (width, height, bytes) = self.proxy(key, SIZE).await?;
+        let proxy = sidecar_engine::RgbaF32::from_f16_bytes(width, height, &bytes);
+        let meta = self.cached_meta(key).await?;
+        let packed =
+            crate::export::Rendering::of(&meta.info).pack(edit, sidecar_color::DisplaySpace::Srgb);
+        let develop: sidecar_color::DevelopParams = bytemuck::pod_read_unaligned(&packed.uniform);
+        let within = match range.within.as_deref() {
+            Some(name) => match self.mask(key, name).await? {
+                Some(png) => Some(decode_grey(&png)?),
+                // Its model mask isn't there (the plain image): nothing is selected, rather than everywhere.
+                None => return Ok(None),
+            },
+            None => None,
+        };
+        let within_bytes = within.as_ref().map(|m| {
+            m.data
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|p| (p[0] * 255.0).round() as u8)
+                .collect::<Vec<u8>>()
+        });
+        let sel = select(
+            &range,
+            &develop,
+            &proxy.data,
+            width,
+            height,
+            within
+                .as_ref()
+                .zip(within_bytes.as_deref())
+                .map(|(m, b)| (b, m.width, m.height)),
+        );
+        Ok(Some(sidecar_engine::RgbaF32 {
+            width,
+            height,
+            data: sel.iter().flat_map(|&v| [v as f32 / 255.0; 4]).collect(),
+        }))
     }
 }
 

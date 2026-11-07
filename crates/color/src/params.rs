@@ -1055,6 +1055,10 @@ pub struct MaskAdjustment {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub range: Option<MaskRange>,
+    /// For a colour-range layer (`mask` = `color`): the colours it selects. None otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub color: Option<crate::color_range::ColorRange>,
     /// The layer's edge feathered and moved, after the range and the strokes. None is the mask as painted.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
@@ -1100,6 +1104,7 @@ impl Default for MaskAdjustment {
             curve: Vec::new(),
             mixer: Mixer::default(),
             range: None,
+            color: None,
             edge: None,
             gradient: None,
             strokes: Vec::new(),
@@ -1472,8 +1477,14 @@ impl MaskAdjustment {
     /// Whether this version knows how to render it: a mask it knows by name, and nothing a newer version
     /// added to say it is something else.
     pub fn renders(&self) -> bool {
+        let color = self.mask == crate::color_range::COLOR
+            && self
+                .color
+                .as_ref()
+                .is_none_or(|c| c.within.as_deref().is_none_or(|w| MASK_NAMES.contains(&w)));
         (self.uses_model()
             || self.mask == BRUSH
+            || color
             || (self.mask == GRADIENT && self.gradient.is_some()))
             && self.other.is_empty()
     }

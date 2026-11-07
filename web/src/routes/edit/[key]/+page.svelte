@@ -4,7 +4,8 @@
 	import { tick, untrack } from 'svelte';
 	import { DevelopPass, requestDevice } from '$lib/gpu/develop';
 	import { CLIP_HIGHS, CLIP_LOWS, MASK_INVERTED, PEAKING, SHOW_MASK, ViewPass, type ViewGeometry, type Viewport } from '$lib/gpu/view';
-	import { BRUSH, DEPTH, GRADIENT, MaskLibrary, brushStroke, rangeUniform, type BrushSettings, type MaskSet } from '$lib/masks';
+	import { ColorSelections } from '$lib/color-range';
+	import { BRUSH, COLOR, DEPTH, GRADIENT, MaskLibrary, brushStroke, rangeUniform, type BrushSettings, type MaskSet } from '$lib/masks';
 	import { DepthPass } from '$lib/gpu/depth';
 	import { MaskPainter, simplify } from '$lib/gpu/brush';
 	import { HistogramPass, type HistogramData } from '$lib/gpu/histogram';
@@ -281,6 +282,10 @@
 	let lensMadeFrom = '';
 	/** The masks the models made for this photo, fetched when a mask is first needed (`$lib/masks`). */
 	let maskLibrary: MaskLibrary | undefined;
+	/** Colour-range layers' selections, and the develop uniform and white balance of what is being shown. */
+	let colorSelections: ColorSelections | undefined;
+	let shownUniform: Uint8Array | undefined;
+	let shownBalance = '';
 	let maskSet = $state<MaskSet | null>(null);
 	/** The layer being edited, and whether its mask is shown over the photo. */
 	let maskSelected = $state<number | null>(null);
@@ -397,6 +402,8 @@
 		if (stock) loadProfile(stock, () => schedule(true));
 		slideProfile = stock ? cachedProfile(stock) : undefined;
 		const packed = packer.pack(source, cameraColor(), meta!.info.sourceKind ?? 'raw', display, slideProfile);
+		shownUniform = packed.uniform;
+		shownBalance = JSON.stringify(source.whiteBalance);
 		if (!before) {
 			lut = packed.lut;
 			maskCurves = packed.maskCurves;
@@ -923,7 +930,7 @@
 	 * while something it needs is loading; that redraws when it arrives.
 	 */
 	function layerTexture(i: number, m: MaskAdjustment): GPUTexture | undefined {
-		if (!m.strokes?.length && !m.range && !m.edge && stroke?.layer !== i && m.mask !== GRADIENT) return m.mask === BRUSH ? undefined : maskTexture(m.mask);
+		if (!m.strokes?.length && !m.range && !m.edge && stroke?.layer !== i && m.mask !== GRADIENT) return m.mask === BRUSH ? undefined : m.mask === COLOR ? colorTexture(i, m) : maskTexture(m.mask);
 		const entry = layerEntry(i, m);
 		if (!entry) return undefined;
 		const size: [number, number] = [entry.painted.width, entry.painted.height];
@@ -938,6 +945,12 @@
 		return entry.corrected;
 	}
 
+	/** A colour-range layer's selection (`$lib/color-range`), under the white balance of what is shown. */
+	function colorTexture(i: number, m: MaskAdjustment): GPUTexture | undefined {
+		if (!colorSelections || !shownUniform || !m.color) return undefined;
+		return colorSelections.texture(i, $state.snapshot(m.color), shownUniform, shownBalance, () => schedule(true));
+	}
+
 	/** Layer `i` painted from its model mask and strokes, up to date unless a stroke is being drawn on it. */
 	function layerEntry(i: number, m: MaskAdjustment) {
 		const proxy = develop?.proxy;
@@ -945,6 +958,9 @@
 		let base: GPUTexture | undefined;
 		if (m.mask === GRADIENT) {
 			if (!m.gradient) return undefined;
+		} else if (m.mask === COLOR) {
+			base = colorTexture(i, m);
+			if (!base) return undefined;
 		} else if (m.mask !== BRUSH) {
 			base = maskLibrary?.ready(m.mask);
 			if (!base) {
@@ -960,7 +976,7 @@
 			entry = { key: '', version: 0, painted: painter.mask([proxy.width, proxy.height], `layer ${i}`), correctedFrom: '' };
 			layerTextures.set(i, entry);
 		}
-		const key = JSON.stringify([m.mask, m.range ?? null, m.edge ?? null, m.strokes ?? [], m.gradient ?? null]);
+		const key = JSON.stringify([m.mask, m.range ?? null, m.edge ?? null, m.strokes ?? [], m.gradient ?? null, m.mask === COLOR ? [m.color ?? null, shownBalance] : null]);
 		if (m.mask === GRADIENT && m.gradient) {
 			// The shape is the base, drawn at the proxy's size whenever it moves.
 			entry.shape ??= painter.mask([proxy.width, proxy.height], `layer ${i} shape`);
@@ -1027,6 +1043,8 @@
 		}
 		// Depth on its own is a gradient from far to near; a layer on it starts as the nearer half.
 		if (name === DEPTH) m.range = { from: 50, to: 100, feather: 15 };
+		// A colour range starts on skin tones, anywhere in the photo (`ColorRange::default`).
+		if (name === COLOR) m.color = { hue: 55, width: 40, saturation: [8, 60], feather: 10 };
 		edit.masks = [...(edit.masks ?? []), m];
 		maskSelected = edit.masks.length - 1;
 		maskShown = true;
@@ -1693,6 +1711,7 @@
 		]);
 		depthPass = await DepthPass.create(device);
 		maskLibrary = new MaskLibrary(device, key);
+		colorSelections = new ColorSelections(device, key, packer);
 		// For tests and for looking, as `?inspect` already leaves the proxy on the window: a real device loss
 		// followed by the real recovery. Destroying it invalidates every pipeline and texture built above, so
 		// what runs afterwards is the rebuild and nothing else.

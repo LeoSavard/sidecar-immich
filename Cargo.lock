@@ -6651,6 +6651,7 @@ dependencies = [
  "anyhow",
  "axum",
  "base64 0.22.1",
+ "bytemuck",
  "futures-util",
  "half",
  "jpeg-encoder",

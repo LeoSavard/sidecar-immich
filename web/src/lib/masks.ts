@@ -27,8 +27,12 @@ export const MASK_LABELS: Record<string, string> = {
 	depth: 'Depth',
 	sky: 'Sky',
 	brush: 'Brush',
-	gradient: 'Gradient'
+	gradient: 'Gradient',
+	color: 'Colour range'
 };
+
+/** A colour-range layer: selected by colour, not by a model (`sidecar_color::color_range`). */
+export const COLOR = 'color';
 
 /** The depth mask: near is white. A layer on it selects a band of distance with its `range`. */
 export const DEPTH = 'depth';
