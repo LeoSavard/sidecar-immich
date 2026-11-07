@@ -46,6 +46,15 @@ temperature: number, tint: number,
  */
 whites?: number, blacks?: number, 
 /**
+ * −100…100: sharpening added to the global Detail amount where the mask is (DESIGN.md §15, "Detail per
+ * layer"). Like the global one it is the server's — the loupe and export — not the editor's preview.
+ */
+sharpness?: number, 
+/**
+ * −100…100: luminance noise reduction added to the global amount where the mask is, as `sharpness`.
+ */
+noise?: number, 
+/**
  * A curve over display-encoded values, applied after the global curve where the mask is. Highlights and
  * Shadows move its 75 % and 25 % points, as the global sliders move the global curve's. Empty is none.
  */

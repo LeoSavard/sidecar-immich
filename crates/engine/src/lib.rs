@@ -373,6 +373,7 @@ mod uniforms {
             &[
                 R::of::<crate::ingest::IngestParams>(),
                 R::of::<crate::detail::DetailParams>(),
+                R::of::<crate::detail::DetailLayers>(),
                 R::of::<crate::brush::BrushParams>(),
                 R::of::<crate::brush::CompositeParams>(),
                 R::of::<crate::guided::GuidedParams>(),

@@ -201,7 +201,9 @@ const MASK_CONTROLS: { label: string; get: (m: MaskAdjustment) => number; show: 
 	{ label: 'blacks', get: (m) => m.blacks ?? 0, show: (v) => signed(v) },
 	{ label: 'saturation', get: (m) => m.saturation, show: (v) => signed(v) },
 	{ label: 'temperature', get: (m) => m.temperature, show: (v) => signed(v) },
-	{ label: 'tint', get: (m) => m.tint, show: (v) => signed(v) }
+	{ label: 'tint', get: (m) => m.tint, show: (v) => signed(v) },
+	{ label: 'sharpness', get: (m) => m.sharpness ?? 0, show: (v) => signed(v) },
+	{ label: 'noise reduction', get: (m) => m.noise ?? 0, show: (v) => signed(v) }
 ];
 
 const layerCurve = (m: MaskAdjustment) => JSON.stringify((m.curve ?? []).filter((p) => !isAnchor(p[0])));
