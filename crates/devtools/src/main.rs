@@ -66,6 +66,7 @@ fn main() -> Result<()> {
             rest.first().map(|p| std::path::Path::new(*p)),
         ),
         ["compare-png", a, b] => compare_png(a.as_ref(), b.as_ref()),
+        ["align", files @ ..] if files.len() >= 2 => align(files),
         ["linear-dng", input, out, rest @ ..] => {
             let input: &std::path::Path = input.as_ref();
             let edge: u32 = rest.first().map_or(Ok(1600), |v| v.parse())?;
@@ -1321,6 +1322,77 @@ fn compare_png(a: &std::path::Path, b: &std::path::Path) -> Result<()> {
         de[de.len() * 99 / 100],
         de[de.len() - 1]
     );
+    Ok(())
+}
+
+/// `align <raw> <raw>…`: each consecutive pair aligned (`sidecar_merge::align`) on 1600 px proxies of log
+/// luminance — so brackets align as well as panning frames — with the inliers, their error, how much of the
+/// first frame lands in the second, and the shift, turn and scale the homography amounts to.
+fn align(files: &[&str]) -> Result<()> {
+    let gpu = sidecar_engine::Gpu::new_headless()?;
+    let ingest = sidecar_engine::Ingest::new(&gpu)?;
+    let grey = |f: &str| -> Result<sidecar_merge::align::Grey> {
+        let raw = sidecar_raw::RawFile::open(f.as_ref())?;
+        let info = raw.info();
+        let m = raw.mosaic()?;
+        let mul = info.color.as_shot_mul;
+        let p = ingest
+            .proxy(
+                &gpu,
+                &sidecar_engine::MosaicInput {
+                    width: m.width,
+                    height: m.height,
+                    data: &m.data,
+                    black: m.black,
+                    white: m.white,
+                    pattern: m.pattern,
+                    period: m.period,
+                },
+                [mul[0] as f32, 1.0, mul[2] as f32],
+                1600,
+            )?
+            .oriented(m.flip);
+        Ok(sidecar_merge::align::Grey::log_luminance(
+            p.width as usize,
+            p.height as usize,
+            p.data.chunks(4).map(|c| (c[0] + c[1] + c[2]) / 3.0),
+        ))
+    };
+    let mut prev = grey(files[0])?;
+    for pair in files.windows(2) {
+        let next = grey(pair[1])?;
+        let t0 = std::time::Instant::now();
+        let name = |f: &str| {
+            std::path::Path::new(f)
+                .file_name()
+                .map_or(f.to_string(), |n| n.to_string_lossy().into_owned())
+        };
+        match sidecar_merge::align::align(&prev, &next) {
+            Some(a) => {
+                let h = a.h;
+                let o = sidecar_merge::align::overlap(&h, prev.w, prev.h, next.w, next.h);
+                let c = sidecar_merge::align::apply(&h, [prev.w as f64 / 2.0, prev.h as f64 / 2.0]);
+                let rot = h[1][0].atan2(h[0][0]).to_degrees();
+                let scale = (h[0][0] * h[1][1] - h[0][1] * h[1][0]).sqrt();
+                println!(
+                    "{} → {}: {} of {} matches agree (rms {:.2} px) · overlap {:.0} % · centre moves ({:+.0}, {:+.0}) px · turn {:+.2}° · scale {:.3} · {:.1} s",
+                    name(pair[0]),
+                    name(pair[1]),
+                    a.inliers,
+                    a.matches,
+                    a.rms,
+                    100.0 * o,
+                    c[0] - prev.w as f64 / 2.0,
+                    c[1] - prev.h as f64 / 2.0,
+                    rot,
+                    scale,
+                    t0.elapsed().as_secs_f64()
+                );
+            }
+            None => println!("{} → {}: no alignment", name(pair[0]), name(pair[1])),
+        }
+        prev = next;
+    }
     Ok(())
 }
 

@@ -1,0 +1,10 @@
+[package]
+name = "sidecar-merge"
+description = "Multi-frame work: aligning frames, and (to come) HDR merge, panoramas and focus stacks"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+publish = false
+
+[dependencies]
+rayon.workspace = true

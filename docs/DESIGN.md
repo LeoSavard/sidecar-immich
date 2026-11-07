@@ -101,6 +101,17 @@ Where the code differs from the text below, the code and these notes win.
   through the server, read back by ExifTool, states R (0.6735, 0.2790, −0.0019), G (0.1657, 0.6753, 0.0300),
   B (0.1251, 0.0456, 0.7968) — the published D50 Rec.2020 colorants. Names end `-rec2020`.
 
+- **Aligning frames** (`sidecar_merge::align`, a new crate for the multi-frame work): FAST-9 corners scored and
+  spread over a grid, oriented by intensity centroid, described by steered BRIEF with BRIEF's Gaussian sampling
+  pattern from a fixed seed, matched by Hamming distance with the ratio test and a cross-check, and a
+  homography by RANSAC over normalised four-point DLTs refined on its inliers — all from the papers. It runs on
+  log luminance, so a bracket's exposure difference is an offset both FAST and BRIEF ignore: one aligner for
+  brackets and panoramas, and a homography is the exact model for a camera turning about its lens. Checked: a
+  known homography (pan, turn, perspective) recovered from a copy two stops darker to under 0.75 px at the
+  corners; unrelated frames don't align (the same frame turned half round does, as it should). On the library,
+  `sidecar-dev align` aligns a 9-frame ZV-1 bracket across 8 EV with 366–528 inliers and sub-pixel error — and
+  shows a 2 px handheld drift per frame — and finds a four-frame D3 panorama by its overlaps.
+
 - **D1 and D5 are both closed, neither merged** (pull request #46, closed 2026-10-29). The owner's rule,
   2026-10-27: what is merged and deployed should be what has been tested. Both were written, and neither
   earned its way in.
