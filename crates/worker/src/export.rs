@@ -498,9 +498,11 @@ pub fn srgb_encode(v: f32) -> f32 {
 }
 
 pub fn icc_for(space: DisplaySpace) -> &'static [u8] {
+    static REC2020: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
     match space {
         DisplaySpace::Srgb => SRGB_ICC,
         DisplaySpace::DisplayP3 => P3_ICC,
+        DisplaySpace::Rec2020 => REC2020.get_or_init(sidecar_color::icc::rec2020),
     }
 }
 

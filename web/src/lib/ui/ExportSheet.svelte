@@ -3,7 +3,7 @@ Export: saves the edit first, creates a job, and follows it over Server-Sent Eve
 server whether or not this page stays open; reopening the sheet later shows the result. -->
 <script lang="ts">
 	type Destination = 'immich' | 'device' | 'both';
-	type Settings = { format: 'jpeg' | 'tiff'; quality: number; longEdge: number | null; colorSpace: 'srgb' | 'display-p3'; destination: Destination };
+	type Settings = { format: 'jpeg' | 'tiff'; quality: number; longEdge: number | null; colorSpace: 'srgb' | 'display-p3' | 'rec2020'; destination: Destination };
 	type Props = { assetKey: string; colorSpace: Settings['colorSpace']; prepare: () => Promise<string | null>; onclose: () => void };
 	let { assetKey, colorSpace, prepare, onclose }: Props = $props();
 
@@ -195,11 +195,14 @@ server whether or not this page stays open; reopening the sheet later shows the 
 				</fieldset>
 				<fieldset class="grid gap-2">
 					<legend class="mb-1 text-xs text-fg-2">Colour</legend>
-					<div class="grid grid-cols-2 gap-2">
-						{#each [['srgb', 'sRGB'], ['display-p3', 'Display P3']] as [value, label] (value)}
+					<div class="grid grid-cols-3 gap-2">
+						{#each [['srgb', 'sRGB'], ['display-p3', 'Display P3'], ['rec2020', 'Rec.2020']] as [value, label] (value)}
 							<button type="button" aria-pressed={settings.colorSpace === value} class="h-10 rounded {settings.colorSpace === value ? 'bg-fg text-ground' : 'bg-raised'}" onclick={() => (settings.colorSpace = value as Settings['colorSpace'])}>{label}</button>
 						{/each}
 					</div>
+					{#if settings.colorSpace === 'rec2020'}
+						<p class="text-xs text-fg-2">The widest of the three, for further editing or print. No screen shows all of it, and it shows its full range only where the file is opened colour-managed; a 16-bit TIFF keeps the most.</p>
+					{/if}
 				</fieldset>
 				{#if immich}
 					<fieldset class="grid gap-2">

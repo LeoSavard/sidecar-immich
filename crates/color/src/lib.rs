@@ -8,6 +8,7 @@ pub mod depth;
 pub mod developer;
 mod film_data;
 pub mod geometry;
+pub mod icc;
 pub mod lens;
 pub mod mat;
 pub mod params;

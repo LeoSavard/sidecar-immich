@@ -91,6 +91,16 @@ Where the code differs from the text below, the code and these notes win.
   a `grading` parity case (ΔE 0.0000 against native), and in Chromium on the GPU — dragging the shadows wheel
   to upper left gives hue 153°, saturation 67, changes the picture and saves.
 
+- **Rec.2020 export** (§9): `DisplaySpace::Rec2020`, export only — no screen shows it and no WebGPU canvas
+  takes it, so the editor's viewing choice stays sRGB or P3. The working space already is linear Rec.2020, so
+  its matrix is the identity and the encoding is the sRGB curve every export uses. The file carries an ICC v4
+  profile *synthesised* from the primaries (`sidecar_color::icc::rgb_profile`, written from ICC.1:2022):
+  colorants adapted to D50 by Bradford, `chad`, D50 `wtpt`, and the sRGB function as a parametric type-3
+  curve. Checked: built from sRGB's primaries it matches the bundled Compact-ICC-Profiles `sRGB-v4.icc` tag by
+  tag (within 6e-4); Rec.2020's unadapted luminance row is BT.2020's 0.2627, 0.6780, 0.0593; and an export
+  through the server, read back by ExifTool, states R (0.6735, 0.2790, −0.0019), G (0.1657, 0.6753, 0.0300),
+  B (0.1251, 0.0456, 0.7968) — the published D50 Rec.2020 colorants. Names end `-rec2020`.
+
 - **D1 and D5 are both closed, neither merged** (pull request #46, closed 2026-10-29). The owner's rule,
   2026-10-27: what is merged and deployed should be what has been tested. Both were written, and neither
   earned its way in.

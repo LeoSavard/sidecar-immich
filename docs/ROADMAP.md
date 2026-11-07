@@ -313,7 +313,8 @@ histogram alongside the JPEG and drawing the overlays into it.
 
 **Wide gamut and HDR.** These are separate: Rec.2020 is a gamut, HDR is a transfer function plus headroom.
 
-- *Rec.2020 SDR export* is close — the 16-bit TIFF path exists and needs the matrix and an ICC profile. The
+- *Rec.2020 SDR export — done* (2026-11-06): `DisplaySpace::Rec2020`, offered in the export sheet only, with a
+  profile synthesised from the primaries (`sidecar_color::icc`). The original entry: *Rec.2020 SDR export* is close — the 16-bit TIFF path exists and needs the matrix and an ICC profile. The
   profile need not be shipped as a third-party binary: it can be synthesised from primaries plus transfer
   function with lcms2 (MIT) or moxcms (Apache-2.0 OR BSD-3, pure Rust).
 - *True HDR.* **The container question is settled; the display question moved to the desktop.** ISO 21496-1

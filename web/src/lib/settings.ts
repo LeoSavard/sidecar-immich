@@ -5,7 +5,7 @@ import type { Settings } from '$lib/types';
 
 export const DEFAULTS: Settings = { outputSpace: 'srgb', clipHighlights: false, clipShadows: false };
 
-export const SPACE_LABELS: Record<Settings['outputSpace'], string> = { srgb: 'sRGB', 'display-p3': 'Display P3' };
+export const SPACE_LABELS: Record<Settings['outputSpace'], string> = { srgb: 'sRGB', 'display-p3': 'Display P3', rec2020: 'Rec.2020' };
 
 let cached: Promise<Settings> | null = null;
 

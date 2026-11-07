@@ -1251,6 +1251,10 @@ pub enum DisplaySpace {
     #[default]
     Srgb,
     DisplayP3,
+    /// ITU-R BT.2020 primaries, for export only: no screen shows it and no canvas takes it. The working space
+    /// already is linear Rec.2020, so its matrix is the identity, and the file carries a profile synthesised
+    /// from the primaries (`crate::icc::rec2020`).
+    Rec2020,
 }
 
 /// The develop modules' uniform (512 bytes). Its WGSL declaration,
@@ -1519,6 +1523,7 @@ fn pack_inner(
         work_to_disp: to_mat3(match display {
             DisplaySpace::Srgb => &mat::REC2020_TO_SRGB,
             DisplaySpace::DisplayP3 => &mat::REC2020_TO_P3,
+            DisplaySpace::Rec2020 => &mat::IDENTITY,
         }),
         tone,
         // Highlight blending neutralises what white balance does to sensor-clipped pixels; a developed file
