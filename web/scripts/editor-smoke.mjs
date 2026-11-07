@@ -187,8 +187,9 @@ try {
 		await page.getByText('Loading history…').waitFor({ state: 'detached', timeout: 15000 }).catch(() => {});
 	});
 	await step('copy and paste look', async () => {
-		await click('Copy look');
-		await click('Paste look');
+		await click('Copy…');
+		await click('Copy these');
+		await click('Paste');
 	});
 	const saved = (await state()).edit;
 

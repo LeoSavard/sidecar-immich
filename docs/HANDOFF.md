@@ -72,6 +72,25 @@ shader changes, a browser check when the editor changes — and where the result
 fact, an A/B on two ports for the owner (the working conventions below). Pixels change only behind a new
 control or a `PROCESS_VERSION` bump with its migration.
 
+## The programme paused, 2026-11-06: one branch with every open pull request
+
+The owner asked to stop after #99 for a status update and a test image. **`integration-2026-11`** holds all 43
+open pull requests (#57–#99), each applied as one squashed three-way merge in PR order, then one commit of fixes
+where they meet. It is for testing; the pull requests stay the unit of review and merge. What the fixes decided:
+
+- **Pre-passes, in order:** retouch spots → lens → defringe → camera profile → develop, in the browser and the
+  worker alike (defringe judges a fringe as the camera recorded it, before the profile re-renders colour).
+- **The whole-frame maps** (adjacency, Texture and Clarity, Dehaze) read the picture *before* defringe and the
+  profile, as the worker's always did; the browser's density map had followed the profile pass.
+- **Rec.2020 meets the LUT and proof code:** a LUT applies to it as to the others; a soft proof in it (no screen
+  shows it) proofs with the LittleCMS profile built from its primaries.
+- **Smoke scripts:** `editor-smoke` clicks the presets PR's Copy…/Copy these/Paste; `measure-smoke` expects the
+  +0.30 EV it applies, not 0.5 stops.
+
+Checked on it: fmt, clippy, every workspace test, `npm run check`; all 35 parity cases (largest mean ΔE 0.0019);
+`editor-smoke` wide, narrow and fallback; and the feature smokes on the photos their pull requests used. The
+image `sidecar:programme-2026-11` is built from it.
+
 ## Where it stands, 2026-11-05
 
 **The order is V2's** (owner's call, 2026-11-05): the maintenance items first, then sign-in, then what V2
