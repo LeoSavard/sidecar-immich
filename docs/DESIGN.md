@@ -19,6 +19,15 @@ Where the code differs from the text below, the code and these notes win.
   for its defining behaviour: a noisy step keeps the guide's edge while each flat side is smoothed, at
   subsample 1 and 4, linear and log guide; a constant input is returned unchanged. No feature uses it yet.
 
+- **Gaussian and Laplacian pyramids on the GPU** (`sidecar_engine::pyramid`; `client/pyr_reduce.wgsl`,
+  `client/pyr_expand.wgsl`, composed by the browser too): Burt and Adelson's 5-tap binomial kernel, levels of
+  ceil(n/2), a clamped border, and an expansion that renormalises its weights per parity so a flat level
+  expands to itself. One expand pass serves three uses (`mode`): the expansion, a Laplacian level (fine −
+  expansion), and collapse (band + expansion) — the same arithmetic both ways, so collapsing a pyramid
+  returns the image to half-float rounding (1.7e-3 over six levels at 203×117, an odd size, in the test).
+  The shared primitive under local Laplacian filtering, multi-band blending, exposure fusion and focus
+  stacking; no feature uses it yet.
+
 - **D1 and D5 are both closed, neither merged** (pull request #46, closed 2026-10-29). The owner's rule,
   2026-10-27: what is merged and deployed should be what has been tested. Both were written, and neither
   earned its way in.

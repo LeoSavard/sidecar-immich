@@ -13,6 +13,7 @@ pub mod focus;
 pub mod guided;
 pub mod ingest;
 pub mod lens;
+pub mod pyramid;
 pub mod warp;
 pub use develop::{DevelopPass, Masks, needs_density_map};
 pub use focus::focus_energy;
@@ -356,6 +357,7 @@ mod uniforms {
                 R::of::<crate::brush::BrushParams>(),
                 R::of::<crate::brush::CompositeParams>(),
                 R::of::<crate::guided::GuidedParams>(),
+                R::of::<crate::pyramid::PyramidParams>(),
             ],
         );
     }
