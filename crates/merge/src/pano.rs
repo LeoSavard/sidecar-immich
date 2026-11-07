@@ -32,6 +32,7 @@
 //! from the optical centre in half-diagonals, so one lens serves the proxies and the full frames alike.
 
 use crate::align::{self, Grey, H};
+use crate::blend::{self, Bands, Plane};
 use crate::linalg::{self, M3, V3};
 use rayon::prelude::*;
 
@@ -819,110 +820,6 @@ pub fn solve(inputs: &[Input], optics: &Optics, focal: Option<f64>) -> Result<So
     Ok(sol)
 }
 
-/// An interleaved multi-channel image.
-#[derive(Clone, Debug)]
-struct Plane {
-    w: usize,
-    h: usize,
-    c: usize,
-    data: Vec<f32>,
-}
-
-impl Plane {
-    fn new(w: usize, h: usize, c: usize) -> Self {
-        Self {
-            w,
-            h,
-            c,
-            data: vec![0.0; w * h * c],
-        }
-    }
-}
-
-/// Burt and Adelson's generating kernel, a = 0.375.
-const K5: [f32; 5] = [0.0625, 0.25, 0.375, 0.25, 0.0625];
-
-fn index(i: isize, n: usize, wrap: bool) -> usize {
-    if wrap {
-        i.rem_euclid(n as isize) as usize
-    } else {
-        i.clamp(0, n as isize - 1) as usize
-    }
-}
-
-/// Blur and halve (both sizes even). `wrap` joins the left and right edges, for a full turn.
-fn reduce(p: &Plane, wrap: bool) -> Plane {
-    let (w2, h2, c) = (p.w / 2, p.h / 2, p.c);
-    let mut t = vec![0f32; w2 * p.h * c];
-    t.par_chunks_mut(w2 * c).enumerate().for_each(|(y, row)| {
-        let src = &p.data[y * p.w * c..(y + 1) * p.w * c];
-        for x in 0..w2 {
-            for (k, wt) in K5.iter().enumerate() {
-                let sx = index(2 * x as isize + k as isize - 2, p.w, wrap);
-                for ch in 0..c {
-                    row[x * c + ch] += wt * src[sx * c + ch];
-                }
-            }
-        }
-    });
-    let mut out = Plane::new(w2, h2, c);
-    out.data
-        .par_chunks_mut(w2 * c)
-        .enumerate()
-        .for_each(|(y, row)| {
-            for (k, wt) in K5.iter().enumerate() {
-                let sy = index(2 * y as isize + k as isize - 2, p.h, false);
-                for (o, s) in row.iter_mut().zip(&t[sy * w2 * c..(sy + 1) * w2 * c]) {
-                    *o += wt * s;
-                }
-            }
-        });
-    out
-}
-
-/// Double and interpolate with the same kernel: Burt and Adelson's EXPAND.
-fn expand(p: &Plane, wrap: bool) -> Plane {
-    let (w, h, c) = (p.w * 2, p.h * 2, p.c);
-    let mut t = vec![0f32; w * p.h * c];
-    t.par_chunks_mut(w * c).enumerate().for_each(|(y, row)| {
-        let src = &p.data[y * p.w * c..(y + 1) * p.w * c];
-        let at = |i: isize, ch: usize| src[index(i, p.w, wrap) * c + ch];
-        for x in 0..w {
-            let m = (x / 2) as isize;
-            for ch in 0..c {
-                row[x * c + ch] = if x % 2 == 0 {
-                    (at(m - 1, ch) + 6.0 * at(m, ch) + at(m + 1, ch)) * 0.125
-                } else {
-                    (at(m, ch) + at(m + 1, ch)) * 0.5
-                };
-            }
-        }
-    });
-    let mut out = Plane::new(w, h, c);
-    let rows = |i: isize| {
-        let y = index(i, p.h, false);
-        &t[y * w * c..(y + 1) * w * c]
-    };
-    out.data
-        .par_chunks_mut(w * c)
-        .enumerate()
-        .for_each(|(y, row)| {
-            let m = (y / 2) as isize;
-            if y % 2 == 0 {
-                let (a, b, d) = (rows(m - 1), rows(m), rows(m + 1));
-                for (k, o) in row.iter_mut().enumerate() {
-                    *o = (a[k] + 6.0 * b[k] + d[k]) * 0.125;
-                }
-            } else {
-                let (a, b) = (rows(m), rows(m + 1));
-                for (k, o) in row.iter_mut().enumerate() {
-                    *o = (a[k] + b[k]) * 0.5;
-                }
-            }
-        });
-    out
-}
-
 /// Where the panorama lies on its projection's plane, and at what resolution.
 #[derive(Clone, Debug)]
 pub struct Layout {
@@ -1193,8 +1090,7 @@ pub struct Canvas {
     feet: Vec<Option<Footprint>>,
     /// Per canvas pixel, the frame whose optical axis is nearest; `u16::MAX` for none.
     best: Vec<u16>,
-    num: Vec<Plane>,
-    den: Vec<Plane>,
+    bands: Bands,
 }
 
 impl Canvas {
@@ -1296,12 +1192,7 @@ impl Canvas {
                     }
                 });
         }
-        let num = (0..=layout.levels)
-            .map(|k| Plane::new(w >> k, h >> k, 3))
-            .collect();
-        let den = (0..=layout.levels)
-            .map(|k| Plane::new(w >> k, h >> k, 1))
-            .collect();
+        let bands = Bands::new(w, h, layout.levels, layout.wrap);
         Self {
             layout,
             lens,
@@ -1310,8 +1201,7 @@ impl Canvas {
             sizes: sizes.to_vec(),
             feet,
             best,
-            num,
-            den,
+            bands,
         }
     }
 
@@ -1374,116 +1264,18 @@ impl Canvas {
                     }
                 }
             });
-        let wrap = f.ring;
-        let levels = lay.levels;
-        // Fill what the frame doesn't see by push–pull, so its pyramid has no false edge at its border.
-        let mut ps = vec![val];
-        let mut as_ = vec![alpha];
-        for k in 0..levels {
-            let (p, a) = (reduce(&ps[k], wrap), reduce(&as_[k], wrap));
-            ps.push(p);
-            as_.push(a);
-        }
-        let mut filled = {
-            let (p, a) = (&ps[levels], &as_[levels]);
-            let mut sum = [0f64; 3];
-            let mut n = 0f64;
-            for (pp, aa) in p.data.chunks(3).zip(&a.data) {
-                if *aa > 1e-6 {
-                    for k in 0..3 {
-                        sum[k] += (pp[k] / aa) as f64;
-                    }
-                    n += 1.0;
-                }
-            }
-            let mean = sum.map(|v| (v / n.max(1.0)) as f32);
-            let mut out = p.clone();
-            for (o, aa) in out.data.chunks_mut(3).zip(&a.data) {
-                for k in 0..3 {
-                    o[k] = if *aa > 1e-6 { o[k] / aa } else { mean[k] };
-                }
-            }
-            out
-        };
-        for k in (0..levels).rev() {
-            let e = expand(&filled, wrap);
-            let mut v = ps[k].clone();
-            for ((o, aa), ee) in v.data.chunks_mut(3).zip(&as_[k].data).zip(e.data.chunks(3)) {
-                for c in 0..3 {
-                    o[c] += (1.0 - aa.min(1.0)) * ee[c];
-                }
-            }
-            filled = v;
-        }
-        drop(ps);
-        drop(as_);
-        // Laplacian bands of the filled frame, Gaussian bands of its seam mask, into the canvas's sums.
-        let mut g = filled;
-        let mut m = mask;
-        for k in 0..=levels {
-            let (band, next) = if k < levels {
-                let next = reduce(&g, wrap);
-                let up = expand(&next, wrap);
-                let mut band = g;
-                for (b, u) in band.data.iter_mut().zip(&up.data) {
-                    *b -= u;
-                }
-                (band, Some(next))
-            } else {
-                (g.clone(), None)
-            };
-            let (num, den) = (&mut self.num[k], &mut self.den[k]);
-            let (cw, ox, oy) = (num.w, f.x0 >> k, f.y0 >> k);
-            num.data
-                .par_chunks_mut(cw * 3)
-                .zip(den.data.par_chunks_mut(cw))
-                .enumerate()
-                .filter(|(y, _)| *y >= oy && *y < oy + band.h)
-                .for_each(|(y, (nr, dr))| {
-                    let by = y - oy;
-                    for bx in 0..band.w {
-                        let wgt = m.data[by * m.w + bx];
-                        if wgt <= 0.0 {
-                            continue;
-                        }
-                        let xx = (ox + bx as isize).rem_euclid(cw as isize) as usize;
-                        for c in 0..3 {
-                            nr[xx * 3 + c] += wgt * band.data[(by * band.w + bx) * 3 + c];
-                        }
-                        dr[xx] += wgt;
-                    }
-                });
-            if let Some(next) = next {
-                g = next;
-                m = reduce(&m, wrap);
-            } else {
-                break;
-            }
-        }
+        self.bands.add(
+            f.x0,
+            f.y0,
+            blend::fill(val, alpha, lay.levels, f.ring),
+            mask,
+            f.ring,
+        );
     }
 
     /// Collapse the bands: the panorama, three floats a pixel, and which pixels any frame saw.
     pub fn finish(self) -> (Vec<f32>, Vec<bool>) {
-        let levels = self.layout.levels;
-        let wrap = self.layout.wrap;
-        let norm = |num: &Plane, den: &Plane| {
-            let mut out = num.clone();
-            for (o, d) in out.data.chunks_mut(3).zip(&den.data) {
-                for v in o.iter_mut() {
-                    *v = if *d > 1e-12 { *v / d } else { 0.0 };
-                }
-            }
-            out
-        };
-        let mut r = norm(&self.num[levels], &self.den[levels]);
-        for k in (0..levels).rev() {
-            let e = expand(&r, wrap);
-            let mut band = norm(&self.num[k], &self.den[k]);
-            for (b, v) in band.data.iter_mut().zip(&e.data) {
-                *b += v;
-            }
-            r = band;
-        }
+        let mut r = self.bands.finish();
         let seen: Vec<bool> = self.best.iter().map(|&b| b != u16::MAX).collect();
         for (p, &s) in r.data.chunks_mut(3).zip(&seen) {
             if !s {
@@ -1493,7 +1285,6 @@ impl Canvas {
         (r.data, seen)
     }
 }
-
 /// The largest axis-aligned rectangle every pixel of which some frame saw: `(x0, y0, x1, y1)`, exclusive at
 /// the far end. Found on blocks of `block` pixels (a block counts only when all of it was seen), by the
 /// largest rectangle under each row's histogram of covered heights.

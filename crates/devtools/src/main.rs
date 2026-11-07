@@ -15,6 +15,7 @@
 //! `sidecar-dev hdri <out.exr|out.hdr> <raw>… [--brackets n] [--space rec709|rec2020|acescg] [--half]
 //!                  [--absolute] [--scale s] [--lensfun <dir>] [--png <out.png>]`  brackets merged per
 //!                                        direction, stitched onto the whole sphere
+//! `sidecar-dev stack <out.dng> <raw>… [--depth <out.png>] [--png <out.png>] [--force]`  a focus stack into one DNG
 
 mod parity;
 
@@ -84,6 +85,7 @@ fn main() -> Result<()> {
         ["hdr", out, files @ ..] if files.len() >= 2 => hdr(out.as_ref(), files),
         ["pano", out, args @ ..] if args.len() >= 2 => pano(out.as_ref(), args),
         ["hdri", out, args @ ..] if !args.is_empty() => hdri(out.as_ref(), args),
+        ["stack", out, args @ ..] if args.len() >= 2 => stack(out.as_ref(), args),
         ["linear-dng", input, out, rest @ ..] => {
             let input: &std::path::Path = input.as_ref();
             let edge: u32 = rest.first().map_or(Ok(1600), |v| v.parse())?;
@@ -2682,6 +2684,259 @@ fn hdri(out: &std::path::Path, args: &[&str]) -> Result<()> {
             },
             &png,
         )?;
+    }
+    Ok(())
+}
+
+/// `stack <out.dng> <raw>… [--depth <out.png>] [--png <out.png>] [--force]`: a focus stack joined into one linear DNG
+/// (`sidecar_merge::focus`). Frames are aligned as a chain, each to its neighbour on proxies (neighbours differ
+/// least in focus), the homographies composed onto the middle frame and carried to full resolution. Two
+/// streaming passes: the first measures focus into a depth map, the second blends each frame by its share of
+/// it; the result is cropped to what every frame saw.
+fn stack(out: &std::path::Path, args: &[&str]) -> Result<()> {
+    use sidecar_merge::align::{self, Grey, H};
+    use sidecar_merge::blend::{self, Bands};
+    use sidecar_merge::focus::{self, Focus};
+    let t0 = std::time::Instant::now();
+    let (mut files, mut depth_png, mut png, mut force) = (vec![], None, None, false);
+    let mut it = args.iter();
+    while let Some(&a) = it.next() {
+        match a {
+            "--depth" => depth_png = it.next().map(std::path::PathBuf::from),
+            "--force" => force = true,
+            "--png" => png = it.next().map(std::path::PathBuf::from),
+            f => files.push(f),
+        }
+    }
+    anyhow::ensure!(files.len() >= 2, "a stack needs two frames");
+    let gpu = sidecar_engine::Gpu::new_headless()?;
+    let ingest = sidecar_engine::Ingest::new(&gpu)?;
+    let raws: Vec<sidecar_raw::RawFile> = files
+        .iter()
+        .map(|f| sidecar_raw::RawFile::open(f.as_ref()))
+        .collect::<Result<_, _>>()?;
+    let n = raws.len();
+    let reference = n / 2;
+    let mul = raws[reference].info().color.as_shot_mul;
+    let wb = [mul[0] as f32, 1.0, mul[2] as f32];
+    fn mosaic(m: &sidecar_raw::Mosaic) -> sidecar_engine::MosaicInput<'_> {
+        sidecar_engine::MosaicInput {
+            width: m.width,
+            height: m.height,
+            data: &m.data,
+            black: m.black,
+            white: m.white,
+            pattern: m.pattern,
+            period: m.period,
+        }
+    }
+    let proxies: Vec<Grey> = raws
+        .iter()
+        .map(|r| -> Result<Grey> {
+            let m = r.mosaic()?;
+            let p = ingest.proxy(&gpu, &mosaic(&m), wb, 1600)?;
+            Ok(Grey::log_luminance(
+                p.width as usize,
+                p.height as usize,
+                p.data.chunks(4).map(|c| (c[0] + c[1] + c[2]) / 3.0),
+            ))
+        })
+        .collect::<Result<_>>()?;
+    let mul3 = |a: &H, b: &H| -> H {
+        std::array::from_fn(|i| std::array::from_fn(|j| (0..3).map(|k| a[i][k] * b[k][j]).sum()))
+    };
+    let id: H = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    // Reference → each frame on proxies, composed outward along the chain.
+    let mut from_ref = vec![id; n];
+    for (range, step) in [
+        ((reference + 1..n).collect::<Vec<_>>(), -1isize),
+        ((0..reference).rev().collect(), 1),
+    ] {
+        for i in range {
+            let nb = (i as isize + step) as usize;
+            let a = align::align(&proxies[nb], &proxies[i])
+                .ok_or_else(|| anyhow::anyhow!("{} doesn't align with {}", files[i], files[nb]))?;
+            let scale = (a.h[0][0] * a.h[1][1] - a.h[0][1] * a.h[1][0]).sqrt();
+            // What changes between frames of a stack is focus: the alignment must be trustworthy (Brown and
+            // Lowe's test), the scale no more than focus breathing, and the coarse picture — what defocus
+            // leaves alone — the same. Otherwise the subject moved, and no stack can be made of it.
+            let moved = sidecar_merge::focus::coarse_difference(&proxies[nb], &proxies[i], &a.h);
+            println!(
+                "  {} → {}: {} inliers, rms {:.2} px, scale {:.4}, coarse difference {:.3} stops",
+                files[nb], files[i], a.inliers, a.rms, scale, moved
+            );
+            let trusted = a.inliers >= 20 && a.inliers as f64 > 8.0 + 0.3 * a.matches as f64;
+            if !force
+                && (!trusted
+                    || !(0.9..=1.1).contains(&scale)
+                    || moved > sidecar_merge::focus::MOVED)
+            {
+                bail!(
+                    "{} and {} don't look like one focus stack ({}); --force stacks them anyway",
+                    files[nb],
+                    files[i],
+                    if !trusted {
+                        "too few matches agree"
+                    } else if !(0.9..=1.1).contains(&scale) {
+                        "the scale changes more than focusing can"
+                    } else {
+                        "the scene itself changed, not only its focus"
+                    }
+                );
+            }
+            from_ref[i] = mul3(&a.h, &from_ref[nb]);
+        }
+    }
+    let full = |r: &sidecar_raw::RawFile| -> Result<(usize, usize, Vec<f32>)> {
+        let m = r.mosaic()?;
+        let tex = ingest.demosaic(&gpu, &mosaic(&m), wb, true)?;
+        let img = sidecar_engine::read_rgba16(&gpu, &tex)?;
+        let rgb = img
+            .data
+            .chunks(4)
+            .flat_map(|p| [p[0], p[1], p[2]])
+            .collect();
+        Ok((img.width as usize, img.height as usize, rgb))
+    };
+    let (rw, rh) = {
+        let [w, h] = raws[reference].info().sensor_size();
+        (w as usize, h as usize)
+    };
+    let s = rw as f64 / proxies[reference].w as f64;
+    let to_full = |h: &H| -> H {
+        let sc: H = [
+            [s, 0.0, 0.5 * s - 0.5],
+            [0.0, s, 0.5 * s - 0.5],
+            [0.0, 0.0, 1.0],
+        ];
+        let inv: H = [
+            [1.0 / s, 0.0, (0.5 - 0.5 * s) / s],
+            [0.0, 1.0 / s, (0.5 - 0.5 * s) / s],
+            [0.0, 0.0, 1.0],
+        ];
+        mul3(&sc, &mul3(h, &inv))
+    };
+    let step = (rw.max(rh) / 3000).max(1);
+    let levels = 6;
+    let mut focus = Focus::new(rw, rh);
+    for (i, r) in raws.iter().enumerate() {
+        let (w, h, rgb) = full(r)?;
+        let (v, a) = focus::warp(&rgb, w, h, &to_full(&from_ref[i]), rw, rh);
+        focus.add(i, &focus::measure(&v, step), &a);
+        println!(
+            "  measured {} ({:.0} s)",
+            files[i],
+            t0.elapsed().as_secs_f64()
+        );
+    }
+    let depth = focus.depth(levels);
+    if let Some(p) = &depth_png {
+        let f = rw.max(rh).div_ceil(1600);
+        let (ow, oh) = (rw / f, rh / f);
+        let data = (0..ow * oh)
+            .flat_map(|k| {
+                let v = depth[(k / ow * f) * rw + k % ow * f] / (n - 1).max(1) as f32;
+                [v, v, v, 1.0]
+            })
+            .collect();
+        write_png(
+            &sidecar_engine::RgbaF32 {
+                width: ow as u32,
+                height: oh as u32,
+                data,
+            },
+            p,
+        )?;
+    }
+    // Blend on a canvas padded to the bands' step.
+    let unit = 1 << levels;
+    let (pw, ph) = (rw.div_ceil(unit) * unit, rh.div_ceil(unit) * unit);
+    let pad = |p: blend::Plane| -> blend::Plane {
+        let mut o = blend::Plane::new(pw, ph, p.c);
+        for y in 0..p.h {
+            o.data[y * pw * p.c..(y * pw + p.w) * p.c]
+                .copy_from_slice(&p.data[y * p.w * p.c..(y + 1) * p.w * p.c]);
+        }
+        o
+    };
+    let mut bands = Bands::new(pw, ph, levels, false);
+    for (i, r) in raws.iter().enumerate() {
+        let (w, h, rgb) = full(r)?;
+        let (v, a) = focus::warp(&rgb, w, h, &to_full(&from_ref[i]), rw, rh);
+        let m = focus::weights(&depth, i, &a);
+        bands.add(
+            0,
+            0,
+            blend::fill(pad(v), pad(a), levels, false),
+            pad(m),
+            false,
+        );
+        println!(
+            "  blended {} ({:.0} s)",
+            files[i],
+            t0.elapsed().as_secs_f64()
+        );
+    }
+    let img = bands.finish();
+    let (x0, y0, x1, y1) = sidecar_merge::pano::largest_rectangle(&focus.covered, rw, rh, 8);
+    let (w, h) = (x1 - x0, y1 - y0);
+    let rgb: Vec<f32> = (y0..y1)
+        .flat_map(|y| {
+            img.data[(y * pw + x0) * 3..(y * pw + x1) * 3]
+                .iter()
+                .copied()
+        })
+        .collect();
+    let info = raws[reference].info();
+    let m = raws[reference].mosaic()?;
+    sidecar_raw::dng_write::write(
+        out,
+        w as u32,
+        h as u32,
+        &rgb,
+        &sidecar_raw::dng_write::DngMeta {
+            make: &info.make,
+            model: &info.model,
+            software: "Sidecar (sidecar-dev stack)",
+            color: &info.color,
+            orientation: sidecar_raw::decoded::orientation_from_flip(m.flip),
+            noise: None,
+            linear_response_limit: Some(1.0),
+        },
+    )?;
+    println!(
+        "{n} frames → {w} × {h} (of {rw} × {rh}) → {} ({:.0} MB) in {:.0} s",
+        out.display(),
+        std::fs::metadata(out)?.len() as f64 / 1e6,
+        t0.elapsed().as_secs_f64()
+    );
+    if let Some(p) = png {
+        let f = w.max(h).div_ceil(1600);
+        let (ow, oh) = (w / f, h / f);
+        let small = sidecar_engine::RgbaF32 {
+            width: ow as u32,
+            height: oh as u32,
+            data: (0..ow * oh)
+                .flat_map(|k| {
+                    let i = ((k / ow * f) * w + k % ow * f) * 3;
+                    [
+                        rgb[i].max(0.0),
+                        rgb[i + 1].max(0.0),
+                        rgb[i + 2].max(0.0),
+                        1.0,
+                    ]
+                })
+                .collect(),
+        }
+        .oriented(m.flip);
+        let packed = sidecar_color::pack(
+            &Default::default(),
+            &info.color,
+            sidecar_raw::SourceKind::Raw,
+            sidecar_color::DisplaySpace::Srgb,
+        );
+        let pass = sidecar_engine::DevelopPass::new(&gpu)?;
+        write_png(&pass.run(&gpu, &small, &packed.uniform, &packed.lut)?, &p)?;
     }
     Ok(())
 }
