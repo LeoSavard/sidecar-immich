@@ -128,6 +128,19 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   }
   c = mask_saturation(mask_contrast(c, local.contrast), local.saturation);
   c = color_mixer(c, local.mixer);                             // 5
+  // An alternative process (`sidecar_color::process`), black and white only: the picture's luminance as the
+  // process's own tones — a cyanotype's Prussian blue, by density, on its paper; a tintype's silver mixed with its
+  // black japan.
+  if (P.process.x > 0.5) {
+    let y = clamp(dot(c, LUMA_2020), 0.0, 1.0);
+    if (P.process.x < 1.5) {
+      let wanted = mix(P.process_dark.w, P.process_light.w, y);
+      let d = -log2(max(wanted, 1e-6) / P.process_light.w) / (P.process.z * 3.3219280949);
+      c = P.process_light.rgb * exp2(-d * P.process_dark.rgb * 3.3219280949);
+    } else {
+      c = mix(P.process_dark.rgb, P.process_light.rgb, y);
+    }
+  }
   c = output_transform(c, P.work_to_disp, developed);
   return vec4f(c, 1.0);
 }

@@ -20,4 +20,9 @@ developer?: string,
  * Development, −2 … 2: the zone system's N−2 … N+2, longer development for more contrast above the
  * shadows. 0, left out of the serialized edit, is normal development.
  */
-development?: number, };
+development?: number, 
+/**
+ * An alternative process the black and white is printed or made as (`crate::process`): `cyanotype` or
+ * `tintype`. Empty, the default and left out of the serialized edit, is a silver gelatin print.
+ */
+process?: string, };

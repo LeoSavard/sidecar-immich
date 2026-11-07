@@ -764,6 +764,11 @@ pub struct Monochrome {
     #[serde(skip_serializing_if = "is_zero")]
     #[cfg_attr(feature = "ts", ts(as = "Option<f64>", optional))]
     pub development: f64,
+    /// An alternative process the black and white is printed or made as (`crate::process`): `cyanotype` or
+    /// `tintype`. Empty, the default and left out of the serialized edit, is a silver gelatin print.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<String>", optional))]
+    pub process: String,
 }
 
 fn is_daylight(v: &str) -> bool {
@@ -782,6 +787,7 @@ impl Default for Monochrome {
             light: "daylight".into(),
             developer: "standard".into(),
             development: 0.0,
+            process: String::new(),
         }
     }
 }
@@ -1009,7 +1015,7 @@ pub enum DisplaySpace {
     DisplayP3,
 }
 
-/// The develop modules' uniform (432 bytes). Its WGSL declaration,
+/// The develop modules' uniform (480 bytes). Its WGSL declaration,
 /// `shaders/uniforms/develop_params.wgsl`, is generated from this struct (`sidecar-uniform`); the
 /// `uniforms` test checks the file and every offset.
 #[repr(C)]
@@ -1072,6 +1078,13 @@ pub struct DevelopParams {
     /// `PROCESS_VERSION` 6), y Contrast as an exponent for the S-curve that grades the straight segment,
     /// since a fixed segment has no steepness of its own for Contrast to set. z, w unused.
     pub tone_shape: [f32; 4],
+    /// An alternative process (`process::uniform`): x 1 cyanotype, 2 tintype, 0 none; y the cyanotype's peak
+    /// density, z its luminance absorbance per unit density. `process_dark`: the cyanotype's absorbance per channel
+    /// per unit density, or the tintype's black japan; w their luminance. `process_light`: the paper or the
+    /// silver, w its luminance. Linear Rec.2020, as shown.
+    pub process: [f32; 4],
+    pub process_dark: [f32; 4],
+    pub process_light: [f32; 4],
 }
 
 /// Contrast slider value → logistic steepness.
@@ -1335,6 +1348,10 @@ fn pack_inner(
             0.0,
             0.0,
         ],
+        // Black and white only: a cyanotype or a tintype is printed from a monochrome rendering.
+        process: [0.0; 4],
+        process_dark: [0.0; 4],
+        process_light: [0.0; 4],
         slide_tone: match &slide {
             Some(_) => {
                 let mut t = display_tone(edit);
@@ -1359,6 +1376,9 @@ fn pack_inner(
         ];
         params.grain[0] *= (d.grain * crate::developer::development_grain(m.development)) as f32;
         params.grain[2] = d.stain as f32;
+        if let Some([p, dark, light]) = crate::process::uniform(&m.process) {
+            (params.process, params.process_dark, params.process_light) = (p, dark, light);
+        }
     }
     let mut masks = MaskParams {
         frame: [0.0; 4],
@@ -1470,7 +1490,7 @@ mod tests {
             SourceKind::Raw,
             DisplaySpace::Srgb,
         );
-        assert_eq!(p.uniform.len(), 432);
+        assert_eq!(p.uniform.len(), 480);
         assert_eq!(p.lut.len(), LUT_SIZE);
         // exposure sits at byte 12, and for a RAW at default it is the baseline, not 1.0
         let gain = |p: &Packed| f32::from_le_bytes(p.uniform[12..16].try_into().unwrap());

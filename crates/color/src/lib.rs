@@ -11,6 +11,7 @@ pub mod geometry;
 pub mod lens;
 pub mod mat;
 pub mod params;
+pub mod process;
 pub mod slide;
 pub mod spectral;
 mod spectral_data;
