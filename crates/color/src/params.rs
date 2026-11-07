@@ -903,6 +903,12 @@ pub struct Film {
     #[serde(skip_serializing_if = "is_daylight")]
     #[cfg_attr(feature = "ts", ts(as = "Option<String>", optional))]
     pub light: String,
+    /// 0–100: halation — light that crossed the emulsion, reflected off the back of the film base and exposed the
+    /// red-sensitive bottom layer again, a red glow around bright things. 100 is a film with no anti-halation
+    /// backing (`HALATION_MAX`); 0, and absent, is none.
+    #[serde(skip_serializing_if = "is_zero")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<f64>", optional))]
+    pub halation: f64,
 }
 
 impl Default for Film {
@@ -912,9 +918,22 @@ impl Default for Film {
             interlayer: 45.0,
             stock: String::new(),
             light: "daylight".into(),
+            halation: 0.0,
         }
     }
 }
+
+/// Halation at 100: the share of the red layer's exposure reflected back into it, as off a film base with no
+/// anti-halation backing (CineStill's films, with their rem-jet removed, are the familiar case), where a backed film
+/// keeps it near 1 %.
+pub const HALATION_MAX: f64 = 0.15;
+/// How far halation spreads: a Gaussian of this standard deviation in mm on a 36 mm frame. The light reflects off
+/// the back of a base about 0.13 mm thick, the strongest of it at the critical angle (≈ 42° for n ≈ 1.5), so it
+/// lands in a ring about 0.24 mm out: a Gaussian of 0.12 mm puts most of its weight within that.
+pub const HALATION_MM: f64 = 0.12;
+/// The share of the halo that exposes the green layer too: the reflected light is mostly red, which the green
+/// layer above barely sees.
+pub const HALATION_GREEN: f64 = 0.15;
 
 /// Film grain: the exposure each spot of the picture got, made to flicker the way silver halide's grains,
 /// developed or not, make it; the tone curve then takes it, so grain is strongest in the midtones, fades into
@@ -1626,7 +1645,8 @@ pub struct DevelopParams {
     /// share a staining developer hides at the white point, 1 for a grain per dye layer.
     pub grain: [f32; 4],
     /// Black and white's developer (`crate::developer`): adjacency, its reach as a share of the long edge,
-    /// development's contrast factor, compensation. `[0, 0, 1, 0]` does nothing; all zero in colour.
+    /// development's contrast factor, compensation. `[0, 0, 1, 0]` does nothing. In colour all zero but the reach,
+    /// which carries halation's (`HALATION_MM`) when it is on: the map's blur reads it either way.
     pub developer: [f32; 4],
     /// A named stock's curve (`crate::stock::Curve`), from a RAW: 1 on, the toe in stops from grey, its width,
     /// the shoulder's strength.
@@ -1906,7 +1926,7 @@ fn pack_inner(
             (Some(f), false) => [
                 (f.amount.clamp(0.0, 100.0) / 100.0) as f32,
                 (f.interlayer.clamp(0.0, 100.0) / 100.0 * FILM_INTERLAYER) as f32,
-                0.0,
+                (f.halation.clamp(0.0, 100.0) / 100.0 * HALATION_MAX) as f32,
                 0.0,
             ],
             _ => [0.0; 4],
@@ -1993,6 +2013,10 @@ fn pack_inner(
         ];
         params.grain[0] *= (d.grain * crate::developer::development_grain(m.development)) as f32;
         params.grain[2] = d.stain as f32;
+    }
+    // Halation's reach goes where the map's blur reads it: the developer's reach lane, which colour never uses.
+    if params.film[2] > 0.0 {
+        params.developer[1] = (HALATION_MM * 1000.0 / FRAME_MICRONS) as f32;
     }
     let mut masks = MaskParams {
         frame: [0.0; 4],

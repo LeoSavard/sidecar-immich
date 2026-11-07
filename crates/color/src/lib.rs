@@ -73,6 +73,10 @@ mod uniforms {
             std::mem::offset_of!(DevelopParams, developer)
         );
         assert_eq!(
+            number(develop, "FILM") * 4,
+            std::mem::offset_of!(DevelopParams, film)
+        );
+        assert_eq!(
             number(pack, "DEVELOP_UNIFORM_BYTES"),
             std::mem::size_of::<DevelopParams>()
         );

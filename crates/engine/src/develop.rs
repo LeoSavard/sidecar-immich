@@ -114,7 +114,9 @@ pub fn needs_local_map(uniform: &[u8]) -> bool {
 /// not the map's own pass.
 pub fn needs_density_map(uniform: &[u8]) -> bool {
     let p: &DevelopParams = bytemuck::from_bytes(uniform);
-    p.mono[0] > 0.5 && p.mono[2] < 0.5 && p.developer[0] != 0.0
+    // Black and white's developer, or colour film's halation: both read a blurred map of the film's exposure.
+    p.mono[2] < 0.5
+        && ((p.mono[0] > 0.5 && p.developer[0] != 0.0) || (p.mono[0] < 0.5 && p.film[2] > 0.0))
 }
 
 /// Black and white's table as a 3D texture, `side`³; a single zero in colour.
@@ -2063,6 +2065,81 @@ mod tests {
                 "channel {k}: {} against one grain's {}",
                 m3[k],
                 m1[k]
+            );
+        }
+    }
+
+    /// Halation: around a bright square on a dark field, film with halation glows red just outside the square —
+    /// a little green, no blue — while far from it the picture is what it was without.
+    #[test]
+    fn halation_glows_red_beside_bright_things() {
+        use sidecar_color::params::Film;
+        let Ok(gpu) = crate::test_gpu() else {
+            return eprintln!("skipping: no GPU");
+        };
+        let pass = DevelopPass::new(gpu).unwrap();
+        let (w, h) = (512u32, 512u32);
+        let src = RgbaF32 {
+            width: w,
+            height: h,
+            data: (0..w * h)
+                .flat_map(|i| {
+                    let (x, y) = (i % w, i / w);
+                    let v = if (248..264).contains(&x) && (248..264).contains(&y) {
+                        40.0
+                    } else {
+                        0.01
+                    };
+                    [v, v, v, 0.0]
+                })
+                .collect(),
+        };
+        let cam = sidecar_color::camera::SourceSpace::Srgb.camera_color();
+        let tex = crate::upload_rgba16(gpu, &src);
+        let render = |halation: f64| {
+            let edit = sidecar_color::EditParams {
+                film: Some(Film {
+                    interlayer: 0.0,
+                    halation,
+                    ..Film::default()
+                }),
+                ..Default::default()
+            };
+            let p = sidecar_color::pack(
+                &edit,
+                &cam,
+                sidecar_color::SourceKind::Raw,
+                sidecar_color::DisplaySpace::Srgb,
+            );
+            let out = pass
+                .render(gpu, &tex, &p.uniform, &p.lut, &Masks::none())
+                .unwrap();
+            crate::read_rgba16(gpu, &out).unwrap()
+        };
+        let (off, on) = (render(0.0), render(100.0));
+        let at = |img: &RgbaF32, x: u32, y: u32| {
+            let i = ((y * w + x) * 4) as usize;
+            [img.data[i], img.data[i + 1], img.data[i + 2]]
+        };
+        let (near_off, near_on) = (at(&off, 265, 256), at(&on, 265, 256));
+        let (far_off, far_on) = (at(&off, 40, 40), at(&on, 40, 40));
+        println!("beside: {near_off:?} → {near_on:?}; far: {far_off:?} → {far_on:?}");
+        assert!(
+            near_on[0] > near_off[0] * 1.5,
+            "red glows beside the square"
+        );
+        assert!(
+            near_on[0] - near_off[0] > 3.0 * (near_on[1] - near_off[1]).max(0.0),
+            "red far more than green"
+        );
+        assert!(
+            (near_on[2] - near_off[2]).abs() < (near_on[0] - near_off[0]) * 0.2,
+            "little blue"
+        );
+        for k in 0..3 {
+            assert!(
+                (far_on[k] - far_off[k]).abs() < 0.01 * far_off[k].max(1e-3) + 1e-4,
+                "far away, as it was"
             );
         }
     }

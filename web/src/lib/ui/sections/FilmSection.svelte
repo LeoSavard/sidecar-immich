@@ -240,6 +240,8 @@ sees the light, through a filter. -->
 			<p class="text-xs text-muted">Colour film is not white balanced either: it sees the surface's own colour times the light. The stock's own curves set the tones; Light and Curve then grade what comes out, as you would a scanned slide.</p>
 		{:else}
 			<Slider id="film-interlayer" label="Interlayer effects" value={edit.film.interlayer} min={0} max={100} defaultValue={45} format={(v) => decimals(v)} onchange={(v) => onchange((e) => { if (e.film) e.film.interlayer = v; })} {oncommit} />
+			<Slider id="film-halation" label="Halation" value={edit.film.halation ?? 0} min={0} max={100} defaultValue={0} format={(v) => decimals(v)} onchange={(v) => onchange((e) => { if (e.film) e.film.halation = v; })} {oncommit} />
+			<p class="text-xs text-muted">Halation is light that crossed the film, reflected off the back of its base and exposed the red layer again: a red glow just beside bright things. 100 is a film with no anti-halation backing.</p>
 			<p class="text-xs text-muted">Each colour gets its own tone curve, so highlights fade to white and midtones gain colour. Interlayer effects spread colours apart as film's layers hold each other back; greys stay grey.</p>
 		{/if}
 	{:else if developed}

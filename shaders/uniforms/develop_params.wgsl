@@ -33,7 +33,8 @@ struct DevelopParams {
   // share a staining developer hides at the white point, 1 for a grain per dye layer.
   grain: vec4f,
   // Black and white's developer (`crate::developer`): adjacency, its reach as a share of the long edge,
-  // development's contrast factor, compensation. `[0, 0, 1, 0]` does nothing; all zero in colour.
+  // development's contrast factor, compensation. `[0, 0, 1, 0]` does nothing. In colour all zero but the reach,
+  // which carries halation's (`HALATION_MM`) when it is on: the map's blur reads it either way.
   developer: vec4f,
   // A named stock's curve (`crate::stock::Curve`), from a RAW: 1 on, the toe in stops from grey, its width,
   // the shoulder's strength.
