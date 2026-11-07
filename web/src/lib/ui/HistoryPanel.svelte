@@ -21,6 +21,11 @@ from there starts a new branch. -->
 	const ROW = 60;
 	const LANE = 14;
 	const DOT = 5;
+	/** The most of the panel's width the lanes may take: past it they draw closer together, so a history with many
+	 *  branches keeps its rows — and Original — readable. */
+	const GRAPH_SHARE = 0.3;
+
+	let panelWidth = $state(320);
 
 	let selected = $state<string | null>(null);
 	let renaming = $state(false);
@@ -48,7 +53,8 @@ from there starts a new branch. -->
 
 		const rows = [...nodes].reverse();
 		const row = new Map(rows.map((n, i) => [n.id, i]));
-		const x = (l: number) => LANE / 2 + l * LANE;
+		const step = Math.max(2, Math.min(LANE, (panelWidth * GRAPH_SHARE - LANE) / Math.max(lanes - 1, 1)));
+		const x = (l: number) => LANE / 2 + l * step;
 		const y = (r: number) => r * ROW + ROW / 2;
 		const edges = nodes
 			.filter((n) => n.parent && row.has(n.parent))
@@ -133,7 +139,7 @@ from there starts a new branch. -->
 		</div>
 	{/if}
 
-	<div class="relative" style:height="{graph.rows.length * ROW}px">
+	<div class="relative overflow-hidden" style:height="{graph.rows.length * ROW}px" bind:clientWidth={panelWidth}>
 		<svg class="pointer-events-none absolute top-0 left-0" width={graph.width} height={graph.rows.length * ROW} aria-hidden="true">
 			{#each graph.edges as e, i (i)}
 				<path d={e.d} fill="none" stroke="currentColor" stroke-width="1.5" class={e.main ? 'text-fg-2' : 'text-muted'} />
@@ -151,14 +157,14 @@ from there starts a new branch. -->
 		{#each graph.rows as n, r (n.id)}
 			<button
 				type="button"
-				class="absolute right-0 flex flex-col justify-center rounded pr-2 text-left {selected === n.id ? 'bg-raised' : 'hover:bg-raised/60'}"
+				class="absolute right-0 flex min-w-0 flex-col justify-center overflow-hidden rounded pr-2 text-left {selected === n.id ? 'bg-raised' : 'hover:bg-raised/60'}"
 				style:top="{r * ROW}px"
 				style:height="{ROW}px"
 				style:left="{graph.width + 6}px"
 				aria-current={n.id === history.head ? 'true' : undefined}
 				onclick={() => { selected = selected === n.id ? null : n.id; renaming = false; }}
 			>
-				<span class="flex min-w-0 items-center gap-1.5 text-sm">
+				<span class="flex min-w-0 items-center gap-1.5 overflow-hidden text-sm">
 					<span class="truncate {n.id === history.head ? 'font-medium text-fg' : 'text-fg'}">{title(n)}</span>
 					{#if n.id === history.head}<span class="shrink-0 rounded bg-fg px-1 text-[10px] text-ground">Current</span>{/if}
 					{#if compareId === n.id}<span class="shrink-0 rounded bg-raised px-1 text-[10px] text-fg">Comparing</span>{/if}

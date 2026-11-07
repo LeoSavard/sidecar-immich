@@ -2717,7 +2717,7 @@
 
 			{/if}
 			{#if wide}
-			<div class="min-h-0 flex-1 overflow-y-auto px-4">
+			<div class="relative min-h-0 flex-1 overflow-y-auto px-4">
 				{#each groups as g (g.id)}
 					{#if g.children.length === 1}
 						{@render sectionDetails(sectionById(g.children[0]), true)}
