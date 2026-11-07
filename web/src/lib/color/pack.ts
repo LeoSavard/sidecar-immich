@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // The Rust colour maths (crates/color) running as WebAssembly. Same code the worker uses for export.
 import wasmUrl from './sidecar_color.wasm?url';
-import type { CameraColor, DisplaySpace, EditParams, Frame, Geometry, Lens, LensProfile, MaskEdge, SourceKind } from '$lib/types';
+import type { CameraColor, DisplaySpace, EditParams, Frame, Geometry, Gradient, Lens, LensProfile, MaskEdge, SourceKind } from '$lib/types';
 
 /** Mirrors `sidecar_color::params::EdgePlan`: the mask edge passes for one mask size. */
 export type EdgePlan = { scale: number; small: [number, number]; radius: number; threshold: number; ramp: number };
@@ -24,6 +24,7 @@ type Exports = {
 	sc_camera_color(ptr: number, len: number): number;
 	sc_pack_depth(ptr: number, len: number): number;
 	sc_mask_edge(ptr: number, len: number): number;
+	sc_gradient(ptr: number, len: number): number;
 };
 
 /**
@@ -124,6 +125,11 @@ export class ColorPacker {
 	 */
 	toneCurveLut(curve: [number, number][], highlights: number, shadows: number): Float32Array {
 		return new Float32Array(this.call(this.x.sc_tone_curve_lut, { curve, highlights, shadows }).buffer);
+	}
+
+	/** A gradient layer's uniform for a mask `size` pixels big (`Gradient::uniform`, 48 bytes). */
+	gradientUniform(gradient: Gradient, size: [number, number]): Uint8Array {
+		return this.call(this.x.sc_gradient, { gradient, size });
 	}
 
 	/** A mask edge's passes for a mask `size` pixels big (`MaskEdge::plan`); null when it is too narrow to show. */

@@ -759,7 +759,9 @@ image** to survive batch application — a design constraint on features already
 
 What §15 still lists and hasn't been built:
 
-- **Gradients.** Linear and radial masks, analytic in the shader: a third kind of layer beside model masks and
+- **Gradients — done** (2026-11-06): linear and radial layers, drawn analytically (`client/gradient.wgsl`) as the
+  base a layer's range, strokes and edge apply to, with handles over the photo. The original entry:
+  Linear and radial masks, analytic in the shader: a third kind of layer beside model masks and
   brushes, with handles drawn over the photo like the crop's. Universal across the category — treat as table
   stakes rather than an enhancement.
 - **Sky — and it should not be a model.** The obvious route is closed: SegFormer's code is Apache-2.0 but its

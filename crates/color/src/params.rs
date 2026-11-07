@@ -663,6 +663,10 @@ pub struct MaskAdjustment {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub edge: Option<MaskEdge>,
+    /// The shape of a `gradient` layer's mask. None for any other kind.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub gradient: Option<Gradient>,
     /// Brush strokes over the mask, in the order they were painted.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     #[cfg_attr(feature = "ts", ts(as = "Option<Vec<Stroke>>", optional))]
@@ -699,6 +703,7 @@ impl Default for MaskAdjustment {
             mixer: Mixer::default(),
             range: None,
             edge: None,
+            gradient: None,
             strokes: Vec::new(),
             other: Default::default(),
         }
@@ -891,6 +896,132 @@ impl EdgePlan {
     }
 }
 
+/// A gradient layer's shape (DESIGN.md §15, "Gradients"), in the photo as shown before lens correction — the
+/// frame strokes are stored in — so it stays on what it was placed over whatever lens correction, crop or
+/// straighten do.
+///
+/// The weight falls *linearly* with position across the transition. A layer adds stops weighted by its mask,
+/// so a linear weight is a density linear in position: what a soft graduated neutral-density filter is.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "edit/"))]
+pub enum Gradient {
+    /// Full weight at and before `from`, none at and beyond `to`, along the line between them. Points are
+    /// `[x, y]` as fractions of the photo's width and height.
+    Linear { from: [f64; 2], to: [f64; 2] },
+    /// Full weight inside an ellipse, fading to none at its edge. `centre` as fractions of width and height;
+    /// `axes` the two semi-axes as fractions of the long edge; `angle` the first axis's direction, degrees
+    /// clockwise from horizontal; `feather` 0…100, how much of the radius the fade takes (0 is a hard edge).
+    Radial {
+        centre: [f64; 2],
+        axes: [f64; 2],
+        angle: f64,
+        feather: f64,
+    },
+}
+
+/// The gradient pass's uniform (48 bytes, `client/gradient.wgsl`). Its WGSL declaration,
+/// `shaders/uniforms/gradient_params.wgsl`, is generated from this struct (`sidecar-uniform`); the `uniforms`
+/// test checks the file and every offset.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable, Uniform)]
+pub struct GradientParams {
+    /// The target, in pixels.
+    pub size: [f32; 2],
+    /// 0 linear, 1 radial.
+    pub kind: u32,
+    /// Radial: the share of the radius inside which the weight is full.
+    pub inner: f32,
+    /// Linear: `from` in xy, `to` in zw. Radial: the centre in xy. Target pixels.
+    pub a: [f32; 4],
+    /// Radial: the two semi-axes as vectors from the centre, xy and zw. Target pixels.
+    pub b: [f32; 4],
+}
+
+impl Gradient {
+    /// The uniform for a target `target` pixels big. `display` is the photo as shown (the frame the gradient
+    /// is stored in), and `to_target` maps a point there, as fractions, into the target's fractions — the
+    /// identity in the browser, the orientation still to apply on the worker. Axes are mapped as points, so
+    /// any turn or mirror between the two frames comes out right.
+    pub fn uniform(
+        &self,
+        display: [u32; 2],
+        target: [u32; 2],
+        to_target: impl Fn([f64; 2]) -> [f64; 2],
+    ) -> GradientParams {
+        let px = |p: [f64; 2]| {
+            let q = to_target(p);
+            [
+                (q[0] * target[0] as f64) as f32,
+                (q[1] * target[1] as f64) as f32,
+            ]
+        };
+        let size = [target[0] as f32, target[1] as f32];
+        match self {
+            Gradient::Linear { from, to } => {
+                let (f, t) = (px(*from), px(*to));
+                GradientParams {
+                    size,
+                    kind: 0,
+                    inner: 0.0,
+                    a: [f[0], f[1], t[0], t[1]],
+                    b: [0.0; 4],
+                }
+            }
+            Gradient::Radial {
+                centre,
+                axes,
+                angle,
+                feather,
+            } => {
+                let (w, h) = (display[0].max(1) as f64, display[1].max(1) as f64);
+                let long = w.max(h);
+                let (s, c) = angle.to_radians().sin_cos();
+                // The ends of the two semi-axes, as fractions of the shown photo.
+                let end = |len: f64, dir: [f64; 2]| {
+                    [
+                        centre[0] + len.max(1e-6) * long * dir[0] / w,
+                        centre[1] + len.max(1e-6) * long * dir[1] / h,
+                    ]
+                };
+                let o = px(*centre);
+                let ea = px(end(axes[0], [c, s]));
+                let eb = px(end(axes[1], [-s, c]));
+                GradientParams {
+                    size,
+                    kind: 1,
+                    inner: (1.0 - feather.clamp(0.0, 100.0) / 100.0) as f32,
+                    a: [o[0], o[1], 0.0, 0.0],
+                    b: [ea[0] - o[0], ea[1] - o[1], eb[0] - o[0], eb[1] - o[1]],
+                }
+            }
+        }
+    }
+
+    /// The weight at a point of the target, as the shader computes it — for tests and the worker's checks.
+    pub fn weight(p: &GradientParams, at: [f32; 2]) -> f32 {
+        if p.kind == 0 {
+            let d = [p.a[2] - p.a[0], p.a[3] - p.a[1]];
+            let len2 = (d[0] * d[0] + d[1] * d[1]).max(1e-12);
+            let t = ((at[0] - p.a[0]) * d[0] + (at[1] - p.a[1]) * d[1]) / len2;
+            return 1.0 - t.clamp(0.0, 1.0);
+        }
+        let v = [at[0] - p.a[0], at[1] - p.a[1]];
+        let proj = |ax: [f32; 2]| {
+            (v[0] * ax[0] + v[1] * ax[1]) / (ax[0] * ax[0] + ax[1] * ax[1]).max(1e-12)
+        };
+        let r = (proj([p.b[0], p.b[1]]).powi(2) + proj([p.b[2], p.b[3]]).powi(2)).sqrt();
+        if p.inner >= 1.0 {
+            return (r <= 1.0) as u8 as f32;
+        }
+        (1.0 - (r - p.inner) / (1.0 - p.inner)).clamp(0.0, 1.0)
+    }
+}
+
 /// One brush stroke on a mask. Coordinates are in the photo as it is shown before lens correction — the
 /// frame the models' masks are made in — so a stroke stays on what it was painted over whatever the lens
 /// correction, crop or straighten later do.
@@ -935,11 +1066,17 @@ pub const MASK_NAMES: [&str; 7] = [
 /// A mask painted from nothing: only its strokes.
 pub const BRUSH: &str = "brush";
 
+/// A layer whose mask is a shape (`Gradient`), drawn rather than found by a model or painted.
+pub const GRADIENT: &str = "gradient";
+
 impl MaskAdjustment {
     /// Whether this version knows how to render it: a mask it knows by name, and nothing a newer version
     /// added to say it is something else.
     pub fn renders(&self) -> bool {
-        (self.uses_model() || self.mask == BRUSH) && self.other.is_empty()
+        (self.uses_model()
+            || self.mask == BRUSH
+            || (self.mask == GRADIENT && self.gradient.is_some()))
+            && self.other.is_empty()
     }
 
     /// Whether its mask starts from one the models make.
@@ -1477,6 +1614,80 @@ mod tests {
         assert!(
             json["detail"].get("noiseModel").is_none(),
             "left out when on"
+        );
+    }
+
+    /// A linear gradient is full before its start and empty past its end, linear between; a radial one is full
+    /// inside its inner radius and empty outside its ellipse. And a quarter turn between the shown photo and
+    /// the target moves the shape with it: the same point of the photo gets the same weight in either frame.
+    #[test]
+    fn gradients_weigh_as_drawn_in_any_orientation() {
+        let lin = Gradient::Linear {
+            from: [0.2, 0.5],
+            to: [0.6, 0.5],
+        };
+        let p = lin.uniform([1000, 500], [1000, 500], |q| q);
+        let w = |x: f32, y: f32| Gradient::weight(&p, [x, y]);
+        assert_eq!(w(100.0, 250.0), 1.0);
+        assert!(
+            (w(400.0, 10.0) - 0.5).abs() < 1e-6,
+            "halfway, and the same on any line across"
+        );
+        assert_eq!(w(700.0, 250.0), 0.0);
+
+        let rad = Gradient::Radial {
+            centre: [0.5, 0.5],
+            axes: [0.2, 0.1],
+            angle: 30.0,
+            feather: 50.0,
+        };
+        let shown = [1200u32, 800u32];
+        let p = rad.uniform(shown, shown, |q| q);
+        let c = [600.0f32, 400.0];
+        let along = |r: f32, deg: f32, len: f32| {
+            let (s, co) = deg.to_radians().sin_cos();
+            [c[0] + r * len * co, c[1] + r * len * s]
+        };
+        // The long axis is 0.2 × 1200 = 240 px at 30°, the short one 120 px at 120°.
+        assert_eq!(Gradient::weight(&p, along(0.4, 30.0, 240.0)), 1.0);
+        assert!((Gradient::weight(&p, along(0.75, 30.0, 240.0)) - 0.5).abs() < 1e-4);
+        assert!((Gradient::weight(&p, along(0.75, 120.0, 120.0)) - 0.5).abs() < 1e-4);
+        assert_eq!(Gradient::weight(&p, along(1.01, 120.0, 120.0)), 0.0);
+
+        // A quarter turn clockwise into an 800 × 1200 target: (x, y) shown → (1 − y, x).
+        let turned = rad.uniform(shown, [800, 1200], |q| [1.0 - q[1], q[0]]);
+        for &(x, y) in &[(0.5f32, 0.5f32), (0.6, 0.55), (0.45, 0.42), (0.7, 0.5)] {
+            let a = Gradient::weight(&p, [x * 1200.0, y * 800.0]);
+            let b = Gradient::weight(&turned, [(1.0 - y) * 800.0, x * 1200.0]);
+            assert!((a - b).abs() < 1e-4, "({x}, {y}): {a} shown, {b} turned");
+        }
+    }
+
+    #[test]
+    fn a_gradient_layer_round_trips_and_renders() {
+        let m = MaskAdjustment {
+            mask: GRADIENT.into(),
+            gradient: Some(Gradient::Radial {
+                centre: [0.5, 0.4],
+                axes: [0.3, 0.2],
+                angle: 0.0,
+                feather: 60.0,
+            }),
+            exposure: -1.0,
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&m).unwrap();
+        assert_eq!(json["gradient"]["kind"], "radial");
+        let back: MaskAdjustment = serde_json::from_value(json).unwrap();
+        assert_eq!(back, m);
+        assert!(back.renders());
+        let shapeless = MaskAdjustment {
+            mask: GRADIENT.into(),
+            ..Default::default()
+        };
+        assert!(
+            !shapeless.renders(),
+            "a gradient layer with no shape draws nothing"
         );
     }
 

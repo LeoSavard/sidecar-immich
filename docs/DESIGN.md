@@ -63,6 +63,20 @@ Where the code differs from the text below, the code and these notes win.
   develops identically to that demosaic (ΔE2000 mean 0.000, p99 0.000, max 1.1). `sidecar-dev compare-png`
   is the measure. A 20.8 MP frame is 69 MB and takes 9–17 s to write.
 
+- **Gradients** (§15): a layer whose `mask` is `gradient` carries a `Gradient` — `linear` (full at `from`, none
+  at `to`) or `radial` (full inside an ellipse's inner `1 − feather` of its radius, none at its edge) — in the
+  photo as shown before lens correction, the frame strokes are stored in. Its mask is drawn analytically by
+  `client/gradient.wgsl` and becomes the layer's *base*, exactly as a model's mask is for other layers, so
+  range, strokes, edge, invert and amount apply unchanged. The weight is linear in position: a layer adds stops
+  weighted by its mask, so that is a density linear in position — a soft graduated ND filter. The uniform is
+  packed in Rust (`Gradient::uniform`, through the wasm in the browser), mapping the shape as *points* into
+  the target frame, so the worker's unoriented textures and any turn or mirror come out right without a
+  special case (tested: a quarter turn gives every point the same weight). The editor's handles are placed
+  by solving `screenToSource` with a few Newton steps, since lens correction, crop and straighten have no
+  closed-form inverse. Checked: the shader against `Gradient::weight` to one 8-bit step; and
+  `web/scripts/gradient-smoke.mjs` end to end — added in the editor, two stops down, its handle dragged, saved —
+  with the browser's canvas and the worker's `/preview` both darker at the top and unchanged at the bottom.
+
 - **D1 and D5 are both closed, neither merged** (pull request #46, closed 2026-10-29). The owner's rule,
   2026-10-27: what is merged and deployed should be what has been tested. Both were written, and neither
   earned its way in.

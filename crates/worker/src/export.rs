@@ -198,20 +198,40 @@ impl Rendering {
                 if !layer.renders() {
                     return None;
                 }
-                let base = masks.get(i).cloned().flatten().map(|m| {
-                    sidecar_engine::upload_rgba16(
-                        &kit.gpu,
-                        &m.oriented(sidecar_engine::inverse_flip(flip)),
-                    )
-                });
+                // Painted masks are at the source's resolution up to 4,096 px on the long edge: a mask is
+                // sampled through a linear filter, and nothing a brush or a gradient draws needs more.
+                let scale = (MASK_EDGE as f64 / frame[0].max(frame[1]) as f64).min(1.0);
+                let size = frame.map(|v| ((v as f64 * scale).round() as u32).max(1));
+                let base = match (
+                    &layer.gradient,
+                    layer.mask == sidecar_color::params::GRADIENT,
+                ) {
+                    // A gradient is drawn, in the source's orientation, from where it sits in the photo as
+                    // shown.
+                    (Some(g), true) => {
+                        let shown = if flip & 4 != 0 {
+                            [size[1], size[0]]
+                        } else {
+                            size
+                        };
+                        Some(kit.brush.gradient(
+                            &kit.gpu,
+                            &g.uniform(shown, size, |p| {
+                                sidecar_color::geometry::map(&to_source, p)
+                            }),
+                        ))
+                    }
+                    _ => masks.get(i).cloned().flatten().map(|m| {
+                        sidecar_engine::upload_rgba16(
+                            &kit.gpu,
+                            &m.oriented(sidecar_engine::inverse_flip(flip)),
+                        )
+                    }),
+                };
                 if layer.strokes.is_empty() && layer.range.is_none() && layer.edge.is_none() {
                     return Some(self.correct(kit, &geometry, base?));
                 }
-                // A range, strokes or an edge: painted, the range windowing the base first, the edge last. At the source's resolution
-                // up to 4,096 px on the long edge: a mask is sampled through a linear filter, and nothing a
-                // brush draws needs more.
-                let scale = (MASK_EDGE as f64 / frame[0].max(frame[1]) as f64).min(1.0);
-                let size = frame.map(|v| ((v as f64 * scale).round() as u32).max(1));
+                // A range, strokes or an edge: painted, the range windowing the base first, the edge last.
                 let strokes: Vec<_> = layer
                     .strokes
                     .iter()

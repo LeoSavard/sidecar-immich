@@ -405,6 +405,30 @@ pub unsafe extern "C" fn sc_mask_edge(ptr: *const u8, len: usize) -> *const u8 {
     )
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct GradientRequest {
+    gradient: sidecar_color::params::Gradient,
+    size: [u32; 2],
+}
+
+/// `{ gradient, size }` → the gradient pass's uniform (`GradientParams`, 48 bytes) for a mask `size` pixels big
+/// in the photo's shown frame, which is the proxy's.
+///
+/// # Safety
+/// `ptr` must point to `len` readable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sc_gradient(ptr: *const u8, len: usize) -> *const u8 {
+    let input = unsafe { std::slice::from_raw_parts(ptr, len) };
+    respond(
+        serde_json::from_slice::<GradientRequest>(input)
+            .map_err(|e| e.to_string())
+            .map(|req| {
+                bytemuck::bytes_of(&req.gradient.uniform(req.size, req.size, |p| p)).to_vec()
+            }),
+    )
+}
+
 /// Default edit parameters as length-prefixed JSON, so the web app never duplicates them.
 #[unsafe(no_mangle)]
 pub extern "C" fn sc_default_edit() -> *const u8 {

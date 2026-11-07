@@ -4,7 +4,7 @@
 	import { tick, untrack } from 'svelte';
 	import { DevelopPass, requestDevice } from '$lib/gpu/develop';
 	import { CLIP_HIGHS, CLIP_LOWS, MASK_INVERTED, PEAKING, SHOW_MASK, ViewPass, type ViewGeometry, type Viewport } from '$lib/gpu/view';
-	import { BRUSH, DEPTH, MaskLibrary, brushStroke, rangeUniform, type BrushSettings, type MaskSet } from '$lib/masks';
+	import { BRUSH, DEPTH, GRADIENT, MaskLibrary, brushStroke, rangeUniform, type BrushSettings, type MaskSet } from '$lib/masks';
 	import { DepthPass } from '$lib/gpu/depth';
 	import { MaskPainter, simplify } from '$lib/gpu/brush';
 	import { HistogramPass, type HistogramData } from '$lib/gpu/histogram';
@@ -23,6 +23,7 @@
 	import HistoryPanel from '$lib/ui/HistoryPanel.svelte';
 	import MasksPanel from '$lib/ui/MasksPanel.svelte';
 	import CropOverlay from '$lib/ui/CropOverlay.svelte';
+	import GradientHandles from '$lib/ui/GradientHandles.svelte';
 	import LensSection from '$lib/ui/sections/LensSection.svelte';
 	import CropSection from '$lib/ui/sections/CropSection.svelte';
 	import WhiteBalanceSection from '$lib/ui/sections/WhiteBalanceSection.svelte';
@@ -240,7 +241,7 @@
 	 * Layers with brush strokes, painted at the proxy's size by layer slot: what they were painted from, a
 	 * version that moves with every live stroke, and the lens-corrected copy develop reads.
 	 */
-	const layerTextures = new Map<number, { key: string; version: number; painted: GPUTexture; corrected?: GPUTexture; correctedFrom: string }>();
+	const layerTextures = new Map<number, { key: string; version: number; painted: GPUTexture; corrected?: GPUTexture; correctedFrom: string; shape?: GPUTexture }>();
 	/**
 	 * The stroke being painted: its finger, layer, settings, its points so far (fractions of the photo), and
 	 * those not drawn yet — pointer events only collect them; each frame draws what arrived since the last.
@@ -694,7 +695,7 @@
 	 * while something it needs is loading; that redraws when it arrives.
 	 */
 	function layerTexture(i: number, m: MaskAdjustment): GPUTexture | undefined {
-		if (!m.strokes?.length && !m.range && !m.edge && stroke?.layer !== i) return m.mask === BRUSH ? undefined : maskTexture(m.mask);
+		if (!m.strokes?.length && !m.range && !m.edge && stroke?.layer !== i && m.mask !== GRADIENT) return m.mask === BRUSH ? undefined : maskTexture(m.mask);
 		const entry = layerEntry(i, m);
 		if (!entry) return undefined;
 		const size: [number, number] = [entry.painted.width, entry.painted.height];
@@ -714,7 +715,9 @@
 		const proxy = develop?.proxy;
 		if (!proxy || !painter) return undefined;
 		let base: GPUTexture | undefined;
-		if (m.mask !== BRUSH) {
+		if (m.mask === GRADIENT) {
+			if (!m.gradient) return undefined;
+		} else if (m.mask !== BRUSH) {
 			base = maskLibrary?.ready(m.mask);
 			if (!base) {
 				maskLibrary?.load(m.mask).then(() => schedule(true), () => {});
@@ -725,10 +728,17 @@
 		if (!entry || entry.painted.width !== proxy.width || entry.painted.height !== proxy.height) {
 			entry?.painted.destroy();
 			entry?.corrected?.destroy();
+			entry?.shape?.destroy();
 			entry = { key: '', version: 0, painted: painter.mask([proxy.width, proxy.height], `layer ${i}`), correctedFrom: '' };
 			layerTextures.set(i, entry);
 		}
-		const key = JSON.stringify([m.mask, m.range ?? null, m.edge ?? null, m.strokes ?? []]);
+		const key = JSON.stringify([m.mask, m.range ?? null, m.edge ?? null, m.strokes ?? [], m.gradient ?? null]);
+		if (m.mask === GRADIENT && m.gradient) {
+			// The shape is the base, drawn at the proxy's size whenever it moves.
+			entry.shape ??= painter.mask([proxy.width, proxy.height], `layer ${i} shape`);
+			if (entry.key !== key) painter.gradient(entry.shape, packer.gradientUniform($state.snapshot(m.gradient), [proxy.width, proxy.height]));
+			base = entry.shape;
+		}
 		if (entry.key !== key && stroke?.layer !== i) {
 			painter.paint(entry.painted, base, $state.snapshot(m.strokes) ?? [], rangeUniform(m.range));
 			// The edge last, over the range and the strokes. (While a stroke is drawn it shows without the edge.)
@@ -764,6 +774,7 @@
 		for (const e of layerTextures.values()) {
 			e.painted.destroy();
 			e.corrected?.destroy();
+			e.shape?.destroy();
 		}
 		layerTextures.clear();
 	}
@@ -780,6 +791,12 @@
 	function addMask(name: string) {
 		if (!edit) return;
 		const m: MaskAdjustment = { mask: name, invert: false, amount: 100, exposure: 0, contrast: 0, saturation: 0, temperature: 0, tint: 0 };
+		// A gradient starts where it is most often wanted: a linear one darkening the sky from the top, a radial
+		// one on the middle of the frame.
+		if (name === 'gradient-linear' || name === 'gradient-radial') {
+			m.mask = GRADIENT;
+			m.gradient = name === 'gradient-linear' ? { kind: 'linear', from: [0.5, 0.2], to: [0.5, 0.55] } : { kind: 'radial', centre: [0.5, 0.5], axes: [0.25, 0.18], angle: 0, feather: 50 };
+		}
 		// Depth on its own is a gradient from far to near; a layer on it starts as the nearer half.
 		if (name === DEPTH) m.range = { from: 50, to: 100, feather: 15 };
 		edit.masks = [...(edit.masks ?? []), m];
@@ -817,6 +834,36 @@
 	}
 
 	// ---------- the brush
+
+	/**
+	 * The other way: a point of the photo before lens correction (0…1) → CSS pixels over the canvas, for a
+	 * gradient's handles. There is no closed form through lens correction, crop and straighten, so it is
+	 * solved — a few Newton steps on `screenToSource`, from where the point would be without them.
+	 */
+	function sourceToScreen(q: [number, number], _frame: number): { x: number; y: number } | null {
+		if (!develop?.output) return null;
+		const r = imageRect();
+		let s = { x: r.x + q[0] * r.w, y: r.y + q[1] * r.h };
+		for (let k = 0; k < 8; k++) {
+			const f = screenToSource(s);
+			const fx = screenToSource({ x: s.x + 1, y: s.y });
+			const fy = screenToSource({ x: s.x, y: s.y + 1 });
+			if (!f || !fx || !fy) return null;
+			const e = [q[0] - f[0], q[1] - f[1]];
+			if (Math.hypot(e[0], e[1]) < 1e-6) break;
+			const [a, b, c, d] = [fx[0] - f[0], fy[0] - f[0], fx[1] - f[1], fy[1] - f[1]];
+			const det = a * d - b * c;
+			if (Math.abs(det) < 1e-15) return null;
+			s = { x: s.x + (d * e[0] - b * e[1]) / det, y: s.y + (-c * e[0] + a * e[1]) / det };
+		}
+		return { x: s.x / devicePixelRatio, y: s.y / devicePixelRatio };
+	}
+
+	/** The proxy's size, which a gradient's axes are measured against; the markup passes `layoutTick`. */
+	function proxySize(_frame: number): [number, number] | null {
+		const p = develop?.proxy;
+		return p ? [p.width, p.height] : null;
+	}
 
 	/** A canvas pixel → the photo before lens correction (0…1), where strokes are stored. */
 	function screenToSource(p: { x: number; y: number }): [number, number] | null {
@@ -1942,6 +1989,18 @@
 					oncommit={committed}
 				/>
 			{/if}
+		{/if}
+		{#if !fallback && !toolsHidden && !cropping && !readOnly && proxyLoaded && maskSelected !== null && (wide || section === 'masks') && edit?.masks?.[maskSelected]?.gradient && proxySize(layoutTick)}
+			{@const i = maskSelected}
+			{@const tick = layoutTick}
+			<GradientHandles
+				gradient={edit.masks[i].gradient!}
+				shown={proxySize(tick)!}
+				toScreen={(p) => sourceToScreen(p, tick)}
+				toSource={(x, y) => screenToSource({ x: x * devicePixelRatio, y: y * devicePixelRatio })}
+				onchange={(g) => { setMask(i, { gradient: g }); schedule(true); }}
+				oncommit={committed}
+			/>
 		{/if}
 		{#if brushCursor && painting}
 			<div class="pointer-events-none absolute rounded-full border border-white/80 shadow-[0_0_0_1px_rgba(0,0,0,0.5)]" style="left: {brushCursor.x - brushCursor.r}px; top: {brushCursor.y - brushCursor.r}px; width: {brushCursor.r * 2}px; height: {brushCursor.r * 2}px;"></div>
