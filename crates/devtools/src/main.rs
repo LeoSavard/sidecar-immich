@@ -52,6 +52,8 @@ fn main() -> Result<()> {
         ),
         ["radial", list] => radial(list.as_ref()),
         ["levels", input] => levels(input.as_ref()),
+        ["denoise-truth", clean, noisy] => denoise_truth(clean.as_ref(), noisy.as_ref()),
+        ["noise", files @ ..] if !files.is_empty() => noise(files),
         ["linear-dng", input, out, rest @ ..] => {
             let input: &std::path::Path = input.as_ref();
             let edge: u32 = rest.first().map_or(Ok(1600), |v| v.parse())?;
@@ -797,6 +799,241 @@ fn camera_jpeg(list: &std::path::Path) -> Result<()> {
 /// brightest sample the old heuristics keyed off (D6/D7 in docs/research/pipeline-review-2026-10.md). On a
 /// frame with blown highlights the two should agree; where they don't, the histogram is the one that
 /// survives a stuck pixel.
+/// `noise <raw>…`: each file's measured noise model (`sidecar_engine::noise`) on its full-resolution
+/// demosaic, with the ratio read/gain that decides how far the fixed transform's assumption is from it
+/// (the fixed transform is the model with read/gain = 0.0005 at gain 1), and the level bins it was fitted to.
+fn noise(files: &[&str]) -> Result<()> {
+    let gpu = sidecar_engine::Gpu::new_headless()?;
+    let ingest = sidecar_engine::Ingest::new(&gpu)?;
+    let detail = sidecar_engine::detail::Detail::new(&gpu)?;
+    for f in files {
+        let path: &std::path::Path = f.as_ref();
+        let raw = match sidecar_raw::RawFile::open(path) {
+            Ok(r) => r,
+            Err(e) => {
+                println!("{f}: {e}");
+                continue;
+            }
+        };
+        let info = raw.info();
+        let Ok(m) = raw.mosaic() else {
+            println!("{f}: not a mosaic");
+            continue;
+        };
+        let mul = info.color.as_shot_mul;
+        let input = sidecar_engine::MosaicInput {
+            width: m.width,
+            height: m.height,
+            data: &m.data,
+            black: m.black,
+            white: m.white,
+            pattern: m.pattern,
+            period: m.period,
+        };
+        let tex = ingest.demosaic(&gpu, &input, [mul[0] as f32, 1.0, mul[2] as f32], true)?;
+        let side = 1024u32.min(tex.width()).min(tex.height());
+        let crop = detail.crop(
+            &gpu,
+            &tex,
+            (tex.width() - side) / 2,
+            (tex.height() - side) / 2,
+            side,
+            side,
+        );
+        let lum: Vec<f32> = sidecar_engine::read_rgba16(&gpu, &crop)?
+            .data
+            .chunks(4)
+            .map(|p| (p[0] + p[1] + p[2]) / 3.0)
+            .collect();
+        match sidecar_engine::noise::estimate(&lum, side as usize, side as usize) {
+            Some((model, bins)) => {
+                println!(
+                    "{f}: {} {} ISO {} · σ² = {:.3e}·y + {:.3e} · read/gain {:.2e} · {} bins",
+                    info.make,
+                    info.model,
+                    info.iso,
+                    model.gain,
+                    model.read,
+                    model.read / model.gain.max(1e-12),
+                    bins.len()
+                );
+                for b in bins {
+                    println!(
+                        "    level {:.5}  σ {:.5}  (model {:.5})  n {}",
+                        b.level,
+                        b.sigma,
+                        model.sigma(b.level),
+                        b.count
+                    );
+                }
+            }
+            None => println!(
+                "{f}: {} {} · too few flat levels to fit",
+                info.make, info.model
+            ),
+        }
+    }
+    Ok(())
+}
+
+/// `denoise-truth <clean raw> <noisy raw>`: how well each stabilization denoises, against ground truth. The
+/// noisy frame's noise model is measured (`sidecar_engine::noise`), that noise is added synthetically to a
+/// central 1024² crop of the clean frame — Poisson-Gaussian, per channel, so its luminance has exactly the
+/// measured model — and the result is denoised under the fixed transform and under the model, across the
+/// strength range. Printed per brightness band: the luminance error against the clean crop, relative to the
+/// band's level. The two frames should come from the same camera, so the noise is that sensor's own.
+fn denoise_truth(clean: &std::path::Path, noisy: &std::path::Path) -> Result<()> {
+    use sidecar_engine::noise::{NoiseModel, Synth};
+    let gpu = sidecar_engine::Gpu::new_headless()?;
+    let ingest = sidecar_engine::Ingest::new(&gpu)?;
+    let detail = sidecar_engine::detail::Detail::new(&gpu)?;
+    let full = |path: &std::path::Path| -> Result<(_, String)> {
+        let raw = sidecar_raw::RawFile::open(path)?;
+        let info = raw.info();
+        let m = raw.mosaic()?;
+        let mul = info.color.as_shot_mul;
+        let input = sidecar_engine::MosaicInput {
+            width: m.width,
+            height: m.height,
+            data: &m.data,
+            black: m.black,
+            white: m.white,
+            pattern: m.pattern,
+            period: m.period,
+        };
+        let tex = ingest.demosaic(&gpu, &input, [mul[0] as f32, 1.0, mul[2] as f32], true)?;
+        Ok((tex, format!("{} {}", info.make, info.model)))
+    };
+    let (noisy_tex, noisy_cam) = full(noisy)?;
+    let measured = detail.noise(&gpu, &noisy_tex)?;
+    let Some((model, _)) = measured.model else {
+        bail!("{}: no noise model could be measured", noisy.display());
+    };
+    let (clean_tex, clean_cam) = full(clean)?;
+    let side = 1024u32.min(clean_tex.width()).min(clean_tex.height());
+    let crop = detail.crop(
+        &gpu,
+        &clean_tex,
+        (clean_tex.width() - side) / 2,
+        (clean_tex.height() - side) / 2,
+        side,
+        side,
+    );
+    let truth = sidecar_engine::read_rgba16(&gpu, &crop)?;
+    println!(
+        "noise from {noisy_cam} ({}): σ² = {:.3e}·y + {:.3e} on luminance · onto {side}² of {clean_cam} ({})",
+        noisy.display(),
+        model.gain,
+        model.read,
+        clean.display()
+    );
+    // Per channel, three times the luminance's variance: the mean of three independent channels then has the
+    // measured model exactly.
+    let channel = NoiseModel {
+        gain: 3.0 * model.gain,
+        read: 3.0 * model.read,
+    };
+    let mut synth = Synth::new(1);
+    let mut noisy_img = truth.clone();
+    for (i, v) in noisy_img.data.iter_mut().enumerate() {
+        if i % 4 != 3 {
+            *v = synth.observe(&channel, *v);
+        }
+    }
+    let tex = sidecar_engine::upload_rgba16(&gpu, &noisy_img);
+    let noise = detail.noise(&gpu, &tex)?;
+    const EDGES: [f32; 7] = [
+        0.0,
+        1.0 / 256.0,
+        1.0 / 64.0,
+        1.0 / 16.0,
+        0.25,
+        1.0,
+        f32::MAX,
+    ];
+    let lum = |p: &[f32]| (p[0] + p[1] + p[2]) / 3.0;
+    let errors = |img: &sidecar_engine::RgbaF32| -> Vec<f64> {
+        let mut acc = vec![(0f64, 0f64, 0usize); EDGES.len() - 1];
+        for (t, g) in truth.data.chunks(4).zip(img.data.chunks(4)) {
+            if t[3] > 0.0 {
+                continue;
+            }
+            let l = lum(t);
+            let b = EDGES
+                .windows(2)
+                .position(|e| l >= e[0] && l < e[1])
+                .unwrap_or(0);
+            let d = (lum(g) - l) as f64;
+            acc[b].0 += d * d;
+            acc[b].1 += l as f64;
+            acc[b].2 += 1;
+        }
+        acc.iter()
+            .map(|&(se, sum, n)| {
+                if n < 200 {
+                    f64::NAN
+                } else {
+                    100.0 * (se / n as f64).sqrt() / (sum / n as f64)
+                }
+            })
+            .collect()
+    };
+    let header: Vec<String> = EDGES
+        .windows(2)
+        .map(|e| {
+            if e[1] == f32::MAX {
+                format!(">{:.3}", e[0])
+            } else {
+                format!("<{:.4}", e[1])
+            }
+        })
+        .collect();
+    println!("luminance error, % of the band's level, by clean luminance band:");
+    println!(
+        "{:<18}{}",
+        "",
+        header.iter().map(|h| format!("{h:>9}")).collect::<String>()
+    );
+    let row = |name: &str, e: &[f64]| {
+        println!(
+            "{name:<18}{}",
+            e.iter()
+                .map(|v| if v.is_nan() {
+                    format!("{:>9}", "-")
+                } else {
+                    format!("{v:>9.1}")
+                })
+                .collect::<String>()
+        )
+    };
+    row("noisy", &errors(&noisy_img));
+    let mut best = [(f64::MAX, 0.0), (f64::MAX, 0.0)];
+    for strength in [20.0f32, 40.0, 60.0, 80.0, 100.0] {
+        for (k, model_on) in [false, true].into_iter().enumerate() {
+            let stab = noise.stabilization(model_on);
+            let out = sidecar_engine::read_rgba16(
+                &gpu,
+                &detail.denoise(&gpu, &tex, &stab, strength, strength),
+            )?;
+            let e = errors(&out);
+            let mean: f64 = e.iter().filter(|v| v.is_finite()).sum::<f64>()
+                / e.iter().filter(|v| v.is_finite()).count().max(1) as f64;
+            if mean < best[k].0 {
+                best[k] = (mean, strength as f64);
+            }
+            row(
+                &format!("{} {strength:.0}", if model_on { "model" } else { "fixed" }),
+                &e,
+            );
+        }
+    }
+    println!(
+        "best mean over bands: fixed {:.1} % at {:.0}, model {:.1} % at {:.0}",
+        best[0].0, best[0].1, best[1].0, best[1].1
+    );
+    Ok(())
+}
+
 fn levels(input: &std::path::Path) -> Result<()> {
     use sidecar_raw::levels::TopOfRange;
     let raw = sidecar_raw::RawFile::open(input)?;
