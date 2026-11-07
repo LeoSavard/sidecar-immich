@@ -12,6 +12,8 @@
 	import { ColorPacker, type SlideProfile } from '$lib/color/pack';
 	import { cachedProfile, loadProfile } from '$lib/film';
 	import { cachedTable, loadTable } from '$lib/luts';
+	import { cachedTable as cachedProof, loadTable as loadProof, type ProofOptions } from '$lib/proofs';
+	import ProofControls from '$lib/ui/ProofControls.svelte';
 	import { api } from '$lib/api';
 	import type { Reading } from '$lib/measure';
 	import { saveSettings, settings, SPACE_LABELS } from '$lib/settings';
@@ -116,6 +118,25 @@
 	let clipHigh = $state(false);
 	let clipLow = $state(false);
 	let peaking = $state(false);
+	/** Soft proofing, a view of the picture and not part of the edit: on or off, and its options, remembered per browser. */
+	let proofOn = $state(false);
+	let proof = $state<ProofOptions | null>(readProof());
+	function readProof(): ProofOptions | null {
+		try {
+			return JSON.parse(localStorage.getItem('sidecar.proof') ?? 'null');
+		} catch {
+			return null;
+		}
+	}
+	function setProof(next: ProofOptions | null) {
+		proof = next;
+		try {
+			localStorage.setItem('sidecar.proof', JSON.stringify(next));
+		} catch {
+			// A private window: the choice lasts the page.
+		}
+		schedule(true);
+	}
 	let before = $state(false);
 	let section = $state<Section>('light');
 	let showPhoneHistogram = $state(true);
@@ -364,6 +385,15 @@
 		return t && uniform ? { uniform, size: t.header.size, rgba: t.rgba } : null;
 	}
 
+	/** The soft proof for the develop pass, once its table is here; until then, and when off, none. */
+	function proofFor() {
+		const o = proof;
+		if (!proofOn || !o?.id) return null;
+		loadProof(o, display, () => schedule(true));
+		const t = cachedProof(o, display);
+		return t ? { uniform: packer.packProof(display, t.header, o.warn), size: t.header.size, rgba: t.rgba } : null;
+	}
+
 	function draw() {
 		frame = 0;
 		if (!edit || !meta) return;
@@ -394,6 +424,7 @@
 			develop.setProfile(packed.profile);
 			develop.setDefringe(packed.defringe);
 			develop.setLook(lookFor((before ? compareEdit() : edit).lut));
+			develop.setProof(proofFor());
 			develop.setToneLut(packed.lut);
 			develop.setMono(packed.monoLut);
 			develop.setSlide(packed.slideExposure, slideProfile?.response ?? NO_TABLE);
@@ -2327,6 +2358,8 @@
 				<!-- Beside Focus, because checking detail is something one does at any time, not only while sharpening
 				     (the October interface review, item 8). Detail keeps its own loupe. -->
 				<button type="button" aria-pressed={loupeOver} class="rounded-full px-2.5 py-1 text-[0.6875rem] {loupeOver ? 'bg-fg text-ground' : 'bg-ground/80 text-fg-2'}" onclick={() => (loupeOver = !loupeOver)}>Loupe</button>
+				<button type="button" aria-pressed={proofOn} class="rounded-full px-2.5 py-1 text-[0.6875rem] {proofOn ? 'bg-fg text-ground' : 'bg-ground/80 text-fg-2'}" onclick={() => { proofOn = !proofOn; schedule(true); }}>Proof</button>
+				{#if proofOn}<ProofControls value={proof} onchange={setProof} />{/if}
 				{#if cameraOffered}
 					<button type="button" aria-pressed={showCamera} class="rounded-full px-2.5 py-1 text-[0.6875rem] {showCamera ? 'bg-fg text-ground' : 'bg-ground/80 text-fg-2'}" onclick={() => (showCamera = !showCamera)}>Camera</button>
 				{/if}
@@ -2482,11 +2515,12 @@
 					</div>
 				</details>
 				{/if}
-				<div class="mt-1 flex items-center justify-between gap-2 text-[0.6875rem]">
-					<div class="flex items-center gap-2">
+				<div class="mt-1 flex flex-wrap items-center justify-between gap-2 text-[0.6875rem]">
+					<div class="flex flex-wrap items-center gap-2">
 						{#if !fallback}
 						<button type="button" aria-pressed={peaking} class="rounded-full px-2 py-0.5 {peaking ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" onclick={() => { peaking = !peaking; schedule(); }}>Focus peaking</button>
 							<button type="button" aria-pressed={loupeOver} class="rounded-full px-2 py-0.5 {loupeOver ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" title="The detail at full resolution, over the photo (Z opens Detail's own)" onclick={() => (loupeOver = !loupeOver)}>Loupe</button>
+							<button type="button" aria-pressed={proofOn} class="rounded-full px-2 py-0.5 {proofOn ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" title="Soft proof: how the photo will look printed through a printer profile, and what the print can't hold" onclick={() => { proofOn = !proofOn; schedule(true); }}>Proof</button>
 							{#if cameraOffered}
 								<button type="button" aria-pressed={showCamera} class="rounded-full px-2 py-0.5 {showCamera ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" title="The camera's own rendering beside the edit" onclick={() => (showCamera = !showCamera)}>Camera</button>
 							{/if}
@@ -2503,6 +2537,7 @@
 						{/each}
 					</div>
 				</div>
+				{#if proofOn && !fallback}<div class="mt-1"><ProofControls value={proof} onchange={setProof} /></div>{/if}
 			</div>
 
 			{:else}

@@ -186,7 +186,8 @@ pub struct LookParams {
     /// (0 the sRGB curve, 1 γ 2.4).
     pub domain_min: [f32; 4],
     pub domain_max: [f32; 4],
-    /// x: the table's size on a side; y, z, w unused.
+    /// x: the table's size on a side; y: 1 to paint the colours the table's alpha marks (a soft proof's gamut
+    /// warning) mid grey; z, w unused.
     pub size: [f32; 4],
 }
 
@@ -249,6 +250,23 @@ pub fn srgb_decode(v: f32) -> f32 {
     } else {
         ((v + 0.055) / 1.055).powf(2.4)
     }
+}
+
+/// A soft proof's uniform (DESIGN.md §15, "Soft proofing"): the proof's table maps the display's own encoded
+/// colour to itself, whole, with the gamut warning painted where its alpha says when `warn`.
+pub fn proof_uniform(display: DisplaySpace, header: &CubeHeader, warn: bool) -> Vec<u8> {
+    let look = LookLut {
+        space: match display {
+            DisplaySpace::Srgb => LutSpace::Srgb,
+            DisplaySpace::DisplayP3 => LutSpace::DisplayP3,
+        },
+        amount: 100.0,
+        ..Default::default()
+    };
+    let bytes = look.uniform(display, header).expect("a whole amount");
+    let mut u: LookParams = bytemuck::pod_read_unaligned(&bytes);
+    u.size[1] = if warn { 1.0 } else { 0.0 };
+    bytemuck::bytes_of(&u).to_vec()
 }
 
 /// The same LUT the pass applies, on the CPU: tetrahedral interpolation (Kasson, Nin, Plouffe and Hafner,

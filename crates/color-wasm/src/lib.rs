@@ -469,6 +469,28 @@ pub unsafe extern "C" fn sc_pack_look(ptr: *const u8, len: usize) -> *const u8 {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProofRequest {
+    display: DisplaySpace,
+    header: sidecar_color::lut::CubeHeader,
+    warn: bool,
+}
+
+/// `{ display, header, warn }` → a soft proof's uniform for the LUT pass (`lut::proof_uniform`, 128 bytes).
+///
+/// # Safety
+/// `ptr` must point to `len` readable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sc_pack_proof(ptr: *const u8, len: usize) -> *const u8 {
+    let input = unsafe { std::slice::from_raw_parts(ptr, len) };
+    respond(
+        serde_json::from_slice::<ProofRequest>(input)
+            .map_err(|e| e.to_string())
+            .map(|req| sidecar_color::lut::proof_uniform(req.display, &req.header, req.warn)),
+    )
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct EdgeRequest {
     edge: sidecar_color::params::MaskEdge,
     size: [u32; 2],

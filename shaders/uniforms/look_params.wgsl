@@ -10,6 +10,7 @@ struct LookParams {
   // (0 the sRGB curve, 1 γ 2.4).
   domain_min: vec4f,
   domain_max: vec4f,
-  // x: the table's size on a side; y, z, w unused.
+  // x: the table's size on a side; y: 1 to paint the colours the table's alpha marks (a soft proof's gamut
+  // warning) mid grey; z, w unused.
   size: vec4f,
 }

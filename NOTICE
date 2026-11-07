@@ -28,6 +28,8 @@ THIRD_PARTY_NOTICES.md, which ships in the Docker image at /usr/share/doc/sideca
   Sidecar runs a HEIF decoder as a separate program. The published image ships none.
 - mozjpeg and libjpeg-turbo — this software is based in part on the work of the Independent JPEG Group.
 - Compact-ICC-Profiles — Clinton Ingram (CC0-1.0).
+- LittleCMS — Marti Maria Saguer (MIT), compiled in through lcms2-sys and lcms2 (Kornel Lesiński, MIT): soft
+  proofing through printer profiles.
 - Free blue-noise textures — Christoph Peters (CC0-1.0).
 - wgpu and naga — the wgpu contributors (MIT OR Apache-2.0).
 - ts-rs — Aleph Alpha GmbH and contributors (MIT): generates the web app's TypeScript for the edit types.

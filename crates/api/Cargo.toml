@@ -20,6 +20,10 @@ reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"
+# LittleCMS (MIT), for soft proofing: the reference CMS, with intents, black point compensation and a gamut check.
+lcms2 = "6"
+# Its vendored C sources, always: a system liblcms2 found by pkg-config would be a library the runtime image lacks.
+lcms2-sys = { version = "4", features = ["static"] }
 tokio.workspace = true
 toml.workspace = true
 thiserror.workspace = true

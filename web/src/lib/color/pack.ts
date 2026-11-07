@@ -27,6 +27,7 @@ type Exports = {
 	sc_camera_color(ptr: number, len: number): number;
 	sc_pack_depth(ptr: number, len: number): number;
 	sc_pack_look(ptr: number, len: number): number;
+	sc_pack_proof(ptr: number, len: number): number;
 	sc_mask_edge(ptr: number, len: number): number;
 	sc_gradient(ptr: number, len: number): number;
 };
@@ -179,6 +180,11 @@ export class ColorPacker {
 		const out = this.framed(this.x.sc_pack_look(ptr, input.length));
 		this.x.sc_free(ptr, input.length);
 		return out.length ? out.slice() : undefined;
+	}
+
+	/** A soft proof's uniform for the LUT pass (`lut::proof_uniform`), with the gamut warning painted when `warn`. */
+	packProof(display: DisplaySpace, header: LutTable['header'], warn: boolean): Uint8Array {
+		return this.call(this.x.sc_pack_proof, { display, header, warn }).slice();
 	}
 
 	/** The temperature and tint under which `neutral`, a camera RGB, is grey: the white balance eyedropper. */
