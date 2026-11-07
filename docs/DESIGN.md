@@ -2333,6 +2333,12 @@ After V1: lens correction, then crop and straighten, then local masks (§15).
 - **Sync across a selection** (home page → Select): the copied look or a preset applied to every photo chosen, each saved through the same `PUT /api/assets/{key}/edit` the editor uses, on top of its own head, so every photo's history shows the change and can step back from it. A photo whose sidecar is read-only or whose folder can't take one is reported, not skipped silently (`batch.ts`). Light keeps each photo's own rendering references (`baselineEv`, `whiteZeroEv`), as the History tool's pick does. Masks re-derive per photo from their names, so a pasted subject mask is that photo's subject.
 - Checked end to end by `web/scripts/presets-smoke.mjs`: copy, paste, a preset saved, applied to a selection of two and in the editor, exported and imported.
 
+**Snapshots.** Named states of one photo's edit, for A/B while editing. A snapshot is a labelled version in the photo's history (`sc:History`), which already keeps every version and never folds a labelled one into a later checkpoint or prunes it — so snapshots are in the sidecar, travel with the photo, and need nothing new on the server. History → Take snapshot saves the edit now and names the version that leaves current (`EditSession.snapshot`); each snapshot can be opened again or set beside the edit.
+
+- **Split view** (Split beside Loupe, or a snapshot's *Side by side*): the compared version — as shot until one is chosen — left of a line, the edit right of it, framed alike by the edit's crop so the two meet. The compared side is developed into a texture of its own (`DevelopPass.renderInto`) only when what it shows changes; the view pass draws the two with scissor rectangles either side of a hairline (`ViewPass.render`'s `split`). The line drags, and moves with the arrow keys. The camera's pane and the split both take half the canvas, so turning one on turns the other off.
+- Checked by `web/scripts/snapshots-smoke.mjs`: two snapshots at ±1 EV, each band of the split matched against renders of each, before and after the line is dragged.
+- Virtual copies — a second entry sharing one RAW — are the other half of this item and come separately.
+
 **Masks.**
 
 - Weights: gradients (still to come) are analytic in the shader. Brush strokes — normalized points, radius, feather, flow — are rasterized by shared WGSL render passes into `r8unorm` masks, at proxy size on the phone and up to 4,096 px on the server (see the build log).

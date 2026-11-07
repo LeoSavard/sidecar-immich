@@ -646,6 +646,12 @@ export class DevelopPass {
 		this.draw(this.target, this.maskBind);
 	}
 
+	/** Develop into `target` (a `variantTarget`) instead of the output: the split view's compared version. */
+	renderInto(target: GPUTexture) {
+		this.maskBind ??= this.maskGroup(this.maskUbo, this.maskTextures);
+		this.draw(target, this.maskBind);
+	}
+
 	/** A texture of the developed picture's size and format, for `renderVariant`. */
 	variantTarget(label: string): GPUTexture {
 		const t = this.target!;

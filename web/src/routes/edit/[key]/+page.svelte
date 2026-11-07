@@ -29,6 +29,7 @@
 	import GradientHandles from '$lib/ui/GradientHandles.svelte';
 	import GradingSection from '$lib/ui/sections/GradingSection.svelte';
 	import LensSection from '$lib/ui/sections/LensSection.svelte';
+	import SnapshotsBar from '$lib/ui/SnapshotsBar.svelte';
 	import CropSection from '$lib/ui/sections/CropSection.svelte';
 	import RetouchSection from '$lib/ui/sections/RetouchSection.svelte';
 	import type { RetouchTool, SpotSettings } from '$lib/ui/sections/section';
@@ -137,6 +138,27 @@
 		schedule(true);
 	}
 	let before = $state(false);
+	/**
+	 * Split view: the compared version (or the photo as shot) left of the line, the edit right of it, framed alike.
+	 * The compared side is developed into a texture of its own, again only when what it shows changes.
+	 */
+	let split = $state(false);
+	let splitAt = $state(0.5);
+	let splitTexture: GPUTexture | undefined;
+	let splitShows = '';
+	/** The camera's pane and the split both take the canvas's other half, so one turns the other off. */
+	function setSplit(on: boolean) {
+		split = on;
+		if (on) showCamera = false;
+		schedule(true);
+	}
+	function dragSplit(e: PointerEvent) {
+		if (e.type === 'pointerdown') (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+		else if (!(e.currentTarget as HTMLElement).hasPointerCapture(e.pointerId)) return;
+		const r = canvas.getBoundingClientRect();
+		splitAt = Math.min(Math.max((e.clientX - r.left) / r.width, 0.02), 0.98);
+		schedule();
+	}
 	let section = $state<Section>('light');
 	let showPhoneHistogram = $state(true);
 	/** The keyboard shortcuts, listed over the editor (`?`). */
@@ -393,6 +415,32 @@
 		return t ? { uniform: packer.packProof(display, t.header, o.warn), size: t.header.size, rgba: t.rgba } : null;
 	}
 
+	/** Develop what is shown — the edit, or the compared version while `before` — into the output or `into`. */
+	function developShown(into?: GPUTexture) {
+		const shown = before ? compareEdit() : edit!;
+		// The spots first: they change the proxy every pass after reads.
+		const m = cameraColor().asShotMul;
+		if (develop.setSpots($state.snapshot(shown.spots ?? []), [m[0], m[1], m[2]])) {
+			lensMadeFrom = '';
+			depthMadeFrom = undefined;
+			refinedFrom = undefined;
+		}
+		correctLens();
+		depthEffects();
+		const packed = repack();
+		develop.setUniforms(packed.uniform);
+		develop.setProfile(packed.profile);
+		develop.setDefringe(packed.defringe);
+		develop.setLook(lookFor(shown.lut));
+		develop.setProof(proofFor());
+		develop.setToneLut(packed.lut);
+		develop.setMono(packed.monoLut);
+		develop.setSlide(packed.slideExposure, slideProfile?.response ?? NO_TABLE);
+		develop.setMasks(packed.masks, (shown.masks ?? []).map((m, i) => layerTexture(i, m)), packed.maskCurves);
+		if (into) develop.renderInto(into);
+		else develop.render();
+	}
+
 	function draw() {
 		frame = 0;
 		if (!edit || !meta) return;
@@ -407,28 +455,19 @@
 		}
 		if (!develop?.output) return;
 		if (stroke && preview) drawStroke();
+		// The split's compared side, developed as the flip to it would be, into its own texture.
+		const splitKey = split && !before ? `${compare?.id ?? 'as shot'}|${display}|${develop.proxy?.label}|${develop.proxy?.width}` : '';
+		if (splitKey && (splitKey !== splitShows || !splitTexture)) {
+			splitTexture?.destroy();
+			splitTexture = develop.variantTarget('split, compared');
+			before = true;
+			developShown(splitTexture);
+			before = false;
+			splitShows = splitKey;
+			developDirty = true;
+		}
 		if (developDirty) {
-			// The spots first: they change the proxy every pass after reads.
-			const shownSpots = $state.snapshot((before ? compareEdit() : edit).spots ?? []);
-			const m = cameraColor().asShotMul;
-			if (develop.setSpots(shownSpots, [m[0], m[1], m[2]])) {
-				lensMadeFrom = '';
-				depthMadeFrom = undefined;
-				refinedFrom = undefined;
-			}
-			correctLens();
-			depthEffects();
-			const packed = repack();
-			develop.setUniforms(packed.uniform);
-			develop.setProfile(packed.profile);
-			develop.setDefringe(packed.defringe);
-			develop.setLook(lookFor((before ? compareEdit() : edit).lut));
-			develop.setProof(proofFor());
-			develop.setToneLut(packed.lut);
-			develop.setMono(packed.monoLut);
-			develop.setSlide(packed.slideExposure, slideProfile?.response ?? NO_TABLE);
-			develop.setMasks(packed.masks, ((before ? compareEdit() : edit).masks ?? []).map((m, i) => layerTexture(i, m)), packed.maskCurves);
-			develop.render();
+			developShown();
 			developDirty = false;
 			histogramStale = true;
 		}
@@ -448,7 +487,7 @@
 		const maskFlags = overlay ? SHOW_MASK | (showing.invert ? MASK_INVERTED : 0) : 0;
 		const shown = displayFrame();
 		const geometry: ViewGeometry | undefined = shown ? { toPicture: shown.frame.toPicture, size: shown.frame.size } : undefined;
-		view.render(develop.output, canvas, viewport, (clipHigh ? CLIP_HIGHS : 0) | (clipLow ? CLIP_LOWS : 0) | (peaking ? PEAKING : 0) | maskFlags, geometry);
+		view.render(develop.output, canvas, viewport, (clipHigh ? CLIP_HIGHS : 0) | (clipLow ? CLIP_LOWS : 0) | (peaking ? PEAKING : 0) | maskFlags, geometry, split && !before && splitTexture ? { texture: splitTexture, at: splitAt } : undefined);
 		markerPos = cropping ? null : imageToScreen(afPoint());
 		spotMarks = !cropping && (section === 'retouch' || retouchTool !== 'off') ? markSpots() : [];
 		// The zoom readout: device pixels per output pixel, which is what the double tap's 100 % means. 0 at fit,
@@ -2145,6 +2184,7 @@
 {#snippet historySection()}
 	<!-- The look taken elsewhere: copied, pasted, kept as presets (`$lib/ui/LookTools`). -->
 	{#if edit && meta}<LookTools edit={() => $state.snapshot(edit!)} defaults={() => defaults} fileName={meta.fileName} {readOnly} onchange={update} oncommit={committed} />{/if}
+	<SnapshotsBar history={session.versions} {readOnly} ontake={(name) => session.snapshot(name)} onopen={(id) => session.openVersion(id)} onsplit={(id) => { session.setCompare(id); setSplit(true); }} />
 	{#if session.versions}
 		<HistoryPanel history={session.versions} compareId={compare?.id ?? null} busy={session.versionsBusy || session.saving} onopen={(id) => session.openVersion(id)} oncompare={(id) => session.setCompare(id)} onpick={(id, section) => session.pickFrom(id, section)} onlabel={(id, label) => session.labelVersion(id, label)} />
 
@@ -2200,6 +2240,26 @@
 			onpointerleave={() => (brushCursor = null)}
 			oncontextmenu={(e) => e.preventDefault()}
 		></canvas>
+		{#if split && !fallback && !sideBySide}
+			<!-- The split's line, dragged to move it; the arrow keys move it too. -->
+			<div
+				class="absolute inset-y-0 z-10 w-6 -translate-x-1/2 cursor-ew-resize touch-none"
+				style="left: {splitAt * 100}%"
+				role="slider"
+				tabindex="0"
+				aria-label="Split between {compare?.label ?? (developed ? 'as saved' : 'as shot')} and the edit"
+				aria-valuemin={0}
+				aria-valuemax={100}
+				aria-valuenow={Math.round(splitAt * 100)}
+				onpointerdown={dragSplit}
+				onpointermove={dragSplit}
+				onkeydown={(e) => { if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') { splitAt = Math.min(Math.max(splitAt + (e.key === 'ArrowLeft' ? -0.05 : 0.05), 0.02), 0.98); schedule(); e.preventDefault(); } }}
+			>
+				<div class="mx-auto h-full w-0.5 bg-fg/80"></div>
+				<span class="absolute top-2 right-4 rounded bg-ground/80 px-1.5 py-0.5 text-[0.6875rem] whitespace-nowrap text-fg-2">{compare?.label ?? (developed ? 'As saved' : 'As shot')}</span>
+				<span class="absolute top-2 left-4 rounded bg-ground/80 px-1.5 py-0.5 text-[0.6875rem] text-fg-2">Edit</span>
+			</div>
+		{/if}
 		{#if sideBySide}
 			<!-- After the canvas, so the canvas keeps its corner and everything drawn over it keeps its place. -->
 			<!-- The same gestures as the canvas, in the canvas's coordinates: either side zooms and pans both. -->
@@ -2354,8 +2414,9 @@
 				<button type="button" aria-pressed={loupeOver} class="rounded-full px-2.5 py-1 text-[0.6875rem] {loupeOver ? 'bg-fg text-ground' : 'bg-ground/80 text-fg-2'}" onclick={() => (loupeOver = !loupeOver)}>Loupe</button>
 				<button type="button" aria-pressed={proofOn} class="rounded-full px-2.5 py-1 text-[0.6875rem] {proofOn ? 'bg-fg text-ground' : 'bg-ground/80 text-fg-2'}" onclick={() => { proofOn = !proofOn; schedule(true); }}>Proof</button>
 				{#if proofOn}<ProofControls value={proof} onchange={setProof} />{/if}
+				<button type="button" aria-pressed={split} class="rounded-full px-2.5 py-1 text-[0.6875rem] {split ? 'bg-fg text-ground' : 'bg-ground/80 text-fg-2'}" onclick={() => setSplit(!split)}>Split</button>
 				{#if cameraOffered}
-					<button type="button" aria-pressed={showCamera} class="rounded-full px-2.5 py-1 text-[0.6875rem] {showCamera ? 'bg-fg text-ground' : 'bg-ground/80 text-fg-2'}" onclick={() => (showCamera = !showCamera)}>Camera</button>
+					<button type="button" aria-pressed={showCamera} class="rounded-full px-2.5 py-1 text-[0.6875rem] {showCamera ? 'bg-fg text-ground' : 'bg-ground/80 text-fg-2'}" onclick={() => { showCamera = !showCamera; if (showCamera) split = false; schedule(); }}>Camera</button>
 				{/if}
 				{/if}
 				{#if !wide}
@@ -2515,8 +2576,9 @@
 						<button type="button" aria-pressed={peaking} class="rounded-full px-2 py-0.5 {peaking ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" onclick={() => { peaking = !peaking; schedule(); }}>Focus peaking</button>
 							<button type="button" aria-pressed={loupeOver} class="rounded-full px-2 py-0.5 {loupeOver ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" title="The detail at full resolution, over the photo (Z opens Detail's own)" onclick={() => (loupeOver = !loupeOver)}>Loupe</button>
 							<button type="button" aria-pressed={proofOn} class="rounded-full px-2 py-0.5 {proofOn ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" title="Soft proof: how the photo will look printed through a printer profile, and what the print can't hold" onclick={() => { proofOn = !proofOn; schedule(true); }}>Proof</button>
+							<button type="button" aria-pressed={split} class="rounded-full px-2 py-0.5 {split ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" title="The compared version — as shot until you choose one in History — left of a line you can drag, the edit right of it" onclick={() => setSplit(!split)}>Split</button>
 							{#if cameraOffered}
-								<button type="button" aria-pressed={showCamera} class="rounded-full px-2 py-0.5 {showCamera ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" title="The camera's own rendering beside the edit" onclick={() => (showCamera = !showCamera)}>Camera</button>
+								<button type="button" aria-pressed={showCamera} class="rounded-full px-2 py-0.5 {showCamera ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" title="The camera's own rendering beside the edit" onclick={() => { showCamera = !showCamera; if (showCamera) split = false; schedule(); }}>Camera</button>
 							{/if}
 						{#if meta?.info.afPoint}
 							<button type="button" aria-pressed={showAfPoint} class="rounded-full px-2 py-0.5 {showAfPoint ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" onclick={() => (showAfPoint = !showAfPoint)}>AF point</button>

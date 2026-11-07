@@ -256,6 +256,19 @@ export class EditSession {
 		}
 	}
 
+	/**
+	 * A snapshot: the edit saved now, and the version that leaves current named `name`. A named version is never
+	 * folded into a later checkpoint or pruned, so it stays to come back to and to compare against. False when
+	 * the save failed (the error is already shown).
+	 */
+	async snapshot(name: string): Promise<boolean> {
+		if (this.readOnly) return false;
+		await this.commit();
+		if (this.dirty) return false;
+		await this.labelVersion(this.head, name);
+		return true;
+	}
+
 	setCompare(id: string | null) {
 		const n = id ? this.versions?.nodes.find((v) => v.id === id) : undefined;
 		this.compare = n ? { id: n.id, label: n.label ?? (n.kind === 'original' ? 'Original' : 'Compared version'), edit: n.edit } : null;
