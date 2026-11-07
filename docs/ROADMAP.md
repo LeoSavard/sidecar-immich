@@ -610,6 +610,11 @@ remapping buys clarity, texture, local contrast, shadow/highlight recovery and t
 guided filter buys dehaze refinement, mask feathering and better depth upsampling. Everything below is
 implementable from published papers — none of it requires reading GPL code.
 
+**The guided filter — the primitive is built** (2026-11-06, `sidecar_engine::guided`, `client/guided_*.wgsl`):
+the fast subsampled form, linear or log₂ luminance guide, checked against an f64 implementation of the paper.
+Its users come next — dehaze, the sky mask, mask edges. The depth refinement stays joint bilateral until an
+A/B on real edges says otherwise; its own comment explains why that was chosen. The original entry:
+
 **The guided filter** (He, Sun and Tang, ECCV 2010 / TPAMI 2013) is the highest-leverage single item in the
 survey: four box filters over I, p, I·p and I², then per-pixel algebra, in linear time regardless of kernel
 size, which is an ideal WGSL shape. It is edge-preserving with better behaviour near edges than the
