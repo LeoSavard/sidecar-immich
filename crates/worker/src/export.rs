@@ -423,6 +423,7 @@ pub fn masks_for<'a>(
         density: None,
         local: None,
         haze: None,
+        profile: packed.profile.as_ref(),
         slide_exposure: &packed.slide_exposure,
         slide_response,
     }

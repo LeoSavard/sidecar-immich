@@ -54,6 +54,8 @@ export type HistoryState = { head: string; nodes: HistoryNode[] };
 export type CameraColor = {
 	asShotMul: [number, number, number];
 	calibrations: { temperatureK: number; xyzToCamera: number[][] }[];
+	/** The camera profile the file carries (`sidecar_color::dcp::Profile`); only its name is read here. */
+	profile?: { name: string } | null;
 };
 
 export type Meta = {

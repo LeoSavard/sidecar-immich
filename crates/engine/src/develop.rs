@@ -33,6 +33,8 @@ pub struct DevelopPass {
     no_maps: wgpu::Texture,
     /// Dehaze's passes (`crate::haze`).
     haze: crate::haze::Haze,
+    /// The camera profile pass (`client/profile.wgsl`).
+    profile: Kernel,
 }
 
 /// What one develop takes beside its uniform and tone curve: the masks' uniforms, a texture per layer in the
@@ -51,6 +53,9 @@ pub struct Masks<'a> {
     pub local: Option<&'a wgpu::Texture>,
     /// Dehaze's map and airlight over the whole frame (`DevelopPass::haze_map`); the same rule.
     pub haze: Option<(&'a wgpu::Texture, &'a wgpu::Texture)>,
+    /// The camera profile pass (`Packed::profile`), run over the source first: per pixel, so a tile needs nothing
+    /// of the whole frame for it.
+    pub profile: Option<&'a sidecar_color::params::ProfilePass>,
     /// A spectral colour stock's two tables (`Packed::slide_exposure` and the stock profile's response table);
     /// both empty unless one is being rendered.
     pub slide_exposure: &'a [f32],
@@ -67,6 +72,7 @@ impl Masks<'_> {
             density: None,
             local: None,
             haze: None,
+            profile: None,
             slide_exposure: &[],
             slide_response: &[],
         }
@@ -401,6 +407,17 @@ impl DevelopPass {
             wgpu::util::TextureDataOrder::LayerMajor,
             bytemuck::cast_slice(&[0.0f32; 4 * MAP_LAYERS as usize]),
         );
+        let profile = Kernel::new(
+            gpu,
+            "client/profile.wgsl",
+            &[
+                B::Uniform,
+                B::Tex,
+                B::Tex3,
+                B::Tex3,
+                B::Store(wgpu::TextureFormat::Rgba16Float),
+            ],
+        )?;
         Ok(Self {
             pipeline,
             layout,
@@ -414,6 +431,7 @@ impl DevelopPass {
             local_pack,
             no_maps,
             haze: crate::haze::Haze::new(gpu)?,
+            profile,
         })
     }
 
@@ -614,6 +632,66 @@ impl DevelopPass {
         Some(array)
     }
 
+    /// `src` through the camera profile pass: its HueSatMap and LookTable, as a new texture.
+    pub fn apply_profile(
+        &self,
+        gpu: &Gpu,
+        src: &wgpu::Texture,
+        p: &sidecar_color::params::ProfilePass,
+    ) -> wgpu::Texture {
+        let u: &sidecar_color::params::ProfileParams = bytemuck::from_bytes(&p.uniform);
+        // A table as a 3D texture: saturation across, hue down, value deep; a single zero texel when absent.
+        let table = |dims: [u32; 4], data: &[f32]| {
+            let (size, data) =
+                if dims[0] > 0 && data.len() == (dims[0] * dims[1] * dims[2] * 4) as usize {
+                    ([dims[1], dims[0], dims[2]], data)
+                } else {
+                    ([1, 1, 1], &[0.0f32; 4][..])
+                };
+            gpu.device.create_texture_with_data(
+                &gpu.queue,
+                &wgpu::TextureDescriptor {
+                    label: Some("profile table"),
+                    size: wgpu::Extent3d {
+                        width: size[0],
+                        height: size[1],
+                        depth_or_array_layers: size[2],
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D3,
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                },
+                wgpu::util::TextureDataOrder::LayerMajor,
+                bytemuck::cast_slice(data),
+            )
+        };
+        let (hs, lt) = (table(u.hue_sat, &p.hue_sat), table(u.look, &p.look));
+        let out = texture(
+            gpu,
+            src.width(),
+            src.height(),
+            wgpu::TextureFormat::Rgba16Float,
+        );
+        let mut enc = gpu.device.create_command_encoder(&Default::default());
+        self.profile.run(
+            gpu,
+            &mut enc,
+            u,
+            [src.width(), src.height()],
+            &[
+                Res::View(&view(src)),
+                Res::View(&view(&hs)),
+                Res::View(&view(&lt)),
+                Res::View(&view(&out)),
+            ],
+        );
+        gpu.queue.submit([enc.finish()]);
+        out
+    }
+
     /// Develop a source texture into a new RGBA16F texture (display-linear).
     pub fn render(
         &self,
@@ -630,6 +708,9 @@ impl DevelopPass {
                 uniform.len()
             );
         }
+        // The camera profile first: develop reads the profiled source, as the browser's does.
+        let profiled = masks.profile.map(|p| self.apply_profile(gpu, src_tex, p));
+        let src_tex = profiled.as_ref().unwrap_or(src_tex);
         // The whole frame makes its own adjacency map; a tile without one goes without its edges.
         let own_map = match (
             masks.density,
@@ -1311,6 +1392,93 @@ mod tests {
             .map(|x| (at(&tile, x) - at(&whole, 600 + x)).abs())
             .fold(0.0, f32::max);
         assert!(worst < 1e-3, "worst difference {worst}");
+    }
+
+    /// The camera profile pass does what `sidecar_color::dcp::apply` does on the CPU: a table that turns hues 30°
+    /// and halves saturation, through the matrices `pack` makes from a forward matrix, on a few camera colours.
+    #[test]
+    fn the_profile_pass_matches_the_cpu() {
+        use sidecar_color::dcp::{HsvTable, Profile};
+        let Ok(gpu) = crate::test_gpu() else {
+            return eprintln!("skipping: no GPU");
+        };
+        let pass = DevelopPass::new(gpu).unwrap();
+        let dims = [12u32, 6, 1];
+        let table = HsvTable {
+            dims,
+            data: (0..dims[0] * dims[1])
+                .flat_map(|_| [30.0, 0.5, 1.0])
+                .collect(),
+            srgb: false,
+        };
+        let mut camera = sidecar_color::camera::SourceSpace::Srgb.camera_color();
+        camera.as_shot_mul = [2.0, 1.0, 1.5];
+        camera.profile = Some(Box::new(Profile {
+            name: "test".into(),
+            forward: vec![(
+                6504.0,
+                [[0.6, 0.25, 0.11], [0.25, 0.73, 0.02], [0.02, 0.1, 0.70]],
+            )],
+            hue_sat: vec![(6504.0, table.clone())],
+            look: None,
+        }));
+        let edit = sidecar_color::params::EditParams {
+            camera_profile: Some(sidecar_color::params::FILE_PROFILE.into()),
+            ..Default::default()
+        };
+        let packed = sidecar_color::params::pack(
+            &edit,
+            &camera,
+            sidecar_color::SourceKind::Raw,
+            sidecar_color::DisplaySpace::Srgb,
+        );
+        let p = packed.profile.expect("a profile pass");
+        let u: &sidecar_color::params::ProfileParams = bytemuck::from_bytes(&p.uniform);
+        // The last is neutral once white-balanced by [2, 1, 1.5].
+        let colours = [
+            [0.2f32, 0.3, 0.1],
+            [0.05, 0.1, 0.3],
+            [0.3, 0.3, 0.2],
+            [0.05, 0.1, 0.1 / 1.5],
+        ];
+        let src = RgbaF32 {
+            width: 4,
+            height: 1,
+            data: colours
+                .iter()
+                .flat_map(|c| [c[0], c[1], c[2], 0.0])
+                .collect(),
+        };
+        let out = crate::read_rgba16(
+            gpu,
+            &pass.apply_profile(gpu, &crate::upload_rgba16(gpu, &src), &p),
+        )
+        .unwrap();
+        let m = |a: &[[f32; 4]; 3]| -> [[f64; 3]; 3] {
+            std::array::from_fn(|r| std::array::from_fn(|c| a[c][r] as f64))
+        };
+        let (to, from) = (m(&u.to_prophoto), m(&u.from_prophoto));
+        for (i, c) in colours.iter().enumerate() {
+            let w = [0, 1, 2].map(|k| c[k] as f64 * u.wb[k] as f64);
+            let pp = sidecar_color::mat::apply(&to, &w);
+            let back = sidecar_color::mat::apply(&from, &sidecar_color::dcp::apply(&table, pp));
+            let want = [0, 1, 2].map(|k| back[k] / u.wb[k] as f64);
+            for (k, want) in want.iter().enumerate() {
+                let got = out.data[i * 4 + k] as f64;
+                assert!(
+                    (got - want).abs() < 2e-3 * want.abs().max(0.05),
+                    "{c:?}: {got} against {want}"
+                );
+            }
+        }
+        // A neutral stays neutral (no hue to turn, no saturation to halve).
+        let grey = &out.data[12..15];
+        assert!(
+            (grey[0] - 0.05).abs() < 1e-3
+                && (grey[1] - 0.1).abs() < 1e-3
+                && (grey[2] - 0.1 / 1.5).abs() < 1e-3,
+            "{grey:?}"
+        );
     }
 
     /// The develop pass renders a spectral colour stock as `slide::Slide` does on the CPU: the same two tables,

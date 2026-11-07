@@ -198,6 +198,15 @@ pub fn read_extras(path: &Path, info: &mut RawInfo) {
         return;
     };
     info.af_point = af::from_tags(&lens::ungrouped(&tags), info.orientation_flip);
+    // A DNG carries the camera profile it was made with ("Adobe Standard" from Adobe's converter); LibRaw reads its
+    // matrices but not its tables.
+    if info.color.profile.is_none()
+        && path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("dng"))
+    {
+        info.color.profile = linear_dng::profile_in(path).map(Box::new);
+    }
     info.lens_profile = lens::from_tags(&tags, info.sensor_size());
     info.lens_identity = Some(lens::identity(&tags));
 }

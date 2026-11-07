@@ -175,6 +175,7 @@ export function describeChanges(from: EditParams, to: EditParams): string[] {
 	if (s1.length > s0.length) out.push(s1.length - s0.length === 1 ? 'Spot added' : `${s1.length - s0.length} spots added`);
 	else if (s1.length < s0.length) out.push(s0.length - s1.length === 1 ? 'Spot removed' : `${s0.length - s1.length} spots removed`);
 	else if (JSON.stringify(s0) !== JSON.stringify(s1)) out.push('Spots adjusted');
+	if ((from.cameraProfile ?? null) !== (to.cameraProfile ?? null)) out.push(to.cameraProfile ? "The file's camera profile" : 'Camera matrix');
 	return out;
 }
 
@@ -244,7 +245,15 @@ export const PICKS: { id: string; label: string; take: (into: EditParams, from: 
 			else delete e.geometry;
 		}
 	},
-	{ id: 'wb', label: 'White balance', take: (e, f) => (e.whiteBalance = structuredClone(f.whiteBalance)) },
+	{
+		id: 'wb',
+		label: 'White balance',
+		take: (e, f) => {
+			e.whiteBalance = structuredClone(f.whiteBalance);
+			if (f.cameraProfile) e.cameraProfile = f.cameraProfile;
+			else delete e.cameraProfile;
+		}
+	},
 	{
 		id: 'grading',
 		label: 'Colour grading',

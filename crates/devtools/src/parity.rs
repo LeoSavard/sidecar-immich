@@ -41,6 +41,9 @@ struct Case {
     /// before anything else.
     #[serde(default)]
     spots: bool,
+    /// `<name>.profile.bin`, `.profile_hs.f32` and `.profile_lt.f32`: the camera profile pass's uniform and tables.
+    #[serde(default)]
+    profile: bool,
 }
 
 /// Masks for the parity case, at half the image's size so both renderers interpolate them: a soft disc and a
@@ -119,6 +122,53 @@ fn nikon_d850() -> CameraColor {
             ]),
         }],
         baseline_exposure: None,
+        profile: None,
+    }
+}
+
+/// A synthetic camera profile: a forward matrix pair, a HueSatMap that turns hues by an amount that varies round
+/// the circle and with saturation, and a LookTable whose value divisions lift the shadows' saturation.
+fn test_profile() -> sidecar_color::dcp::Profile {
+    use sidecar_color::dcp::{HsvTable, Profile};
+    let table = |dims: [u32; 3], f: &dyn Fn(u32, u32, u32) -> [f32; 3]| HsvTable {
+        dims,
+        data: (0..dims[2])
+            .flat_map(|v| (0..dims[0]).flat_map(move |h| (0..dims[1]).map(move |s| (h, s, v))))
+            .flat_map(|(h, s, v)| f(h, s, v))
+            .collect(),
+        srgb: false,
+    };
+    let fm = |k: f64| {
+        [
+            [0.62 + k, 0.21, 0.13],
+            [0.27, 0.70 - k, 0.03],
+            [0.03, 0.11, 0.68],
+        ]
+    };
+    Profile {
+        name: "Synthetic".into(),
+        forward: vec![(2856.0, fm(0.02)), (6504.0, fm(0.0))],
+        hue_sat: vec![
+            (
+                2856.0,
+                table([24, 8, 1], &|h, s, _| {
+                    [8.0 * (h as f32 * 0.5).sin(), 1.0 + 0.05 * s as f32, 1.0]
+                }),
+            ),
+            (
+                6504.0,
+                table([24, 8, 1], &|h, s, _| {
+                    [6.0 * (h as f32 * 0.5).cos(), 1.0 - 0.03 * s as f32, 1.0]
+                }),
+            ),
+        ],
+        look: Some(table([12, 6, 8], &|_, s, v| {
+            [
+                2.0,
+                1.0 + 0.1 * (7 - v) as f32 / 7.0 * s as f32 / 5.0,
+                1.0 - 0.02 * v as f32,
+            ]
+        })),
     }
 }
 
@@ -132,6 +182,7 @@ fn fujifilm_xt4() -> CameraColor {
             ]),
         }],
         baseline_exposure: None,
+        profile: None,
     }
 }
 
@@ -577,6 +628,24 @@ fn cases() -> Vec<Fixture> {
             None,
         ),
         (
+            // A camera profile from the file: forward matrices, a HueSatMap and a LookTable with value divisions,
+            // run by the profile pass in both renderers.
+            "profile".into(),
+            {
+                let mut c = nikon_d850();
+                c.profile = Some(Box::new(test_profile()));
+                c
+            },
+            SourceKind::Raw,
+            {
+                let mut e = graded.clone();
+                e.camera_profile = Some(sidecar_color::params::FILE_PROFILE.into());
+                e
+            },
+            DisplaySpace::Srgb,
+            None,
+        ),
+        (
             "film-layers".into(),
             nikon_d850(),
             SourceKind::Raw,
@@ -758,6 +827,18 @@ pub fn fixtures(dir: &Path) -> Result<()> {
                 }))?,
             )?;
         }
+        let has_profile = packed.profile.is_some();
+        if let Some(p) = &packed.profile {
+            std::fs::write(dir.join(format!("{name}.profile.bin")), &p.uniform)?;
+            std::fs::write(
+                dir.join(format!("{name}.profile_hs.f32")),
+                bytemuck::cast_slice(&p.hue_sat),
+            )?;
+            std::fs::write(
+                dir.join(format!("{name}.profile_lt.f32")),
+                bytemuck::cast_slice(&p.look),
+            )?;
+        }
         let mono = !packed.mono_lut.is_empty();
         if mono {
             std::fs::write(
@@ -811,6 +892,7 @@ pub fn fixtures(dir: &Path) -> Result<()> {
             mono,
             slide,
             spots,
+            profile: has_profile,
         });
     }
     std::fs::write(dir.join("index.json"), serde_json::to_vec_pretty(&index)?)?;
@@ -864,6 +946,21 @@ pub fn native(dir: &Path, out: &Path) -> Result<()> {
             let params: sidecar_color::lens::LensParams = bytemuck::pod_read_unaligned(&bytes);
             tex = lens_pass.apply(&gpu, &tex, &params, [case.width, case.height]);
         }
+        let profile = case
+            .profile
+            .then(|| -> Result<sidecar_color::params::ProfilePass> {
+                let f32s = |suffix: &str| -> Result<Vec<f32>> {
+                    Ok(bytemuck::pod_collect_to_vec(&std::fs::read(
+                        dir.join(format!("{}.{suffix}", case.name)),
+                    )?))
+                };
+                Ok(sidecar_color::params::ProfilePass {
+                    uniform: std::fs::read(dir.join(format!("{}.profile.bin", case.name)))?,
+                    hue_sat: f32s("profile_hs.f32")?,
+                    look: f32s("profile_lt.f32")?,
+                })
+            })
+            .transpose()?;
         let mut mask_textures = Vec::new();
         for i in 0..case.masks {
             let bytes = std::fs::read(dir.join(format!("{}.mask{i}.u8", case.name)))?;
@@ -910,12 +1007,14 @@ pub fn native(dir: &Path, out: &Path) -> Result<()> {
                 density: None,
                 local: None,
                 haze: None,
+                profile: profile.as_ref(),
                 slide_exposure: &slide_exposure,
                 slide_response: &slide_response,
             }
         } else {
             sidecar_engine::Masks {
                 mono: &mono,
+                profile: profile.as_ref(),
                 slide_exposure: &slide_exposure,
                 slide_response: &slide_response,
                 ..sidecar_engine::Masks::none()

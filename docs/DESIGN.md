@@ -401,6 +401,31 @@ Where the code differs from the text below, the code and these notes win.
     it, drawn on the photo. It changes the canvas at the spot (54) and nowhere else (0.04), and the worker's
     preview likewise (18 against 0.00); removing it leaves no spots in the edit.
 
+- **Camera profiles from the file** (§7, `sidecar_color::dcp`, `EditParams::camera_profile`, `client/profile.wgsl`;
+  White balance → Profile): a DNG carries the profile it was made with ("Adobe Standard" from Adobe's converter),
+  and it is now read and can be rendered — from the DNG specification (1.6, chapter 6), which is public. No
+  profile is shipped.
+  - **Parsing:** `ForwardMatrix1/2`, `ProfileHueSatMapDims/Data1/2/Encoding` and `ProfileLookTableDims/Data/Encoding`,
+    from a DNG's first IFD or a `.dcp` file (`linear_dng::profile_in`; `sidecar-dev profile <file>…`).
+  - **With the file's profile:** develop's matrix comes from the forward matrices (white-balanced camera →
+    XYZ D50, Bradford to D65, normalised as `resolve` does). A pre-pass then applies the HueSatMap and LookTable in
+    linear ProPhoto RGB, as the specification orders them: the HueSatMap before exposure, the LookTable at the file's
+    own BaselineExposure plus the person's exposure. Then it returns to the camera RGB develop expects. It's a
+    pre-pass because develop is at the fragment stage's sixteen textures, and the HueSatMap is a characterisation of
+    the camera. It is the same WGSL in both renderers (inside `DevelopPass`), and `pack` hands both the uniform and
+    the tables, interpolated by the white balance's temperature as the matrices are.
+  - **Not used:** the profile's tone curve is the maker's contrast look, and Sidecar's own tone curve stays in charge.
+  - **Edits:** an edit that doesn't ask renders as before, so there is no `PROCESS_VERSION` bump.
+  Checked:
+  - The pass matches the CPU reference (`dcp::apply`) on GPU colours; an identity table changes nothing and a
+    neutral stays neutral.
+  - Parity case `profile` (forward matrices, a HueSatMap, a LookTable with value divisions): ΔE 0.0000.
+  - Against the files' own Adobe-rendered previews (`sidecar-dev profile-check`), comparing the chroma-weighted
+    hue histograms of the coloured midtones (the preview may be cropped, so not pixel by pixel): Canon EOS M3
+    0.186 → 0.128 with the profile, Nikon D7000 0.195 → 0.185. With the LookTable read at Sidecar's own grey
+    placement instead of the file's baseline, the D7000 went the other way (0.276), which is how the right
+    exposure was settled. An X100F's preview matched neither (0.94), so it isn't a usable reference.
+
 - **D1 and D5 are both closed, neither merged** (pull request #46, closed 2026-10-29). The owner's rule,
   2026-10-27: what is merged and deployed should be what has been tested. Both were written, and neither
   earned its way in.

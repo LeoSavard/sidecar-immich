@@ -39,6 +39,8 @@ fn bad(s: impl Into<String>) -> LinearDngError {
 #[derive(Clone, Debug)]
 struct Field {
     values: Vec<f64>,
+    /// An ASCII field's text (`ProfileName`); empty for numbers.
+    text: String,
 }
 
 struct Tiff<'a> {
@@ -107,12 +109,17 @@ impl<'a> Tiff<'a> {
                     _ => 0.0,
                 }
             };
-            let values = if typ == 2 {
-                Vec::new()
+            let (values, text) = if typ == 2 {
+                let bytes = &self.d[at..at + total];
+                let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+                (
+                    Vec::new(),
+                    String::from_utf8_lossy(&bytes[..end]).into_owned(),
+                )
             } else {
-                (0..count).map(value).collect()
+                ((0..count).map(value).collect(), String::new())
             };
-            tags.insert(tag, Field { values });
+            tags.insert(tag, Field { values, text });
         }
         Some((tags, self.u32(off + 2 + 12 * n)? as usize))
     }
@@ -215,6 +222,74 @@ fn matrix(tags: &Tags, tag: u16) -> Option<[[f64; 3]; 3]> {
     (v.len() >= 9).then(|| [[v[0], v[1], v[2]], [v[3], v[4], v[5]], [v[6], v[7], v[8]]])
 }
 
+/// The camera profile a DNG (or a DCP file's) first IFD carries (`sidecar_color::dcp`): its name, forward
+/// matrices and hue/saturation tables, each with its calibration's temperature. `None` without any of them.
+fn dcp_profile(ifd0: &Tags) -> Option<Box<sidecar_color::dcp::Profile>> {
+    use sidecar_color::dcp::{HsvTable, Profile};
+    let temperature = |tag: u16| {
+        first(ifd0, tag)
+            .and_then(|code| crate::illuminant_temperature(code as u16))
+            .unwrap_or(6504.0)
+    };
+    let mut forward = vec![];
+    for (m, i) in [(50964, 50778), (50965, 50779)] {
+        if let Some(m) = matrix(ifd0, m) {
+            forward.push((temperature(i), m));
+        }
+    }
+    let table = |dims: u16, data: u16, encoding: u16| -> Option<HsvTable> {
+        let d = &ifd0.get(&dims)?.values;
+        let dims = match d.as_slice() {
+            [h, s] => [*h as u32, *s as u32, 1],
+            [h, s, v, ..] => [*h as u32, *s as u32, *v as u32],
+            _ => return None,
+        };
+        let t = HsvTable {
+            dims,
+            data: ifd0.get(&data)?.values.iter().map(|&v| v as f32).collect(),
+            srgb: first(ifd0, encoding) == Some(1.0),
+        };
+        t.is_valid().then_some(t)
+    };
+    let mut hue_sat = vec![];
+    for (data, i) in [(50938, 50778), (50939, 50779)] {
+        if let Some(t) = table(50937, data, 51107) {
+            hue_sat.push((temperature(i), t));
+        }
+    }
+    let look = table(50981, 50982, 51108);
+    if forward.is_empty() && hue_sat.is_empty() && look.is_none() {
+        return None;
+    }
+    Some(Box::new(Profile {
+        name: ifd0
+            .get(&50936)
+            .map(|f| f.text.clone())
+            .filter(|t| !t.is_empty())
+            .unwrap_or_else(|| "Embedded profile".into()),
+        forward,
+        hue_sat,
+        look,
+    }))
+}
+
+/// The camera profile in a DNG or a DCP file, read whole (a profile's tables can sit anywhere in it).
+pub fn profile_in(path: &Path) -> Option<sidecar_color::dcp::Profile> {
+    let d = std::fs::read(path).ok()?;
+    let le = match d.get(0..2)? {
+        b"II" => true,
+        b"MM" => false,
+        _ => return None,
+    };
+    let t = Tiff { d: &d, le };
+    // 42 for a DNG; a DCP file is the same structure with "RC" (0x4352) in its place.
+    if !matches!(t.u16(2)?, 42 | 0x4352) {
+        return None;
+    }
+    let (ifd0, _) = t.ifd(t.u32(4)? as usize)?;
+    dcp_profile(&ifd0).map(|b| *b)
+}
+
 /// The colour model a linear DNG declares: its calibrations and as-shot white. Each calibration is
 /// `AnalogBalance · CameraCalibration · ColorMatrix` (`dng_xyz_to_camera`), which is what makes Apple's ProRAW
 /// read right: it keeps its white balance in `AnalogBalance` and says 1 1 1 in `AsShotNeutral`.
@@ -260,6 +335,7 @@ fn color(ifd0: &Tags) -> CameraColor {
         as_shot_mul,
         calibrations,
         baseline_exposure,
+        profile: dcp_profile(ifd0),
     }
 }
 

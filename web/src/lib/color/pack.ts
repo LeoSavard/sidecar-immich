@@ -42,7 +42,12 @@ export type Packed = {
 	monoLut: Float32Array;
 	/** A spectral colour stock's layer responses over the colour cube; empty unless one is being rendered. */
 	slideExposure: Float32Array;
+	/** The camera profile pass (`DevelopPass.setProfile`), when the edit renders with the file's profile. */
+	profile: ProfilePass | null;
 };
+
+/** `sidecar_color::params::ProfilePass`: the pass's uniform and its HueSatMap and LookTable, four floats an entry. */
+export type ProfilePass = { uniform: Uint8Array; hueSat: Float32Array; look: Float32Array };
 
 /** A spectral colour stock's profile, as `GET /api/film/stocks/{id}` sends it (`slide::SlideProfile`). */
 export type SlideProfile = { offsets: [number, number, number]; scale: number; side: number; response: Float32Array };
@@ -202,6 +207,13 @@ export class ColorPacker {
 		};
 		const monoLut = table();
 		const slideExposure = table();
+		const profileBytes = view.getUint32(at, true);
+		let profile: ProfilePass | null = null;
+		if (profileBytes) {
+			const uniform = out.slice(at + 4, at + 4 + profileBytes);
+			at += 4 + profileBytes;
+			profile = { uniform, hueSat: table(), look: table() };
+		}
 		return {
 			uniform: out.slice(0, U),
 			lut: new Float32Array(out.slice(U, U + lutBytes).buffer),
@@ -210,7 +222,8 @@ export class ColorPacker {
 			masks: out.slice(U + 16 + lutBytes, U + 16 + lutBytes + MASK_UNIFORM_BYTES),
 			maskCurves: new Float32Array(out.slice(U + 16 + lutBytes + MASK_UNIFORM_BYTES, U + 16 + lutBytes + MASK_UNIFORM_BYTES + MAX_MASKS * LUT * 4).buffer),
 			monoLut,
-			slideExposure
+			slideExposure,
+			profile
 		};
 	}
 }
