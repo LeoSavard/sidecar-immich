@@ -1244,6 +1244,12 @@ async fn capabilities(State(app): State<Arc<App>>, ApiUser(_user): ApiUser) -> R
     relay(app.http.get(app.worker("/v1/capabilities")).send().await).await
 }
 
+/// `GET /api/models` — the models Sidecar can run, what each enables, its licence, and whether this server has
+/// it: the worker's list, relayed.
+async fn models(State(app): State<Arc<App>>, ApiUser(_user): ApiUser) -> Response {
+    relay(app.http.get(app.worker("/v1/models")).send().await).await
+}
+
 async fn film_stocks(State(app): State<Arc<App>>, ApiUser(_user): ApiUser) -> Response {
     relay(app.http.get(app.worker("/v1/film/stocks")).send().await).await
 }
@@ -1797,6 +1803,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/intake/folder/{key}", axum::routing::delete(forget))
         .route("/api/immich/assets/{id}/thumbnail", get(thumbnail))
         .route("/api/capabilities", get(capabilities))
+        .route("/api/models", get(models))
         .route("/api/film/stocks", get(film_stocks))
         .route("/api/film/stocks/{id}", get(film_stock))
         .route(

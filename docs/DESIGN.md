@@ -2198,6 +2198,22 @@ edit.example.com {
 }
 ```
 
+### Models
+
+Settings → **Models** lists the machine-learning models Sidecar can run (`sidecar_worker::models::MODELS`), what
+each enables, its weights' licence and what that restricts, and whether this server has it: *on this server*, *not
+in this image* (the plain image has no `sidecar-ml`), *not downloaded*, or *needs updating*. Weights arrive two
+ways. **Shipped**: cleared for distribution and baked into the `-ml` image — BiRefNet lite, MediaPipe's
+multi-class model, YuNet and Depth Anything V2 Small. **On demand** (ROADMAP, "Models on demand"): fetched by an
+administrator from the publisher's own URL, pinned by SHA-256, converted on the server, never shipped. Only
+weights travel; a model's graph is compiled into `sidecar-ml`, so what can run is this list, fixed per release.
+The models folder (`SIDECAR_MODELS_DIR`, `models/` in the cache by default) is scanned rather than recorded, so
+a file copied in by hand counts like a download, and a file stamped for another converter (`<file>.json`) reads
+as needing an update rather than loading into a structure that changed under it. No model is on demand yet:
+the download and its conversion come with the first feature that needs one, so that they are built against
+real weights. Weights with no licence at all are never listed. Checked by `scans_the_image_and_the_models_folder`,
+`every_model_has_a_licence` and `web/scripts/models-smoke.mjs`.
+
 ### Publishing and licences
 
 Sidecar is published as an Apache-2.0 Docker image on GitHub Container Registry, and reuses existing code wherever it fits, with credit. Apache-2.0 is as permissive as MIT and adds an explicit patent grant and the `NOTICE`-file convention for credits; MIT would also work. This is the common reading of these licences, not legal advice.
