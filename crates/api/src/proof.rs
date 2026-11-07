@@ -77,29 +77,29 @@ pub struct ProofOptions {
 }
 
 fn display_profile(ctx: &ThreadContext, display: DisplaySpace) -> Result<Profile<ThreadContext>> {
-    Ok(match display {
-        DisplaySpace::Srgb => Profile::new_srgb_context(ctx),
-        DisplaySpace::DisplayP3 => {
-            let xy = |x, y| CIExyY { x, y, Y: 1.0 };
-            // The sRGB curve as ICC parametric type 4: Y = (aX + b)^g above d, cX below.
-            let curve = ToneCurve::new_parametric(
-                4,
-                &[2.4, 1.0 / 1.055, 0.055 / 1.055, 1.0 / 12.92, 0.04045],
-            )
+    // Display P3 and Rec.2020 (an export space, proofed only when asked) as their primaries under D65 with the
+    // sRGB curve every export carries.
+    let primaries = match display {
+        DisplaySpace::Srgb => return Ok(Profile::new_srgb_context(ctx)),
+        DisplaySpace::DisplayP3 => [(0.680, 0.320), (0.265, 0.690), (0.150, 0.060)],
+        DisplaySpace::Rec2020 => [(0.708, 0.292), (0.170, 0.797), (0.131, 0.046)],
+    };
+    let xy = |x, y| CIExyY { x, y, Y: 1.0 };
+    // The sRGB curve as ICC parametric type 4: Y = (aX + b)^g above d, cX below.
+    let curve =
+        ToneCurve::new_parametric(4, &[2.4, 1.0 / 1.055, 0.055 / 1.055, 1.0 / 12.92, 0.04045])
             .context("the sRGB curve")?;
-            Profile::new_rgb_context(
-                ctx,
-                &xy(0.3127, 0.3290),
-                &CIExyYTRIPLE {
-                    Red: xy(0.680, 0.320),
-                    Green: xy(0.265, 0.690),
-                    Blue: xy(0.150, 0.060),
-                },
-                &[&curve, &curve, &curve],
-            )
-            .context("the Display P3 profile")?
-        }
-    })
+    Profile::new_rgb_context(
+        ctx,
+        &xy(0.3127, 0.3290),
+        &CIExyYTRIPLE {
+            Red: xy(primaries[0].0, primaries[0].1),
+            Green: xy(primaries[1].0, primaries[1].1),
+            Blue: xy(primaries[2].0, primaries[2].1),
+        },
+        &[&curve, &curve, &curve],
+    )
+    .context("the display profile")
 }
 
 fn intent(i: ProofIntent) -> Intent {

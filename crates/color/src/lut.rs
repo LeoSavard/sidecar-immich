@@ -203,6 +203,7 @@ fn display_from_rec2020(display: DisplaySpace) -> M3 {
     match display {
         DisplaySpace::Srgb => mat::REC2020_TO_SRGB,
         DisplaySpace::DisplayP3 => mat::REC2020_TO_P3,
+        DisplaySpace::Rec2020 => mat::IDENTITY,
     }
 }
 
@@ -259,6 +260,8 @@ pub fn proof_uniform(display: DisplaySpace, header: &CubeHeader, warn: bool) -> 
         space: match display {
             DisplaySpace::Srgb => LutSpace::Srgb,
             DisplaySpace::DisplayP3 => LutSpace::DisplayP3,
+            // Rec.2020 is an export space: no screen shows it, so nothing proofs in it.
+            DisplaySpace::Rec2020 => LutSpace::Srgb,
         },
         amount: 100.0,
         ..Default::default()

@@ -12,9 +12,9 @@ import type { LookLut } from "./LookLut";
 import type { MaskAdjustment } from "./MaskAdjustment";
 import type { Mixer } from "./Mixer";
 import type { Monochrome } from "./Monochrome";
+import type { Negative } from "./Negative";
 import type { Presence } from "./Presence";
 import type { Spot } from "./Spot";
-import type { Negative } from "./Negative";
 import type { Tone } from "./Tone";
 import type { WhiteBalance } from "./WhiteBalance";
 
@@ -74,4 +74,30 @@ colorGrading?: ColorGrading,
  * Texture and Clarity (DESIGN.md §7, "Local contrast"): fine and middle detail in log luminance, raised or
  * lowered against an edge-preserving base. Absent, and left out of the serialized edit, is none.
  */
-presence?: Presence, };
+presence?: Presence, 
+/**
+ * Heal, clone and red-eye spots (DESIGN.md §15, "Retouch"), applied in order to the photo before anything
+ * else. Empty, and left out of the serialized edit, is none.
+ */
+spots?: Array<Spot>, 
+/**
+ * The camera profile to render with (DESIGN.md §7, "Camera profiles"): `FILE_PROFILE` for the one the
+ * photo's file carries (`CameraColor::profile`); absent, and left out of the serialized edit, for the camera
+ * matrices alone, as before profiles existed.
+ */
+cameraProfile?: string, 
+/**
+ * The photo is a film negative to invert (DESIGN.md §7, "Negatives"). Absent, and left out of the serialized
+ * edit, is a positive.
+ */
+negative?: Negative, 
+/**
+ * Purple and green fringes taken out (DESIGN.md §15, "Defringe"). Absent, and left out of the serialized edit,
+ * is none.
+ */
+defringe?: Defringe, 
+/**
+ * A 3D LUT applied after develop as a look (DESIGN.md §15, "3D LUTs"). Absent, and left out of the
+ * serialized edit, is none.
+ */
+lut?: LookLut, };

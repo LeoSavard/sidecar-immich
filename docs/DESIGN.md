@@ -271,63 +271,9 @@ Where the code differs from the text below, the code and these notes win.
   every frame aligned (174–504 inliers, rms ≤ 1.06 px), steps measured at 1.00 ± 0.04 EV where EXIF said
   0.97–1.09, 35 s for 9 × 20 MP, and the DNG develops clean.
 
-- **Aligning frames** (`sidecar_merge::align`, a new crate for the multi-frame work): FAST-9 corners scored and
-  spread over a grid, oriented by intensity centroid, described by steered BRIEF with BRIEF's Gaussian sampling
-  pattern from a fixed seed, matched by Hamming distance with the ratio test and a cross-check, and a
-  homography by RANSAC over normalised four-point DLTs refined on its inliers — all from the papers. It runs on
-  log luminance, so a bracket's exposure difference is an offset both FAST and BRIEF ignore: one aligner for
-  brackets and panoramas, and a homography is the exact model for a camera turning about its lens. Checked: a
-  known homography (pan, turn, perspective) recovered from a copy two stops darker to under 0.75 px at the
-  corners; unrelated frames don't align (the same frame turned half round does, as it should). On the library,
-  `sidecar-dev align` aligns a 9-frame ZV-1 bracket across 8 EV with 366–528 inliers and sub-pixel error — and
-  shows a 2 px handheld drift per frame — and finds a four-frame D3 panorama by its overlaps.
 
-- **Noise reduction against each photo's measured noise** (`PROCESS_VERSION` 8, `Detail::noise_model`):
-  `sidecar_engine::noise` fits σ² = a·y + b to the luminance of a central 1024² crop — 5×5 local mean as the
-  level, a 4-neighbour high-pass (noise gain √1.25) as the noise, the flattest 40 % of each of 24 log-spaced
-  level bins, a robust MAD per bin, weighted least squares with a and b held non-negative (Foi, Trimeche,
-  Katkovnik and Egiazarian 2008). `to_opponent.wgsl` then applies the generalized Anscombe transform for
-  that model, chroma scaled by its derivative as before, and `from_opponent.wgsl` inverts luminance with
-  Mäkitalo and Foi's closed-form exact unbiased inverse (2013), falling back to the algebraic one below D = 1.
-  The noise level after the transform is still measured, so a model that is a little off changes only the
-  balance across levels, never the overall strength. Checked: a known model is recovered from synthetic
-  Poisson-Gaussian patches (gain within 0.3 %, read within 2 %); the transform gives unit variance at every
-  level and the inverse returns the mean; on eight bands a stop apart, 6 to 800 photo-electrons, the model
-  denoises every band by the same factor (0.06–0.10 of its noise) where the fixed transform kept 59 % of the
-  deepest band's noise and 6.5 % of the brightest's; every band's mean moves by under a tenth of its noise (the
-  deepest by +14 % of its level at about six photo-electrons, where soft thresholding of skewed noise is not
-  quite unbiased; the fixed transform moved it −7 %). `sidecar-dev noise` and `denoise-truth` are the tools.
-  An edit saved before version 8 that denoised keeps the fixed transform (`migrate`); one that never did gets
-  the model if it starts to; "take up today's rendering" switches it on.
 
-- **Writing a linear DNG** (`sidecar_raw::dng_write`; read back by `linear_dng`): what every merge will
-  produce, so its result is an original like any other (docs/research/multi-frame-and-denoise.md).
-  Camera-native linear RGB as 16-bit IEEE floats — `PhotometricInterpretation` LinearRaw, `SampleFormat` 3 —
-  in 256² tiles, Deflate with TIFF Technical Note 3's floating-point predictor, the directory first so readers
-  that look for it near the start find it. The source camera's `ColorMatrix1/2` with their illuminants and
-  `AsShotNeutral`, `BaselineExposure`, the measured noise in DNG's own `NoiseProfile`, and `WhiteLevel` 1 —
-  the specification's default for floats, stated because LibRaw otherwise assumes 65535 and scales every
-  sample to zero. `LinearResponseLimit` says where a sample stops being a measurement (1.0 for a single
-  frame; absent for a merge with nothing saturated, whose every value is light), and the reader flags clipping
-  there and nowhere else for a float file. Checked: written and read back to half-float precision at an odd
-  size with light up to 5× white; LibRaw — an independent decoder — opens it and reads the same picture
-  (bright/dark ratio 21.95 against 21.91 after its integer conversion; LibRaw only takes a file as tiled when
-  a tile fits inside the image both ways, so nothing smaller than 256 px an edge); ExifTool validates it.
-  `sidecar-dev to-dng <raw> <out.dng> [png]` writes one from a raw's full-resolution demosaic, and the DNG
-  develops identically to that demosaic (ΔE2000 mean 0.000, p99 0.000, max 1.1). `sidecar-dev compare-png`
-  is the measure. A 20.8 MP frame is 69 MB and takes 9–17 s to write.
 
-- **The guided filter, as a primitive** (`sidecar_engine::guided`; `client/guided_stats`, `_box`, `_coef`,
-  `_apply.wgsl`, so the browser composes the same passes): He, Sun and Tang's filter in He and Sun's fast
-  subsampled form. Statistics on a grid `subsample` times coarser than the output, each texel the mean of its
-  footprint (products averaged, not multiplied after averaging, since the covariance needs E[I·p]); box means
-  normalised by the taps inside the image; coefficients and their box means on that grid in rgba32float —
-  the variance is a difference of means and half precision cancels it — then q = mean(a)·I + mean(b) at full
-  resolution against the full-resolution guide. The guide is linear luminance, or log₂ luminance so that ε
-  is relative to the level (a doubling of light counts the same in the shadows as in the highlights). Checked
-  against an f64 implementation of the paper's equations (largest difference 9.4e-4, half-float output), and
-  for its defining behaviour: a noisy step keeps the guide's edge while each flat side is smoothed, at
-  subsample 1 and 4, linear and log guide; a constant input is returned unchanged. No feature uses it yet.
 
 - **The sky mask** (§15, `sidecar_engine::sky`, mask name `sky`, `MASK_REVISION` 6): found in the depth
   map, drawn by the photo.

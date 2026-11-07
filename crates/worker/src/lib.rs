@@ -12,8 +12,8 @@ pub mod lensfun;
 pub mod luts;
 pub mod masks;
 pub mod ml;
-pub mod overlays;
 pub mod models;
+pub mod overlays;
 pub mod stocks;
 
 use anyhow::{Context, Result};
@@ -841,7 +841,7 @@ fn loupe_png(
             [sw, sh],
             &packed.uniform,
             &packed.lut,
-            &export::masks_for(&packed, &mask_textures, [0.0; 4], slide_response),
+            &export::masks_for(&packed, &mask_textures, [0.0; 4], slide_response, None),
         )?),
         false => None,
     };

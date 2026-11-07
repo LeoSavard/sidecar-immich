@@ -98,7 +98,6 @@ export class DevelopPass {
 	private defringePipeline: GPUComputePipeline;
 	private defringeUbo?: GPUBuffer;
 	private defringed?: GPUTexture;
-	private boundInput?: GPUTexture;
 	/**
 	 * The LUT pass (`client/look.wgsl`), run after develop for the edit's LUT and then for a soft proof, each with
 	 * its uniform and table when on; and the textures develop and the first of them render into on the way.
@@ -453,7 +452,8 @@ export class DevelopPass {
 	 * averaged down by a whole number, developed to the film's log exposure, blurred over the developer's reach.
 	 */
 	private buildDensityMap(masks: GPUBindGroup) {
-		const input = this.developInput();
+		// Before the defringe and profile passes, as the worker's map is made.
+		const input = this.input ?? this.proxy!;
 		const [w, h] = [input.width, input.height];
 		const k = Math.max(1, Math.ceil(Math.max(w, h) / MAP_LONG));
 		const [mw, mh] = [Math.ceil(w / k), Math.ceil(h / k)];
@@ -591,7 +591,8 @@ export class DevelopPass {
 		this.boundDensity = density;
 		const wantMaps = this.needsLocalMap || this.needsHazeMap;
 		const input = this.developInput();
-		if (wantMaps) this.buildMaps(input);
+		// The maps read the picture before the defringe and profile passes, as the worker's do.
+		if (wantMaps) this.buildMaps(this.input ?? this.proxy!);
 		const maps = wantMaps && this.local ? this.local.maps : this.noMaps;
 		if (maps !== this.boundMaps || input !== this.boundInput) this.bindGroup = undefined;
 		this.boundMaps = maps;

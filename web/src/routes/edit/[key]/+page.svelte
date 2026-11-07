@@ -697,7 +697,7 @@
 	// ---------- retouch
 
 	/** A point of the proxy (0…1, before lens correction) → the canvas, in CSS pixels. */
-	function sourceToScreen(p: [number, number]) {
+	function spotToScreen(p: [number, number]) {
 		const proxy = develop?.proxy;
 		if (!proxy) return null;
 		return imageToScreen(correctedPoint(lensUniform, proxy.width, proxy.height, { x: p[0], y: p[1] }));
@@ -711,9 +711,9 @@
 		const outW = displayFrame()?.frame.size[0] ?? develop.output.width;
 		const scale = r.w / outW / devicePixelRatio;
 		return edit.spots.flatMap((s) => {
-			const at = sourceToScreen(s.at);
+			const at = spotToScreen(s.at);
 			if (!at) return [];
-			return [{ at, from: s.kind === 'redEye' ? null : sourceToScreen(s.from), r: s.radius * Math.max(proxy.width, proxy.height) * scale }];
+			return [{ at, from: s.kind === 'redEye' ? null : spotToScreen(s.from), r: s.radius * Math.max(proxy.width, proxy.height) * scale }];
 		});
 	}
 

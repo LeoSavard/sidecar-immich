@@ -5,8 +5,8 @@
 pub mod auto;
 pub mod camera;
 pub mod cct;
-pub mod dcp;
 pub mod color_range;
+pub mod dcp;
 pub mod depth;
 pub mod developer;
 mod film_data;

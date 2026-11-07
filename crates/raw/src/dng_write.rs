@@ -359,6 +359,7 @@ mod tests {
                 },
             ],
             baseline_exposure: Some(0.35),
+            profile: None,
         }
     }
 
