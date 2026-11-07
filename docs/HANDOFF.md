@@ -57,7 +57,7 @@ primitives first, because several features stand on each:
 | **Film** ||||
 | 34 | Halation; grain per dye layer | A/Bs of Dye layers and Halation | #96 grain per dye layer, #97 halation (on #96) |
 | 35 | A print stock, so colour negatives render as seen | which print stock, and its data sheet | |
-| 36 | Alternative processes: tintype, cyanotype, cyanotype digital negatives | the step tablet scan for the last | |
+| 36 | Alternative processes: tintype, cyanotype, cyanotype digital negatives | the step tablet scan for the last | #99 cyanotype and tintype (digital negatives to come) |
 | **Studies** ||||
 | 37 | `DEFAULT_WHITE_EV` across a few hundred library files | the verdict, by eye | |
 | 38 | Highlight reconstruction on real blown frames, generation 3 | the verdict, by eye | |
