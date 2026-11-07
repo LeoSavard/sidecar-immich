@@ -17,6 +17,7 @@ pub mod lens;
 pub mod pyramid;
 pub mod noise;
 pub mod noise;
+pub mod sky;
 pub mod warp;
 pub use develop::{DevelopPass, Masks, needs_density_map, needs_haze_map, needs_local_map};
 pub use focus::focus_energy;

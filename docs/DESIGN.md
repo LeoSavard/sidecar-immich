@@ -329,6 +329,28 @@ Where the code differs from the text below, the code and these notes win.
   for its defining behaviour: a noisy step keeps the guide's edge while each flat side is smoothed, at
   subsample 1 and 4, linear and log guide; a constant input is returned unchanged. No feature uses it yet.
 
+- **The sky mask** (§15, `sidecar_engine::sky`, mask name `sky`, `MASK_REVISION` 6): found in the depth
+  map, drawn by the photo.
+  - **Coarse:** the far plane, by hysteresis. Seeds are within 6 % of the depth range from the farthest,
+    connected to the top edge and brighter than most of the frame; the flood reaches out to 25 %, across the
+    model's blurred skyline.
+  - **Like sky, pixel by pixel:** smooth (log-luminance σ under 0.2 stop over 5 × 5 at the depth map's size,
+    which brick and foliage aren't); not green once white-balanced (green under 38 % of r + g + b, which
+    excludes blurred foliage); not the subject; and within 1.5 stops of the seeds' level. A diffuse wall lit
+    by an overcast sky returns at most its albedo times half the sky, so a pale far facade is left out.
+  - **The edge:** the compositing equation in linear light, I = α·S + (1 − α)·G. A trimap comes from the
+    coarse mask, widened 2 % either way; S and G are the nearby certain colours' means (normalised
+    convolution over 4 %); α is solved per pixel by least squares in RGB. This is the known-colour case of
+    alpha matting, in place of the guided filter the plan named: the guided filter, fed a mask the model had
+    already shifted, could only compromise (skyline error 0.34 → 0.25 against 0.34 → 0.07 here).
+  Checked:
+  - A synthetic landscape with a ragged tree against a gradient sky: skyline error 0.37 → 0.10, pixels on the
+    wrong side 8,043 → 1,791. A far region that is dark, green or textured is not sky.
+  - On four library frames (`web/scripts/mask-dump.mjs`): the treeline of an overcast street follows the
+    photo, and its brick building is left out (it was taken before the level bound). Blurred backyard foliage
+    is left out, and only the sky between its branches kept. A blown window behind a cat is partly taken —
+    far, white and above, so genuinely ambiguous. A blown window behind a portrait is barely touched.
+
 - **D1 and D5 are both closed, neither merged** (pull request #46, closed 2026-10-29). The owner's rule,
   2026-10-27: what is merged and deployed should be what has been tested. Both were written, and neither
   earned its way in.

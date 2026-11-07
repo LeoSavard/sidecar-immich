@@ -1206,7 +1206,7 @@ impl Default for Stroke {
 }
 
 /// The masks the models make, which an adjustment can name. Kept in step with the worker's `masks::NAMES`.
-pub const MASK_NAMES: [&str; 7] = [
+pub const MASK_NAMES: [&str; 8] = [
     "subject",
     "skin",
     "face-skin",
@@ -1214,6 +1214,7 @@ pub const MASK_NAMES: [&str; 7] = [
     "hair",
     "clothes",
     "depth",
+    "sky",
 ];
 /// A mask painted from nothing: only its strokes.
 pub const BRUSH: &str = "brush";
