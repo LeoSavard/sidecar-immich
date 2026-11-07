@@ -38,6 +38,7 @@ mod uniforms {
                 R::of::<crate::params::MaskLayer>(),
                 R::of::<crate::params::MaskParams>(),
                 R::of::<crate::params::ProfileParams>(),
+                R::of::<crate::params::DefringeParams>(),
                 R::of::<crate::params::EdgeParams>(),
                 R::of::<crate::params::GradientParams>(),
                 R::of::<crate::depth::DepthParams>(),

@@ -424,6 +424,7 @@ pub fn masks_for<'a>(
         local: None,
         haze: None,
         profile: packed.profile.as_ref(),
+        defringe: packed.defringe.as_deref(),
         slide_exposure: &packed.slide_exposure,
         slide_response,
     }

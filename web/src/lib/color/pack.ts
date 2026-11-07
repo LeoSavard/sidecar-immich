@@ -44,6 +44,8 @@ export type Packed = {
 	slideExposure: Float32Array;
 	/** The camera profile pass (`DevelopPass.setProfile`), when the edit renders with the file's profile. */
 	profile: ProfilePass | null;
+	/** The defringe pass's uniform (`DevelopPass.setDefringe`), when the edit takes fringes out. */
+	defringe: Uint8Array | null;
 };
 
 /** `sidecar_color::params::ProfilePass`: the pass's uniform and its HueSatMap and LookTable, four floats an entry. */
@@ -214,6 +216,8 @@ export class ColorPacker {
 			at += 4 + profileBytes;
 			profile = { uniform, hueSat: table(), look: table() };
 		}
+		const defringeBytes = view.getUint32(at, true);
+		const defringe = defringeBytes ? out.slice(at + 4, at + 4 + defringeBytes) : null;
 		return {
 			uniform: out.slice(0, U),
 			lut: new Float32Array(out.slice(U, U + lutBytes).buffer),
@@ -223,7 +227,8 @@ export class ColorPacker {
 			maskCurves: new Float32Array(out.slice(U + 16 + lutBytes + MASK_UNIFORM_BYTES, U + 16 + lutBytes + MASK_UNIFORM_BYTES + MAX_MASKS * LUT * 4).buffer),
 			monoLut,
 			slideExposure,
-			profile
+			profile,
+			defringe
 		};
 	}
 }

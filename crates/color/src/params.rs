@@ -95,6 +95,11 @@ pub struct EditParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub negative: Option<Negative>,
+    /// Purple and green fringes taken out (DESIGN.md §15, "Defringe"). Absent, and left out of the serialized edit,
+    /// is none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub defringe: Option<Defringe>,
 }
 
 /// Local contrast at two scales and haze, each −100…100. Texture and Clarity: 0 leaves the picture alone, 100
@@ -344,6 +349,90 @@ impl Negative {
     }
 }
 
+/// Axial chromatic aberration: a lens focuses the colours at slightly different distances, so beside a high-contrast
+/// edge one colour is sharp and another blurred, and a fringe of that colour shows — purple (blue and red out of
+/// focus) or green. The fringe's signature is the pair: a fringe hue *and* a steep luminance edge within a few
+/// pixels. Pixels with both are taken toward neutral at their own luminance; a purple flower, with no edge in
+/// reach, keeps its colour.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "edit/"))]
+pub struct Defringe {
+    /// 0…100.
+    pub purple: f64,
+    /// The purple hues taken, OKLab hue in degrees, from and to.
+    pub purple_hue: [f64; 2],
+    pub green: f64,
+    pub green_hue: [f64; 2],
+}
+
+impl Default for Defringe {
+    fn default() -> Self {
+        Self {
+            purple: 0.0,
+            purple_hue: [280.0, 345.0],
+            green: 0.0,
+            green_hue: [120.0, 165.0],
+        }
+    }
+}
+
+/// How far from an edge a fringe reaches, as a share of the long edge (a few pixels of a 24 MP frame), and the
+/// contrast across that reach, in stops, that counts as an edge — from its start to full.
+pub const FRINGE_REACH: f64 = 0.0008;
+pub const FRINGE_EDGE_STOPS: [f64; 2] = [0.7, 1.5];
+
+/// The defringe pass's uniform (`client/defringe.wgsl`, 144 bytes). Its WGSL declaration,
+/// `shaders/uniforms/defringe_params.wgsl`, is generated from this struct (`sidecar-uniform`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable, Uniform)]
+pub struct DefringeParams {
+    /// Develop's matrix and its inverse: white-balanced camera RGB ↔ linear Rec.2020, where hue is judged.
+    #[uniform(wgsl = "mat3x3f")]
+    pub cam_to_work: [[f32; 4]; 3],
+    #[uniform(wgsl = "mat3x3f")]
+    pub work_to_cam: [[f32; 4]; 3],
+    /// Develop's camera multipliers; w unused.
+    pub wb: [f32; 4],
+    /// Amount (0…1) and the hue band (radians, from and to); w unused.
+    pub purple: [f32; 4],
+    pub green: [f32; 4],
+    /// x: the reach as a share of the long edge; y, z: the edge's contrast in stops, from and to; w: the whole
+    /// frame's long edge in pixels, 0 to take the texture's.
+    pub reach: [f32; 4],
+}
+
+impl Defringe {
+    /// The pass's uniform for this edit's develop uniform, or `None` when there is nothing to do.
+    pub fn uniform(d: Option<&Defringe>, develop: &DevelopParams) -> Option<Vec<u8>> {
+        let d = d.filter(|d| d.purple > 0.0 || d.green > 0.0)?;
+        let cam: M3 =
+            std::array::from_fn(|r| std::array::from_fn(|c| develop.cam_to_work[c][r] as f64));
+        let band = |amount: f64, hue: [f64; 2]| {
+            [
+                (amount.clamp(0.0, 100.0) / 100.0) as f32,
+                hue[0].to_radians() as f32,
+                hue[1].to_radians() as f32,
+                0.0,
+            ]
+        };
+        let u = DefringeParams {
+            cam_to_work: develop.cam_to_work,
+            work_to_cam: to_mat3(&mat::inverse(&cam)),
+            wb: [develop.wb_mul[0], develop.wb_mul[1], develop.wb_mul[2], 0.0],
+            purple: band(d.purple, d.purple_hue),
+            green: band(d.green, d.green_hue),
+            reach: [
+                FRINGE_REACH as f32,
+                FRINGE_EDGE_STOPS[0] as f32,
+                FRINGE_EDGE_STOPS[1] as f32,
+                0.0,
+            ],
+        };
+        Some(bytemuck::bytes_of(&u).to_vec())
+    }
+}
+
 /// A lens blur by distance: how far it reaches, where the focus is, and how deep the sharp band around it is.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
@@ -390,6 +479,7 @@ impl Default for EditParams {
             spots: Vec::new(),
             camera_profile: None,
             negative: None,
+            defringe: None,
         }
     }
 }
@@ -1590,6 +1680,8 @@ pub struct Packed {
     pub slide_exposure: Vec<f32>,
     /// The camera profile pass, when the edit renders with one that has tables (`FILE_PROFILE`).
     pub profile: Option<ProfilePass>,
+    /// The defringe pass's uniform (`DefringeParams`), when the edit takes fringes out.
+    pub defringe: Option<Vec<u8>>,
 }
 
 /// Row-major 3×3 → WGSL `mat3x3f` columns.
@@ -1936,6 +2028,8 @@ fn pack_inner(
                 2f64.powf(edit.exposure.ev + camera.baseline_exposure.unwrap_or(0.0)) as f32;
             profile_pass(p, &params, wb.temperature_k, look_exposure)
         }),
+        // A developed file's fringes were the camera's to take out; it is still offered, as its pixels are light too.
+        defringe: Defringe::uniform(edit.defringe.as_ref(), &params),
     }
 }
 

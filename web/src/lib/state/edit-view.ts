@@ -178,6 +178,7 @@ export function describeChanges(from: EditParams, to: EditParams): string[] {
 	if ((from.cameraProfile ?? null) !== (to.cameraProfile ?? null)) out.push(to.cameraProfile ? "The file's camera profile" : 'Camera matrix');
 	if (!from.negative !== !to.negative) out.push(to.negative ? 'Film negative' : 'Positive');
 	else if (from.negative && to.negative && JSON.stringify(from.negative) !== JSON.stringify(to.negative)) out.push('Negative adjusted');
+	if (JSON.stringify(from.defringe ?? null) !== JSON.stringify(to.defringe ?? null)) out.push(to.defringe ? 'Defringe adjusted' : 'No defringe');
 	return out;
 }
 
@@ -238,7 +239,15 @@ function describeMasks(from: MaskAdjustment[], to: MaskAdjustment[]): string[] {
 
 /** Sections one version can take from another, as the editor groups its tools. */
 export const PICKS: { id: string; label: string; take: (into: EditParams, from: EditParams) => void }[] = [
-	{ id: 'lens', label: 'Lens correction', take: (e, f) => (e.lens = structuredClone(f.lens ?? null)) },
+	{
+		id: 'lens',
+		label: 'Lens correction',
+		take: (e, f) => {
+			e.lens = structuredClone(f.lens ?? null);
+			if (f.defringe) e.defringe = structuredClone(f.defringe);
+			else delete e.defringe;
+		}
+	},
 	{
 		id: 'geometry',
 		label: 'Crop and straighten',

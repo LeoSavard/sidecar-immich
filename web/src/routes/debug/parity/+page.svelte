@@ -3,7 +3,7 @@
 	import { DevelopPass, requestDevice } from '$lib/gpu/develop';
 	import { LensPass } from '$lib/gpu/lens';
 
-	type Case = { name: string; width: number; height: number; lens?: boolean; masks?: number; maskSize?: [number, number]; mono?: boolean; slide?: boolean; spots?: boolean; profile?: boolean };
+	type Case = { name: string; width: number; height: number; lens?: boolean; masks?: number; maskSize?: [number, number]; mono?: boolean; slide?: boolean; spots?: boolean; profile?: boolean; defringe?: boolean };
 	type Result = { name: string; status: string };
 
 	let results = $state<Result[]>([]);
@@ -52,6 +52,7 @@
 				// A spectral colour stock's two tables: the fixtures carry both, so this needs no server.
 				const slide = async (what: string) => (c.slide ? new Float32Array(await get(`slide_${what}.f32`)) : new Float32Array(0));
 				pass.setSlide(await slide('exposure'), await slide('response'));
+				pass.setDefringe(c.defringe ? new Uint8Array(await get('defringe.bin')) : null);
 				pass.setToneLut(new Float32Array(await get('lut.f32')));
 				pass.render();
 				out[c.name] = toBase64(await pass.readback());

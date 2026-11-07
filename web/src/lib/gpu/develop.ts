@@ -6,6 +6,7 @@ import densityDownWgsl from './wgsl/client_density_down.wgsl?raw';
 import densityBlurWgsl from './wgsl/client_density_blur.wgsl?raw';
 import profileWgsl from './wgsl/client_profile.wgsl?raw';
 import type { ProfilePass } from '$lib/color/pack';
+import defringeWgsl from './wgsl/client_defringe.wgsl?raw';
 import { DEVELOP_UNIFORM_BYTES } from '$lib/color/pack';
 import { fromHalf } from '$lib/color/transfer';
 import { kernel } from './depth';
@@ -87,8 +88,13 @@ export class DevelopPass {
 	private profile?: { pass: ProfilePass; ubo: GPUBuffer; hueSat: GPUTexture; look: GPUTexture };
 	private profiled?: GPUTexture;
 	private boundInput?: GPUTexture;
+	/** The defringe pass (`client/defringe.wgsl`): its uniform when on, and what it made of develop's input. */
+	private defringePipeline: GPUComputePipeline;
+	private defringeUbo?: GPUBuffer;
+	private defringed?: GPUTexture;
+	private boundInput?: GPUTexture;
 
-	private constructor(device: GPUDevice, pipeline: GPURenderPipeline, layout: GPUBindGroupLayout, maskLayout: GPUBindGroupLayout, densityDown: GPUComputePipeline, densityBlur: GPUComputePipeline, localMap: LocalMap, retouchPass: RetouchPass, profilePipeline: GPUComputePipeline) {
+	private constructor(device: GPUDevice, pipeline: GPURenderPipeline, layout: GPUBindGroupLayout, maskLayout: GPUBindGroupLayout, densityDown: GPUComputePipeline, densityBlur: GPUComputePipeline, localMap: LocalMap, retouchPass: RetouchPass, profilePipeline: GPUComputePipeline, defringePipeline: GPUComputePipeline) {
 		this.device = device;
 		this.pipeline = pipeline;
 		this.layout = layout;
@@ -99,6 +105,7 @@ export class DevelopPass {
 		this.noMaps = device.createTexture({ label: 'no maps', size: [1, 1, MAP_LAYERS], format: 'rgba32float', usage: GPUTextureUsage.TEXTURE_BINDING });
 		this.retouchPass = retouchPass;
 		this.profilePipeline = profilePipeline;
+		this.defringePipeline = defringePipeline;
 		this.ubo = device.createBuffer({ label: 'develop params', size: DEVELOP_UNIFORM_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 		// Zeroed on creation: no masks until `setMasks` says otherwise.
 		this.maskUbo = device.createBuffer({ label: 'develop masks', size: MASK_UNIFORM_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
@@ -147,14 +154,15 @@ export class DevelopPass {
 			fragment: { module, entryPoint: 'fs', targets: [{ format: 'rgba16float' }] },
 			primitive: { topology: 'triangle-list' }
 		});
-		const [densityDown, densityBlur, localMap, retouchPass, profilePipeline] = await Promise.all([
+		const [densityDown, densityBlur, localMap, retouchPass, profilePipeline, defringePipeline] = await Promise.all([
 			kernel(device, 'density down', densityDownWgsl, ['uniform', 'texture', 'storage']),
 			kernel(device, 'density blur', densityBlurWgsl, ['uniform', 'texture', 'storage']),
 			LocalMap.create(device),
 			RetouchPass.create(device),
-			kernel(device, 'camera profile', profileWgsl, ['uniform', 'texture', 'texture3d', 'texture3d', 'storage'])
+			kernel(device, 'camera profile', profileWgsl, ['uniform', 'texture', 'texture3d', 'texture3d', 'storage']),
+			kernel(device, 'defringe', defringeWgsl, ['uniform', 'texture', 'storage'])
 		]);
-		return new DevelopPass(device, pipeline, layout, maskLayout, densityDown, densityBlur, localMap, retouchPass, profilePipeline);
+		return new DevelopPass(device, pipeline, layout, maskLayout, densityDown, densityBlur, localMap, retouchPass, profilePipeline, defringePipeline);
 	}
 
 	get output(): GPUTexture | undefined {
@@ -255,9 +263,35 @@ export class DevelopPass {
 		this.device.queue.writeBuffer(this.profile!.ubo, 0, pass.uniform);
 	}
 
-	/** Develop's input as develop reads it: through the camera profile pass when there is one. */
-	private developInput(): GPUTexture {
+	/** The defringe pass's uniform (`Packed.defringe`), or null for none: run over develop's input on every render. */
+	setDefringe(uniform: Uint8Array | null) {
+		if (!uniform) {
+			this.defringeUbo?.destroy();
+			this.defringeUbo = undefined;
+			return;
+		}
+		this.defringeUbo ??= this.device.createBuffer({ label: 'defringe params', size: uniform.byteLength, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+		this.device.queue.writeBuffer(this.defringeUbo, 0, uniform);
+	}
+
+	/** The input through the defringe pass when it is on. */
+	private defringedInput(): GPUTexture {
 		const input = this.input ?? this.proxy!;
+		if (!this.defringeUbo) return input;
+		if (this.defringed?.width !== input.width || this.defringed?.height !== input.height) {
+			this.defringed?.destroy();
+			this.defringed = this.storage('defringed', input.width, input.height);
+		}
+		const encoder = this.device.createCommandEncoder();
+		this.dispatch(encoder, this.defringePipeline, this.defringeUbo, input, this.defringed);
+		this.device.queue.submit([encoder.finish()]);
+		return this.defringed;
+	}
+
+	/** Develop's input as develop reads it: defringed when that is on, then through the camera profile pass when
+	 *  there is one — the order the worker runs them in. */
+	private developInput(): GPUTexture {
+		const input = this.defringedInput();
 		const p = this.profile;
 		if (!p) return input;
 		if (this.profiled?.width !== input.width || this.profiled?.height !== input.height) {

@@ -44,6 +44,9 @@ struct Case {
     /// `<name>.profile.bin`, `.profile_hs.f32` and `.profile_lt.f32`: the camera profile pass's uniform and tables.
     #[serde(default)]
     profile: bool,
+    /// `<name>.defringe.bin` holds the defringe pass's uniform, run over develop's input.
+    #[serde(default)]
+    defringe: bool,
 }
 
 /// Masks for the parity case, at half the image's size so both renderers interpolate them: a soft disc and a
@@ -424,7 +427,26 @@ fn cases() -> Vec<Fixture> {
     };
     lens.lens.as_mut().unwrap().lateral_ca = 150.0;
 
+    // Defringe both bands, wide, so the hue band's purples and greens beside the bands' edges are taken.
+    let defringe = EditParams {
+        defringe: Some(sidecar_color::params::Defringe {
+            purple: 100.0,
+            green: 80.0,
+            purple_hue: [260.0, 350.0],
+            ..Default::default()
+        }),
+        ..graded.clone()
+    };
+
     let mut cases: Vec<Fixture> = vec![
+        (
+            "defringe".into(),
+            nikon_d850(),
+            SourceKind::Raw,
+            defringe,
+            DisplaySpace::Srgb,
+            None,
+        ),
         (
             "as-shot-srgb".into(),
             nikon_d850(),
@@ -873,6 +895,10 @@ pub fn fixtures(dir: &Path) -> Result<()> {
                 bytemuck::cast_slice(&stock.response),
             )?;
         }
+        let defringe = packed.defringe.is_some();
+        if let Some(u) = &packed.defringe {
+            std::fs::write(dir.join(format!("{name}.defringe.bin")), u)?;
+        }
         let masks = edit.masks.len().min(2) as u32;
         if masks > 0 {
             for (i, m) in synthetic_masks().iter().take(masks as usize).enumerate() {
@@ -909,6 +935,7 @@ pub fn fixtures(dir: &Path) -> Result<()> {
             slide,
             spots,
             profile: has_profile,
+            defringe,
         });
     }
     std::fs::write(dir.join("index.json"), serde_json::to_vec_pretty(&index)?)?;
@@ -1011,6 +1038,12 @@ pub fn native(dir: &Path, out: &Path) -> Result<()> {
             })
         };
         let (slide_exposure, slide_response) = (table("exposure")?, table("response")?);
+        let defringe = match case.defringe {
+            true => Some(std::fs::read(
+                dir.join(format!("{}.defringe.bin", case.name)),
+            )?),
+            false => None,
+        };
         let masks = if case.masks > 0 {
             let params: sidecar_color::params::MaskParams = bytemuck::pod_read_unaligned(
                 &std::fs::read(dir.join(format!("{}.masks.bin", case.name)))?,
@@ -1024,6 +1057,7 @@ pub fn native(dir: &Path, out: &Path) -> Result<()> {
                 local: None,
                 haze: None,
                 profile: profile.as_ref(),
+                defringe: defringe.as_deref(),
                 slide_exposure: &slide_exposure,
                 slide_response: &slide_response,
             }
@@ -1031,6 +1065,7 @@ pub fn native(dir: &Path, out: &Path) -> Result<()> {
             sidecar_engine::Masks {
                 mono: &mono,
                 profile: profile.as_ref(),
+                defringe: defringe.as_deref(),
                 slide_exposure: &slide_exposure,
                 slide_response: &slide_response,
                 ..sidecar_engine::Masks::none()

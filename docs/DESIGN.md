@@ -2303,6 +2303,13 @@ After V1: lens correction, then crop and straighten, then local masks (§15).
 
 **Lens correction.** Profiles come from the file when it carries one — DNG opcodes (iPhone ProRAW and Lightroom's DNGs), Sony's and Fujifilm's own tables, each verified as the build log describes — otherwise from the lensfun database, matched on the lens ExifTool identifies. The models are reimplemented from lensfun's documentation, and the database (CC BY-SA 3.0) is downloaded on first use, not shipped (§12). Absent `sc:Lens` means off, so photos edited in V1 render unchanged; new edits default to on.
 
+**Defringe.** Lateral CA is the lens profile's job; what it leaves is longitudinal CA — the lens focusing blue-violet and green at a different distance from the rest, so a high-contrast edge in front of or behind the focal plane carries a purple or green rim. No profile models it, because it depends on the focus distance and the edge's own defocus. Defringe (`EditParams.defringe`, Lens → Defringe) takes the colour out of such rims and only such rims:
+
+- A pixel is a candidate when its OKLab hue falls in the band's range (purple 280°–345°, green 120°–165° by default, each editable; 10° soft edges) — hue in a perceptual space, so the band matches what the eye calls purple at every lightness.
+- It is a fringe only near an edge: the largest log-luminance range along x and along y within `FRINGE_REACH` (0.08 % of the frame's long edge, ≈ 5 px on a 24 MP frame — the width longitudinal CA has at ordinary apertures) must exceed `FRINGE_EDGE_STOPS` (a smoothstep from 0.7 to 1.5 stops). A purple flower or a green shirt has no such contrast within that reach across most of its area, so it keeps its colour; its outline against a much brighter or darker background is what defringe can touch.
+- The fix moves the colour toward a neutral of the same luminance by `amount × band × edge`, in the working space, and returns it to camera RGB: the pass (`client/defringe.wgsl`) runs as a compute pre-pass over develop's input — the lens-corrected proxy on the phone, the full-resolution frame on the worker, the reach measured against the whole frame when a tile renders — so everything downstream sees a picture without the rims, and develop keeps its sampled-texture budget.
+- Parity: the `defringe` case (ΔE 0); `web/scripts/defringe-smoke.mjs` checks the editor and the worker end to end.
+
 **Masks.**
 
 - Weights: gradients (still to come) are analytic in the shader. Brush strokes — normalized points, radius, feather, flow — are rasterized by shared WGSL render passes into `r8unorm` masks, at proxy size on the phone and up to 4,096 px on the server (see the build log).
