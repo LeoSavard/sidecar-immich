@@ -2339,6 +2339,14 @@ After V1: lens correction, then crop and straighten, then local masks (§15).
 - Checked by `web/scripts/snapshots-smoke.mjs`: two snapshots at ±1 EV, each band of the split matched against renders of each, before and after the line is dragged.
 - Virtual copies — a second entry sharing one RAW — are the other half of this item and come separately.
 
+**Virtual copies.** A second entry for one photo — two deliverable looks from one file — with its own edit, history and exports. A copy is another head in the photo's own history (`sidecar_xmp::VirtualCopy` in `sc:History.copies`): it starts at any version, its saves move only its head, and its versions are nodes of the same tree, so the History tool shows where it branched. Nothing is written beside the photo but its one sidecar, and `sc:Edit` — the photo's own edit, which other programs read — never changes for a copy.
+
+- **Keys.** A copy's key is the photo's and `~c` with six hex digits. The edit routes (`…/edit`, `…/history`, checkout, labels, thumbnails, exports) take it as they take the photo's own; everything about the file itself — proxy, masks, metadata, the loupe and previews — stays keyed on the photo's, so a copy costs no decode, cache or mask of its own. Any other `~` suffix is not a key.
+- **Saving** goes through `SidecarDoc::commit_to`: `History::with_copy` swaps the copy's head into place for the commit, the photo's own head waiting in the copy's slot, so pruning sees every head while it runs and never squashes one.
+- **Editor.** History → Virtual copies lists the photo and its copies; New virtual copy saves what is on screen and starts the copy from that version; a copy can be renamed or removed (its versions stay in the tree). The editor names the copy it shows; moving between entries reloads the page, which is built around one key.
+- **Recent** lists a copy under its own name and key, with a thumbnail of its own edit. **Exports** of a copy render its edit and carry its name: `IMG_1234-mono-v3.jpg`.
+- Checked by `copies-smoke.mjs` and the xmp tests (`a_virtual_copy_saves_beside_the_photo`, `pruning_keeps_a_virtual_copys_head`).
+
 **Masks.**
 
 - Weights: gradients (still to come) are analytic in the shader. Brush strokes — normalized points, radius, feather, flow — are rasterized by shared WGSL render passes into `r8unorm` masks, at proxy size on the phone and up to 4,096 px on the server (see the build log).

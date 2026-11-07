@@ -9,7 +9,10 @@ import { UndoStack } from '$lib/state/undo';
 import type { EditParams, HistoryState, LensProfile } from '$lib/types';
 
 /** What `GET`/`PUT …/edit` and a checkout answer. */
-export type EditState = { edit: EditParams; etag: string; head: string; readOnly: boolean; writable?: boolean; exports: unknown[]; forked?: boolean; savedFor?: string };
+export type EditState = { edit: EditParams; etag: string; head: string; readOnly: boolean; writable?: boolean; exports: unknown[]; forked?: boolean; savedFor?: string; copy?: VirtualCopy; copies?: VirtualCopy[] };
+
+/** Mirrors `sidecar_xmp::VirtualCopy`: another entry for the same photo, a head of its own in its history. */
+export type VirtualCopy = { id: string; name: string; head: string };
 
 export type SessionHooks = {
 	/** The edit changed: develop it again. */
@@ -42,6 +45,9 @@ export class EditSession {
 	versionsBusy = $state(false);
 	/** What pressing and holding the photo shows instead of the edit: a chosen version, or the original. */
 	compare = $state<{ id: string; label: string; edit: EditParams } | null>(null);
+	/** The virtual copy this is, and the photo's copies (DESIGN.md §15, "Virtual copies"). */
+	copy = $state<VirtualCopy | null>(null);
+	copies = $state<VirtualCopy[]>([]);
 
 	private etag = '';
 	/** The history node the edit on screen came from: what the next save names as its base. */
@@ -72,6 +78,8 @@ export class EditSession {
 		this.readOnly = state.readOnly;
 		this.savedFor = state.savedFor ?? null;
 		this.writable = state.writable !== false;
+		this.copy = state.copy ?? null;
+		this.copies = state.copies ?? [];
 		const draft = await loadDraft(this.key);
 		if (draft && draft.baseEtag === state.etag && JSON.stringify(draft.edit) !== JSON.stringify(state.edit)) {
 			this.edit = draft.edit;
@@ -170,6 +178,7 @@ export class EditSession {
 			const state: EditState = await r.json();
 			this.etag = state.etag;
 			this.head = state.head;
+			this.copies = state.copies ?? this.copies;
 			this.forked ||= !!state.forked;
 			this.savedFor = state.savedFor ?? null;
 			this.lensDefaulted = false;
@@ -267,6 +276,43 @@ export class EditSession {
 		if (this.dirty) return false;
 		await this.labelVersion(this.head, name);
 		return true;
+	}
+
+	/**
+	 * A new virtual copy of the photo, starting from the version on screen — saved first, so nothing unsaved is
+	 * left behind — named `name`. Its key, `<photo key>~<id>`, or null when it couldn't be made.
+	 */
+	async newCopy(photoKey: string, name: string): Promise<string | null> {
+		if (!this.readOnly) await this.commit();
+		if (this.dirty) return null;
+		try {
+			const state: EditState = await (await api(`/api/assets/${photoKey}/copies`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name, from: this.head }) })).json();
+			this.copies = state.copies ?? [];
+			const made = this.copies.at(-1);
+			return made ? `${photoKey}~${made.id}` : null;
+		} catch (e) {
+			this.hooks.error(e instanceof Error ? e.message : String(e));
+			return null;
+		}
+	}
+
+	async renameCopy(photoKey: string, id: string, name: string) {
+		try {
+			const state: EditState = await (await api(`/api/assets/${photoKey}/copies/${id}`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name }) })).json();
+			this.copies = state.copies ?? [];
+			if (this.copy?.id === id) this.copy = this.copies.find((c) => c.id === id) ?? this.copy;
+		} catch (e) {
+			this.hooks.error(e instanceof Error ? e.message : String(e));
+		}
+	}
+
+	async removeCopy(photoKey: string, id: string) {
+		try {
+			const state: EditState = await (await api(`/api/assets/${photoKey}/copies/${id}`, { method: 'DELETE' })).json();
+			this.copies = state.copies ?? [];
+		} catch (e) {
+			this.hooks.error(e instanceof Error ? e.message : String(e));
+		}
 	}
 
 	setCompare(id: string | null) {
