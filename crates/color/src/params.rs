@@ -1713,7 +1713,7 @@ pub struct DevelopParams {
     pub process_dark: [f32; 4],
     pub process_light: [f32; 4],
     /// The light controls, per pixel (`light_uniform`): Highlights' and Shadows' slope changes, Contrast as a slope
-    /// less one, and 1 to keep how colourful a colour looks. All zero is the identity, and is all an edit before
+    /// less one, w unused. All zero is the identity, and is all an edit before
     /// `PROCESS_VERSION` 10 packs.
     pub light: [f32; 4],
 }
@@ -1722,20 +1722,17 @@ pub struct DevelopParams {
 pub const CONTRAST_SCALE: f64 = 7.0;
 
 /// How far Highlights and Shadows at ±100 change the slope of the tones past their ramps (`develop/light.wgsl`):
-/// −100 halves Highlights' and +100 halves Shadows', so at least half of every texture's contrast is kept.
-/// Highlights −100 brings about 2¼ stops past white into view, as far as the reach it replaces did.
-pub const LIGHT_SLOPE_RANGE: f64 = 0.5;
+/// Highlights −100 and Shadows +100 take it to a quarter, so a texture there keeps at least a quarter of its
+/// contrast. Set by eye on 2026-11-09, a step stronger than the half first tried, for creative room.
+pub const LIGHT_SLOPE_RANGE: f64 = 0.75;
 /// Contrast as a slope in stops per stop around grey: the stored value 1 + slider/100 (0.3…2) taken halfway, so
 /// +100 is 1.5 and −70 is 0.65.
 pub const LIGHT_CONTRAST_GAIN: f64 = 0.5;
-/// Whether a colour whose light the controls change keeps how colourful it looks (OKLab a and b) rather than the
-/// light's own colour (its RGB ratios). The A/B of 2026-11-09 is between these two.
-pub const LIGHT_KEEPS_COLOURFULNESS: bool = false;
 
 /// Where Highlights' and Shadows' ramps begin, in stops from grey, and how wide they are (`develop/light.wgsl`,
 /// which this mirrors).
-const LIGHT_RAMP_FROM: f64 = 0.75;
-const LIGHT_RAMP_WIDTH: f64 = 1.25;
+const LIGHT_RAMP_FROM: f64 = 0.5;
+const LIGHT_RAMP_WIDTH: f64 = 1.0;
 
 /// The light stage on a luminance `u` stops from grey, for a packed `light`: the stops it renders at. Mirrors
 /// `light_apply` in `develop/light.wgsl`, for tests and for the curve the editor draws.
@@ -1757,7 +1754,7 @@ fn light_uniform(t: &Tone) -> [f32; 4] {
         (t.highlights.clamp(-100.0, 100.0) / 100.0 * LIGHT_SLOPE_RANGE) as f32,
         (t.shadows.clamp(-100.0, 100.0) / 100.0 * LIGHT_SLOPE_RANGE) as f32,
         ((t.contrast - 1.0) * LIGHT_CONTRAST_GAIN).max(-0.9) as f32,
-        if LIGHT_KEEPS_COLOURFULNESS { 1.0 } else { 0.0 },
+        0.0,
     ]
 }
 
@@ -3522,17 +3519,9 @@ mod tests {
         assert!(up.windows(2).all(|w| w[1] > w[0]), "Highlights up: {up:?}");
         let lift: Vec<f64> = [0.0, 25.0, 50.0, 100.0].map(|s| at(0.0, s, -5.0)).to_vec();
         assert!(lift.windows(2).all(|w| w[1] > w[0]), "Shadows up: {lift:?}");
-        // Highlights −100 brings about two stops past white into view.
+        // Highlights −100 brings at least two stops past white into view.
         let white = DEFAULT_WHITE_EV;
-        let mut u = white;
-        while at(-100.0, 0.0, u) < white {
-            u += 0.01;
-        }
-        assert!(
-            (u - white - 2.25).abs() < 0.2,
-            "reaches {} stops past white",
-            u - white
-        );
+        assert!(at(-100.0, 0.0, white + 2.0) <= white, "reaches past white");
     }
 
     /// The light stage never turns tones over — a brighter pixel always renders at least as bright — and keeps

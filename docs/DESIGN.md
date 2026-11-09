@@ -1484,19 +1484,22 @@ point alone, exactly as it did.
 `sidecar_color::params::light_stops`). Highlights, Shadows and Contrast act on each pixel's luminance alone, in
 stops from middle grey, u = log₂(Y / 0.18), on the scene's light after Clarity and Dehaze and before film, black and
 white and the tone map — one function for a RAW and a developed file, which differ only in the rendering that
-follows. A pixel is its light Y times its colour (R/Y, G/Y, B/Y): the controls choose a new Y and the colour is
-kept, either as the light's own ratios or, with `LIGHT_KEEPS_COLOURFULNESS`, as its OKLab a and b, so a darkened
-colour does not read as a duller one (the A/B of 2026-11-09 decides which).
+follows. A pixel is its light Y times its colour (R/Y, G/Y, B/Y): the controls choose a new Y and keep the ratios,
+as dimming or brightening real light does. The A/B of 2026-11-09 against keeping OKLab a and b instead (so a
+darkened colour stays as colourful) went this way: the owner found the ratios natural — "the light curve is fixed
+and the adjustments nudge the lightness" — and the other floating and digital.
 
 - **Contrast** is a slope in stops per stop through grey: 1 + (stored − 1) × 0.5, so +100 is 1.5 and −70 is 0.65.
-- **Highlights** and **Shadows** change the slope of the tones past a ramp that begins 0.75 stops from grey and
-  is 1.25 stops wide (a smoothstep, integrated, so the curve has no kink): Highlights −100 halves the slope above
-  about +2 stops, which brings about 2¼ stops past white into view; Shadows +100 halves it below −2, lifting the
-  deep shadows while black stays black. The slope is never less than half of Contrast's, so tones never turn
-  over, a slider does more the further it goes, and grey stays put (all tested).
+- **Highlights** and **Shadows** change the slope of the tones past a ramp that begins ½ stop from grey and is
+  1 stop wide (a smoothstep, integrated, so the curve has no kink): Highlights −100 takes the slope to a quarter
+  above +1½ stops, darkening the bright tones and bringing what lay past white into view; Shadows +100 does the same
+  below −1½, lifting the deep shadows while black stays black. The slope never falls below a quarter of
+  Contrast's, so tones never turn over, a slider does more the further it goes, and grey stays put (all tested).
+  The strength (`LIGHT_SLOPE_RANGE`, a quarter at full travel) was set a step past the half first tried, at the
+  owner's asking, for creative room.
 - What it costs, measured with `web/scripts/tone-audit.mjs` (docs/research/tone-review-2026-11.md): within the
-  range a slider changes, a texture keeps its share of the slope — at most half its contrast lost — and outside it
-  nothing moves. A per-pixel control cannot both move a band and keep that band's contrast; that would take a
+  range a slider changes, a texture keeps its share of the slope — at least a quarter of its contrast — and outside
+  it nothing moves. A per-pixel control cannot both move a band and keep that band's contrast; that would take a
   spatial filter, which the owner chose against for the light controls.
 - **The fade to neutral** is keyed on the clipped samples around a pixel (the ingest's alpha) instead of on the
   output's brightness: a bright colour that was measured keeps its colour at any level, and a reconstructed one —
