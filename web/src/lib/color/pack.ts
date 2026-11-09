@@ -62,7 +62,7 @@ export type SlideProfile = { offsets: [number, number, number]; scale: number; s
 
 /** `DevelopParams` (crates/color/src/params.rs). Checked against the wasm on load, so a
  *  struct that grew on one side fails here, by name, rather than as a garbled render. */
-export const DEVELOP_UNIFORM_BYTES = 592;
+export const DEVELOP_UNIFORM_BYTES = 608;
 const MASK_UNIFORM_BYTES = 1696;
 const EMPTY = new Float32Array(0);
 const LUT = 4096;

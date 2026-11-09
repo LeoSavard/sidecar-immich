@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright Sidecar contributors
-//! requires: uniforms/develop_params.wgsl develop/wb.wgsl develop/exposure.wgsl develop/gamut.wgsl develop/tone.wgsl develop/masks.wgsl develop/mixer.wgsl develop/mono.wgsl develop/developer.wgsl develop/grain.wgsl develop/stock.wgsl develop/slide.wgsl develop/grading.wgsl develop/local.wgsl develop/haze.wgsl develop/output.wgsl
+//! requires: uniforms/develop_params.wgsl develop/wb.wgsl develop/exposure.wgsl develop/gamut.wgsl develop/tone.wgsl develop/light.wgsl develop/masks.wgsl develop/mixer.wgsl develop/mono.wgsl develop/developer.wgsl develop/grain.wgsl develop/stock.wgsl develop/slide.wgsl develop/grading.wgsl develop/local.wgsl develop/haze.wgsl develop/output.wgsl
 // Develop pass: full-screen triangle into developedTex (rgba16float, proxy size). Output is display-linear.
 
 @group(0) @binding(0) var<uniform> P: DevelopParams;
@@ -116,6 +116,9 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     let air = textureLoad(maps, vec2i(0), 2, 0).rgb * P.exposure * exp2(local.ev);
     c = haze_apply(c, air, t, P.local.w);
   }
+  // Highlights, Shadows and Contrast, per pixel on the scene's light (`PROCESS_VERSION` 10; before it they were
+  // the tone curve's, and `P.light` is the identity).
+  c = light_apply(c, P.light);
   // Black and white: the film's exposure in place of the colour, before the tone map, as film is exposed; then
   // what the developer makes of it.
   if (P.mono.x > 0.5) {
@@ -176,7 +179,15 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     if (film) { ef = film_curve_in(c, local.tone, P.film.y); }
   }
   e = layer_curves(lut_sample(tone_lut, e), layer_curves_tex, local.curves, M.count);
-  c = tone_apply(c, e, developed, P.highlight_bleach);
+  if (P.tone_shape.w > 0.5) {
+    // Since `PROCESS_VERSION` 10 the fade to neutral is keyed on what the sensor did not measure — the share of
+    // clipped samples around the pixel — rather than on how bright the output is: a bright colour that was
+    // measured keeps it at any level, and a reconstructed one has no colour of its own to keep.
+    c = tone_apply(c, e, developed, 0.0);
+    c = mix(c, vec3f(dot(c, LUMA_2020)), P.highlight_bleach * clamp(src.a, 0.0, 1.0));
+  } else {
+    c = tone_apply(c, e, developed, P.highlight_bleach);
+  }
   if (film) {
     let user = vec3f(
       layer_curves(lut_sample(tone_lut, ef.r), layer_curves_tex, local.curves, M.count),

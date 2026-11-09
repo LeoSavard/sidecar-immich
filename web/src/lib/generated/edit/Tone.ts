@@ -46,7 +46,14 @@ highlightReachEv: number,
  * edit so an older one keeps the saturated colours it was approved with; left out of the serialized edit
  * when on.
  */
-gamutAp1?: boolean, contrast: number, 
+gamutAp1?: boolean, 
+/**
+ * Highlights, Shadows and Contrast as per-pixel functions of luminance in stops from grey (`Light`,
+ * `develop/light.wgsl`), the same for a RAW and a developed file, and the fade to neutral keyed on clipped
+ * samples — since `PROCESS_VERSION` 10. Off, they are the tone curve's bump, the white point's reach and
+ * the curve's steepness, as an older edit was approved with. Left out of the serialized edit when on.
+ */
+perPixelLight?: boolean, contrast: number, 
 /**
  * Control points over display-encoded values, `[x, y]` in 0…1. Manually drawn only, as of
  * `PROCESS_VERSION` 2 — Highlights and Shadows are `highlights`/`shadows` below, not points in here.

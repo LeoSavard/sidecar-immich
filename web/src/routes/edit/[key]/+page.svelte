@@ -351,7 +351,9 @@
 	let keepOldRendering = $state(false);
 	/** What Highlights/Shadows alone would do to an identity curve — the curve editor's "ghost" line, drawn
 	 * behind the real one so a slider's effect stays visible even once a manual curve has its own shape. */
-	const ghostLut = $derived.by(() => (edit ? (packer?.toneCurveLut([], edit.tone.highlights ?? 0, edit.tone.shadows ?? 0) ?? null) : null));
+	// Highlights and Shadows bend the curve only in an edit from before `PROCESS_VERSION` 10; since, they are the
+	// light stage's and the curve has nothing of theirs to draw.
+	const ghostLut = $derived.by(() => (edit && edit.tone.perPixelLight === false ? (packer?.toneCurveLut([], edit.tone.highlights ?? 0, edit.tone.shadows ?? 0) ?? null) : null));
 	let display: DisplaySpace = 'srgb';
 	let developDirty = true;
 	let frame = 0;

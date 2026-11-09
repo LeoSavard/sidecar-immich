@@ -1480,6 +1480,33 @@ point alone, exactly as it did.
 4. **Tone map.** Luminance Y (Rec.2020 weights) → `log2(Y / 0.18)` mapped from [BlackEV, WhiteEV] to [0, 1] → sigmoid (contrast, pivot) → user curve LUT → decode to Y′ → `rgb × Y′ / Y`, which keeps channel ratios and therefore hue. The curve is Fritsch–Carlson monotone cubic over display-encoded values, baked into 4,096 entries in an `r32float` 1D texture and interpolated manually (`r32float` isn't filterable without an optional feature). Shadows / Midtones / Highlights sliders in the UI move curve control points — the same spline.
 5. **Color mixer.** Linear → OKLab → LCh. Bands: red, orange, yellow, green, aqua, blue, purple, magenta. Raised-cosine weights span neighbouring band centres and sum to 1. `h += Σ wᵢ·hueᵢ`, `C ×= 1 + Σ wᵢ·satᵢ`, `L += Σ wᵢ·lumᵢ · smoothstep(0.02, 0.08, C)` so neutrals stay put. Back to linear.
 
+**Light, per pixel** (`PROCESS_VERSION` 10, `Tone::per_pixel_light`; `develop/light.wgsl`, mirrored by
+`sidecar_color::params::light_stops`). Highlights, Shadows and Contrast act on each pixel's luminance alone, in
+stops from middle grey, u = log₂(Y / 0.18), on the scene's light after Clarity and Dehaze and before film, black and
+white and the tone map — one function for a RAW and a developed file, which differ only in the rendering that
+follows. A pixel is its light Y times its colour (R/Y, G/Y, B/Y): the controls choose a new Y and the colour is
+kept, either as the light's own ratios or, with `LIGHT_KEEPS_COLOURFULNESS`, as its OKLab a and b, so a darkened
+colour does not read as a duller one (the A/B of 2026-11-09 decides which).
+
+- **Contrast** is a slope in stops per stop through grey: 1 + (stored − 1) × 0.5, so +100 is 1.5 and −70 is 0.65.
+- **Highlights** and **Shadows** change the slope of the tones past a ramp that begins 0.75 stops from grey and
+  is 1.25 stops wide (a smoothstep, integrated, so the curve has no kink): Highlights −100 halves the slope above
+  about +2 stops, which brings about 2¼ stops past white into view; Shadows +100 halves it below −2, lifting the
+  deep shadows while black stays black. The slope is never less than half of Contrast's, so tones never turn
+  over, a slider does more the further it goes, and grey stays put (all tested).
+- What it costs, measured with `web/scripts/tone-audit.mjs` (docs/research/tone-review-2026-11.md): within the
+  range a slider changes, a texture keeps its share of the slope — at most half its contrast lost — and outside it
+  nothing moves. A per-pixel control cannot both move a band and keep that band's contrast; that would take a
+  spatial filter, which the owner chose against for the light controls.
+- **The fade to neutral** is keyed on the clipped samples around a pixel (the ingest's alpha) instead of on the
+  output's brightness: a bright colour that was measured keeps its colour at any level, and a reconstructed one —
+  which has none of its own — fades whatever Highlights does to it. This ends the magenta a clipped sky showed
+  when pulled well below white.
+
+Before version 10, Highlights and Shadows were a bump on the display-encoded curve (`tone_curve_lut`), Highlights
+also moved the white point (`highlight_reach`), and Contrast set the curve's steepness; an older edit renders that
+way, and taking up today's rendering moves it to this.
+
 **Developed files take a display-referred path.** A JPEG, HEIC, PNG or TIFF was rendered for display by
 whatever wrote it — tone curve, white clip, gamut — and none of that can be undone, so the stages above that
 exist to render sensor light don't apply to it. `SourceKind::Developed` (from `RawInfo.source_kind`, passed to

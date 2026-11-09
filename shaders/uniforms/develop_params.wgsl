@@ -77,4 +77,8 @@ struct DevelopParams {
   process: vec4f,
   process_dark: vec4f,
   process_light: vec4f,
+  // The light controls, per pixel (`light_uniform`): Highlights' and Shadows' slope changes, Contrast as a slope
+  // less one, and 1 to keep how colourful a colour looks. All zero is the identity, and is all an edit before
+  // `PROCESS_VERSION` 10 packs.
+  light: vec4f,
 }

@@ -702,6 +702,36 @@ fn cases() -> Vec<Fixture> {
             None,
         ),
         (
+            // The light stage (`PROCESS_VERSION` 10): Highlights, Shadows and Contrast per pixel, in stops.
+            "light".into(),
+            nikon_d850(),
+            SourceKind::Raw,
+            {
+                let mut e = EditParams::default();
+                e.tone.highlights = -70.0;
+                e.tone.shadows = 45.0;
+                e.tone.contrast = 1.35;
+                e
+            },
+            DisplaySpace::Srgb,
+            None,
+        ),
+        (
+            // The light stage (`PROCESS_VERSION` 10): Highlights, Shadows and Contrast per pixel, in stops.
+            "heic-light".into(),
+            heic(),
+            SourceKind::Developed,
+            {
+                let mut e = EditParams::default();
+                e.tone.highlights = -70.0;
+                e.tone.shadows = 45.0;
+                e.tone.contrast = 1.35;
+                e
+            },
+            DisplaySpace::Srgb,
+            None,
+        ),
+        (
             // An edit from before `PROCESS_VERSION` 9: gamut compression in Rec.2020, as it was.
             "gamut-legacy".into(),
             nikon_d850(),

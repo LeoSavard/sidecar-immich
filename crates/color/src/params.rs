@@ -13,7 +13,7 @@ use crate::tone;
 /// `migrate_highlight_shadow_anchors`) — an edit saved under version 1 needs its curve read differently, not
 /// just a field that defaults to off, so this is a real bump rather than an additive field. See
 /// docs/ROADMAP.md, "Curve editor: Highlights and Shadows stop sharing points with the manual curve".
-pub const PROCESS_VERSION: u32 = 9;
+pub const PROCESS_VERSION: u32 = 10;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
@@ -498,6 +498,11 @@ impl EditParams {
         if self.process_version < 2 {
             self.migrate_highlight_shadow_anchors();
         }
+        if self.process_version < 10 {
+            // Its Highlights, Shadows and Contrast bent the tone curve, and its bright colours faded by brightness:
+            // that is the picture the person approved.
+            self.tone.per_pixel_light = false;
+        }
         if self.process_version < 9 {
             // Its saturated lights were compressed in Rec.2020 and that is the colour the person approved.
             self.tone.gamut_ap1 = false;
@@ -570,6 +575,7 @@ impl EditParams {
             self.tone.highlight_reach_ev = HIGHLIGHT_REACH_EV;
             self.tone.gamut_ap1 = true;
         }
+        self.tone.per_pixel_light = true;
         self.detail.noise_model = true;
         self.process_version = PROCESS_VERSION;
     }
@@ -747,6 +753,13 @@ pub struct Tone {
     #[serde(skip_serializing_if = "is_true")]
     #[cfg_attr(feature = "ts", ts(as = "Option<bool>", optional))]
     pub gamut_ap1: bool,
+    /// Highlights, Shadows and Contrast as per-pixel functions of luminance in stops from grey (`Light`,
+    /// `develop/light.wgsl`), the same for a RAW and a developed file, and the fade to neutral keyed on clipped
+    /// samples — since `PROCESS_VERSION` 10. Off, they are the tone curve's bump, the white point's reach and
+    /// the curve's steepness, as an older edit was approved with. Left out of the serialized edit when on.
+    #[serde(skip_serializing_if = "is_true")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<bool>", optional))]
+    pub per_pixel_light: bool,
     pub contrast: f64,
     /// Control points over display-encoded values, `[x, y]` in 0…1. Manually drawn only, as of
     /// `PROCESS_VERSION` 2 — Highlights and Shadows are `highlights`/`shadows` below, not points in here.
@@ -796,6 +809,7 @@ impl Default for Tone {
             highlight_bleach: 1.0,
             highlight_reach_ev: HIGHLIGHT_REACH_EV,
             gamut_ap1: true,
+            per_pixel_light: true,
             contrast: 1.0,
             curve: vec![[0.0, 0.0], [1.0, 1.0]],
             highlights: 0.0,
@@ -1616,7 +1630,7 @@ pub enum DisplaySpace {
     Rec2020,
 }
 
-/// The develop modules' uniform (592 bytes). Its WGSL declaration,
+/// The develop modules' uniform (608 bytes). Its WGSL declaration,
 /// `shaders/uniforms/develop_params.wgsl`, is generated from this struct (`sidecar-uniform`); the
 /// `uniforms` test checks the file and every offset.
 #[repr(C)]
@@ -1698,10 +1712,54 @@ pub struct DevelopParams {
     pub process: [f32; 4],
     pub process_dark: [f32; 4],
     pub process_light: [f32; 4],
+    /// The light controls, per pixel (`light_uniform`): Highlights' and Shadows' slope changes, Contrast as a slope
+    /// less one, and 1 to keep how colourful a colour looks. All zero is the identity, and is all an edit before
+    /// `PROCESS_VERSION` 10 packs.
+    pub light: [f32; 4],
 }
 
 /// Contrast slider value → logistic steepness.
 pub const CONTRAST_SCALE: f64 = 7.0;
+
+/// How far Highlights and Shadows at ±100 change the slope of the tones past their ramps (`develop/light.wgsl`):
+/// −100 halves Highlights' and +100 halves Shadows', so at least half of every texture's contrast is kept.
+/// Highlights −100 brings about 2¼ stops past white into view, as far as the reach it replaces did.
+pub const LIGHT_SLOPE_RANGE: f64 = 0.5;
+/// Contrast as a slope in stops per stop around grey: the stored value 1 + slider/100 (0.3…2) taken halfway, so
+/// +100 is 1.5 and −70 is 0.65.
+pub const LIGHT_CONTRAST_GAIN: f64 = 0.5;
+/// Whether a colour whose light the controls change keeps how colourful it looks (OKLab a and b) rather than the
+/// light's own colour (its RGB ratios). The A/B of 2026-11-09 is between these two.
+pub const LIGHT_KEEPS_COLOURFULNESS: bool = false;
+
+/// Where Highlights' and Shadows' ramps begin, in stops from grey, and how wide they are (`develop/light.wgsl`,
+/// which this mirrors).
+const LIGHT_RAMP_FROM: f64 = 0.75;
+const LIGHT_RAMP_WIDTH: f64 = 1.25;
+
+/// The light stage on a luminance `u` stops from grey, for a packed `light`: the stops it renders at. Mirrors
+/// `light_apply` in `develop/light.wgsl`, for tests and for the curve the editor draws.
+pub fn light_stops(u: f64, light: [f32; 4]) -> f64 {
+    let ramp = |t: f64| {
+        let x = (t / LIGHT_RAMP_WIDTH).clamp(0.0, 1.0);
+        LIGHT_RAMP_WIDTH * x.powi(3) * (1.0 - 0.5 * x) + (t - LIGHT_RAMP_WIDTH).max(0.0)
+    };
+    let [h, s, k, _] = light.map(f64::from);
+    (1.0 + k) * (u + h * ramp(u - LIGHT_RAMP_FROM) + s * ramp(-u - LIGHT_RAMP_FROM))
+}
+
+/// `DevelopParams::light` for these tone settings: the identity before `PROCESS_VERSION` 10.
+fn light_uniform(t: &Tone) -> [f32; 4] {
+    if !t.per_pixel_light {
+        return [0.0; 4];
+    }
+    [
+        (t.highlights.clamp(-100.0, 100.0) / 100.0 * LIGHT_SLOPE_RANGE) as f32,
+        (t.shadows.clamp(-100.0, 100.0) / 100.0 * LIGHT_SLOPE_RANGE) as f32,
+        ((t.contrast - 1.0) * LIGHT_CONTRAST_GAIN).max(-0.9) as f32,
+        if LIGHT_KEEPS_COLOURFULNESS { 1.0 } else { 0.0 },
+    ]
+}
 
 /// A developed file's tone settings, from the same stored fields a RAW uses so the editor's sliders need no
 /// second meaning: Blacks and Whites as −1…1 (the slider over 100), Contrast as the S-curve's exponent, and
@@ -1718,7 +1776,11 @@ fn display_tone(edit: &EditParams) -> [f32; 4] {
     [
         blacks as f32,
         whites as f32,
-        t.contrast.max(0.1) as f32,
+        if t.per_pixel_light {
+            1.0
+        } else {
+            t.contrast.max(0.1) as f32
+        },
         knee as f32,
     ]
 }
@@ -1765,8 +1827,16 @@ fn tone_params(edit: &EditParams, developed: bool) -> [f32; 4] {
         // where white went, and `display_tone` grades what is there.
         return display_tone(edit);
     }
-    let white_ev = t.white_ev + highlight_reach(t);
-    let mut k = (t.contrast * CONTRAST_SCALE).max(0.5);
+    // Since `PROCESS_VERSION` 10 Highlights and Contrast are the light stage's (`light_uniform`): the white point
+    // and the curve's steepness are the rendering's own.
+    let (white_ev, mut k) = if t.per_pixel_light {
+        (t.white_ev, CONTRAST_SCALE)
+    } else {
+        (
+            t.white_ev + highlight_reach(t),
+            (t.contrast * CONTRAST_SCALE).max(0.5),
+        )
+    };
     let mut black = t.black_ev;
     // A named stock's print puts its fog just above paper black, half a stop under the floor its toe flattens the
     // shadows into, as a printer chooses exposure and grade for a negative; Blacks still moves it from there. The
@@ -1991,10 +2061,15 @@ fn pack_inner(
             } else {
                 edit.tone.shoulder_order.clamp(0.0, 8.0) as f32
             },
-            edit.tone.contrast.max(0.1) as f32,
+            if edit.tone.per_pixel_light {
+                1.0
+            } else {
+                edit.tone.contrast.max(0.1) as f32
+            },
             // A developed file is never gamut-compressed (it is already in its display's gamut).
             if edit.tone.gamut_ap1 { 1.0 } else { 0.0 },
-            0.0,
+            // The fade to neutral by clipped samples rather than by output level (`PROCESS_VERSION` 10).
+            if edit.tone.per_pixel_light { 1.0 } else { 0.0 },
         ],
         grade,
         grade_split,
@@ -2009,6 +2084,7 @@ fn pack_inner(
         process: [0.0; 4],
         process_dark: [0.0; 4],
         process_light: [0.0; 4],
+        light: light_uniform(&edit.tone),
         slide_tone: match &slide {
             Some(_) => {
                 let mut t = display_tone(edit);
@@ -2092,12 +2168,13 @@ fn pack_inner(
                 .map_or([0.0; 4], |c| c.uniformity()),
         };
     }
-    let lut = tone_curve_lut(
-        &edit.tone.curve,
-        edit.tone.highlights,
-        edit.tone.shadows,
-        LUT_SIZE,
-    );
+    // Since `PROCESS_VERSION` 10 Highlights and Shadows are the light stage's, not a bump on the curve.
+    let (highlights, shadows) = if edit.tone.per_pixel_light {
+        (0.0, 0.0)
+    } else {
+        (edit.tone.highlights, edit.tone.shadows)
+    };
+    let lut = tone_curve_lut(&edit.tone.curve, highlights, shadows, LUT_SIZE);
     Packed {
         uniform: bytemuck::bytes_of(&params).to_vec(),
         lut,
@@ -2450,7 +2527,7 @@ mod tests {
             SourceKind::Raw,
             DisplaySpace::Srgb,
         );
-        assert_eq!(p.uniform.len(), 592);
+        assert_eq!(p.uniform.len(), 608);
         assert_eq!(p.lut.len(), LUT_SIZE);
         // exposure sits at byte 12, and for a RAW at default it is the baseline, not 1.0
         let gain = |p: &Packed| f32::from_le_bytes(p.uniform[12..16].try_into().unwrap());
@@ -3208,6 +3285,8 @@ mod tests {
     #[test]
     fn migrated_edit_packs_the_same_value_at_the_anchor_as_the_old_mechanism_did() {
         let mut e = EditParams::default();
+        // Anchors are a version-1 edit's, which renders Highlights and Shadows on the curve.
+        e.tone.per_pixel_light = false;
         let old_y = 0.25 + (-35.0_f64) / 100.0 * HIGHLIGHT_SHADOW_SCALE;
         e.tone.curve = vec![[0.0, 0.0], [0.25, old_y], [1.0, 1.0]];
         let before = pack(
@@ -3338,8 +3417,8 @@ mod tests {
 
     /// The defect this fixes: everything at or above `white_ev` becomes display white before the LUT sees
     /// it, and the LUT's ends are pinned, so Highlights could bend the curve below white and reach nothing
-    /// that was already at it. Negative Highlights now moves the white point itself, which is the only place
-    /// a blown highlight can be reached from.
+    /// that was already at it. Negative Highlights moved the white point itself, from `PROCESS_VERSION` 7 until
+    /// the light stage took Highlights over in 10; an edit from between keeps it.
     #[test]
     fn highlights_can_reach_past_white_now() {
         let cam = crate::camera::nikon_d850();
@@ -3349,6 +3428,7 @@ mod tests {
             u.tone[1]
         };
         let mut e = EditParams::default();
+        e.tone.per_pixel_light = false;
         let at_rest = white_of(&e);
         assert!((at_rest - DEFAULT_WHITE_EV as f32).abs() < 1e-6);
 
@@ -3366,6 +3446,121 @@ mod tests {
         // Positive Highlights is not a white-point control: it grades what is below white, as it always did.
         e.tone.highlights = 100.0;
         assert!((white_of(&e) - at_rest).abs() < 1e-6);
+    }
+
+    /// Since `PROCESS_VERSION` 10 Highlights, Shadows and Contrast are the light stage's alone: the white point,
+    /// the curve and its steepness stay the rendering's, and the stage gets the stops and the slope.
+    #[test]
+    fn the_light_controls_pack_into_the_light_stage() {
+        let cam = crate::camera::nikon_d850();
+        let packed = |e: &EditParams, kind| {
+            let p = pack(e, &cam, kind, DisplaySpace::Srgb);
+            let u: DevelopParams = *bytemuck::from_bytes(&p.uniform);
+            (u, p.lut)
+        };
+        let rest = EditParams::default();
+        assert!(rest.tone.per_pixel_light);
+        let (u0, lut0) = packed(&rest, SourceKind::Raw);
+        assert_eq!(u0.light, [0.0; 4], "at rest the stage is the identity");
+        assert_eq!(u0.tone_shape[3], 1.0, "the fade keyed on clipped samples");
+
+        let mut e = rest.clone();
+        e.tone.highlights = -100.0;
+        e.tone.shadows = 50.0;
+        e.tone.contrast = 1.4;
+        for kind in [SourceKind::Raw, SourceKind::Developed] {
+            let (u, lut) = packed(&e, kind);
+            let (r, rlut) = packed(&rest, kind);
+            assert_eq!(u.light[0], -LIGHT_SLOPE_RANGE as f32);
+            assert_eq!(u.light[1], (0.5 * LIGHT_SLOPE_RANGE) as f32);
+            assert!((u.light[2] - 0.2).abs() < 1e-6);
+            assert_eq!(
+                u.tone, r.tone,
+                "{kind:?}: the tone map is the rendering's own"
+            );
+            assert_eq!(u.tone_shape[1], r.tone_shape[1]);
+            assert_eq!(lut, rlut, "{kind:?}: no bump on the curve");
+        }
+        assert_eq!(lut0.len(), LUT_SIZE);
+
+        // An edit from before keeps the curve's Highlights, and the identity stage.
+        let mut old: EditParams =
+            serde_json::from_str(r#"{"processVersion":9,"tone":{"highlights":-100}}"#).unwrap();
+        old.migrate();
+        assert!(!old.tone.per_pixel_light);
+        let (u, _) = packed(&old, SourceKind::Raw);
+        assert_eq!(u.light, [0.0; 4]);
+        assert_eq!(u.tone_shape[3], 0.0);
+        assert!(old.behind_current_rendering(false));
+        old.adopt_current_rendering(false);
+        assert!(old.tone.per_pixel_light);
+        assert!(
+            serde_json::to_value(EditParams::default()).unwrap()["tone"]
+                .get("perPixelLight")
+                .is_none(),
+            "left out when on"
+        );
+    }
+
+    /// Each slider does more the further it goes, where it is aimed: Highlights on a tone three stops over grey,
+    /// Shadows on one five stops under.
+    #[test]
+    fn the_light_sliders_do_more_the_further_they_go() {
+        let at = |h: f64, s: f64, u: f64| {
+            let mut t = Tone::default();
+            (t.highlights, t.shadows) = (h, s);
+            light_stops(u, light_uniform(&t))
+        };
+        let down: Vec<f64> = [0.0, -25.0, -50.0, -75.0, -100.0]
+            .map(|h| at(h, 0.0, 3.0))
+            .to_vec();
+        assert!(
+            down.windows(2).all(|w| w[1] < w[0]),
+            "Highlights down: {down:?}"
+        );
+        let up: Vec<f64> = [0.0, 25.0, 50.0, 100.0].map(|h| at(h, 0.0, 3.0)).to_vec();
+        assert!(up.windows(2).all(|w| w[1] > w[0]), "Highlights up: {up:?}");
+        let lift: Vec<f64> = [0.0, 25.0, 50.0, 100.0].map(|s| at(0.0, s, -5.0)).to_vec();
+        assert!(lift.windows(2).all(|w| w[1] > w[0]), "Shadows up: {lift:?}");
+        // Highlights −100 brings about two stops past white into view.
+        let white = DEFAULT_WHITE_EV;
+        let mut u = white;
+        while at(-100.0, 0.0, u) < white {
+            u += 0.01;
+        }
+        assert!(
+            (u - white - 2.25).abs() < 0.2,
+            "reaches {} stops past white",
+            u - white
+        );
+    }
+
+    /// The light stage never turns tones over — a brighter pixel always renders at least as bright — and keeps
+    /// at least half its slope, at every setting of the three controls; grey stays where it is.
+    #[test]
+    fn the_light_stage_is_monotone_and_leaves_grey() {
+        for h in [-100.0, -60.0, -20.0, 0.0, 50.0, 100.0] {
+            for s in [-100.0, -40.0, 0.0, 30.0, 100.0] {
+                for c in [0.3, 1.0, 2.0] {
+                    let mut t = Tone::default();
+                    (t.highlights, t.shadows, t.contrast) = (h, s, c);
+                    let l = light_uniform(&t);
+                    assert!(light_stops(0.0, l).abs() < 1e-9, "grey moved: {h} {s} {c}");
+                    let slope_floor = (1.0 - LIGHT_SLOPE_RANGE) * (1.0 + l[2] as f64);
+                    let mut prev = light_stops(-10.0, l);
+                    for i in 1..=2000 {
+                        let u = -10.0 + i as f64 * 0.01;
+                        let v = light_stops(u, l);
+                        let slope = (v - prev) / 0.01;
+                        assert!(
+                            slope >= slope_floor - 0.02,
+                            "{h} {s} {c}: slope {slope} at {u}"
+                        );
+                        prev = v;
+                    }
+                }
+            }
+        }
     }
 
     /// The scene level that renders as white, which is the number the complaint was really about. Recovery
