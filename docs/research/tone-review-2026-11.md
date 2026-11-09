@@ -102,3 +102,28 @@ would be `PROCESS_VERSION` 10, with older edits rendering as they did.
   colour; 4 the bleach and the magenta).
 - For 3, chroma kept (darker colours stay as colourful) against saturation kept (today) — an A/B on two ports.
 - How much colour Contrast adds — an A/B.
+
+## The owner's direction, 2026-11-09, and what was built
+
+The owner preferred **no spatial filter for the light controls**: they should be simple per-pixel math, the same
+for every kind of file. So proposal 1's base/detail split is dropped, and 2–4 are built per pixel on the
+`light-model` branch (`PROCESS_VERSION` 10; DESIGN.md §7, "Light, per pixel"):
+
+- Highlights, Shadows and Contrast are functions of a pixel's luminance in stops from grey; the colour is kept
+  as the light's ratios or, for the A/B, as OKLab a and b.
+- A first version moved Highlights' range by a fixed number of stops over a short ramp. tone-audit caught it
+  turning tones over, and a widened ramp then made −100 weaker than −50; the version built changes the **slope**
+  past the ramp instead, which is monotone in brightness and in slider travel by construction.
+- The fade to neutral is keyed on clipped samples; the sky that showed 26–34 levels of magenta now shows 0.
+
+Measured (overcast frame, light's colour kept):
+
+| | shadows | lower mids | upper mids | highlights | near white |
+|---|---|---|---|---|---|
+| Highlights −100 ΔL / detail | 0 / 1.00 | 0 / 0.99 | 0 / 0.97 | −1.2 / 0.94 | −5.5 / 0.67 |
+| Shadows +100 | +5.4 / 0.73 | 0 / 0.89 | 0 / 0.97 | 0 / 0.99 | 0 / 1.00 |
+| Contrast +50, chroma kept: light's colour / colourfulness | 0.83 / 0.97 | 0.96 / 0.99 | 1.02 / 1.00 | 1.04 / 0.97 | 0.96 / 0.84 |
+
+What per-pixel math costs, as expected: Highlights now darkens the visible highlights only slightly (−1.2 where
+the old control moved them −12.6, taking the midtones with it); its weight is near white and in what it recovers
+past it. How strong it should be is a constant (`LIGHT_SLOPE_RANGE`, the ramp's start and width) to set by eye.
