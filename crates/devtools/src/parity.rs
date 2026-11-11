@@ -37,6 +37,42 @@ struct Case {
     /// simply has no such case rather than a different rendering.
     #[serde(default)]
     slide: bool,
+    /// `<name>.spots.json` holds retouch spots (with the camera's as-shot multipliers), applied to the source
+    /// before anything else.
+    #[serde(default)]
+    spots: bool,
+    /// `<name>.profile.bin`, `.profile_hs.f32` and `.profile_lt.f32`: the camera profile pass's uniform and tables.
+    #[serde(default)]
+    profile: bool,
+    /// `<name>.defringe.bin` holds the defringe pass's uniform, run over develop's input.
+    #[serde(default)]
+    defringe: bool,
+    /// `<name>.look.bin` holds the LUT pass's uniform and `<name>.look.f32` its table, RGBA floats this many on
+    /// a side; 0 for no LUT.
+    #[serde(default)]
+    look: u32,
+}
+
+/// The parity case's LUT: a warm, contrasty grade that mixes channels, 17 on a side.
+fn parity_lut() -> sidecar_color::lut::CubeLut {
+    let n = 17u32;
+    let m = (n - 1) as f32;
+    sidecar_color::lut::CubeLut {
+        title: Some("parity".into()),
+        size: n,
+        domain_min: [0.0; 3],
+        domain_max: [1.0; 3],
+        table: (0..n * n * n)
+            .map(|i| {
+                let c = [i % n, (i / n) % n, i / (n * n)].map(|v| v as f32 / m);
+                [
+                    (c[0] * 0.9 + c[1] * 0.15).powf(1.2).min(1.0),
+                    (c[1] * 0.95 + 0.03 * c[2]).powf(1.1),
+                    (c[2] * 0.8 + 0.1 * c[0]).powf(0.9),
+                ]
+            })
+            .collect(),
+    }
 }
 
 /// Masks for the parity case, at half the image's size so both renderers interpolate them: a soft disc and a
@@ -115,6 +151,53 @@ fn nikon_d850() -> CameraColor {
             ]),
         }],
         baseline_exposure: None,
+        profile: None,
+    }
+}
+
+/// A synthetic camera profile: a forward matrix pair, a HueSatMap that turns hues by an amount that varies round
+/// the circle and with saturation, and a LookTable whose value divisions lift the shadows' saturation.
+fn test_profile() -> sidecar_color::dcp::Profile {
+    use sidecar_color::dcp::{HsvTable, Profile};
+    let table = |dims: [u32; 3], f: &dyn Fn(u32, u32, u32) -> [f32; 3]| HsvTable {
+        dims,
+        data: (0..dims[2])
+            .flat_map(|v| (0..dims[0]).flat_map(move |h| (0..dims[1]).map(move |s| (h, s, v))))
+            .flat_map(|(h, s, v)| f(h, s, v))
+            .collect(),
+        srgb: false,
+    };
+    let fm = |k: f64| {
+        [
+            [0.62 + k, 0.21, 0.13],
+            [0.27, 0.70 - k, 0.03],
+            [0.03, 0.11, 0.68],
+        ]
+    };
+    Profile {
+        name: "Synthetic".into(),
+        forward: vec![(2856.0, fm(0.02)), (6504.0, fm(0.0))],
+        hue_sat: vec![
+            (
+                2856.0,
+                table([24, 8, 1], &|h, s, _| {
+                    [8.0 * (h as f32 * 0.5).sin(), 1.0 + 0.05 * s as f32, 1.0]
+                }),
+            ),
+            (
+                6504.0,
+                table([24, 8, 1], &|h, s, _| {
+                    [6.0 * (h as f32 * 0.5).cos(), 1.0 - 0.03 * s as f32, 1.0]
+                }),
+            ),
+        ],
+        look: Some(table([12, 6, 8], &|_, s, v| {
+            [
+                2.0,
+                1.0 + 0.1 * (7 - v) as f32 / 7.0 * s as f32 / 5.0,
+                1.0 - 0.02 * v as f32,
+            ]
+        })),
     }
 }
 
@@ -128,6 +211,7 @@ fn fujifilm_xt4() -> CameraColor {
             ]),
         }],
         baseline_exposure: None,
+        profile: None,
     }
 }
 
@@ -328,7 +412,11 @@ fn cases() -> Vec<Fixture> {
 
     // Grain: the hash and both octaves, in black and white, in film colour and on a developed file.
     let grain = |e: &EditParams, amount: f64, size: f64| EditParams {
-        grain: Some(sidecar_color::params::Grain { amount, size }),
+        grain: Some(sidecar_color::params::Grain {
+            amount,
+            size,
+            layered: false,
+        }),
         ..e.clone()
     };
     let (grain_mono, grain_film, grain_heic) = (
@@ -336,6 +424,17 @@ fn cases() -> Vec<Fixture> {
         grain(&graded_film, 60.0, 30.0),
         grain(&phone, 100.0, 100.0),
     );
+    // Colour film's halation: the red layer's exposure, blurred over the map each side builds, back in.
+    let film_halation = EditParams {
+        film: Some(sidecar_color::params::Film {
+            halation: 100.0,
+            ..graded_film.film.clone().unwrap()
+        }),
+        ..graded_film.clone()
+    };
+    // Colour film's grain per dye layer: three noises, each by its own layer's density.
+    let mut grain_film_layers = grain(&graded_film, 70.0, 40.0);
+    grain_film_layers.grain.as_mut().unwrap().layered = true;
 
     // Developers: adjacency through the map (built by each side from the picture), development, compensation,
     // the stain's grain masking; and a light other than daylight.
@@ -369,7 +468,63 @@ fn cases() -> Vec<Fixture> {
     };
     lens.lens.as_mut().unwrap().lateral_ca = 150.0;
 
+    // Defringe both bands, wide, so the hue band's purples and greens beside the bands' edges are taken.
+    let defringe = EditParams {
+        defringe: Some(sidecar_color::params::Defringe {
+            purple: 100.0,
+            green: 80.0,
+            purple_hue: [260.0, 350.0],
+            ..Default::default()
+        }),
+        ..graded.clone()
+    };
+
+    // A LUT at most of its strength, built for video (Rec.709, γ 2.4), over a P3 display.
+    let look = EditParams {
+        lut: Some(sidecar_color::lut::LookLut {
+            id: "0000000000000000".into(),
+            name: "parity".into(),
+            amount: 80.0,
+            space: sidecar_color::lut::LutSpace::Rec709,
+        }),
+        ..graded.clone()
+    };
+
+    // A colour range's uniformity on the first synthetic mask: hue and saturation pulled toward its centre.
+    let mut uniformity = masked.clone();
+    uniformity.masks[0].mask = sidecar_color::color_range::COLOR.into();
+    uniformity.masks[0].color = Some(sidecar_color::color_range::ColorRange {
+        hue: 40.0,
+        uniformity_hue: 80.0,
+        uniformity_saturation: 60.0,
+        ..Default::default()
+    });
+
+    // Alternative processes: the black and white printed as a cyanotype, and made as a tintype.
+    let process = |name: &str| {
+        let mut e = graded_mono.clone();
+        e.monochrome.as_mut().unwrap().process = name.into();
+        e
+    };
+    let (cyanotype, tintype) = (process("cyanotype"), process("tintype"));
+
     let mut cases: Vec<Fixture> = vec![
+        (
+            "look".into(),
+            nikon_d850(),
+            SourceKind::Raw,
+            look,
+            DisplaySpace::DisplayP3,
+            None,
+        ),
+        (
+            "defringe".into(),
+            nikon_d850(),
+            SourceKind::Raw,
+            defringe,
+            DisplaySpace::Srgb,
+            None,
+        ),
         (
             "as-shot-srgb".into(),
             nikon_d850(),
@@ -419,6 +574,30 @@ fn cases() -> Vec<Fixture> {
             Some(zv1()),
         ),
         (
+            "uniformity".into(),
+            nikon_d850(),
+            SourceKind::Raw,
+            uniformity,
+            DisplaySpace::Srgb,
+            None,
+        ),
+        (
+            "cyanotype".into(),
+            nikon_d850(),
+            SourceKind::Raw,
+            cyanotype,
+            DisplaySpace::Srgb,
+            None,
+        ),
+        (
+            "tintype".into(),
+            nikon_d850(),
+            SourceKind::Raw,
+            tintype,
+            DisplaySpace::Srgb,
+            None,
+        ),
+        (
             "masks".into(),
             nikon_d850(),
             SourceKind::Raw,
@@ -447,6 +626,192 @@ fn cases() -> Vec<Fixture> {
             nikon_d850(),
             SourceKind::Raw,
             graded_film,
+            DisplaySpace::Srgb,
+            None,
+        ),
+        (
+            // Colour grading's three ranges and the global wheel, with the crossover moved.
+            "grading".into(),
+            nikon_d850(),
+            SourceKind::Raw,
+            {
+                use sidecar_color::params::{ColorGrading, GradeWheel};
+                let mut e = graded.clone();
+                e.color_grading = Some(ColorGrading {
+                    shadows: GradeWheel {
+                        hue: 230.0,
+                        saturation: 60.0,
+                        luminance: -20.0,
+                    },
+                    midtones: GradeWheel {
+                        hue: 60.0,
+                        saturation: 25.0,
+                        luminance: 5.0,
+                    },
+                    highlights: GradeWheel {
+                        hue: 70.0,
+                        saturation: 45.0,
+                        luminance: 10.0,
+                    },
+                    global: GradeWheel {
+                        hue: 150.0,
+                        saturation: 10.0,
+                        luminance: 0.0,
+                    },
+                    blending: 70.0,
+                    balance: -30.0,
+                });
+                e
+            },
+            DisplaySpace::Srgb,
+            None,
+        ),
+        (
+            // Texture raised and Clarity lowered, then the other way: the browser builds the local-contrast map
+            // with the same guided passes the server does.
+            "local".into(),
+            nikon_d850(),
+            SourceKind::Raw,
+            {
+                let mut e = graded.clone();
+                e.presence = Some(sidecar_color::params::Presence {
+                    texture: 60.0,
+                    clarity: 80.0,
+                    dehaze: 0.0,
+                });
+                e
+            },
+            DisplaySpace::Srgb,
+            None,
+        ),
+        (
+            // Dehaze: the dark channel, the airlight found on the GPU, the transmission refined — the browser's
+            // passes against the server's.
+            "dehaze".into(),
+            nikon_d850(),
+            SourceKind::Raw,
+            {
+                let mut e = graded.clone();
+                e.presence = Some(sidecar_color::params::Presence {
+                    dehaze: 70.0,
+                    ..Default::default()
+                });
+                e
+            },
+            DisplaySpace::Srgb,
+            None,
+        ),
+        (
+            // The light stage (`PROCESS_VERSION` 10): Highlights, Shadows and Contrast per pixel, in stops.
+            "light".into(),
+            nikon_d850(),
+            SourceKind::Raw,
+            {
+                let mut e = EditParams::default();
+                e.tone.highlights = -70.0;
+                e.tone.shadows = 45.0;
+                e.tone.contrast = 1.35;
+                e
+            },
+            DisplaySpace::Srgb,
+            None,
+        ),
+        (
+            // The light stage (`PROCESS_VERSION` 10): Highlights, Shadows and Contrast per pixel, in stops.
+            "heic-light".into(),
+            heic(),
+            SourceKind::Developed,
+            {
+                let mut e = EditParams::default();
+                e.tone.highlights = -70.0;
+                e.tone.shadows = 45.0;
+                e.tone.contrast = 1.35;
+                e
+            },
+            DisplaySpace::Srgb,
+            None,
+        ),
+        (
+            // An edit from before `PROCESS_VERSION` 9: gamut compression in Rec.2020, as it was.
+            "gamut-legacy".into(),
+            nikon_d850(),
+            SourceKind::Raw,
+            {
+                let mut e = graded.clone();
+                e.tone.gamut_ap1 = false;
+                e
+            },
+            DisplaySpace::DisplayP3,
+            None,
+        ),
+        (
+            // Retouch: a heal, a clone and a red eye on the source before develop, in both renderers.
+            "retouch".into(),
+            nikon_d850(),
+            SourceKind::Raw,
+            {
+                use sidecar_color::params::{Spot, SpotKind};
+                let mut e = graded.clone();
+                e.spots = vec![
+                    Spot {
+                        kind: SpotKind::Heal,
+                        at: [0.3, 0.5],
+                        from: [0.6, 0.4],
+                        radius: 0.05,
+                        ..Default::default()
+                    },
+                    Spot {
+                        kind: SpotKind::Clone,
+                        at: [0.8, 0.3],
+                        from: [0.2, 0.7],
+                        radius: 0.04,
+                        feather: 50.0,
+                        opacity: 80.0,
+                    },
+                    Spot {
+                        kind: SpotKind::RedEye,
+                        at: [0.5, 0.8],
+                        from: [0.5, 0.8],
+                        radius: 0.06,
+                        ..Default::default()
+                    },
+                ];
+                e
+            },
+            DisplaySpace::Srgb,
+            None,
+        ),
+        (
+            // A camera profile from the file: forward matrices, a HueSatMap and a LookTable with value divisions,
+            // run by the profile pass in both renderers.
+            "profile".into(),
+            {
+                let mut c = nikon_d850();
+                c.profile = Some(Box::new(test_profile()));
+                c
+            },
+            SourceKind::Raw,
+            {
+                let mut e = graded.clone();
+                e.camera_profile = Some(sidecar_color::params::FILE_PROFILE.into());
+                e
+            },
+            DisplaySpace::Srgb,
+            None,
+        ),
+        (
+            // A film negative inverted by its density, its base an orange mask.
+            "negative".into(),
+            nikon_d850(),
+            SourceKind::Raw,
+            {
+                let mut e = graded.clone();
+                e.negative = Some(sidecar_color::params::Negative {
+                    base: [0.9, 0.55, 0.3],
+                    gamma: 0.6,
+                });
+                e
+            },
             DisplaySpace::Srgb,
             None,
         ),
@@ -487,6 +852,22 @@ fn cases() -> Vec<Fixture> {
             nikon_d850(),
             SourceKind::Raw,
             grain_film,
+            DisplaySpace::Srgb,
+            None,
+        ),
+        (
+            "film-halation".into(),
+            nikon_d850(),
+            SourceKind::Raw,
+            film_halation,
+            DisplaySpace::Srgb,
+            None,
+        ),
+        (
+            "grain-film-layers".into(),
+            nikon_d850(),
+            SourceKind::Raw,
+            grain_film_layers,
             DisplaySpace::Srgb,
             None,
         ),
@@ -547,6 +928,7 @@ fn cases() -> Vec<Fixture> {
                 interlayer: 45.0,
                 stock: "provia-100f".into(),
                 light: light.into(),
+                halation: 0.0,
             }),
             ..e.clone()
         };
@@ -621,6 +1003,29 @@ pub fn fixtures(dir: &Path) -> Result<()> {
             }
             _ => false,
         };
+        let spots = !edit.spots.is_empty();
+        if spots {
+            let m = camera.as_shot_mul;
+            std::fs::write(
+                dir.join(format!("{name}.spots.json")),
+                serde_json::to_vec(&serde_json::json!({
+                    "spots": edit.spots,
+                    "wb": [m[0] as f32, m[1] as f32, m[2] as f32],
+                }))?,
+            )?;
+        }
+        let has_profile = packed.profile.is_some();
+        if let Some(p) = &packed.profile {
+            std::fs::write(dir.join(format!("{name}.profile.bin")), &p.uniform)?;
+            std::fs::write(
+                dir.join(format!("{name}.profile_hs.f32")),
+                bytemuck::cast_slice(&p.hue_sat),
+            )?;
+            std::fs::write(
+                dir.join(format!("{name}.profile_lt.f32")),
+                bytemuck::cast_slice(&p.look),
+            )?;
+        }
         let mono = !packed.mono_lut.is_empty();
         if mono {
             std::fs::write(
@@ -638,6 +1043,23 @@ pub fn fixtures(dir: &Path) -> Result<()> {
                 dir.join(format!("{name}.slide_response.f32")),
                 bytemuck::cast_slice(&stock.response),
             )?;
+        }
+        let look = match &edit.lut {
+            Some(l) => {
+                let lut = parity_lut();
+                let u = l.uniform(display, &lut.header()).unwrap();
+                std::fs::write(dir.join(format!("{name}.look.bin")), u)?;
+                std::fs::write(
+                    dir.join(format!("{name}.look.f32")),
+                    bytemuck::cast_slice(&lut.rgba()),
+                )?;
+                lut.size
+            }
+            None => 0,
+        };
+        let defringe = packed.defringe.is_some();
+        if let Some(u) = &packed.defringe {
+            std::fs::write(dir.join(format!("{name}.defringe.bin")), u)?;
         }
         let masks = edit.masks.len().min(2) as u32;
         if masks > 0 {
@@ -673,6 +1095,10 @@ pub fn fixtures(dir: &Path) -> Result<()> {
             mask_size: if masks > 0 { MASK_SIZE } else { [0; 2] },
             mono,
             slide,
+            spots,
+            profile: has_profile,
+            defringe,
+            look,
         });
     }
     std::fs::write(dir.join("index.json"), serde_json::to_vec_pretty(&index)?)?;
@@ -695,6 +1121,7 @@ pub fn native(dir: &Path, out: &Path) -> Result<()> {
     );
     let pass = DevelopPass::new(&gpu)?;
     let lens_pass = sidecar_engine::lens::LensPass::new(&gpu)?;
+    let retouch = sidecar_engine::retouch::RetouchPass::new(&gpu)?;
     for case in load_index(dir)? {
         let src = RgbaF32::from_f16_bytes(
             case.width,
@@ -706,11 +1133,40 @@ pub fn native(dir: &Path, out: &Path) -> Result<()> {
             bytemuck::cast_slice(&std::fs::read(dir.join(format!("{}.lut.f32", case.name)))?)
                 .to_vec();
         let mut tex = sidecar_engine::upload_rgba16(&gpu, &src);
+        if case.spots {
+            let json: serde_json::Value = serde_json::from_slice(&std::fs::read(
+                dir.join(format!("{}.spots.json", case.name)),
+            )?)?;
+            let spots: Vec<sidecar_color::params::Spot> =
+                serde_json::from_value(json["spots"].clone())?;
+            let wb: [f32; 3] = serde_json::from_value(json["wb"].clone())?;
+            let size = [case.width, case.height];
+            let px: Vec<_> = spots
+                .iter()
+                .map(|s| sidecar_engine::retouch::PixelSpot::new(s, size, |p| p))
+                .collect();
+            tex = retouch.apply(&gpu, &tex, &px, wb);
+        }
         if case.lens {
             let bytes = std::fs::read(dir.join(format!("{}.lens.bin", case.name)))?;
             let params: sidecar_color::lens::LensParams = bytemuck::pod_read_unaligned(&bytes);
             tex = lens_pass.apply(&gpu, &tex, &params, [case.width, case.height]);
         }
+        let profile = case
+            .profile
+            .then(|| -> Result<sidecar_color::params::ProfilePass> {
+                let f32s = |suffix: &str| -> Result<Vec<f32>> {
+                    Ok(bytemuck::pod_collect_to_vec(&std::fs::read(
+                        dir.join(format!("{}.{suffix}", case.name)),
+                    )?))
+                };
+                Ok(sidecar_color::params::ProfilePass {
+                    uniform: std::fs::read(dir.join(format!("{}.profile.bin", case.name)))?,
+                    hue_sat: f32s("profile_hs.f32")?,
+                    look: f32s("profile_lt.f32")?,
+                })
+            })
+            .transpose()?;
         let mut mask_textures = Vec::new();
         for i in 0..case.masks {
             let bytes = std::fs::read(dir.join(format!("{}.mask{i}.u8", case.name)))?;
@@ -745,6 +1201,26 @@ pub fn native(dir: &Path, out: &Path) -> Result<()> {
             })
         };
         let (slide_exposure, slide_response) = (table("exposure")?, table("response")?);
+        let defringe = match case.defringe {
+            true => Some(std::fs::read(
+                dir.join(format!("{}.defringe.bin", case.name)),
+            )?),
+            false => None,
+        };
+        let (look_uniform, look_table) = match case.look {
+            0 => (Vec::new(), Vec::new()),
+            _ => (
+                std::fs::read(dir.join(format!("{}.look.bin", case.name)))?,
+                bytemuck::pod_collect_to_vec::<u8, f32>(&std::fs::read(
+                    dir.join(format!("{}.look.f32", case.name)),
+                )?),
+            ),
+        };
+        let look = (case.look > 0).then_some(sidecar_engine::develop::Look {
+            uniform: &look_uniform,
+            size: case.look,
+            table: &look_table,
+        });
         let masks = if case.masks > 0 {
             let params: sidecar_color::params::MaskParams = bytemuck::pod_read_unaligned(
                 &std::fs::read(dir.join(format!("{}.masks.bin", case.name)))?,
@@ -755,12 +1231,20 @@ pub fn native(dir: &Path, out: &Path) -> Result<()> {
                 curves: &curves,
                 mono: &mono,
                 density: None,
+                local: None,
+                haze: None,
+                profile: profile.as_ref(),
+                defringe: defringe.as_deref(),
+                look,
                 slide_exposure: &slide_exposure,
                 slide_response: &slide_response,
             }
         } else {
             sidecar_engine::Masks {
                 mono: &mono,
+                profile: profile.as_ref(),
+                defringe: defringe.as_deref(),
+                look,
                 slide_exposure: &slide_exposure,
                 slide_response: &slide_response,
                 ..sidecar_engine::Masks::none()
@@ -786,10 +1270,17 @@ fn lab(p: &[f32]) -> Lab {
 }
 
 pub fn compare(dir: &Path, out: &Path) -> Result<()> {
+    compare_with(dir, out, out)
+}
+
+/// `compare`, the browser's renders read from `browser` rather than beside the native ones: a run a phone uploaded
+/// (`POST /api/debug/parity`), checked against this machine's native renders.
+pub fn compare_with(dir: &Path, out: &Path, browser: &Path) -> Result<()> {
     let mut failed = false;
     for case in load_index(dir)? {
         let read = |kind: &str| -> Result<RgbaF32> {
-            let path = out.join(format!("{}.{kind}.f16", case.name));
+            let path = if kind == "browser" { browser } else { out }
+                .join(format!("{}.{kind}.f16", case.name));
             Ok(RgbaF32::from_f16_bytes(
                 case.width,
                 case.height,

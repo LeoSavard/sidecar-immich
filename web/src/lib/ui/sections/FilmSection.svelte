@@ -4,12 +4,35 @@ characteristic curve on its own as a colour film's layers each have theirs; or b
 sees the light, through a filter. -->
 <script lang="ts">
 	import Slider from '$lib/ui/Slider.svelte';
+	import LutControls from './LutControls.svelte';
 	import { decimals } from '$lib/ui/format';
 	import { grainMicrons } from '$lib/state/edit-view';
 	import { stocks as offeredStocks } from '$lib/film';
 	import type { SectionProps } from './section';
 
-	let { edit, onchange, oncommit, developed }: SectionProps & { developed: boolean } = $props();
+	let {
+		edit,
+		onchange,
+		oncommit,
+		developed,
+		onnegative,
+		pickingBase,
+		onpickbase
+	}: SectionProps & {
+		developed: boolean;
+		/** Treat the photo as a film negative, or not; the page sets the base and the balance it starts from. */
+		onnegative?: (on: boolean) => void;
+		/** The film-base eyedropper waiting for a tap; undefined where it can't work. */
+		pickingBase?: boolean;
+		onpickbase?: (on: boolean) => void;
+	} = $props();
+
+	/** Black and white printed or made as (`sidecar_color::process`). */
+	const PROCESSES = [
+		{ id: '', label: 'Silver gelatin', note: 'A black-and-white print on paper, as the film renders it.' },
+		{ id: 'cyanotype', label: 'Cyanotype', note: 'Prussian blue on cotton paper: the iron process, its blue and its short range of tones computed from the pigment and the paper.' },
+		{ id: 'tintype', label: 'Tintype', note: 'Collodion silver on black-japanned iron, a direct positive: warm grey on black, three and a half stops. Collodion saw only blue — pair it with the Blue-sensitive film type.' }
+	];
 
 	type Rendering = 'neutral' | 'film' | 'mono';
 	const rendering: Rendering = $derived(edit.monochrome ? 'mono' : edit.film ? 'film' : 'neutral');
@@ -126,7 +149,8 @@ sees the light, through a filter. -->
 	/** Grain, kept while its size is set even at amount 0, so the size isn't lost on the way back up. */
 	function setGrain(field: 'amount' | 'size', v: number) {
 		onchange((e) => {
-			const g = { amount: e.grain?.amount ?? 0, size: e.grain?.size ?? 50, [field]: v };
+			// New grain is colour film's own, a grain per dye layer; an edit's existing choice is kept.
+			const g = { amount: e.grain?.amount ?? 0, size: e.grain?.size ?? 50, layered: e.grain ? !!e.grain.layered : true, [field]: v };
 			if (g.amount === 0 && g.size === 50) delete e.grain;
 			else e.grain = g;
 		});
@@ -192,6 +216,13 @@ sees the light, through a filter. -->
 		</div>
 		<Slider id="mono-development" label="Development" value={mono.development ?? 0} min={-2} max={2} step={0.5} defaultValue={0} bipolar format={zone} onchange={(v) => onchange((e) => { if (!e.monochrome) return; if (v === 0) delete e.monochrome.development; else e.monochrome.development = v; })} {oncommit} />
 		<p class="text-xs text-muted">Longer development (N+) gives the negative more contrast above the shadows and coarser grain; shorter (N−) less, for a scene too contrasty to hold.</p>
+		<p class="pt-1 text-[11px] font-medium tracking-wide text-muted uppercase">Print</p>
+		<div class="flex flex-wrap items-center gap-1.5 text-xs" role="radiogroup" aria-label="Print">
+			{#each PROCESSES as p (p.id)}
+				<button type="button" role="radio" aria-checked={(mono.process ?? '') === p.id} class={choice((mono.process ?? '') === p.id)} onclick={() => { onchange((e) => { if (!e.monochrome) return; if (p.id) e.monochrome.process = p.id; else delete e.monochrome.process; }); oncommit(); }}>{p.label}</button>
+			{/each}
+		</div>
+		<p class="text-xs text-muted">{PROCESSES.find((p) => p.id === (mono.process ?? ''))?.note}</p>
 		<p class="text-xs text-muted">Each colour's spectrum is estimated from the photo, then seen as the film type would. The types are the classes' sensitivities; a named stock is its maker's measured curve.</p>
 	{:else if edit.film}
 		{@const stock = slides.find((s) => s.id === edit.film?.stock)}
@@ -223,6 +254,8 @@ sees the light, through a filter. -->
 			<p class="text-xs text-muted">Colour film is not white balanced either: it sees the surface's own colour times the light. The stock's own curves set the tones; Light and Curve then grade what comes out, as you would a scanned slide.</p>
 		{:else}
 			<Slider id="film-interlayer" label="Interlayer effects" value={edit.film.interlayer} min={0} max={100} defaultValue={45} format={(v) => decimals(v)} onchange={(v) => onchange((e) => { if (e.film) e.film.interlayer = v; })} {oncommit} />
+			<Slider id="film-halation" label="Halation" value={edit.film.halation ?? 0} min={0} max={100} defaultValue={0} format={(v) => decimals(v)} onchange={(v) => onchange((e) => { if (e.film) e.film.halation = v; })} {oncommit} />
+			<p class="text-xs text-muted">Halation is light that crossed the film, reflected off the back of its base and exposed the red layer again: a red glow just beside bright things. 100 is a film with no anti-halation backing.</p>
 			<p class="text-xs text-muted">Each colour gets its own tone curve, so highlights fade to white and midtones gain colour. Interlayer effects spread colours apart as film's layers hold each other back; greys stay grey.</p>
 		{/if}
 	{:else if developed}
@@ -230,8 +263,26 @@ sees the light, through a filter. -->
 	{:else}
 		<p class="text-xs text-muted">Neutral keeps every colour's hue through the tone curve. Film renders each colour channel through it separately, as film does. Black and white sees the light as a film type would.</p>
 	{/if}
+	{#if !developed && onnegative}
+		<p class="pt-1 text-[11px] font-medium tracking-wide text-muted uppercase">Negative</p>
+		<div class="flex flex-wrap items-center gap-1.5 text-xs">
+			<button type="button" aria-pressed={!!edit.negative} class="rounded-full px-2.5 py-1 {edit.negative ? 'bg-fg text-ground' : 'bg-raised text-fg'}" onclick={() => onnegative(!edit.negative)}>Film negative</button>
+			{#if edit.negative && pickingBase !== undefined}
+				<button type="button" aria-pressed={pickingBase} class="rounded-full px-2.5 py-1 {pickingBase ? 'bg-fg text-ground' : 'bg-raised text-fg'}" onclick={() => onpickbase?.(!pickingBase)}>Pick the film base</button>
+			{/if}
+		</div>
+		{#if edit.negative}
+			<Slider id="negative-gamma" label="Film contrast (γ)" value={edit.negative.gamma} min={0.3} max={1.5} step={0.01} defaultValue={0.6} format={(v) => decimals(v, 2)} onchange={(v) => onchange((e) => { if (e.negative) e.negative.gamma = v; })} {oncommit} />
+			<p class="text-xs text-muted">{pickingBase ? 'Tap the film between frames, or its unexposed edge.' : 'Inverted by density: the base (the clear film, orange mask and all) is divided out and γ, the film\'s contrast, undone. Colour negative is about 0.6. Set the white balance on something grey afterwards.'}</p>
+		{/if}
+	{/if}
 	<p class="pt-1 text-[11px] font-medium tracking-wide text-muted uppercase">Grain</p>
 	<Slider id="grain-amount" label="Amount" value={edit.grain?.amount ?? 0} min={0} max={100} defaultValue={0} format={(v) => decimals(v)} onchange={(v) => setGrain('amount', v)} {oncommit} />
 	<Slider id="grain-size" label="Size" value={edit.grain?.size ?? 50} min={0} max={100} defaultValue={50} format={(v) => `${Math.round(grainMicrons(v))} µm`} onchange={(v) => setGrain('size', v)} {oncommit} />
+	{#if edit.grain && rendering === 'film'}
+		<button type="button" aria-pressed={!!edit.grain.layered} class="{choice(!!edit.grain.layered)} w-fit text-xs" onclick={() => { onchange((e) => { if (e.grain) e.grain.layered = !e.grain.layered; }); oncommit(); }}>Dye layers</button>
+		<p class="text-xs text-muted">Colour film has three emulsions, each grained on its own: with Dye layers each colour flickers by its own layer's density, as on film; off, one grain for all three, as before.</p>
+	{/if}
 	<p class="text-xs text-muted">Size is a grain on a 35 mm negative, so it keeps its share of the picture at any size. The preview, smaller than the photo, shows grain softer than the export does; zoom in to see it as exported.</p>
+	<LutControls {edit} {onchange} {oncommit} />
 </div>

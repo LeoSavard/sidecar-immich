@@ -10,10 +10,16 @@ pub mod depth;
 pub mod detail;
 pub mod develop;
 pub mod focus;
+pub mod guided;
+pub mod haze;
 pub mod ingest;
 pub mod lens;
+pub mod noise;
+pub mod pyramid;
+pub mod retouch;
+pub mod sky;
 pub mod warp;
-pub use develop::{DevelopPass, Masks, needs_density_map};
+pub use develop::{DevelopPass, Masks, needs_density_map, needs_haze_map, needs_local_map};
 pub use focus::focus_energy;
 pub use ingest::{Ingest, MosaicInput};
 
@@ -247,8 +253,24 @@ pub fn upload_rgba16(gpu: &Gpu, img: &RgbaF32) -> wgpu::Texture {
 
 /// Read an RGBA16F texture back to the CPU.
 pub fn read_rgba16(gpu: &Gpu, tex: &wgpu::Texture) -> Result<RgbaF32> {
+    let bytes = read_texels(gpu, tex, 8)?;
+    Ok(RgbaF32::from_f16_bytes(tex.width(), tex.height(), &bytes))
+}
+
+/// Read an RGBA32F texture back to the CPU.
+pub fn read_rgba32(gpu: &Gpu, tex: &wgpu::Texture) -> Result<RgbaF32> {
+    let bytes = read_texels(gpu, tex, 16)?;
+    Ok(RgbaF32 {
+        width: tex.width(),
+        height: tex.height(),
+        data: bytemuck::pod_collect_to_vec(&bytes),
+    })
+}
+
+/// A texture's texels, `size` bytes each, row after row without padding.
+fn read_texels(gpu: &Gpu, tex: &wgpu::Texture, size: u32) -> Result<Vec<u8>> {
     let (w, h) = (tex.width(), tex.height());
-    let bytes_per_row = (8 * w).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+    let bytes_per_row = (size * w).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
     let buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("readback"),
         size: (bytes_per_row * h) as u64,
@@ -279,14 +301,14 @@ pub fn read_rgba16(gpu: &Gpu, tex: &wgpu::Texture) -> Result<RgbaF32> {
     gpu.device.poll(wgpu::PollType::wait_indefinitely())?;
     rx.recv()??;
     let mapped = slice.get_mapped_range()?;
-    let mut bytes = Vec::with_capacity((8 * w * h) as usize);
+    let mut bytes = Vec::with_capacity((size * w * h) as usize);
     for row in 0..h {
         let start = (row * bytes_per_row) as usize;
-        bytes.extend_from_slice(&mapped[start..start + (8 * w) as usize]);
+        bytes.extend_from_slice(&mapped[start..start + (size * w) as usize]);
     }
     drop(mapped);
     buf.unmap();
-    Ok(RgbaF32::from_f16_bytes(w, h, &bytes))
+    Ok(bytes)
 }
 
 pub struct Gpu {
@@ -352,8 +374,14 @@ mod uniforms {
             &[
                 R::of::<crate::ingest::IngestParams>(),
                 R::of::<crate::detail::DetailParams>(),
+                R::of::<crate::detail::DetailLayers>(),
+                R::of::<crate::retouch::RetouchParams>(),
                 R::of::<crate::brush::BrushParams>(),
                 R::of::<crate::brush::CompositeParams>(),
+                R::of::<crate::guided::GuidedParams>(),
+                R::of::<crate::pyramid::PyramidParams>(),
+                R::of::<crate::guided::GuidedParams>(),
+                R::of::<crate::haze::HazeParams>(),
             ],
         );
     }

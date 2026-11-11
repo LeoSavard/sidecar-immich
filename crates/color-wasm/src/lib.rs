@@ -128,6 +128,23 @@ pub unsafe extern "C" fn sc_pack(ptr: *const u8, len: usize) -> *const u8 {
                 out.extend_from_slice(bytemuck::cast_slice(&p.mono_lut));
                 out.extend_from_slice(&(p.slide_exposure.len() as u32).to_le_bytes());
                 out.extend_from_slice(bytemuck::cast_slice(&p.slide_exposure));
+                // The camera profile pass, when the edit renders with one: its uniform's length in bytes (0 for
+                // none), the uniform, then its two tables, each preceded by its length in floats.
+                match &p.profile {
+                    Some(pp) => {
+                        out.extend_from_slice(&(pp.uniform.len() as u32).to_le_bytes());
+                        out.extend_from_slice(&pp.uniform);
+                        for t in [&pp.hue_sat, &pp.look] {
+                            out.extend_from_slice(&(t.len() as u32).to_le_bytes());
+                            out.extend_from_slice(bytemuck::cast_slice(t));
+                        }
+                    }
+                    None => out.extend_from_slice(&0u32.to_le_bytes()),
+                }
+                // The defringe pass's uniform, preceded by its length in bytes (0 for none).
+                let defringe = p.defringe.as_deref().unwrap_or(&[]);
+                out.extend_from_slice(&(defringe.len() as u32).to_le_bytes());
+                out.extend_from_slice(defringe);
                 out
             }),
     )
@@ -207,6 +224,47 @@ pub unsafe extern "C" fn sc_geometry_fit(ptr: *const u8, len: usize) -> *const u
                 let before = req.before.unwrap_or_default();
                 serde_json::to_vec(&sidecar_color::geometry::fit(&req.geometry, &before, a))
                     .map_err(|e| e.to_string())
+            }),
+    )
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct UprightRequest {
+    geometry: sidecar_color::geometry::Geometry,
+    /// The picture's size in pixels (its proportions are what matter).
+    size: [u32; 2],
+    /// The picture's luminance, row-major, at `lum_size` (any scale).
+    lum: Vec<f32>,
+    lum_size: [u32; 2],
+    mode: sidecar_color::upright::Mode,
+    /// The lens's focal length in picture diagonals, when the photo says it: for Aspect.
+    #[serde(default)]
+    focal: Option<f64>,
+}
+
+/// `{ geometry, size, lum, lumSize, mode, focal }` → the geometry stood up (`sidecar_color::upright::solve`), as
+/// JSON; an error when the picture hasn't the lines the mode needs.
+///
+/// # Safety
+/// `ptr` must point to `len` readable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sc_upright(ptr: *const u8, len: usize) -> *const u8 {
+    let input = unsafe { std::slice::from_raw_parts(ptr, len) };
+    respond(
+        serde_json::from_slice::<UprightRequest>(input)
+            .map_err(|e| e.to_string())
+            .and_then(|req| {
+                use sidecar_color::upright;
+                let [lw, lh] = req.lum_size.map(|v| v as usize);
+                if req.lum.len() != lw * lh {
+                    return Err("lum is not lumSize".into());
+                }
+                let a = req.size[0] as f64 / req.size[1].max(1) as f64;
+                let segs = upright::segments(&req.lum, lw, lh);
+                let g = upright::solve(&req.geometry, a, &segs, req.mode, req.focal)
+                    .ok_or("not enough straight lines in this photo")?;
+                serde_json::to_vec(&g).map_err(|e| e.to_string())
             }),
     )
 }
@@ -384,6 +442,55 @@ pub unsafe extern "C" fn sc_pack_depth(ptr: *const u8, len: usize) -> *const u8 
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LookRequest {
+    lut: sidecar_color::lut::LookLut,
+    display: DisplaySpace,
+    header: sidecar_color::lut::CubeHeader,
+}
+
+/// `{ lut, display, header }` → the LUT pass's uniform (`LookLut::uniform`, 128 bytes), or no bytes when the
+/// amount leaves nothing to do.
+///
+/// # Safety
+/// `ptr` must point to `len` readable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sc_pack_look(ptr: *const u8, len: usize) -> *const u8 {
+    let input = unsafe { std::slice::from_raw_parts(ptr, len) };
+    respond(
+        serde_json::from_slice::<LookRequest>(input)
+            .map_err(|e| e.to_string())
+            .map(|req| {
+                req.lut
+                    .uniform(req.display, &req.header)
+                    .unwrap_or_default()
+            }),
+    )
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProofRequest {
+    display: DisplaySpace,
+    header: sidecar_color::lut::CubeHeader,
+    warn: bool,
+}
+
+/// `{ display, header, warn }` → a soft proof's uniform for the LUT pass (`lut::proof_uniform`, 128 bytes).
+///
+/// # Safety
+/// `ptr` must point to `len` readable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sc_pack_proof(ptr: *const u8, len: usize) -> *const u8 {
+    let input = unsafe { std::slice::from_raw_parts(ptr, len) };
+    respond(
+        serde_json::from_slice::<ProofRequest>(input)
+            .map_err(|e| e.to_string())
+            .map(|req| sidecar_color::lut::proof_uniform(req.display, &req.header, req.warn)),
+    )
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct EdgeRequest {
     edge: sidecar_color::params::MaskEdge,
     size: [u32; 2],
@@ -401,6 +508,30 @@ pub unsafe extern "C" fn sc_mask_edge(ptr: *const u8, len: usize) -> *const u8 {
             .map_err(|e| e.to_string())
             .and_then(|req| {
                 serde_json::to_vec(&req.edge.plan(req.size)).map_err(|e| e.to_string())
+            }),
+    )
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct GradientRequest {
+    gradient: sidecar_color::params::Gradient,
+    size: [u32; 2],
+}
+
+/// `{ gradient, size }` → the gradient pass's uniform (`GradientParams`, 48 bytes) for a mask `size` pixels big
+/// in the photo's shown frame, which is the proxy's.
+///
+/// # Safety
+/// `ptr` must point to `len` readable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sc_gradient(ptr: *const u8, len: usize) -> *const u8 {
+    let input = unsafe { std::slice::from_raw_parts(ptr, len) };
+    respond(
+        serde_json::from_slice::<GradientRequest>(input)
+            .map_err(|e| e.to_string())
+            .map(|req| {
+                bytemuck::bytes_of(&req.gradient.uniform(req.size, req.size, |p| p)).to_vec()
             }),
     )
 }
@@ -442,4 +573,65 @@ mod tests {
             "found {seen} request structs; has the source layout changed?"
         );
     }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SelectRequest {
+    range: sidecar_color::color_range::ColorRange,
+    width: u32,
+    height: u32,
+    #[serde(default)]
+    mask_width: u32,
+    #[serde(default)]
+    mask_height: u32,
+}
+
+/// A colour-range layer's mask (`color_range::select`), one byte a pixel at `width` × `height`: the request as
+/// JSON, the develop uniform the edit packs to (`DevelopParams`), the proxy's camera RGB as little-endian f32 RGBA,
+/// and the `within` model mask's bytes (`mask_width` × `mask_height`), or none.
+///
+/// # Safety
+/// Each pointer must point to its length's readable bytes.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn sc_color_select(
+    req: *const u8,
+    req_len: usize,
+    uniform: *const u8,
+    uniform_len: usize,
+    pixels: *const u8,
+    pixels_len: usize,
+    mask: *const u8,
+    mask_len: usize,
+) -> *const u8 {
+    let req = unsafe { std::slice::from_raw_parts(req, req_len) };
+    let uniform = unsafe { std::slice::from_raw_parts(uniform, uniform_len) };
+    let pixels = unsafe { std::slice::from_raw_parts(pixels, pixels_len) };
+    let mask = (mask_len > 0).then(|| unsafe { std::slice::from_raw_parts(mask, mask_len) });
+    respond(
+        serde_json::from_slice::<SelectRequest>(req)
+            .map_err(|e| e.to_string())
+            .and_then(|r| {
+                if uniform.len() != std::mem::size_of::<sidecar_color::DevelopParams>() {
+                    return Err("the develop uniform is the wrong size".into());
+                }
+                if pixels.len() != (r.width * r.height * 16) as usize {
+                    return Err("the pixels are not width × height RGBA floats".into());
+                }
+                let develop: sidecar_color::DevelopParams = bytemuck::pod_read_unaligned(uniform);
+                let rgba: Vec<f32> = pixels
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|b| f32::from_le_bytes(*b))
+                    .collect();
+                let within = mask
+                    .filter(|m| m.len() == (r.mask_width * r.mask_height) as usize && !m.is_empty())
+                    .map(|m| (m, r.mask_width, r.mask_height));
+                Ok(sidecar_color::color_range::select(
+                    &r.range, &develop, &rgba, r.width, r.height, within,
+                ))
+            }),
+    )
 }

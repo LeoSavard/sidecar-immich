@@ -10,6 +10,9 @@ use crate::{Gpu, RgbaF32};
 use sidecar_color::params::{DevelopParams, MAX_MASKS};
 use sidecar_color::spline::LUT_SIZE;
 
+/// Layers of develop's whole-frame maps: local contrast, Dehaze's transmission, the airlight.
+pub const MAP_LAYERS: u32 = 3;
+
 pub struct DevelopPass {
     pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
@@ -22,6 +25,29 @@ pub struct DevelopPass {
     density_blur: Kernel,
     /// Every layer's curve the identity, for a develop whose layers have none.
     identity_curves: wgpu::Texture,
+    /// Texture and Clarity's map: the guided filter's coefficients, packed (`client/local_pack.wgsl`), and
+    /// what binds when there is none (1×1, RGBA32F).
+    guided: crate::guided::GuidedFilter,
+    local_pack: Kernel,
+    /// What the maps' binding holds when none is needed: 1×1, `MAP_LAYERS` layers of zero.
+    no_maps: wgpu::Texture,
+    /// Dehaze's passes (`crate::haze`).
+    haze: crate::haze::Haze,
+    /// The camera profile pass (`client/profile.wgsl`).
+    profile: Kernel,
+    /// The defringe pass (`client/defringe.wgsl`).
+    defringe: Kernel,
+    /// A 3D LUT as a look, after develop (`client/look.wgsl`).
+    look: Kernel,
+}
+
+/// A 3D LUT to apply after develop: the pass's uniform (`LookLut::uniform`) and the table, RGBA floats
+/// `size` on a side (`CubeLut::rgba`).
+#[derive(Clone, Copy)]
+pub struct Look<'a> {
+    pub uniform: &'a [u8],
+    pub size: u32,
+    pub table: &'a [f32],
 }
 
 /// What one develop takes beside its uniform and tone curve: the masks' uniforms, a texture per layer in the
@@ -35,6 +61,18 @@ pub struct Masks<'a> {
     pub curves: &'a [f32],
     pub mono: &'a [f32],
     pub density: Option<&'a wgpu::Texture>,
+    /// Texture and Clarity's map over the whole frame (`DevelopPass::local_map`); like the adjacency map, a
+    /// develop of the whole frame makes its own and a tile has to be given it.
+    pub local: Option<&'a wgpu::Texture>,
+    /// Dehaze's map and airlight over the whole frame (`DevelopPass::haze_map`); the same rule.
+    pub haze: Option<(&'a wgpu::Texture, &'a wgpu::Texture)>,
+    /// The camera profile pass (`Packed::profile`), run over the source first: per pixel, so a tile needs nothing
+    /// of the whole frame for it.
+    pub profile: Option<&'a sidecar_color::params::ProfilePass>,
+    /// The defringe pass's uniform (`Packed::defringe`), run over the source first.
+    pub defringe: Option<&'a [u8]>,
+    /// A 3D LUT, run over develop's output last.
+    pub look: Option<Look<'a>>,
     /// A spectral colour stock's two tables (`Packed::slide_exposure` and the stock profile's response table);
     /// both empty unless one is being rendered.
     pub slide_exposure: &'a [f32],
@@ -49,17 +87,36 @@ impl Masks<'_> {
             curves: &[],
             mono: &[],
             density: None,
+            local: None,
+            haze: None,
+            profile: None,
+            defringe: None,
+            look: None,
             slide_exposure: &[],
             slide_response: &[],
         }
     }
 }
 
+/// Whether a develop with this uniform reads the haze map: Dehaze is not 0.
+pub fn needs_haze_map(uniform: &[u8]) -> bool {
+    let p: &DevelopParams = bytemuck::from_bytes(uniform);
+    p.local[3] != 0.0
+}
+
+/// Whether a develop with this uniform reads the local-contrast map: Texture or Clarity is on.
+pub fn needs_local_map(uniform: &[u8]) -> bool {
+    let p: &DevelopParams = bytemuck::from_bytes(uniform);
+    p.local[2] > 0.5
+}
+
 /// Whether a develop with this uniform reads the adjacency map: black and white, a developer with adjacency, and
 /// not the map's own pass.
 pub fn needs_density_map(uniform: &[u8]) -> bool {
     let p: &DevelopParams = bytemuck::from_bytes(uniform);
-    p.mono[0] > 0.5 && p.mono[2] < 0.5 && p.developer[0] != 0.0
+    // Black and white's developer, or colour film's halation: both read a blurred map of the film's exposure.
+    p.mono[2] < 0.5
+        && ((p.mono[0] > 0.5 && p.developer[0] != 0.0) || (p.mono[0] < 0.5 && p.film[2] > 0.0))
 }
 
 /// Black and white's table as a 3D texture, `side`³; a single zero in colour.
@@ -220,6 +277,17 @@ impl DevelopPass {
                         },
                         count: None,
                     },
+                    // The whole-frame maps (`MAP_LAYERS`): Texture and Clarity's, Dehaze's, the airlight.
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 7,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2Array,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
                 ],
             });
         // Mirrors web/src/lib/gpu/develop.ts: the mask uniforms, a linear sampler, and a texture per slot.
@@ -331,6 +399,65 @@ impl DevelopPass {
             "client/density_blur.wgsl",
             &[B::Uniform, B::Tex, store],
         )?;
+        let local_pack = Kernel::new(
+            gpu,
+            "client/local_pack.wgsl",
+            &[
+                B::Uniform,
+                B::Tex,
+                B::Tex,
+                B::Store(wgpu::TextureFormat::Rgba32Float),
+            ],
+        )?;
+        let no_maps = gpu.device.create_texture_with_data(
+            &gpu.queue,
+            &wgpu::TextureDescriptor {
+                label: Some("no maps"),
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: MAP_LAYERS,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba32Float,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            bytemuck::cast_slice(&[0.0f32; 4 * MAP_LAYERS as usize]),
+        );
+        let profile = Kernel::new(
+            gpu,
+            "client/profile.wgsl",
+            &[
+                B::Uniform,
+                B::Tex,
+                B::Tex3,
+                B::Tex3,
+                B::Store(wgpu::TextureFormat::Rgba16Float),
+            ],
+        )?;
+        let defringe = Kernel::new(
+            gpu,
+            "client/defringe.wgsl",
+            &[
+                B::Uniform,
+                B::Tex,
+                B::Store(wgpu::TextureFormat::Rgba16Float),
+            ],
+        )?;
+        let look = Kernel::new(
+            gpu,
+            "client/look.wgsl",
+            &[
+                B::Uniform,
+                B::Tex,
+                B::Store(wgpu::TextureFormat::Rgba16Float),
+                B::Tex3,
+            ],
+        )?;
         Ok(Self {
             pipeline,
             layout,
@@ -340,6 +467,13 @@ impl DevelopPass {
             density_down,
             density_blur,
             identity_curves,
+            guided: crate::guided::GuidedFilter::new(gpu)?,
+            local_pack,
+            no_maps,
+            haze: crate::haze::Haze::new(gpu)?,
+            profile,
+            defringe,
+            look,
         })
     }
 
@@ -383,6 +517,8 @@ impl DevelopPass {
     ) -> Result<wgpu::Texture> {
         let mut own: DevelopParams = *bytemuck::from_bytes(uniform);
         own.mono[2] = 1.0;
+        // The film's exposure, without Texture, Clarity or Dehaze: the browser's map is made the same way.
+        own.local = [0.0; 4];
         let mut whole = masks.params;
         whole.frame = [0.0; 4];
         let whole = Masks {
@@ -419,6 +555,259 @@ impl DevelopPass {
         Ok(map)
     }
 
+    /// Texture and Clarity's map for a frame `frame` pixels across, from `small` (`density_source`'s: the whole
+    /// frame averaged down to at most 1,024 on the long edge): two self-guided filters of its log luminance, the
+    /// texture band's and the clarity band's (`sidecar_color::params::TEXTURE_RADIUS` and the rest, shares of
+    /// the long edge), their coefficients side by side in one RGBA32F texel. It depends on the photo alone, not
+    /// on the edit, so a caller may keep it while the sliders move.
+    pub fn local_map(&self, gpu: &Gpu, small: &wgpu::Texture, frame: [u32; 2]) -> wgpu::Texture {
+        use crate::guided::{GUIDE, Guided};
+        use sidecar_color::params::{CLARITY_EPS, CLARITY_RADIUS, TEXTURE_EPS, TEXTURE_RADIUS};
+        let size = [small.width(), small.height()];
+        // Radii in the map's own texels.
+        let texels =
+            frame[0].max(frame[1]) as f64 / sidecar_color::developer::map_scale(frame) as f64;
+        let band = |radius: f64, eps: f64| {
+            self.guided
+                .coefficients(
+                    gpu,
+                    small,
+                    small,
+                    size,
+                    Guided {
+                        radius: (radius * texels).max(1.0) as f32,
+                        eps: eps as f32,
+                        subsample: 1,
+                        channel: GUIDE,
+                        log_guide: true,
+                    },
+                )
+                .0
+        };
+        let (fine, mid) = (
+            band(TEXTURE_RADIUS, TEXTURE_EPS),
+            band(CLARITY_RADIUS, CLARITY_EPS),
+        );
+        let map = texture(gpu, size[0], size[1], wgpu::TextureFormat::Rgba32Float);
+        let mut enc = gpu.device.create_command_encoder(&Default::default());
+        self.local_pack.run(
+            gpu,
+            &mut enc,
+            &[0.0f32; 4],
+            size,
+            &[
+                Res::View(&view(&fine)),
+                Res::View(&view(&mid)),
+                Res::View(&view(&map)),
+            ],
+        );
+        gpu.queue.submit([enc.finish()]);
+        map
+    }
+
+    /// Dehaze's map for a frame `frame` pixels across from `small` (`density_source`'s), under this uniform's
+    /// white balance and camera matrix: the transmission's guided coefficients and the airlight (`crate::haze`).
+    pub fn haze_map(
+        &self,
+        gpu: &Gpu,
+        small: &wgpu::Texture,
+        frame: [u32; 2],
+        uniform: &[u8],
+    ) -> (wgpu::Texture, wgpu::Texture) {
+        let p: &DevelopParams = bytemuck::from_bytes(uniform);
+        self.haze
+            .map(gpu, &self.guided, small, frame, p.cam_to_work, p.wb_mul)
+    }
+
+    /// The whole-frame maps as develop binds them: one array of `MAP_LAYERS` (the fragment stage allows sixteen
+    /// sampled textures, and develop is at that), layer 0 the local-contrast map, 1 Dehaze's, and the airlight in
+    /// texel (0, 0) of layer 2. `None` when neither is wanted.
+    fn maps(
+        gpu: &Gpu,
+        local: Option<&wgpu::Texture>,
+        haze: Option<(&wgpu::Texture, &wgpu::Texture)>,
+    ) -> Option<wgpu::Texture> {
+        let any = local.or(haze.map(|h| h.0))?;
+        let array = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("develop maps"),
+            size: wgpu::Extent3d {
+                width: any.width(),
+                height: any.height(),
+                depth_or_array_layers: MAP_LAYERS,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let mut enc = gpu.device.create_command_encoder(&Default::default());
+        let mut copy = |from: &wgpu::Texture, layer: u32| {
+            enc.copy_texture_to_texture(
+                from.as_image_copy(),
+                wgpu::TexelCopyTextureInfo {
+                    texture: &array,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d {
+                        x: 0,
+                        y: 0,
+                        z: layer,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::Extent3d {
+                    width: from.width().min(any.width()),
+                    height: from.height().min(any.height()),
+                    depth_or_array_layers: 1,
+                },
+            );
+        };
+        if let Some(l) = local {
+            copy(l, 0);
+        }
+        if let Some((m, a)) = haze {
+            copy(m, 1);
+            copy(a, 2);
+        }
+        gpu.queue.submit([enc.finish()]);
+        Some(array)
+    }
+
+    /// `src` through the camera profile pass: its HueSatMap and LookTable, as a new texture.
+    pub fn apply_profile(
+        &self,
+        gpu: &Gpu,
+        src: &wgpu::Texture,
+        p: &sidecar_color::params::ProfilePass,
+    ) -> wgpu::Texture {
+        let u: &sidecar_color::params::ProfileParams = bytemuck::from_bytes(&p.uniform);
+        // A table as a 3D texture: saturation across, hue down, value deep; a single zero texel when absent.
+        let table = |dims: [u32; 4], data: &[f32]| {
+            let (size, data) =
+                if dims[0] > 0 && data.len() == (dims[0] * dims[1] * dims[2] * 4) as usize {
+                    ([dims[1], dims[0], dims[2]], data)
+                } else {
+                    ([1, 1, 1], &[0.0f32; 4][..])
+                };
+            gpu.device.create_texture_with_data(
+                &gpu.queue,
+                &wgpu::TextureDescriptor {
+                    label: Some("profile table"),
+                    size: wgpu::Extent3d {
+                        width: size[0],
+                        height: size[1],
+                        depth_or_array_layers: size[2],
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D3,
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                },
+                wgpu::util::TextureDataOrder::LayerMajor,
+                bytemuck::cast_slice(data),
+            )
+        };
+        let (hs, lt) = (table(u.hue_sat, &p.hue_sat), table(u.look, &p.look));
+        let out = texture(
+            gpu,
+            src.width(),
+            src.height(),
+            wgpu::TextureFormat::Rgba16Float,
+        );
+        let mut enc = gpu.device.create_command_encoder(&Default::default());
+        self.profile.run(
+            gpu,
+            &mut enc,
+            u,
+            [src.width(), src.height()],
+            &[
+                Res::View(&view(src)),
+                Res::View(&view(&hs)),
+                Res::View(&view(&lt)),
+                Res::View(&view(&out)),
+            ],
+        );
+        gpu.queue.submit([enc.finish()]);
+        out
+    }
+
+    /// `src` with its fringes taken out (`client/defringe.wgsl`), as a new texture. `frame_long` is the whole frame's
+    /// long edge in pixels when `src` is a tile of it, so the reach is the whole frame's; 0 for a whole frame.
+    pub fn apply_defringe(
+        &self,
+        gpu: &Gpu,
+        src: &wgpu::Texture,
+        uniform: &[u8],
+        frame_long: f32,
+    ) -> wgpu::Texture {
+        let mut u: sidecar_color::params::DefringeParams = bytemuck::pod_read_unaligned(uniform);
+        u.reach[3] = frame_long;
+        let out = texture(
+            gpu,
+            src.width(),
+            src.height(),
+            wgpu::TextureFormat::Rgba16Float,
+        );
+        let mut enc = gpu.device.create_command_encoder(&Default::default());
+        self.defringe.run(
+            gpu,
+            &mut enc,
+            &u,
+            [src.width(), src.height()],
+            &[Res::View(&view(src)), Res::View(&view(&out))],
+        );
+        gpu.queue.submit([enc.finish()]);
+        out
+    }
+
+    /// `src`, developed, through a 3D LUT (`client/look.wgsl`), as a new texture.
+    pub fn apply_look(&self, gpu: &Gpu, src: &wgpu::Texture, look: &Look) -> wgpu::Texture {
+        let u: sidecar_color::lut::LookParams = bytemuck::pod_read_unaligned(look.uniform);
+        let n = look.size;
+        let table = gpu.device.create_texture_with_data(
+            &gpu.queue,
+            &wgpu::TextureDescriptor {
+                label: Some("look lut"),
+                size: wgpu::Extent3d {
+                    width: n,
+                    height: n,
+                    depth_or_array_layers: n,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D3,
+                format: wgpu::TextureFormat::Rgba32Float,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            bytemuck::cast_slice(look.table),
+        );
+        let out = texture(
+            gpu,
+            src.width(),
+            src.height(),
+            wgpu::TextureFormat::Rgba16Float,
+        );
+        let mut enc = gpu.device.create_command_encoder(&Default::default());
+        self.look.run(
+            gpu,
+            &mut enc,
+            &u,
+            [src.width(), src.height()],
+            &[
+                Res::View(&view(src)),
+                Res::View(&view(&out)),
+                Res::View(&view(&table)),
+            ],
+        );
+        gpu.queue.submit([enc.finish()]);
+        out
+    }
+
     /// Develop a source texture into a new RGBA16F texture (display-linear).
     pub fn render(
         &self,
@@ -435,6 +824,19 @@ impl DevelopPass {
                 uniform.len()
             );
         }
+        // Fringes first, as the camera recorded them, then the camera profile: develop reads the result, as the
+        // browser's does.
+        let frame_long = if masks.params.frame[2] > 0.0 {
+            masks.params.frame[2].max(masks.params.frame[3])
+        } else {
+            0.0
+        };
+        let defringed = masks
+            .defringe
+            .map(|u| self.apply_defringe(gpu, src_tex, u, frame_long));
+        let src_tex = defringed.as_ref().unwrap_or(src_tex);
+        let profiled = masks.profile.map(|p| self.apply_profile(gpu, src_tex, p));
+        let src_tex = profiled.as_ref().unwrap_or(src_tex);
         // The whole frame makes its own adjacency map; a tile without one goes without its edges.
         let own_map = match (
             masks.density,
@@ -454,6 +856,25 @@ impl DevelopPass {
             _ => None,
         };
         let density = masks.density.or(own_map.as_ref()).unwrap_or(&self.no_mask);
+        let own_local =
+            (masks.local.is_none() && needs_local_map(uniform) && masks.params.frame[2] == 0.0)
+                .then(|| {
+                    let small = self.density_source(gpu, src_tex);
+                    self.local_map(gpu, &small, [src_tex.width(), src_tex.height()])
+                });
+        let own_haze = (masks.haze.is_none()
+            && needs_haze_map(uniform)
+            && masks.params.frame[2] == 0.0)
+            .then(|| {
+                let small = self.density_source(gpu, src_tex);
+                self.haze_map(gpu, &small, [src_tex.width(), src_tex.height()], uniform)
+            });
+        let own_maps = Self::maps(
+            gpu,
+            masks.local.or(own_local.as_ref()),
+            masks.haze.or(own_haze.as_ref().map(|(m, a)| (m, a))),
+        );
+        let maps = own_maps.as_ref().unwrap_or(&self.no_maps);
         let (w, h) = (src_tex.width(), src_tex.height());
         let size = wgpu::Extent3d {
             width: w,
@@ -544,6 +965,15 @@ impl DevelopPass {
                         &slide_responses.create_view(&Default::default()),
                     ),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::TextureView(&maps.create_view(
+                        &wgpu::TextureViewDescriptor {
+                            dimension: Some(wgpu::TextureViewDimension::D2Array),
+                            ..Default::default()
+                        },
+                    )),
+                },
             ],
         });
         let mask_ubo = d.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -613,7 +1043,11 @@ impl DevelopPass {
             pass.draw(0..3, 0..1);
         }
         gpu.queue.submit([enc.finish()]);
-        Ok(out)
+        // The look last, over the developed picture, as the browser applies it.
+        Ok(match &masks.look {
+            Some(look) => self.apply_look(gpu, &out, look),
+            None => out,
+        })
     }
 }
 
@@ -801,6 +1235,456 @@ mod tests {
         assert!(worst < 1e-3, "worst difference {worst}");
     }
 
+    /// Clarity raises middle-scale detail in stops and leaves a hard edge with little halo; at rest the pass is the
+    /// one before, bit for bit; a tile given the whole frame's map develops as that part of the whole does.
+    #[test]
+    fn clarity_raises_middle_detail_without_halos() {
+        let Ok(gpu) = crate::test_gpu() else {
+            return eprintln!("skipping: no GPU");
+        };
+        let pass = DevelopPass::new(gpu).unwrap();
+        let (w, h) = (2048u32, 128u32);
+        // Left: a ripple of ±0.15 stop, 60 px across, round mid grey. Right: two flats meeting at a 3.3-stop edge.
+        let level = |x: u32| -> f32 {
+            if x < 700 {
+                0.18 * (0.15 * (x as f32 * std::f32::consts::TAU / 60.0).sin()).exp2()
+            } else if x < 1400 {
+                0.05
+            } else {
+                0.5
+            }
+        };
+        let src = RgbaF32 {
+            width: w,
+            height: h,
+            data: (0..w * h)
+                .flat_map(|i| {
+                    let v = level(i % w);
+                    [1.3 * v, v, 0.8 * v, 0.0]
+                })
+                .collect(),
+        };
+        let uniform = |local: [f32; 4]| {
+            let mut p: DevelopParams = bytemuck::Zeroable::zeroed();
+            p.wb_mul = [1.0; 3];
+            p.exposure = 1.0;
+            p.cam_to_work = [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+            ];
+            p.work_to_disp = p.cam_to_work;
+            p.tone = [-10.0, 6.5, 7.0, 0.5];
+            p.local = local;
+            bytemuck::bytes_of(&p).to_vec()
+        };
+        let lut: Vec<f32> = (0..4096).map(|i| i as f32 / 4095.0).collect();
+        let tex = crate::upload_rgba16(gpu, &src);
+        let develop = |u: &[u8]| {
+            crate::read_rgba16(
+                gpu,
+                &pass.render(gpu, &tex, u, &lut, &Masks::none()).unwrap(),
+            )
+            .unwrap()
+        };
+        let at = |img: &RgbaF32, x: u32| img.data[((64 * img.width + x) * 4 + 1) as usize];
+        let rest = develop(&uniform([0.0, 0.0, 0.0, 0.0]));
+        let off = develop(&uniform([0.0, 0.0, 1.0, 0.0]));
+        assert!(
+            (0..w).all(|x| at(&rest, x) == at(&off, x)),
+            "both bands at 0 change nothing"
+        );
+        let clear = develop(&uniform([0.0, 1.0, 1.0, 0.0]));
+        // The ripple's swing, in stops of the output, over two periods away from the ends.
+        let swing = |img: &RgbaF32| {
+            let v: Vec<f32> = (300..420).map(|x| at(img, x).log2()).collect();
+            v.iter().cloned().fold(f32::MIN, f32::max) - v.iter().cloned().fold(f32::MAX, f32::min)
+        };
+        let (before, after) = (swing(&rest), swing(&clear));
+        // Each side of the edge, 8 px from it, against its own interior.
+        let halo = |img: &RgbaF32| {
+            (
+                at(img, 1392) / at(img, 1000) - 1.0,
+                at(img, 1408) / at(img, 1800) - 1.0,
+            )
+        };
+        eprintln!(
+            "ripple {before:.3} → {after:.3} stops; edge {:?} → {:?}",
+            halo(&rest),
+            halo(&clear)
+        );
+        assert!(
+            after > 1.6 * before,
+            "clarity raised the ripple {before} → {after}"
+        );
+        // A 3.3-stop edge at full Clarity: the guided filter's windows that straddle it leave about a tenth of a
+        // stop on the dark side, 8 px out — measured, and bounded here so it can't grow unnoticed.
+        let (d, b) = halo(&clear);
+        assert!(d.abs() < 0.1 && b.abs() < 0.05, "halo {d} {b}");
+        let fine = develop(&uniform([1.0, 0.0, 1.0, 0.0]));
+        eprintln!(
+            "texture: ripple {:.3} stops, edge {:?}",
+            swing(&fine),
+            halo(&fine)
+        );
+        let (d, b) = halo(&fine);
+        assert!(d.abs() < 0.05 && b.abs() < 0.05, "texture halo {d} {b}");
+        // A tile at 1300, 256 wide, given the whole frame's map.
+        let small = pass.density_source(gpu, &tex);
+        let map = pass.local_map(gpu, &small, [w, h]);
+        let cut = RgbaF32 {
+            width: 256,
+            height: h,
+            data: (0..h)
+                .flat_map(|y| {
+                    src.data[((y * w + 1300) * 4) as usize..((y * w + 1556) * 4) as usize].to_vec()
+                })
+                .collect(),
+        };
+        let mut params: sidecar_color::params::MaskParams = bytemuck::Zeroable::zeroed();
+        params.frame = [1300.0, 0.0, w as f32, h as f32];
+        let tile = crate::read_rgba16(
+            gpu,
+            &pass
+                .render(
+                    gpu,
+                    &crate::upload_rgba16(gpu, &cut),
+                    &uniform([0.0, 1.0, 1.0, 0.0]),
+                    &lut,
+                    &Masks {
+                        params,
+                        local: Some(&map),
+                        ..Masks::none()
+                    },
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        let worst = (0..256)
+            .map(|x| (at(&tile, x) - at(&clear, 1300 + x)).abs())
+            .fold(0.0, f32::max);
+        assert!(worst < 1e-3, "worst difference {worst}");
+    }
+
+    /// A scene hazed by Koschmieder's model over a depth ramp under a sky, with a known airlight: Dehaze finds the airlight,
+    /// and its develop is much nearer the haze-free scene's than the hazy one's is; −100 takes it further away; a
+    /// tile given the whole frame's map develops as that part of the whole does.
+    #[test]
+    fn dehaze_recovers_a_hazed_scene() {
+        let Ok(gpu) = crate::test_gpu() else {
+            return eprintln!("skipping: no GPU");
+        };
+        let pass = DevelopPass::new(gpu).unwrap();
+        let (w, h) = (1024u32, 512u32);
+        let air = [0.55f32, 0.6, 0.65];
+        let hash = |mut s: u64| {
+            s = s.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            (s % 10_000) as f32 / 10_000.0
+        };
+        // Coloured cells 32 px square, each with one channel near black, as outdoor scenes have (the prior).
+        let clear = |x: u32, y: u32| -> [f32; 3] {
+            let k = ((y / 32) * 64 + x / 32) as u64;
+            let mut c = [
+                0.05 + 0.4 * hash(k * 3),
+                0.05 + 0.4 * hash(k * 3 + 1),
+                0.05 + 0.4 * hash(k * 3 + 2),
+            ];
+            c[(hash(k * 7) * 3.0) as usize % 3] = 0.01;
+            c
+        };
+        // Depth grows left to right: transmission from 0.95 to 0.25.
+        let t_at = |x: u32| (-(0.05 + 1.33 * x as f32 / w as f32)).exp();
+        let image = |hazy: bool| RgbaF32 {
+            width: w,
+            height: h,
+            data: (0..w * h)
+                .flat_map(|i| {
+                    let (x, y) = (i % w, i / w);
+                    // The top eighth is sky: nothing but air, hazy or not.
+                    let t = if y < h / 8 {
+                        0.0
+                    } else if hazy {
+                        t_at(x)
+                    } else {
+                        1.0
+                    };
+                    let j = clear(x, y);
+                    [0, 1, 2]
+                        .map(|c| j[c] * t + air[c] * (1.0 - t))
+                        .into_iter()
+                        .chain([0.0])
+                        .collect::<Vec<_>>()
+                })
+                .collect(),
+        };
+        let uniform = |dehaze: f32| {
+            let mut p: DevelopParams = bytemuck::Zeroable::zeroed();
+            p.wb_mul = [1.0; 3];
+            p.exposure = 1.0;
+            p.cam_to_work = [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+            ];
+            p.work_to_disp = p.cam_to_work;
+            p.tone = [-10.0, 6.5, 7.0, 0.5];
+            p.local = [0.0, 0.0, 0.0, dehaze];
+            bytemuck::bytes_of(&p).to_vec()
+        };
+        let lut: Vec<f32> = (0..4096).map(|i| i as f32 / 4095.0).collect();
+        let (hazy, truth) = (
+            crate::upload_rgba16(gpu, &image(true)),
+            crate::upload_rgba16(gpu, &image(false)),
+        );
+        let develop = |tex: &wgpu::Texture, u: &[u8]| {
+            crate::read_rgba16(
+                gpu,
+                &pass.render(gpu, tex, u, &lut, &Masks::none()).unwrap(),
+            )
+            .unwrap()
+        };
+        let reference = develop(&truth, &uniform(0.0));
+        // Mean absolute difference from the haze-free render, away from the frame's edges.
+        let err = |img: &RgbaF32| {
+            let mut e = 0.0;
+            let mut n = 0.0;
+            for y in (40..h - 40).step_by(4) {
+                for x in (40..w - 40).step_by(4) {
+                    for c in 0..3 {
+                        let i = ((y * w + x) * 4 + c) as usize;
+                        e += (img.data[i] - reference.data[i]).abs() as f64;
+                        n += 1.0;
+                    }
+                }
+            }
+            e / n
+        };
+        let as_is = err(&develop(&hazy, &uniform(0.0)));
+        let removed = err(&develop(&hazy, &uniform(1.0)));
+        let added = err(&develop(&hazy, &uniform(-1.0)));
+        let small = pass.density_source(gpu, &hazy);
+        let (map, found) = pass.haze_map(gpu, &small, [w, h], &uniform(1.0));
+        let found = crate::read_rgba32(gpu, &found).unwrap();
+        eprintln!(
+            "airlight {:?} (truth {air:?}); error from the clear scene: hazy {as_is:.4}, dehazed {removed:.4}, doubled {added:.4}",
+            &found.data[..3]
+        );
+        for (got, want) in found.data.iter().zip(air) {
+            assert!(
+                (got / want - 1.0).abs() < 0.1,
+                "airlight {:?}",
+                &found.data[..3]
+            );
+        }
+        assert!(
+            removed < 0.5 * as_is,
+            "dehazed {removed} against hazy {as_is}"
+        );
+        assert!(added > 1.2 * as_is, "doubled {added} against hazy {as_is}");
+        // A tile at 600, 200 wide, given the whole frame's map.
+        let whole = develop(&hazy, &uniform(1.0));
+        let src = image(true);
+        let cut = RgbaF32 {
+            width: 200,
+            height: h,
+            data: (0..h)
+                .flat_map(|y| {
+                    src.data[((y * w + 600) * 4) as usize..((y * w + 800) * 4) as usize].to_vec()
+                })
+                .collect(),
+        };
+        let mut params: sidecar_color::params::MaskParams = bytemuck::Zeroable::zeroed();
+        params.frame = [600.0, 0.0, w as f32, h as f32];
+        let found_tex =
+            crate::haze::one_texel(gpu, [found.data[0], found.data[1], found.data[2], 1.0]);
+        let tile = crate::read_rgba16(
+            gpu,
+            &pass
+                .render(
+                    gpu,
+                    &crate::upload_rgba16(gpu, &cut),
+                    &uniform(1.0),
+                    &lut,
+                    &Masks {
+                        params,
+                        haze: Some((&map, &found_tex)),
+                        ..Masks::none()
+                    },
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        let at = |img: &RgbaF32, x: u32| img.data[((256 * img.width + x) * 4 + 1) as usize];
+        let worst = (0..200)
+            .map(|x| (at(&tile, x) - at(&whole, 600 + x)).abs())
+            .fold(0.0, f32::max);
+        assert!(worst < 1e-3, "worst difference {worst}");
+    }
+
+    /// The camera profile pass does what `sidecar_color::dcp::apply` does on the CPU: a table that turns hues 30°
+    /// and halves saturation, through the matrices `pack` makes from a forward matrix, on a few camera colours.
+    #[test]
+    fn the_profile_pass_matches_the_cpu() {
+        use sidecar_color::dcp::{HsvTable, Profile};
+        let Ok(gpu) = crate::test_gpu() else {
+            return eprintln!("skipping: no GPU");
+        };
+        let pass = DevelopPass::new(gpu).unwrap();
+        let dims = [12u32, 6, 1];
+        let table = HsvTable {
+            dims,
+            data: (0..dims[0] * dims[1])
+                .flat_map(|_| [30.0, 0.5, 1.0])
+                .collect(),
+            srgb: false,
+        };
+        let mut camera = sidecar_color::camera::SourceSpace::Srgb.camera_color();
+        camera.as_shot_mul = [2.0, 1.0, 1.5];
+        camera.profile = Some(Box::new(Profile {
+            name: "test".into(),
+            forward: vec![(
+                6504.0,
+                [[0.6, 0.25, 0.11], [0.25, 0.73, 0.02], [0.02, 0.1, 0.70]],
+            )],
+            hue_sat: vec![(6504.0, table.clone())],
+            look: None,
+        }));
+        let edit = sidecar_color::params::EditParams {
+            camera_profile: Some(sidecar_color::params::FILE_PROFILE.into()),
+            ..Default::default()
+        };
+        let packed = sidecar_color::params::pack(
+            &edit,
+            &camera,
+            sidecar_color::SourceKind::Raw,
+            sidecar_color::DisplaySpace::Srgb,
+        );
+        let p = packed.profile.expect("a profile pass");
+        let u: &sidecar_color::params::ProfileParams = bytemuck::from_bytes(&p.uniform);
+        // The last is neutral once white-balanced by [2, 1, 1.5].
+        let colours = [
+            [0.2f32, 0.3, 0.1],
+            [0.05, 0.1, 0.3],
+            [0.3, 0.3, 0.2],
+            [0.05, 0.1, 0.1 / 1.5],
+        ];
+        let src = RgbaF32 {
+            width: 4,
+            height: 1,
+            data: colours
+                .iter()
+                .flat_map(|c| [c[0], c[1], c[2], 0.0])
+                .collect(),
+        };
+        let out = crate::read_rgba16(
+            gpu,
+            &pass.apply_profile(gpu, &crate::upload_rgba16(gpu, &src), &p),
+        )
+        .unwrap();
+        let m = |a: &[[f32; 4]; 3]| -> [[f64; 3]; 3] {
+            std::array::from_fn(|r| std::array::from_fn(|c| a[c][r] as f64))
+        };
+        let (to, from) = (m(&u.to_prophoto), m(&u.from_prophoto));
+        for (i, c) in colours.iter().enumerate() {
+            let w = [0, 1, 2].map(|k| c[k] as f64 * u.wb[k] as f64);
+            let pp = sidecar_color::mat::apply(&to, &w);
+            let back = sidecar_color::mat::apply(&from, &sidecar_color::dcp::apply(&table, pp));
+            let want = [0, 1, 2].map(|k| back[k] / u.wb[k] as f64);
+            for (k, want) in want.iter().enumerate() {
+                let got = out.data[i * 4 + k] as f64;
+                assert!(
+                    (got - want).abs() < 2e-3 * want.abs().max(0.05),
+                    "{c:?}: {got} against {want}"
+                );
+            }
+        }
+        // A neutral stays neutral (no hue to turn, no saturation to halve).
+        let grey = &out.data[12..15];
+        assert!(
+            (grey[0] - 0.05).abs() < 1e-3
+                && (grey[1] - 0.1).abs() < 1e-3
+                && (grey[2] - 0.1 / 1.5).abs() < 1e-3,
+            "{grey:?}"
+        );
+    }
+
+    /// Defringe takes a purple fringe beside a black-to-white edge to neutral at its own luminance, and leaves a
+    /// large purple patch, with no edge within reach of its middle, as it was.
+    #[test]
+    fn defringe_takes_fringes_and_leaves_purple_things() {
+        let Ok(gpu) = crate::test_gpu() else {
+            return eprintln!("skipping: no GPU");
+        };
+        let pass = DevelopPass::new(gpu).unwrap();
+        let (w, h) = (512u32, 256u32);
+        let purple = [0.45f32, 0.25, 0.65];
+        let src = RgbaF32 {
+            width: w,
+            height: h,
+            data: (0..w * h)
+                .flat_map(|i| {
+                    let (x, y) = (i % w, i / w);
+                    let c = if y < 128 {
+                        // An edge at x = 256, a fringe in the two pixels beside it on the bright side.
+                        if x < 256 {
+                            [0.02, 0.02, 0.02]
+                        } else if x < 258 {
+                            purple
+                        } else {
+                            [0.8, 0.8, 0.8]
+                        }
+                    } else {
+                        // A purple thing, 200 px wide, on mid grey.
+                        if (156..356).contains(&x) {
+                            purple
+                        } else {
+                            [0.2, 0.2, 0.2]
+                        }
+                    };
+                    [c[0], c[1], c[2], 0.0]
+                })
+                .collect(),
+        };
+        let mut d: DevelopParams = bytemuck::Zeroable::zeroed();
+        d.wb_mul = [1.0; 3];
+        d.cam_to_work = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+        ];
+        let u = sidecar_color::params::Defringe::uniform(
+            Some(&sidecar_color::params::Defringe {
+                purple: 100.0,
+                ..Default::default()
+            }),
+            &d,
+        )
+        .unwrap();
+        let out = crate::read_rgba16(
+            gpu,
+            &pass.apply_defringe(gpu, &crate::upload_rgba16(gpu, &src), &u, 0.0),
+        )
+        .unwrap();
+        let at =
+            |x: u32, y: u32| &out.data[((y * w + x) * 4) as usize..((y * w + x) * 4 + 3) as usize];
+        let spread = |c: &[f32]| {
+            c.iter().cloned().fold(f32::MIN, f32::max) - c.iter().cloned().fold(f32::MAX, f32::min)
+        };
+        let fringe = at(256, 64);
+        eprintln!("fringe {fringe:?}, purple thing {:?}", at(256, 192));
+        assert!(spread(fringe) < 0.02, "the fringe is neutral: {fringe:?}");
+        let y = 0.2627 * purple[0] + 0.678 * purple[1] + 0.0593 * purple[2];
+        assert!((fringe[1] - y).abs() < 0.01, "at its own luminance");
+        let thing = at(256, 192);
+        assert!(
+            (thing[0] - 0.45).abs() < 1e-3 && (thing[2] - 0.65).abs() < 1e-3,
+            "the purple thing keeps its colour: {thing:?}"
+        );
+    }
+
     /// The develop pass renders a spectral colour stock as `slide::Slide` does on the CPU: the same two tables,
     /// read the same way. Stand-in standards, so these are not real PROVIA 100F colours — the chain is what is
     /// being checked. At amount 0 the pass is the neutral rendering, bit for bit.
@@ -953,5 +1837,424 @@ mod tests {
             off.data, plain.data,
             "a stock at amount 0 renders as if it were not there"
         );
+    }
+
+    /// The look pass is `sidecar_color::lut::sample` on the GPU: a graded table through the sRGB curve matches
+    /// the CPU's tetrahedral sample, half the amount sits between, and none leaves even out-of-gamut colour be.
+    #[test]
+    fn look_matches_the_cpu_lut() {
+        use sidecar_color::lut::{CubeLut, LookLut, LutSpace, sample};
+        let Ok(gpu) = crate::test_gpu() else {
+            return eprintln!("skipping: no GPU");
+        };
+        let pass = DevelopPass::new(gpu).unwrap();
+        let n = 17u32;
+        let m = (n - 1) as f32;
+        let lut = CubeLut {
+            title: None,
+            size: n,
+            domain_min: [0.0; 3],
+            domain_max: [1.0; 3],
+            table: (0..n * n * n)
+                .map(|i| {
+                    let c = [i % n, (i / n) % n, i / (n * n)].map(|v| v as f32 / m);
+                    // A warm, contrasty grade, not separable by channel.
+                    [
+                        (c[0] * 0.9 + c[1] * 0.15).powf(1.2).min(1.0),
+                        (c[1] * 0.95 + 0.03 * c[2]).powf(1.1),
+                        (c[2] * 0.8 + 0.1 * c[0]).powf(0.9),
+                    ]
+                })
+                .collect(),
+        };
+        let colours: Vec<[f32; 3]> = vec![
+            [0.0, 0.0, 0.0],
+            [0.18, 0.18, 0.18],
+            [0.7, 0.2, 0.05],
+            [0.03, 0.4, 0.9],
+            [1.0, 1.0, 1.0],
+            [1.3, -0.05, 0.2],
+        ];
+        let src = RgbaF32 {
+            width: colours.len() as u32,
+            height: 1,
+            data: colours
+                .iter()
+                .flat_map(|c| [c[0], c[1], c[2], 0.0])
+                .collect(),
+        };
+        let tex = crate::upload_rgba16(gpu, &src);
+        let table = lut.rgba();
+        let run = |amount: f64| {
+            let look = LookLut {
+                amount,
+                space: LutSpace::Srgb,
+                ..Default::default()
+            };
+            let u = look
+                .uniform(sidecar_color::DisplaySpace::Srgb, &lut.header())
+                .unwrap_or_else(|| vec![0; 1]);
+            if u.len() == 1 {
+                return src.clone();
+            }
+            let out = pass.apply_look(
+                gpu,
+                &tex,
+                &Look {
+                    uniform: &u,
+                    size: n,
+                    table: &table,
+                },
+            );
+            crate::read_rgba16(gpu, &out).unwrap()
+        };
+        let (enc, dec) = (
+            sidecar_color::lut::srgb_encode,
+            sidecar_color::lut::srgb_decode,
+        );
+        let full = run(100.0);
+        let half = run(50.0);
+        for (i, c) in colours.iter().enumerate() {
+            let e = c.map(enc);
+            let want = sample(&lut, e).map(dec);
+            let got = &full.data[i * 4..i * 4 + 3];
+            for k in 0..3 {
+                // f16 storage of the input and output: a few thousandths at most.
+                assert!(
+                    (got[k] - want[k]).abs() < 4e-3,
+                    "{c:?}: {got:?} vs {want:?}"
+                );
+            }
+            let g = sample(&lut, e);
+            let mid: [f32; 3] = std::array::from_fn(|k| dec(0.5 * (e[k] + g[k])));
+            let held: [f32; 3] = std::array::from_fn(|k| 0.5 * (c[k] - c[k].clamp(0.0, 1.0)));
+            for k in 0..3 {
+                let h = half.data[i * 4 + k];
+                assert!(
+                    (h - (mid[k] + held[k])).abs() < 4e-3,
+                    "{c:?} at 50: {h} vs {}",
+                    mid[k] + held[k]
+                );
+            }
+        }
+        // An amount just above zero is all but the input, out of gamut too: nothing is clipped on the way.
+        let faint = run(0.01);
+        for (a, b) in faint.data.chunks(4).zip(src.data.chunks(4)) {
+            for k in 0..3 {
+                assert!((a[k] - b[k]).abs() < 4e-3, "{a:?} vs {b:?}");
+            }
+        }
+    }
+
+    /// A soft proof's gamut warning: where the table's alpha marks a colour, the warning paints it mid grey, and
+    /// with the warning off the proof is the table's colour alone.
+    #[test]
+    fn proof_warning_paints_what_the_table_marks() {
+        use sidecar_color::lut::{CubeHeader, proof_uniform, srgb_decode};
+        let Ok(gpu) = crate::test_gpu() else {
+            return eprintln!("skipping: no GPU");
+        };
+        let pass = DevelopPass::new(gpu).unwrap();
+        let n = 9u32;
+        let m = (n - 1) as f32;
+        // An identity, its alpha marking every node with red over three quarters.
+        let table: Vec<f32> = (0..n * n * n)
+            .flat_map(|i| {
+                let c = [i % n, (i / n) % n, i / (n * n)].map(|v| v as f32 / m);
+                [c[0], c[1], c[2], if c[0] > 0.75 { 1.0 } else { 0.0 }]
+            })
+            .collect();
+        let header = CubeHeader {
+            size: n,
+            domain_min: [0.0; 3],
+            domain_max: [1.0; 3],
+        };
+        let colours = [[0.9f32, 0.1, 0.1], [0.2, 0.3, 0.4]];
+        let src = RgbaF32 {
+            width: 2,
+            height: 1,
+            data: colours
+                .iter()
+                .flat_map(|c| [c[0], c[1], c[2], 0.0])
+                .collect(),
+        };
+        let tex = crate::upload_rgba16(gpu, &src);
+        let run = |warn: bool| {
+            let u = proof_uniform(sidecar_color::DisplaySpace::Srgb, &header, warn);
+            let look = Look {
+                uniform: &u,
+                size: n,
+                table: &table,
+            };
+            crate::read_rgba16(gpu, &pass.apply_look(gpu, &tex, &look)).unwrap()
+        };
+        let (on, off) = (run(true), run(false));
+        let grey = srgb_decode(0.5);
+        for (k, (&marked, &kept)) in colours[0].iter().zip(&colours[1]).enumerate() {
+            assert!((on.data[k] - grey).abs() < 2e-3, "{:?}", &on.data[..3]);
+            assert!((off.data[k] - marked).abs() < 4e-3, "{:?}", &off.data[..3]);
+            assert!((on.data[4 + k] - kept).abs() < 4e-3, "{:?}", &on.data[4..7]);
+        }
+    }
+
+    /// Colour film's grain per dye layer: on flat grey, one grain moves red, green and blue together (their
+    /// correlation near 1), a grain per layer moves them apart — independent in the working space where the
+    /// layers are, and on screen negatively correlated by the Rec.2020 → sRGB matrix's negative terms, film's own
+    /// interlayer coupling left out — and the picture's level is what one grain leaves it at (grain
+    /// keeps the mean exposure; the tone curve then bends it the same way for both).
+    #[test]
+    fn grain_per_dye_layer_decorrelates_the_channels() {
+        use sidecar_color::params::{Film, Grain};
+        let Ok(gpu) = crate::test_gpu() else {
+            return eprintln!("skipping: no GPU");
+        };
+        let pass = DevelopPass::new(gpu).unwrap();
+        let (w, h) = (256u32, 256u32);
+        let src = RgbaF32 {
+            width: w,
+            height: h,
+            data: [0.12f32, 0.12, 0.12, 0.0].repeat((w * h) as usize),
+        };
+        let cam = sidecar_color::camera::SourceSpace::Srgb.camera_color();
+        let render = |layered: bool, amount: f64| {
+            let edit = sidecar_color::EditParams {
+                film: Some(Film {
+                    interlayer: 0.0,
+                    ..Film::default()
+                }),
+                grain: Some(Grain {
+                    amount,
+                    size: 0.0,
+                    layered,
+                }),
+                ..Default::default()
+            };
+            let p = sidecar_color::pack(
+                &edit,
+                &cam,
+                sidecar_color::SourceKind::Raw,
+                sidecar_color::DisplaySpace::Srgb,
+            );
+            pass.run(gpu, &src, &p.uniform, &p.lut).unwrap()
+        };
+        let stats = |img: &RgbaF32| {
+            let n = (w * h) as f64;
+            let mean: [f64; 3] =
+                std::array::from_fn(|k| img.data.chunks(4).map(|p| p[k] as f64).sum::<f64>() / n);
+            let cov = |a: usize, b: usize| {
+                img.data
+                    .chunks(4)
+                    .map(|p| (p[a] as f64 - mean[a]) * (p[b] as f64 - mean[b]))
+                    .sum::<f64>()
+                    / n
+            };
+            (mean, cov(0, 1) / (cov(0, 0) * cov(1, 1)).sqrt())
+        };
+        let (flat, _) = stats(&render(false, 0.0));
+        let (m1, r1) = stats(&render(false, 100.0));
+        let (m3, r3) = stats(&render(true, 100.0));
+        println!(
+            "one grain: mean {m1:?} corr {r1:.3}; per layer: mean {m3:?} corr {r3:.3}; no grain {flat:?}"
+        );
+        assert!(r1 > 0.9, "one grain moves the channels together: {r1}");
+        assert!(r3 < 0.0, "a grain per layer moves them apart: {r3}");
+        assert!(flat[0] > m1[0], "grain against no grain: {flat:?}");
+        for k in 0..3 {
+            assert!(
+                (m3[k] / m1[k] - 1.0).abs() < 0.01,
+                "channel {k}: {} against one grain's {}",
+                m3[k],
+                m1[k]
+            );
+        }
+    }
+
+    /// Halation: around a bright square on a dark field, film with halation glows red just outside the square —
+    /// a little green, no blue — while far from it the picture is what it was without.
+    #[test]
+    fn halation_glows_red_beside_bright_things() {
+        use sidecar_color::params::Film;
+        let Ok(gpu) = crate::test_gpu() else {
+            return eprintln!("skipping: no GPU");
+        };
+        let pass = DevelopPass::new(gpu).unwrap();
+        let (w, h) = (512u32, 512u32);
+        let src = RgbaF32 {
+            width: w,
+            height: h,
+            data: (0..w * h)
+                .flat_map(|i| {
+                    let (x, y) = (i % w, i / w);
+                    let v = if (248..264).contains(&x) && (248..264).contains(&y) {
+                        40.0
+                    } else {
+                        0.01
+                    };
+                    [v, v, v, 0.0]
+                })
+                .collect(),
+        };
+        let cam = sidecar_color::camera::SourceSpace::Srgb.camera_color();
+        let tex = crate::upload_rgba16(gpu, &src);
+        let render = |halation: f64| {
+            let edit = sidecar_color::EditParams {
+                film: Some(Film {
+                    interlayer: 0.0,
+                    halation,
+                    ..Film::default()
+                }),
+                ..Default::default()
+            };
+            let p = sidecar_color::pack(
+                &edit,
+                &cam,
+                sidecar_color::SourceKind::Raw,
+                sidecar_color::DisplaySpace::Srgb,
+            );
+            let out = pass
+                .render(gpu, &tex, &p.uniform, &p.lut, &Masks::none())
+                .unwrap();
+            crate::read_rgba16(gpu, &out).unwrap()
+        };
+        let (off, on) = (render(0.0), render(100.0));
+        let at = |img: &RgbaF32, x: u32, y: u32| {
+            let i = ((y * w + x) * 4) as usize;
+            [img.data[i], img.data[i + 1], img.data[i + 2]]
+        };
+        let (near_off, near_on) = (at(&off, 265, 256), at(&on, 265, 256));
+        let (far_off, far_on) = (at(&off, 40, 40), at(&on, 40, 40));
+        println!("beside: {near_off:?} → {near_on:?}; far: {far_off:?} → {far_on:?}");
+        assert!(
+            near_on[0] > near_off[0] * 1.5,
+            "red glows beside the square"
+        );
+        assert!(
+            near_on[0] - near_off[0] > 3.0 * (near_on[1] - near_off[1]).max(0.0),
+            "red far more than green"
+        );
+        assert!(
+            (near_on[2] - near_off[2]).abs() < (near_on[0] - near_off[0]) * 0.2,
+            "little blue"
+        );
+        for k in 0..3 {
+            assert!(
+                (far_on[k] - far_off[k]).abs() < 0.01 * far_off[k].max(1e-3) + 1e-4,
+                "far away, as it was"
+            );
+        }
+    }
+
+    /// A colour range's uniformity at full strength, through a mask covering everything: patches of different
+    /// hues all come out at the range's centre hue, their saturations closer together, their lightness kept.
+    #[test]
+    fn uniformity_pulls_hue_and_saturation_to_the_centre() {
+        use sidecar_color::color_range::{COLOR, ColorRange, oklch};
+        use sidecar_color::params::MaskAdjustment;
+        let Ok(gpu) = crate::test_gpu() else {
+            return eprintln!("skipping: no GPU");
+        };
+        let pass = DevelopPass::new(gpu).unwrap();
+        let patches = [
+            [0.30f32, 0.15, 0.10],
+            [0.30, 0.20, 0.08],
+            [0.25, 0.12, 0.14],
+            [0.20, 0.16, 0.10],
+        ];
+        let (w, h) = (patches.len() as u32 * 8, 8u32);
+        let src = RgbaF32 {
+            width: w,
+            height: h,
+            data: (0..w * h)
+                .flat_map(|i| {
+                    let c = patches[((i % w) / 8) as usize];
+                    [c[0], c[1], c[2], 0.0]
+                })
+                .collect(),
+        };
+        let cam = sidecar_color::camera::SourceSpace::Srgb.camera_color();
+        let render = |uniform: f64| {
+            let layer = MaskAdjustment {
+                mask: COLOR.into(),
+                amount: 100.0,
+                color: Some(ColorRange {
+                    hue: 45.0,
+                    uniformity_hue: uniform,
+                    uniformity_saturation: uniform,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            let edit = sidecar_color::EditParams {
+                masks: vec![layer],
+                ..Default::default()
+            };
+            let p = sidecar_color::pack(
+                &edit,
+                &cam,
+                sidecar_color::SourceKind::Raw,
+                sidecar_color::DisplaySpace::Srgb,
+            );
+            let white = crate::upload_rgba16(
+                gpu,
+                &RgbaF32 {
+                    width: 4,
+                    height: 4,
+                    data: vec![1.0; 64],
+                },
+            );
+            let masks = Masks {
+                params: p.masks,
+                textures: vec![Some(&white)],
+                curves: &p.mask_curves,
+                ..Masks::none()
+            };
+            let out = crate::read_rgba16(
+                gpu,
+                &pass
+                    .render(
+                        gpu,
+                        &crate::upload_rgba16(gpu, &src),
+                        &p.uniform,
+                        &p.lut,
+                        &masks,
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
+            (0..patches.len())
+                .map(|k| {
+                    let i = ((4 * w + k as u32 * 8 + 4) * 4) as usize;
+                    oklch([out.data[i], out.data[i + 1], out.data[i + 2]])
+                })
+                .collect::<Vec<_>>()
+        };
+        let (before, after) = (render(0.0), render(100.0));
+        println!("before {before:?}\nafter  {after:?}");
+        let spread = |v: &[[f32; 3]], k: usize| {
+            v.iter().map(|c| c[k]).fold(f32::MIN, f32::max)
+                - v.iter().map(|c| c[k]).fold(f32::MAX, f32::min)
+        };
+        for c in &after {
+            let d = ((c[2] - 45.0 + 540.0).rem_euclid(360.0) - 180.0).abs();
+            assert!(d < 1.5, "hue {} isn't the centre's", c[2]);
+        }
+        let sat = |v: &[[f32; 3]]| v.iter().map(|c| c[1] / c[0]).collect::<Vec<_>>();
+        let (sb, sa) = (sat(&before), sat(&after));
+        let range = |v: &[f32]| {
+            v.iter().cloned().fold(f32::MIN, f32::max) - v.iter().cloned().fold(f32::MAX, f32::min)
+        };
+        assert!(
+            range(&sa) < range(&sb) * 0.2,
+            "saturations closer: {sb:?} → {sa:?}"
+        );
+        for (b, a) in before.iter().zip(&after) {
+            assert!(
+                (a[0] - b[0]).abs() < 0.01,
+                "lightness kept: {} → {}",
+                b[0],
+                a[0]
+            );
+        }
+        assert!(spread(&before, 2) > 10.0, "the patches did differ in hue");
     }
 }

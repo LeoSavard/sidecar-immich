@@ -17,8 +17,15 @@ colour packer — so this section only asks for changes; the crop itself is draw
 		onturn: (by: 1 | -1) => void;
 		onreset: () => void;
 		oncommit: () => void;
+		/** Stand the photo up by its own lines; resolves false when it hasn't the lines for it. Absent without WebGPU. */
+		onupright?: (mode: 'level' | 'vertical' | 'full') => Promise<boolean>;
 	};
-	let { edit, readOnly, originalRatio, ongeometry, onturn, onreset, oncommit }: Props = $props();
+	let { edit, readOnly, originalRatio, ongeometry, onturn, onreset, oncommit, onupright }: Props = $props();
+	let uprightNote = $state('');
+	async function upright(mode: 'level' | 'vertical' | 'full') {
+		uprightNote = '';
+		if (!(await onupright!(mode))) uprightNote = 'Not enough straight lines in this photo for that.';
+	}
 
 	const g = $derived(edit.geometry ?? NO_GEOMETRY);
 	const ratios = $derived([{ label: 'Free', value: 0 }, { label: 'Original', value: originalRatio }, { label: '1:1', value: 1 }, { label: '4:5', value: 4 / 5 }, { label: '3:2', value: 3 / 2 }, { label: '16:9', value: 16 / 9 }]);
@@ -42,6 +49,15 @@ colour packer — so this section only asks for changes; the crop itself is draw
 		<button type="button" disabled={readOnly} aria-pressed={g.flip} class="rounded-full px-2.5 py-1 {g.flip ? 'bg-fg text-ground' : 'bg-raised text-fg'}" onclick={() => once({ flip: !g.flip })}>Mirror</button>
 		<button type="button" disabled={readOnly || !edit.geometry} class="ml-auto rounded-full bg-raised px-2.5 py-1 text-fg-2 disabled:opacity-40" onclick={onreset}>Reset</button>
 	</div>
+	{#if onupright}
+		<div class="flex flex-wrap items-center gap-1.5 text-xs" role="group" aria-label="Upright">
+			<span class="text-fg-2">Upright</span>
+			<button type="button" disabled={readOnly} class="rounded-full bg-raised px-2.5 py-1 text-fg" onclick={() => upright('level')}>Level</button>
+			<button type="button" disabled={readOnly} class="rounded-full bg-raised px-2.5 py-1 text-fg" onclick={() => upright('vertical')}>Vertical</button>
+			<button type="button" disabled={readOnly} class="rounded-full bg-raised px-2.5 py-1 text-fg" onclick={() => upright('full')}>Full</button>
+		</div>
+		{#if uprightNote}<p class="text-xs text-muted">{uprightNote}</p>{/if}
+	{/if}
 	<Slider id="geo-angle" label="Straighten" value={g.angle} min={-45} max={45} step={0.1} defaultValue={0} bipolar disabled={readOnly} format={(v) => `${signed(v, 1)}°`} onchange={(v) => ongeometry({ angle: v })} {oncommit} />
 	<Slider id="geo-vertical" label="Vertical" value={g.vertical} min={-100} max={100} defaultValue={0} bipolar disabled={readOnly} format={(v) => signed(v)} onchange={(v) => ongeometry({ vertical: v })} {oncommit} />
 	<Slider id="geo-horizontal" label="Horizontal" value={g.horizontal} min={-100} max={100} defaultValue={0} bipolar disabled={readOnly} format={(v) => signed(v)} onchange={(v) => ongeometry({ horizontal: v })} {oncommit} />

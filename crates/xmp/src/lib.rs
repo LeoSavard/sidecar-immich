@@ -16,7 +16,7 @@ use std::time::SystemTime;
 use xmp_toolkit::{IterOptions, OpenFileOptions, ToStringOptions, XmpFile, XmpMeta, XmpValue};
 
 pub mod history;
-pub use history::{Commit, Committed, History, Node, NodeKind};
+pub use history::{Commit, Committed, History, Node, NodeKind, VirtualCopy};
 
 /// Sidecar's XMP namespace. Never change it once sidecars exist.
 pub const NS: &str = "https://sidecar.ls-tech.ca/ns/1.0/";
@@ -57,6 +57,8 @@ pub enum SidecarError {
     ChangedOnDisk,
     #[error("this photo's history has no version {id}")]
     UnknownVersion { id: String },
+    #[error("this photo has no virtual copy {id}")]
+    UnknownCopy { id: String },
     #[error(
         "Sidecar can't write in {}, so this edit can't be saved. That folder belongs to another user — give the account Sidecar runs as write access to it (in Docker, the `user:` of the api container).",
         .dir.display()
@@ -416,6 +418,25 @@ impl SidecarDoc {
 
     pub fn etag(&self) -> String {
         etag_of(&self.edit())
+    }
+
+    /// The edit a virtual copy holds, or the photo's own for `None` (`edit`).
+    pub fn edit_for(&self, copy: Option<&str>) -> Result<EditParams> {
+        match copy {
+            None => Ok(self.edit()),
+            Some(id) => {
+                let h = self.history();
+                let c = h
+                    .copy(id)
+                    .ok_or_else(|| SidecarError::UnknownCopy { id: id.into() })?;
+                h.version_of(&c.head)
+            }
+        }
+    }
+
+    /// `etag` for a virtual copy's edit, or the photo's own for `None`.
+    pub fn etag_for(&self, copy: Option<&str>) -> Result<String> {
+        Ok(etag_of(&self.edit_for(copy)?))
     }
 
     pub fn exports(&self) -> Vec<Value> {

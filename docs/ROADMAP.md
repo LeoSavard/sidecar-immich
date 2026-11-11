@@ -280,12 +280,19 @@ for loupe and export, so an X-Trans file is slower, not broken. Porting LibRaw's
 so the port keeps that header) is what it would take, and `DSCF7611.RAF` is the test case if demand ever
 appears. Milestone 5 is otherwise complete; this is no longer what is holding it open.
 
-**iPhone parity is unverified.** The ΔE2000 harness compares Chromium against the server; Safari on Metal has
-never been in the loop. It needs a way to run the browser side on a phone and post results back.
+**iPhone parity: the harness is built; the run is the owner's** (2026-11-06). `/debug/parity?post` renders the
+fixtures in whatever browser opens it and sends the renders to the server (`POST /api/debug/parity`, on only where
+`parity_uploads` is, as in the dev config), which keeps them as a run under `<state>/parity/`; `sidecar-dev parity
+compare web/static/parity testdata/parity-out <run>` then checks them against this machine's native renders with the
+same ΔE2000 limits. Safari's WebGPU needs HTTPS, so the phone reaches `./dev/serve` the way the A/Bs are reached,
+through a tunnel, signed in. Safari on Metal has still never been measured: that is one URL on the iPhone.
 
 ## Reach
 
-**Someone else's folder structure.** The storage template is tuned to one library — this one. `render_dir`
+**Someone else's folder structure — the finding half is done** (2026-11-06; DESIGN.md, build log, "Layouts that aren't
+the template's"): templates are matched rather than joined, with unknown tokens as wildcards, month names in seven
+languages and the ISO week; the name walk is the fallback after them, and the picker's search without Immich. What
+follows is how it stood before. The storage template is tuned to one library — this one. `render_dir`
 understands date tokens only (`{{yyyy}}`, `{{yy}}`, `{{y}}`, `{{MMMM}}`, `{{MMM}}`, `{{MM}}`, `{{M}}`,
 `{{dd}}`, `{{d}}`) with month names in English or French, and a `Root` carries an `immich_prefix` and a
 `per_user` flag shaped by Immich's own internal layout. Note what this does *not* affect: the sidecar is
@@ -307,13 +314,12 @@ flight at a time and changes arriving mid-render coalesce into a single follow-u
 not one per frame. The colour packer is wasm, so the white-balance readout and the curve stay live without a
 GPU. The loupe and export already ran on the server and are unaffected.
 
-What's hidden in fallback, because it lives in the view shader rather than the develop pass: the histogram,
-the clipping overlays, focus peaking and the AF marker. Moving those server-side would mean returning the
-histogram alongside the JPEG and drawing the overlays into it.
+**The histogram and overlays in fallback — done** (2026-11-06; DESIGN.md build log, "The histogram and overlays without WebGPU"): the server's preview returns `histogram.wgsl`'s counts in `x-histogram` and paints highlight and shadow clipping and focus peaking in, as the view pass would. Still hidden in fallback: the AF marker, the Measure readout and the loupe overlay, which need the picture's geometry on this side.
 
 **Wide gamut and HDR.** These are separate: Rec.2020 is a gamut, HDR is a transfer function plus headroom.
 
-- *Rec.2020 SDR export* is close — the 16-bit TIFF path exists and needs the matrix and an ICC profile. The
+- *Rec.2020 SDR export — done* (2026-11-06): `DisplaySpace::Rec2020`, offered in the export sheet only, with a
+  profile synthesised from the primaries (`sidecar_color::icc`). The original entry: *Rec.2020 SDR export* is close — the 16-bit TIFF path exists and needs the matrix and an ICC profile. The
   profile need not be shipped as a third-party binary: it can be synthesised from primaries plus transfer
   function with lcms2 (MIT) or moxcms (Apache-2.0 OR BSD-3, pure Rust).
 - *True HDR.* **The container question is settled; the display question moved to the desktop.** ISO 21496-1
@@ -594,6 +600,13 @@ isn't also on that card. Worth testing on real AMD and Intel hardware before doc
 Mesa's compute-shader support has historically lagged NVIDIA's on some corner cases the ingest and develop
 passes might hit, and that needs checking with pictures, not assumed from the driver's feature flags.
 
+**A desktop app — parked** (owner's call, 2026-11-06: no personal need for desktop integration; kept for the
+day someone needs it). Everything learned so far is in
+[`research/shell-experiment.md`](research/shell-experiment.md): Electron gives WebGPU on Linux only under
+X11/XWayland; the colour-managed route is a native window owning a wgpu canvas with the web UI embedded in the
+same process (on Wayland, embedding across processes isn't possible); macOS looks the easiest platform for
+colour and Windows the hardest to sign. `dev/shell-probe/` reruns the measurements on a desktop.
+
 ## Image processing: primitives first
 
 Surveyed on 2026-10-17 (see [`research/desktop-port-survey.md`](research/desktop-port-survey.md) for the
@@ -602,6 +615,11 @@ features, so build the primitives rather than the features.** One Gaussian/Lapla
 remapping buys clarity, texture, local contrast, shadow/highlight recovery and tone mapping at once; one
 guided filter buys dehaze refinement, mask feathering and better depth upsampling. Everything below is
 implementable from published papers — none of it requires reading GPL code.
+
+**The guided filter — the primitive is built** (2026-11-06, `sidecar_engine::guided`, `client/guided_*.wgsl`):
+the fast subsampled form, linear or log₂ luminance guide, checked against an f64 implementation of the paper.
+Its users come next — dehaze, the sky mask, mask edges. The depth refinement stays joint bilateral until an
+A/B on real edges says otherwise; its own comment explains why that was chosen. The original entry:
 
 **The guided filter** (He, Sun and Tang, ECCV 2010 / TPAMI 2013) is the highest-leverage single item in the
 survey: four box filters over I, p, I·p and I², then per-pixel algebra, in linear time regardless of kernel
@@ -623,6 +641,16 @@ luminance norm and handle chroma separately. Sidecar's base curve is already a l
 to an existing stage rather than a new one — and it is half of what ROADMAP's "Tone curve above middle grey"
 is really asking for, the other half being the gamut compression above.
 
+**The noise model and its transform — built** (2026-11-06, `PROCESS_VERSION` 8; `sidecar_engine::noise`,
+`detail/to_opponent.wgsl`/`from_opponent.wgsl`). The denoiser already had a square-root stabilization, with a
+fixed read-noise floor; each photo's noise is now *measured* as σ² = a·y + b (Foi et al. 2008), stabilized
+with the generalized Anscombe transform for that model and brought back with Mäkitalo and Foi's exact
+unbiased inverse. `sidecar-dev noise <raw…>` prints a file's model; `sidecar-dev denoise-truth <clean>
+<noisy>` puts a measured model's noise on a clean frame and scores both transforms per brightness band. What
+the measurements say: read/gain spans ~100× across the cameras here (D5 4.5e-4…6e-3, ZV-1 4.5e-2); on D5-like
+sensors the two transforms coincide, and on a read-noise-heavy model the fixed one over-smooths highlights.
+Edits that denoised before version 8 keep the fixed transform. The original entry:
+
 **A variance-stabilising transform around the existing wavelet noise reduction.** Raw noise is
 Poisson-Gaussian per CFA plane, and the wavelet stage implicitly assumes uniform-variance Gaussian — which is
 exactly why it is habitually too strong in shadows and too weak in highlights. Foi's pipeline (generalised
@@ -630,6 +658,19 @@ Anscombe transform → Gaussian-assumption denoiser → *exact unbiased inverse*
 what controls bias) is two per-pixel scalar functions plus a small LUT wrapped around a stage that already
 exists. Caveats worth carrying: the transform is inaccurate below about one count per pixel, and vkdt's own
 noise-profile fitting has had integer-overflow failures, so guard rails are required.
+
+**A highlight-aware demosaic — measured, and closed** (2026-11-06). The mechanism this entry describes doesn't
+occur here: highlight reconstruction replaces every sample near white before RCD runs, so the demosaic never
+sees a clipped sample. What does remain was measured at full resolution with `sidecar-dev hilite-truth --full`
+(a clean frame raised and clipped on purpose, colour error against the truth by distance from the nearest
+clipped pixel): a fringe exactly one pixel wide — D5 0.0093 chromaticity error there against 0.0010
+background, ZV-1 0.0048 against 0.0003, Canon M3 none — gone at two pixels, and *smaller* with reconstruction
+than without it (D5 0.0114 without). Two repairs were built and measured: re-interpolating those pixels from
+measured samples only (bilinear green, colour differences for red and blue) made the ring 2.7× worse (0.0248),
+and keeping RCD's edge-directed green while repairing only the colour differences still doubled it (0.0185).
+RCD on the reconstructed mosaic is the best of the three: its directional weighting matters more at a blown
+edge than whether a neighbour is a measurement or a bounded estimate. Nothing to build; the tool stays for
+whoever returns to it. The original entry:
 
 **A highlight-aware demosaic.** Standard interpolators mix clipped and unclipped neighbours, which makes
 magenta and green fringes at highlight edges *before* highlight reconstruction ever runs. The fix is a
@@ -679,19 +720,23 @@ order:
   for portrait work, since the skin, hair and face masks can constrain a source region automatically. Red-eye
   is a small adjacent tool. *Generative* fill is a trap for a self-hosted Apache-2.0 project: every
   commercial one is a paid cloud service needing an internet connection.
-- **Clarity, texture and local contrast.** Front-panel sliders everywhere; their absence is immediately
+- **Clarity, texture and local contrast — built** (2026-11-06, `EditParams::presence`; DESIGN.md's build log).
+  Front-panel sliders everywhere; their absence is immediately
   visible. Falls out of the local Laplacian or guided filter above, which is why those come first.
-- **Dehaze.** Present in all of Lightroom, darktable and RawTherapee.
+- **Dehaze — built** (2026-11-06, `Presence::dehaze`; DESIGN.md's build log). Present in all of Lightroom,
+  darktable and RawTherapee.
 - **A scene-to-display tone transform.** This is becoming the consensus default rather than an option:
   darktable made `sigmoid` the default for new installs in 5.2 and added AgX in 5.4; RawTherapee added a
   sigmoid tone mapper in 5.12. An editor shipping only exposure, contrast and a curve clips highlights in a
   way that reads as broken to anyone arriving from those. This is the same question as "Tone curve above
   middle grey" at the top of this file — worth noting that the field has converged while that decision waits.
-- **Camera profile selection — a correctness issue, not a feature.** Everyone exposes an input-profile
+- **Camera profile selection — a correctness issue, not a feature — the file's own built** (2026-11-06,
+  `EditParams::camera_profile`; standalone `.dcp` files and a profile picker still to come). Everyone exposes an input-profile
   choice; without one, Sidecar's colours differ from every other tool on the same file and users read that
   as a bug. The incremental piece is DCP's forward matrix plus HueSatMap/LookTable — data plumbing and a
   small 3D-LUT sampler, not an algorithm, since camera matrices are already interpolated by illuminant.
-- **Colour grading wheels.** The OKLCh mixer does *not* substitute: wheels act on tonal ranges, the mixer on
+- **Colour grading wheels — done** (2026-11-06; DESIGN.md §7, "Colour grading"). The original entry:
+  The OKLCh mixer does *not* substitute: wheels act on tonal ranges, the mixer on
   hue bands, and they are orthogonal. A shadows/midtones/highlights lift-gamma-gain operator is a handful of
   lines of WGSL on top of what is already computed — the best cost/benefit of any "pro" feature surveyed.
 - **Presets and styles, copy-paste, and sync across a selection.** Presets are not a feature so much as a
@@ -712,7 +757,7 @@ order:
   profile, they do not measure one.
 - **3D LUT loading**, **defringe** as a post-demosaic tool distinct from raw CA correction, and
   **film-negative inversion** for scans.
-- **HDR merge and focus stacking.** These sit with panorama below: not table stakes for a RAW *developer*
+- **HDR merge — built** (2026-11-06; DESIGN.md, "HDR merge"; editor integration to come). **Focus stacking** still open. These sit with panorama below: not table stakes for a RAW *developer*
   (darktable and RawTherapee have none of the three) but expected of anything calling itself all-in-one. All
   three ride on the multi-frame alignment infrastructure above, and focus stacking is cheap given that focus
   peaking already computes a focus measure — the hard part is that focal breathing changes the field of view
@@ -724,7 +769,9 @@ image** to survive batch application — a design constraint on features already
 
 What §15 still lists and hasn't been built:
 
-- **Gradients.** Linear and radial masks, analytic in the shader: a third kind of layer beside model masks and
+- **Gradients — done** (2026-11-06): linear and radial layers, drawn analytically (`client/gradient.wgsl`) as the
+  base a layer's range, strokes and edge apply to, with handles over the photo. The original entry:
+  Linear and radial masks, analytic in the shader: a third kind of layer beside model masks and
   brushes, with handles drawn over the photo like the crop's. Universal across the category — treat as table
   stakes rather than an enhancement.
 - **Sky — and it should not be a model.** The obvious route is closed: SegFormer's code is Apache-2.0 but its
@@ -819,7 +866,7 @@ open raw denoiser at full resolution on a consumer or integrated GPU — measure
 is a useful precedent (Apache-2.0 *including its weights repository*) but is trained for render noise, needs
 auxiliary buffers and has no Vulkan backend, so it does not transfer.
 
-**Context-aware auto-edit — thin, and implement the papers rather than the repos.** OpenCV's `xphoto` auto
+**Context-aware auto-edit — measured, and not wired in** (2026-11-06; DESIGN.md build log, "Auto-edit, measured before it was built"): every statistical white balance sits 4–5° from the camera's own, and Reinhard's key does worse against the owner's exposures than leaving them at 0. What follows is the survey that set it up. **Context-aware auto-edit — thin, and implement the papers rather than the repos.** OpenCV's `xphoto` auto
 white balance (gray-world, simple, learning-based) is Apache-2.0 and genuinely shippable, and grey-world,
 white-patch and grey-edge are textbook. The obvious learned route is closed: Afifi and Brown's Deep White-
 Balance Editing says it is for research purposes and cannot be used commercially, and has no LICENSE file at

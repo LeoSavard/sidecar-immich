@@ -50,7 +50,7 @@ try {
 	// Keyed by the section's label in `allSections`, not by its id: 'Mixer' is the section the panel calls
 	// 'color'. An unknown label used to click an arbitrary button and then wait out the timeout on a tab that
 	// was never coming, so a renamed section cost thirty silent seconds; say so instead.
-	const GROUP = { 'White balance': 'Colour', Film: 'Colour', Mixer: 'Colour', Light: 'Light', Curve: 'Light', 'Crop and straighten': 'Crop and straighten', Depth: 'Processing', Masks: 'Processing', Detail: 'Processing', Lens: 'Processing', History: 'History' };
+	const GROUP = { 'White balance': 'Colour', Film: 'Colour', Mixer: 'Colour', 'Colour grading': 'Colour', Light: 'Light', Curve: 'Light', 'Crop and straighten': 'Crop and straighten', Depth: 'Processing', Masks: 'Processing', Retouch: 'Processing', Detail: 'Processing', Lens: 'Processing', History: 'History' };
 	async function section(label) {
 		if (narrow) {
 			if (!GROUP[label]) throw new Error(`no group for section "${label}" — has it been renamed?`);
@@ -187,8 +187,9 @@ try {
 		await page.getByText('Loading history…').waitFor({ state: 'detached', timeout: 15000 }).catch(() => {});
 	});
 	await step('copy and paste look', async () => {
-		await click('Copy look');
-		await click('Paste look');
+		await click('Copy…');
+		await click('Copy these');
+		await click('Paste');
 	});
 	const saved = (await state()).edit;
 

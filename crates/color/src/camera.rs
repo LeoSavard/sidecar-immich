@@ -30,6 +30,10 @@ pub struct CameraColor {
     /// three stops dark. Absent for anything but a DNG read through `linear_dng`.
     #[serde(default)]
     pub baseline_exposure: Option<f64>,
+    /// The camera profile the file carries (`crate::dcp`): forward matrices and hue/saturation tables. Rendered
+    /// only when the edit asks for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<Box<crate::dcp::Profile>>,
 }
 
 impl CameraColor {
@@ -147,6 +151,7 @@ impl SourceSpace {
                 xyz_to_camera: self.xyz_to_rgb(),
             }],
             baseline_exposure: None,
+            profile: None,
         }
     }
 }
@@ -269,6 +274,7 @@ impl LibrawColor {
             as_shot_mul,
             calibrations,
             baseline_exposure: None,
+            profile: None,
         }
     }
 }
@@ -324,6 +330,7 @@ pub(crate) fn nikon_d850() -> CameraColor {
             xyz_to_camera: [[m[0], m[1], m[2]], [m[3], m[4], m[5]], [m[6], m[7], m[8]]],
         }],
         baseline_exposure: None,
+        profile: None,
     }
 }
 
@@ -361,6 +368,7 @@ mod tests {
                 },
             ],
             baseline_exposure: None,
+            profile: None,
         };
         let shot = |c: &CameraColor| resolve(c, c.as_shot_xy());
         let bare = shot(&colour(None));
@@ -512,6 +520,7 @@ mod tests {
             as_shot_mul: [1.0, 1.0, 1.0],
             calibrations: Vec::new(),
             baseline_exposure: None,
+            profile: None,
         };
         let wb = resolve(&cam, cam.as_shot_xy());
         assert!(

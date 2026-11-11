@@ -3,12 +3,13 @@
 	import { DevelopPass, requestDevice } from '$lib/gpu/develop';
 	import { LensPass } from '$lib/gpu/lens';
 
-	type Case = { name: string; width: number; height: number; lens?: boolean; masks?: number; maskSize?: [number, number]; mono?: boolean; slide?: boolean };
+	type Case = { name: string; width: number; height: number; lens?: boolean; masks?: number; maskSize?: [number, number]; mono?: boolean; slide?: boolean; spots?: boolean; profile?: boolean; defringe?: boolean; look?: number };
 	type Result = { name: string; status: string };
 
 	let results = $state<Result[]>([]);
 	let adapterName = $state('');
 	let error = $state('');
+	let sent = $state('');
 
 	const toBase64 = (bytes: Uint8Array) => {
 		let s = '';
@@ -28,6 +29,10 @@
 			for (const c of cases) {
 				const get = async (suffix: string) => (await fetch(`/parity/${c.name}.${suffix}`)).arrayBuffer();
 				pass.setSource(c.width, c.height, await get('src.f16'));
+				if (c.spots) {
+					const { spots, wb } = JSON.parse(new TextDecoder().decode(await get('spots.json')));
+					pass.setSpots(spots, wb);
+				}
 				if (c.lens) {
 					const target = lens.target(pass.proxy!, 'lens corrected');
 					lens.run(pass.proxy!, target, new Uint8Array(await get('lens.bin')));
@@ -41,12 +46,15 @@
 					device.queue.writeTexture({ texture: t }, await get(`mask${i}.u8`), { bytesPerRow: w }, [w, h]);
 					masks.push(t);
 				}
-				pass.setMasks(masks.length ? new Uint8Array(await get('masks.bin')) : new Uint8Array(1568), masks, masks.length ? new Float32Array(await get('curves.f32')) : undefined);
+				pass.setMasks(masks.length ? new Uint8Array(await get('masks.bin')) : new Uint8Array(1696), masks, masks.length ? new Float32Array(await get('curves.f32')) : undefined);
 				pass.setUniforms(await get('uniform.bin'));
+				pass.setProfile(c.profile ? { uniform: new Uint8Array(await get('profile.bin')), hueSat: new Float32Array(await get('profile_hs.f32')), look: new Float32Array(await get('profile_lt.f32')) } : null);
 				pass.setMono(c.mono ? new Float32Array(await get('mono.f32')) : new Float32Array(0));
 				// A spectral colour stock's two tables: the fixtures carry both, so this needs no server.
 				const slide = async (what: string) => (c.slide ? new Float32Array(await get(`slide_${what}.f32`)) : new Float32Array(0));
 				pass.setSlide(await slide('exposure'), await slide('response'));
+				pass.setDefringe(c.defringe ? new Uint8Array(await get('defringe.bin')) : null);
+				pass.setLook(c.look ? { uniform: new Uint8Array(await get('look.bin')), size: c.look, rgba: new Float32Array(await get('look.f32')) } : null);
 				pass.setToneLut(new Float32Array(await get('lut.f32')));
 				pass.render();
 				out[c.name] = toBase64(await pass.readback());
@@ -56,6 +64,18 @@
 			error = e instanceof Error ? e.message : String(e);
 		}
 		(window as unknown as { __parity: unknown }).__parity = { adapter: adapterName, error, images: out };
+		// On a phone no automation can collect these: `?post` sends them to the server, which keeps them as a run
+		// for `sidecar-dev parity compare` (the server must have `parity_uploads` on).
+		if (!error && new URLSearchParams(location.search).has('post')) {
+			sent = 'Sending…';
+			try {
+				const r = await fetch('/api/debug/parity', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ adapter: adapterName, userAgent: navigator.userAgent, images: out }) });
+				const done = r.ok ? await r.json() : null;
+				sent = done ? `Sent ${done.cases} renders as run ${done.run}. On the server: sidecar-dev parity compare web/static/parity testdata/parity-out ${done.dir}` : `The server refused them (${r.status}).`;
+			} catch (e) {
+				sent = `Couldn't send them: ${e instanceof Error ? e.message : String(e)}`;
+			}
+		}
 	}
 
 	$effect(() => {
@@ -67,6 +87,7 @@
 	<h1 class="mb-2 text-lg font-semibold">WebGPU parity</h1>
 	<p class="mb-4 text-neutral-500">{adapterName}</p>
 	{#if error}<p class="text-red-600">{error}</p>{/if}
+	{#if sent}<p class="mb-4 break-all" role="status">{sent}</p>{/if}
 	<ul>
 		{#each results as r (r.name)}<li>{r.name}: {r.status}</li>{/each}
 	</ul>

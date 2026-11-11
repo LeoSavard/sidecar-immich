@@ -3,7 +3,7 @@ resolver = "3"
 members = [
   "crates/shaders", "crates/color", "crates/color-wasm", "crates/engine", "crates/devtools",
   "crates/libraw-sys", "crates/raw", "crates/template", "crates/xmp", "crates/worker", "crates/api", "crates/sidecar",
-  "crates/ml", "crates/uniform", "crates/uniform-derive",
+  "crates/ml", "crates/merge", "crates/uniform", "crates/uniform-derive",
 ]
 
 [workspace.package]
@@ -13,6 +13,7 @@ version = "0.5.0"
 repository = "https://github.com/LeoSavard/sidecar-immich"
 
 [workspace.dependencies]
+exr = { version = "1.74", default-features = false }
 anyhow = "1"
 # `multipart` for `POST /api/intake`: a photo handed straight to Sidecar from the device being edited on.
 axum = { version = "0.8", features = ["multipart"] }
@@ -56,6 +57,7 @@ sidecar-template = { path = "crates/template" }
 sidecar-xmp = { path = "crates/xmp" }
 sidecar-worker = { path = "crates/worker" }
 sidecar-api = { path = "crates/api" }
+sidecar-merge = { path = "crates/merge" }
 sidecar-uniform = { path = "crates/uniform" }
 
 # What `./dev/serve` builds: dependencies fully optimized (they change rarely and hold the hot loops — wgpu,

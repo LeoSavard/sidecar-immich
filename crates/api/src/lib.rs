@@ -2,9 +2,14 @@
 //! Public HTTP surface. The worker is reached over the internal network only.
 
 pub mod config;
+mod copies;
 pub mod export;
+mod folders;
 pub mod immich;
 mod lensfun;
+pub mod luts;
+pub mod presets;
+pub mod proof;
 pub mod resolve;
 pub mod session;
 pub mod store;
@@ -204,7 +209,7 @@ impl Default for Settings {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct RecentItem {
+pub(crate) struct RecentItem {
     asset_key: String,
     file_name: String,
     immich_asset_id: Option<String>,
@@ -985,8 +990,25 @@ async fn thumbnail(
     }
 }
 
-fn valid_key(key: &str) -> bool {
+pub(crate) fn valid_key(key: &str) -> bool {
     key.len() == 40 && key.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// A key as the editor holds it: the photo's own, or a virtual copy's, `<key>~<copy id>` (DESIGN.md §15,
+/// "Virtual copies"). The photo's part is what everything about the file is keyed on; the copy only says which
+/// edit. `None` for anything else, which every route answers as not found.
+pub(crate) fn split_key(key: &str) -> Option<(&str, Option<&str>)> {
+    match key.split_once('~') {
+        None => Some((key, None)),
+        Some((k, c))
+            if c.len() == 7
+                && c.starts_with('c')
+                && c[1..].bytes().all(|b| b.is_ascii_hexdigit()) =>
+        {
+            Some((k, Some(c)))
+        }
+        _ => None,
+    }
 }
 
 /// The asset record, if this user has opened the photo.
@@ -1051,7 +1073,13 @@ pub(crate) async fn relay(resp: reqwest::Result<reqwest::Response>) -> Response 
         }
     };
     let mut out = Response::builder().status(resp.status().as_u16());
-    for name in ["content-type", "x-width", "x-height", "x-process-version"] {
+    for name in [
+        "content-type",
+        "x-width",
+        "x-height",
+        "x-process-version",
+        "x-histogram",
+    ] {
         if let Some(v) = resp.headers().get(name) {
             out = out.header(name, v.as_bytes());
         }
@@ -1147,13 +1175,17 @@ async fn thumb(
     ApiUser(user): ApiUser,
     Path(key): Path<String>,
 ) -> Response {
+    let Some((key, copy)) = split_key(&key).map(|(k, c)| (k.to_string(), c.map(String::from)))
+    else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
     let Some(rec) = asset_for(&app, &user, &key).await else {
         return StatusCode::NOT_FOUND.into_response();
     };
     let path = rec.path.clone();
     let Ok(edit) = tokio::task::spawn_blocking(move || {
         SidecarDoc::load(&path)
-            .map(|d| d.edit())
+            .and_then(|d| d.edit_for(copy.as_deref()))
             .unwrap_or_default()
     })
     .await
@@ -1210,6 +1242,70 @@ async fn focus(
 /// `GET /api/capabilities` — what the worker can do (`models`, `gpu`), relayed, so the editor hides what won't work.
 async fn capabilities(State(app): State<Arc<App>>, ApiUser(_user): ApiUser) -> Response {
     relay(app.http.get(app.worker("/v1/capabilities")).send().await).await
+}
+
+/// `GET /api/models` — the models Sidecar can run, what each enables, its licence, and whether this server has
+/// it: the worker's list, relayed.
+async fn models(State(app): State<Arc<App>>, ApiUser(_user): ApiUser) -> Response {
+    relay(app.http.get(app.worker("/v1/models")).send().await).await
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ParityUpload {
+    adapter: String,
+    user_agent: String,
+    /// Each case's render, RGBA16F as the page reads it back, base64.
+    images: std::collections::BTreeMap<String, String>,
+}
+
+/// `POST /api/debug/parity` — a browser's parity renders (`/debug/parity?post`), kept as a run under
+/// `<state>/parity/` for `sidecar-dev parity compare <fixtures> <native> <run>`: how a phone's WebGPU checks against
+/// the server's when no automation can drive its browser. Only where `parity_uploads` is on.
+async fn parity_upload(
+    State(app): State<Arc<App>>,
+    ApiUser(_user): ApiUser,
+    Json(up): Json<ParityUpload>,
+) -> Response {
+    use base64::Engine;
+    if !app.config.server.parity_uploads {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let run = format!(
+        "{}-{}",
+        sidecar_xmp::utc_now().replace([':', '.'], "-"),
+        up.user_agent
+            .split_whitespace()
+            .find(|w| w.contains("iPhone")
+                || w.contains("iPad")
+                || w.contains("Mac")
+                || w.contains("Android"))
+            .unwrap_or("browser")
+            .replace(|c: char| !c.is_ascii_alphanumeric(), "")
+    );
+    let dir = app.config.server.state_dir.join("parity").join(&run);
+    let saved = (|| -> Result<usize> {
+        std::fs::create_dir_all(&dir)?;
+        for (name, b64) in &up.images {
+            anyhow::ensure!(
+                !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'),
+                "not a case name: {name}"
+            );
+            let bytes = base64::engine::general_purpose::STANDARD.decode(b64)?;
+            std::fs::write(dir.join(format!("{name}.browser.f16")), bytes)?;
+        }
+        std::fs::write(
+            dir.join("run.json"),
+            serde_json::to_vec_pretty(
+                &serde_json::json!({ "adapter": up.adapter, "userAgent": up.user_agent, "cases": up.images.len() }),
+            )?,
+        )?;
+        Ok(up.images.len())
+    })();
+    match saved {
+        Ok(n) => Json(serde_json::json!({ "run": run, "dir": dir, "cases": n })).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, format!("{e:#}")).into_response(),
+    }
 }
 
 async fn film_stocks(State(app): State<Arc<App>>, ApiUser(_user): ApiUser) -> Response {
@@ -1299,24 +1395,50 @@ struct EditState {
     /// another program is the same picture — and the next save ties the sidecar to this file.
     #[serde(skip_serializing_if = "Option::is_none")]
     saved_for: Option<String>,
+    /// The virtual copy this is, when it is one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    copy: Option<sidecar_xmp::VirtualCopy>,
+    /// The photo's virtual copies, so the editor can list them and move between them.
+    copies: Vec<sidecar_xmp::VirtualCopy>,
 }
 
 impl EditState {
-    fn of(doc: &SidecarDoc, key: &str, writable: bool, forked: bool) -> Self {
+    /// The edit state of the photo, or of its virtual copy `copy`. `key` is the photo's own.
+    fn of(
+        doc: &SidecarDoc,
+        key: &str,
+        copy: Option<&str>,
+        writable: bool,
+        forked: bool,
+    ) -> anyhow::Result<Self> {
         let saved_for = doc
             .source_sha1()
             .filter(|s| !s.eq_ignore_ascii_case(key))
             .map(String::from);
-        Self {
-            edit: doc.edit(),
-            etag: doc.etag(),
-            head: doc.history().head,
+        let history = doc.history();
+        let this = copy
+            .map(|id| {
+                history
+                    .copy(id)
+                    .cloned()
+                    .ok_or_else(|| sidecar_xmp::SidecarError::UnknownCopy { id: id.into() })
+            })
+            .transpose()?;
+        let edit = doc.edit_for(copy)?;
+        Ok(Self {
+            etag: sidecar_xmp::etag_of(&edit),
+            edit,
+            head: this
+                .as_ref()
+                .map_or(history.head.clone(), |c| c.head.clone()),
             read_only: doc.is_read_only(),
             writable,
             exports: doc.exports(),
             forked,
             saved_for,
-        }
+            copy: this,
+            copies: history.copies,
+        })
     }
 
     fn into_response(self) -> Response {
@@ -1329,16 +1451,29 @@ async fn get_edit(
     ApiUser(user): ApiUser,
     Path(key): Path<String>,
 ) -> Response {
+    let Some((key, copy)) = split_key(&key).map(|(k, c)| (k.to_string(), c.map(String::from)))
+    else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
     let Some(rec) = asset_for(&app, &user, &key).await else {
         return StatusCode::NOT_FOUND.into_response();
     };
     let loaded = tokio::task::spawn_blocking(move || {
         let writable = sidecar_xmp::writable_beside(&rec.path);
-        SidecarDoc::load(&rec.path).map(|d| EditState::of(&d, &key, writable, false))
+        SidecarDoc::load(&rec.path)
+            .and_then(|d| EditState::of(&d, &key, copy.as_deref(), writable, false))
     })
     .await;
     match loaded {
         Ok(Ok(state)) => state.into_response(),
+        Ok(Err(e))
+            if matches!(
+                e.downcast_ref(),
+                Some(sidecar_xmp::SidecarError::UnknownCopy { .. })
+            ) =>
+        {
+            (StatusCode::NOT_FOUND, format!("{e}")).into_response()
+        }
         Ok(Err(e)) => internal(e),
         Err(e) => internal(e.into()),
     }
@@ -1355,6 +1490,7 @@ struct Stale;
 async fn write_sidecar(
     app: &Arc<App>,
     key: &str,
+    copy: Option<String>,
     rec: &AssetRecord,
     mut change: impl FnMut(&mut SidecarDoc) -> anyhow::Result<bool> + Send + 'static,
 ) -> Response {
@@ -1371,10 +1507,13 @@ async fn write_sidecar(
         let mut state = None;
         let saved = sidecar_xmp::update(&path, &roots, |doc| {
             let forked = change(doc)?;
-            state = Some(EditState::of(doc, &key, writable, forked));
+            state = Some(EditState::of(doc, &key, copy.as_deref(), writable, forked)?);
             Ok(())
         });
-        let stale = || SidecarDoc::load(&path).map(|d| EditState::of(&d, &key, writable, false));
+        let stale = || {
+            SidecarDoc::load(&path)
+                .and_then(|d| EditState::of(&d, &key, copy.as_deref(), writable, false))
+        };
         match saved {
             Ok(_) => Ok((state.expect("set by a successful change"), created)),
             Err(e) if e.is::<Stale>() => Err(Box::new(stale().map_or_else(internal, |s| {
@@ -1390,9 +1529,10 @@ async fn write_sidecar(
                     Some(sidecar_xmp::SidecarError::NewerProcessVersion { .. }) => {
                         (StatusCode::CONFLICT, format!("{e}")).into_response()
                     }
-                    Some(sidecar_xmp::SidecarError::UnknownVersion { .. }) => {
-                        (StatusCode::NOT_FOUND, format!("{e}")).into_response()
-                    }
+                    Some(
+                        sidecar_xmp::SidecarError::UnknownVersion { .. }
+                        | sidecar_xmp::SidecarError::UnknownCopy { .. },
+                    ) => (StatusCode::NOT_FOUND, format!("{e}")).into_response(),
                     Some(sidecar_xmp::SidecarError::NotWritable { .. }) => {
                         tracing::error!("{e:#}");
                         (StatusCode::FORBIDDEN, format!("{e}")).into_response()
@@ -1443,6 +1583,10 @@ async fn put_edit(
     headers: HeaderMap,
     Json(body): Json<SaveBody>,
 ) -> Response {
+    let Some((key, copy)) = split_key(&key).map(|(k, c)| (k.to_string(), c.map(String::from)))
+    else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
     let Some(rec) = asset_for(&app, &user, &key).await else {
         return StatusCode::NOT_FOUND.into_response();
     };
@@ -1452,6 +1596,14 @@ async fn put_edit(
         .map(|v| v.trim_matches('"').to_string());
     let save = match body {
         SaveBody::Versioned(save) => save,
+        // Virtual copies came long after history: their editor always sends a base.
+        SaveBody::Bare(_) if copy.is_some() => {
+            return (
+                StatusCode::BAD_REQUEST,
+                "Save a virtual copy with the version it was edited from.",
+            )
+                .into_response();
+        }
         SaveBody::Bare(edit) => {
             let Some(if_match) = if_match else {
                 return (
@@ -1461,7 +1613,7 @@ async fn put_edit(
                     .into_response();
             };
             // Without a base the save can only go on top of the head, and only if the client saw the head.
-            return write_sidecar(&app, &key.clone(), &rec, move |doc| {
+            return write_sidecar(&app, &key.clone(), None, &rec, move |doc| {
                 if doc.etag() != if_match {
                     anyhow::bail!(Stale);
                 }
@@ -1483,7 +1635,8 @@ async fn put_edit(
         }
     };
     let name = user.name.clone();
-    write_sidecar(&app, &key.clone(), &rec, move |doc| {
+    let into = copy.clone();
+    write_sidecar(&app, &key.clone(), copy, &rec, move |doc| {
         let c = Commit {
             edit: &save.edit,
             base: &save.base,
@@ -1491,7 +1644,7 @@ async fn put_edit(
             session: save.session.as_deref(),
             user: Some(&name),
         };
-        Ok(doc.commit(&c, &key)?.forked)
+        Ok(doc.commit_to(into.as_deref(), &c, &key)?.forked)
     })
     .await
 }
@@ -1513,12 +1666,25 @@ async fn get_history(
     ApiUser(user): ApiUser,
     Path(key): Path<String>,
 ) -> Response {
+    let Some((key, copy)) = split_key(&key).map(|(k, c)| (k.to_string(), c.map(String::from)))
+    else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
     let Some(rec) = asset_for(&app, &user, &key).await else {
         return StatusCode::NOT_FOUND.into_response();
     };
     let built = tokio::task::spawn_blocking(move || -> anyhow::Result<serde_json::Value> {
         let doc = SidecarDoc::load(&rec.path)?;
         let (history, exports) = (doc.history(), doc.exports());
+        // A virtual copy's history is the same tree, current where the copy is.
+        let head = match &copy {
+            Some(id) => history
+                .copy(id)
+                .ok_or_else(|| sidecar_xmp::SidecarError::UnknownCopy { id: id.clone() })?
+                .head
+                .clone(),
+            None => history.head.clone(),
+        };
         let nodes = history
             .nodes
             .iter()
@@ -1536,7 +1702,7 @@ async fn get_history(
                 })
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
-        Ok(serde_json::json!({ "head": history.head, "nodes": nodes }))
+        Ok(serde_json::json!({ "head": head, "nodes": nodes, "copies": history.copies }))
     })
     .await;
     match built {
@@ -1558,11 +1724,17 @@ async fn checkout(
     Path(key): Path<String>,
     Json(body): Json<Checkout>,
 ) -> Response {
+    let Some((key, copy)) = split_key(&key).map(|(k, c)| (k.to_string(), c.map(String::from)))
+    else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
     let Some(rec) = asset_for(&app, &user, &key).await else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    write_sidecar(&app, &key.clone(), &rec, move |doc| {
-        doc.checkout(&body.node, &key).map(|()| false)
+    let into = copy.clone();
+    write_sidecar(&app, &key.clone(), copy, &rec, move |doc| {
+        doc.checkout_to(into.as_deref(), &body.node, &key)
+            .map(|()| false)
     })
     .await
 }
@@ -1579,10 +1751,14 @@ async fn label(
     Path((key, node)): Path<(String, String)>,
     Json(body): Json<Label>,
 ) -> Response {
+    let Some((key, copy)) = split_key(&key).map(|(k, c)| (k.to_string(), c.map(String::from)))
+    else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
     let Some(rec) = asset_for(&app, &user, &key).await else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    write_sidecar(&app, &key, &rec, move |doc| {
+    write_sidecar(&app, &key, copy, &rec, move |doc| {
         doc.label(&node, body.label.clone()).map(|()| false)
     })
     .await
@@ -1626,6 +1802,9 @@ struct PreviewBody {
     #[serde(default)]
     color_space: sidecar_color::DisplaySpace,
     long_edge: Option<u32>,
+    /// Overlays the worker paints in, as the view would draw them (`sidecar_worker::overlays`).
+    #[serde(default)]
+    overlays: u32,
 }
 
 /// `POST /api/assets/{key}/preview` — the whole photo developed on the server, as JPEG, for browsers that
@@ -1639,7 +1818,7 @@ async fn preview(
     let Some(rec) = asset_for(&app, &user, &key).await else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let req = serde_json::json!({ "key": key, "path": rec.path, "edit": body.edit, "colorSpace": body.color_space, "longEdge": body.long_edge });
+    let req = serde_json::json!({ "key": key, "path": rec.path, "edit": body.edit, "colorSpace": body.color_space, "longEdge": body.long_edge, "overlays": body.overlays });
     relay(
         app.http
             .post(app.worker("/v1/preview"))
@@ -1653,6 +1832,7 @@ async fn preview(
 pub fn router(app: Arc<App>) -> Router {
     app.start_housekeeping();
     app.start_lensfun_sync();
+    app.start_lut_sync();
     let web = &app.config.server.web_root;
     let spa = ServeDir::new(web).fallback(ServeFile::new(web.join("index.html")));
     let routes = Router::new()
@@ -1672,11 +1852,40 @@ pub fn router(app: Arc<App>) -> Router {
             axum::routing::post(intake).layer(axum::extract::DefaultBodyLimit::max(INTAKE_LIMIT)),
         )
         .route("/api/intake/folder", get(folder))
+        .route("/api/folders", get(folders::roots))
+        .route("/api/folders/{root}/list", get(folders::list))
+        .route(
+            "/api/folders/{root}/open",
+            axum::routing::post(folders::open),
+        )
         .route("/api/intake/folder/{key}", axum::routing::delete(forget))
         .route("/api/immich/assets/{id}/thumbnail", get(thumbnail))
         .route("/api/capabilities", get(capabilities))
+        .route("/api/models", get(models))
+        .route(
+            "/api/debug/parity",
+            axum::routing::post(parity_upload)
+                .layer(axum::extract::DefaultBodyLimit::max(256 << 20)),
+        )
         .route("/api/film/stocks", get(film_stocks))
         .route("/api/film/stocks/{id}", get(film_stock))
+        .route(
+            "/api/luts",
+            get(luts::list)
+                .post(luts::upload)
+                .layer(axum::extract::DefaultBodyLimit::max(luts::LUT_LIMIT)),
+        )
+        .route("/api/luts/{id}", get(luts::table).delete(luts::remove))
+        .route(
+            "/api/proofs",
+            get(proof::list)
+                .post(proof::upload)
+                .layer(axum::extract::DefaultBodyLimit::max(proof::PROFILE_LIMIT)),
+        )
+        .route("/api/proofs/{id}", axum::routing::delete(proof::remove))
+        .route("/api/proofs/{id}/table", get(proof::table))
+        .route("/api/presets", get(presets::list).post(presets::create))
+        .route("/api/presets/{id}", axum::routing::delete(presets::remove))
         .route("/api/assets/{key}/meta", get(meta))
         .route("/api/assets/{key}/proxy", get(proxy))
         .route("/api/assets/{key}/thumb", get(thumb))
@@ -1686,6 +1895,14 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/assets/{key}/camera", get(camera))
         .route("/api/assets/{key}/edit", get(get_edit).put(put_edit))
         .route("/api/assets/{key}/history", get(get_history))
+        .route(
+            "/api/assets/{key}/copies",
+            axum::routing::post(copies::create),
+        )
+        .route(
+            "/api/assets/{key}/copies/{id}",
+            axum::routing::put(copies::rename).delete(copies::remove),
+        )
         .route(
             "/api/assets/{key}/history/checkout",
             axum::routing::post(checkout),
@@ -1732,6 +1949,20 @@ pub fn router(app: Arc<App>) -> Router {
 mod tests {
     use super::*;
 
+    /// A virtual copy's key is the photo's and `~c` with six hex digits; anything else after a `~` is no key.
+    #[test]
+    fn copy_keys_split() {
+        let k = "0123456789abcdef0123456789abcdef01234567";
+        assert_eq!(split_key(k), Some((k, None)));
+        assert_eq!(
+            split_key(&format!("{k}~c1a2b3c")),
+            Some((k, Some("c1a2b3c")))
+        );
+        assert_eq!(split_key(&format!("{k}~x1a2b3c")), None);
+        assert_eq!(split_key(&format!("{k}~c1a2b3")), None);
+        assert_eq!(split_key(&format!("{k}~c1a2b3g")), None);
+    }
+
     /// Every field of an edit has a default, so a versioned save would also parse as a (default) bare edit if
     /// the two were tried the other way round — and quietly save nothing.
     #[test]
@@ -1774,16 +2005,30 @@ mod tests {
         .unwrap();
         let doc = SidecarDoc::load(&original).unwrap();
         assert_eq!(
-            EditState::of(&doc, "bbbb", true, false)
+            EditState::of(&doc, "bbbb", None, true, false)
+                .unwrap()
                 .saved_for
                 .as_deref(),
             Some("aaaa")
         );
-        assert_eq!(EditState::of(&doc, "AAAA", true, false).saved_for, None);
+        assert_eq!(
+            EditState::of(&doc, "AAAA", None, true, false)
+                .unwrap()
+                .saved_for,
+            None
+        );
         let other = dir.join("DSC_2.NEF");
         std::fs::write(&other, b"raw2").unwrap();
         assert_eq!(
-            EditState::of(&SidecarDoc::load(&other).unwrap(), "bbbb", true, false).saved_for,
+            EditState::of(
+                &SidecarDoc::load(&other).unwrap(),
+                "bbbb",
+                None,
+                true,
+                false
+            )
+            .unwrap()
+            .saved_for,
             None
         );
     }

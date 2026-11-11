@@ -1028,6 +1028,124 @@ mod history {
             "a checkout makes the migrated version current"
         );
     }
+
+    /// A virtual copy is another head in the same tree: saving to it moves only its head, `sc:Edit` stays the
+    /// photo's own, the copy comes back from the file, and the photo's own saves go on beside it.
+    #[test]
+    fn a_virtual_copy_saves_beside_the_photo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let roots = [tmp.path().canonicalize().unwrap()];
+        let original = fixture(tmp.path(), "IMG_2.HEIC");
+        let commit = |copy: Option<&str>, e: &EditParams| {
+            let doc = SidecarDoc::load(&original).unwrap();
+            let h = doc.history();
+            let base = match copy {
+                Some(id) => h.copy(id).unwrap().head.clone(),
+                None => h.head.clone(),
+            };
+            let mut head = String::new();
+            update(&original, &roots, |d| {
+                head = d
+                    .commit_to(
+                        copy,
+                        &Commit {
+                            edit: e,
+                            base: &base,
+                            checkpoint: false,
+                            session: None,
+                            user: None,
+                        },
+                        "sha",
+                    )?
+                    .head;
+                Ok(())
+            })
+            .unwrap();
+            head
+        };
+        let own = commit(None, &ev(0.5));
+        let mut copy = None;
+        update(&original, &roots, |d| {
+            copy = Some(d.add_copy("Black and white", None)?);
+            Ok(())
+        })
+        .unwrap();
+        let copy = copy.unwrap();
+        assert!(
+            copy.id.starts_with('c') && copy.id.len() == 7,
+            "{}",
+            copy.id
+        );
+        assert_eq!(
+            copy.head, own,
+            "a copy starts from the photo's current version"
+        );
+
+        let in_copy = commit(Some(&copy.id), &ev(-1.0));
+        let doc = SidecarDoc::load(&original).unwrap();
+        let h = doc.history();
+        assert_eq!(h.head, own, "the photo's head stays");
+        assert_eq!(h.copy(&copy.id).unwrap().head, in_copy);
+        assert_eq!(
+            h.node(&in_copy).unwrap().parent.as_deref(),
+            Some(own.as_str()),
+            "the copy's save branches from where it began"
+        );
+        assert_eq!(doc.edit(), ev(0.5), "sc:Edit is the photo's own edit");
+        assert_eq!(doc.edit_for(Some(&copy.id)).unwrap(), ev(-1.0));
+        assert_eq!(doc.etag_for(None).unwrap(), doc.etag());
+
+        // The photo's own save goes on beside it.
+        let later = commit(None, &ev(1.0));
+        let h = SidecarDoc::load(&original).unwrap().history();
+        assert_eq!(h.head, later);
+        assert_eq!(h.copy(&copy.id).unwrap().head, in_copy);
+
+        // Back to an older version in the copy, renamed, then removed: its versions stay.
+        update(&original, &roots, |d| {
+            d.checkout_to(Some(&copy.id), ORIGINAL, "sha")?;
+            d.rename_copy(&copy.id, "Mono")
+        })
+        .unwrap();
+        let doc = SidecarDoc::load(&original).unwrap();
+        assert_eq!(doc.history().copy(&copy.id).unwrap().head, ORIGINAL);
+        assert_eq!(doc.history().copy(&copy.id).unwrap().name, "Mono");
+        assert_eq!(
+            doc.edit(),
+            ev(1.0),
+            "a checkout in the copy leaves the photo's edit"
+        );
+        update(&original, &roots, |d| d.remove_copy(&copy.id)).unwrap();
+        let h = SidecarDoc::load(&original).unwrap().history();
+        assert!(h.copies.is_empty());
+        assert!(
+            h.node(&in_copy).is_some(),
+            "the copy's versions stay in the tree"
+        );
+        assert!(
+            SidecarDoc::load(&original)
+                .unwrap()
+                .edit_for(Some(&copy.id))
+                .is_err()
+        );
+    }
+
+    /// Pruning keeps every head: a copy's head is never squashed, however many saves the photo itself makes.
+    #[test]
+    fn pruning_keeps_a_virtual_copys_head() {
+        let mut h = History::begin(&EditParams::default());
+        let first = save(&mut h, &ev(0.01), ORIGINAL).head;
+        let next = save(&mut h, &ev(0.02), &first).head;
+        let c = h.add_copy("copy", &first).unwrap();
+        let mut base = next;
+        for i in 3..MAX_NODES + 40 {
+            base = save(&mut h, &ev(i as f64 / 100.0), &base).head;
+        }
+        assert!(h.nodes.len() <= MAX_NODES);
+        assert!(h.node(&first).is_some(), "the copy's head was squashed");
+        assert_eq!(h.copy(&c.id).unwrap().head, first);
+        assert_eq!(h.edit_of(&first).unwrap(), ev(0.01));
+    }
 }
 
 /// Saving writes the edit as it is now: a field this version knows and leaves out (at its default) is gone

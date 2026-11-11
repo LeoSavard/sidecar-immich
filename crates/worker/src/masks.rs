@@ -19,10 +19,10 @@ use crate::ml::{Face, PARTS, Picture};
 use crate::{DEFAULT_EDGE, Worker, cache_generation, export, unique_tmp};
 
 /// Bump when the models, or how masks are made from them, change: every cached mask is then made again.
-pub const MASK_REVISION: u32 = 3;
+pub const MASK_REVISION: u32 = 6;
 
 /// The masks an edit can name, in the order the editor lists them.
-pub const NAMES: [&str; 7] = [
+pub const NAMES: [&str; 8] = [
     "subject",
     "skin",
     "face-skin",
@@ -30,6 +30,7 @@ pub const NAMES: [&str; 7] = [
     "hair",
     "clothes",
     "depth",
+    "sky",
 ];
 
 /// The size the models look at: past BiRefNet's 1024² input nothing more is seen.
@@ -56,6 +57,72 @@ pub struct MaskSet {
 pub struct DepthMap {
     pub image: sidecar_engine::RgbaF32,
     pub airlight: [f32; 3],
+}
+
+/// The sky mask's long edge: its edges come from the photo (`sidecar_engine::sky`), so it is kept as fine as
+/// the subject's.
+const SKY_EDGE: u32 = 1024;
+
+/// The sky (`sidecar_engine::sky`): found in the depth map — the far plane, from the top edge, not the subject,
+/// light — and drawn by the proxy, box-averaged to `SKY_EDGE`. Empty when there is none.
+fn sky(
+    proxy: &sidecar_engine::RgbaF32,
+    depth: &[u8],
+    dw: u32,
+    dh: u32,
+    subject: (&[u8], u32, u32),
+    wb: [f32; 3],
+) -> (u32, u32, Vec<u8>) {
+    let k = proxy.width.max(proxy.height).div_ceil(SKY_EDGE).max(1);
+    let (w, h) = (proxy.width / k, proxy.height / k);
+    let photo = sidecar_engine::RgbaF32 {
+        width: w,
+        height: h,
+        data: (0..w * h)
+            .flat_map(|i| {
+                let (bx, by) = (i % w * k, i / w * k);
+                let mut s = [0f32; 3];
+                for y in by..by + k {
+                    for x in bx..bx + k {
+                        let p = ((y * proxy.width + x) * 4) as usize;
+                        for (c, v) in s.iter_mut().enumerate() {
+                            *v += proxy.data[p + c].max(0.0);
+                        }
+                    }
+                }
+                let n = (k * k) as f32;
+                [s[0] / n, s[1] / n, s[2] / n, 1.0]
+            })
+            .collect(),
+    };
+    // At the depth map's size: the photo's log luminance and the subject.
+    let at = |x: u32, y: u32, sw: u32, sh: u32| {
+        (
+            ((x as f64 + 0.5) / dw as f64 * sw as f64) as u32,
+            ((y as f64 + 0.5) / dh as f64 * sh as f64) as u32,
+        )
+    };
+    // White-balanced, so a grey sky is grey and foliage green.
+    let rgb: Vec<[f32; 3]> = (0..dw * dh)
+        .map(|i| {
+            let (x, y) = at(i % dw, i / dw, w, h);
+            let p = ((y.min(h - 1) * w + x.min(w - 1)) * 4) as usize;
+            [0, 1, 2].map(|c| photo.data[p + c] * wb[c])
+        })
+        .collect();
+    let (sd, sw, sh) = subject;
+    let subject: Vec<u8> = (0..dw * dh)
+        .map(|i| {
+            let (x, y) = at(i % dw, i / dw, sw, sh);
+            sd[(y.min(sh - 1) * sw + x.min(sw - 1)) as usize]
+        })
+        .collect();
+    let mask =
+        match sidecar_engine::sky::coarse(depth, dw as usize, dh as usize, &rgb, Some(&subject)) {
+            Some(c) => sidecar_engine::sky::refine(&photo, &c, dw as usize, dh as usize),
+            None => vec![0; (w * h) as usize],
+        };
+    (w, h, mask)
 }
 
 /// The share of the photo, farthest first, whose colour is the airlight.
@@ -157,6 +224,17 @@ impl Worker {
                         depth.width,
                         depth.height,
                     );
+                    let sky = sky(
+                        &sidecar_engine::RgbaF32::from_f16_bytes(w, h, &bytes),
+                        &depth.data,
+                        depth.width,
+                        depth.height,
+                        (&subject.data, subject.width, subject.height),
+                        {
+                            let m = info.color.as_shot_mul;
+                            [m[0] as f32, 1.0, m[2] as f32]
+                        },
+                    );
                     let faces = ml.faces(&picture)?;
                     let channel = |name: &str| {
                         let c = PARTS.iter().position(|p| *p == name).expect("a part");
@@ -179,6 +257,7 @@ impl Worker {
                             "subject" => grey_png(subject.width, subject.height, &subject.data)?,
                             "skin" => grey_png(parts.width, parts.height, &skin)?,
                             "depth" => grey_png(depth.width, depth.height, &depth.data)?,
+                            "sky" => grey_png(sky.0, sky.1, &sky.2)?,
                             "depth.json" => {
                                 serde_json::to_vec(&serde_json::json!({ "airlight": air }))?
                             }
@@ -241,11 +320,28 @@ impl Worker {
         if !NAMES.contains(&name) || !self.masks(key).await?.available {
             return Ok(None);
         }
-        Ok(Some(
-            tokio::fs::read(self.mask_path(key, &format!("{name}.png")))
-                .await
-                .context("mask was not written")?,
-        ))
+        let coarse = tokio::fs::read(self.mask_path(key, &format!("{name}.png")))
+            .await
+            .context("mask was not written")?;
+        if !REFINED.contains(&name) {
+            return Ok(Some(coarse));
+        }
+        // A part mask is served with its edges put where the photo's are, made once and kept beside it.
+        let path = self.mask_path(key, &format!("{name}-refined.png"));
+        if let Ok(bytes) = tokio::fs::read(&path).await {
+            return Ok(Some(bytes));
+        }
+        let refined = self.refined(key, decode_grey(&coarse)?).await;
+        let bytes: Vec<u8> = refined
+            .data
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|p| (p[0] * 255.0).round() as u8)
+            .collect();
+        let png = grey_png(refined.width, refined.height, &bytes)?;
+        write_atomic(&path, &png)?;
+        Ok(Some(png))
     }
 }
 
@@ -260,6 +356,17 @@ impl Worker {
     ) -> Vec<Option<sidecar_engine::RgbaF32>> {
         let mut out = Vec::new();
         for m in edit.masks.iter().take(sidecar_color::params::MAX_MASKS) {
+            if m.mask == sidecar_color::color_range::COLOR && m.renders() {
+                out.push(
+                    self.color_selection(key, edit, m)
+                        .await
+                        .unwrap_or_else(|e| {
+                            tracing::warn!("colour range for {key}: {e:#}");
+                            None
+                        }),
+                );
+                continue;
+            }
             let png = if m.renders() {
                 self.mask(key, &m.mask).await.unwrap_or_else(|e| {
                     tracing::warn!("mask {} for {key}: {e:#}", m.mask);
@@ -274,7 +381,114 @@ impl Worker {
     }
 }
 
-fn decode_grey(png_bytes: &[u8]) -> Result<sidecar_engine::RgbaF32> {
+/// The masks from the 256² multi-class model, whose edges are refined against the photo: what `mask` serves, to
+/// the browser and to every render, for these names.
+const REFINED: [&str; 5] = ["hair", "skin", "face-skin", "body-skin", "clothes"];
+
+impl Worker {
+    /// `coarse` with its edges put where the photo's are (`sidecar_color::mask_refine`), at the proxy's
+    /// `color_range::SIZE`, the colour guide judged as shot — so a refined mask depends on the photo alone. Kept
+    /// as it came when the proxy can't be had.
+    async fn refined(
+        self: &Arc<Self>,
+        key: &str,
+        coarse: sidecar_engine::RgbaF32,
+    ) -> sidecar_engine::RgbaF32 {
+        let made = async {
+            let (width, height, bytes) = self.proxy(key, sidecar_color::color_range::SIZE).await?;
+            let proxy = sidecar_engine::RgbaF32::from_f16_bytes(width, height, &bytes);
+            let meta = self.cached_meta(key).await?;
+            let packed = crate::export::Rendering::of(&meta.info)
+                .pack(&Default::default(), sidecar_color::DisplaySpace::Srgb);
+            let develop: sidecar_color::DevelopParams =
+                bytemuck::pod_read_unaligned(&packed.uniform);
+            let mask: Vec<u8> = coarse
+                .data
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|p| (p[0] * 255.0).round() as u8)
+                .collect();
+            let (mw, mh) = (coarse.width, coarse.height);
+            let out = tokio::task::spawn_blocking(move || {
+                sidecar_color::mask_refine::refine(
+                    &mask,
+                    mw,
+                    mh,
+                    &proxy.data,
+                    width,
+                    height,
+                    &develop,
+                )
+            })
+            .await?;
+            anyhow::Ok(sidecar_engine::RgbaF32 {
+                width,
+                height,
+                data: out.iter().flat_map(|&v| [v as f32 / 255.0; 4]).collect(),
+            })
+        };
+        match made.await {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!("refining a mask for {key}: {e:#}");
+                coarse
+            }
+        }
+    }
+
+    /// A colour-range layer's mask (`sidecar_color::color_range::select`): the proxy at the selection's size,
+    /// judged through the edit's own white balance and camera matrix, within its model mask when it names one.
+    async fn color_selection(
+        self: &Arc<Self>,
+        key: &str,
+        edit: &sidecar_color::EditParams,
+        layer: &sidecar_color::params::MaskAdjustment,
+    ) -> Result<Option<sidecar_engine::RgbaF32>> {
+        use sidecar_color::color_range::{SIZE, select};
+        let range = layer.color.clone().unwrap_or_default();
+        let (width, height, bytes) = self.proxy(key, SIZE).await?;
+        let proxy = sidecar_engine::RgbaF32::from_f16_bytes(width, height, &bytes);
+        let meta = self.cached_meta(key).await?;
+        let packed =
+            crate::export::Rendering::of(&meta.info).pack(edit, sidecar_color::DisplaySpace::Srgb);
+        let develop: sidecar_color::DevelopParams = bytemuck::pod_read_unaligned(&packed.uniform);
+        let within = match range.within.as_deref() {
+            Some(name) => match self.mask(key, name).await? {
+                Some(png) => Some(decode_grey(&png)?),
+                // Its model mask isn't there (the plain image): nothing is selected, rather than everywhere.
+                None => return Ok(None),
+            },
+            None => None,
+        };
+        let within_bytes = within.as_ref().map(|m| {
+            m.data
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|p| (p[0] * 255.0).round() as u8)
+                .collect::<Vec<u8>>()
+        });
+        let sel = select(
+            &range,
+            &develop,
+            &proxy.data,
+            width,
+            height,
+            within
+                .as_ref()
+                .zip(within_bytes.as_deref())
+                .map(|(m, b)| (b, m.width, m.height)),
+        );
+        Ok(Some(sidecar_engine::RgbaF32 {
+            width,
+            height,
+            data: sel.iter().flat_map(|&v| [v as f32 / 255.0; 4]).collect(),
+        }))
+    }
+}
+
+pub(crate) fn decode_grey(png_bytes: &[u8]) -> Result<sidecar_engine::RgbaF32> {
     let mut reader = png::Decoder::new(std::io::Cursor::new(png_bytes)).read_info()?;
     let mut buf = vec![0; reader.output_buffer_size().context("mask too large")?];
     let info = reader.next_frame(&mut buf)?;

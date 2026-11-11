@@ -4,9 +4,25 @@
 	import { importPhoto, type Who } from '$lib/intake';
 	import { ACCEPT_RAW, isRaw } from '$lib/formats';
 	import { showPreview, type ShownPreview } from '$lib/local/preview';
+	import SelectionBar from '$lib/ui/SelectionBar.svelte';
+	import FolderBrowser from '$lib/ui/FolderBrowser.svelte';
 
 	type Recent = { assetKey: string; fileName: string; immichAssetId: string | null; openedAt: string };
 	let recent = $state<Recent[] | null>(null);
+
+	// ---------- choosing several photos, to give them all one look (`SelectionBar`)
+	let selecting = $state(false);
+	let selected = $state<string[]>([]);
+	/** Bumped per photo a batch changed, so its thumbnail is fetched again. */
+	let thumbVersion = $state<Record<string, number>>({});
+	function toggleSelect(e: MouseEvent, key: string) {
+		if (!selecting) return;
+		e.preventDefault();
+		selected = selected.includes(key) ? selected.filter((k) => k !== key) : [...selected, key];
+	}
+	function stopSelecting() {
+		(selecting = false), (selected = []);
+	}
 	let who = $state<Who | null>(null);
 
 	$effect(() => {
@@ -60,7 +76,8 @@
 	const mb = (n: number) => `${(n / 1e6).toFixed(1)} MB`;
 
 	/** Sidecar's own thumbnail: the photo as the edit renders it, for anything Immich can't or won't show. */
-	const ownThumb = (assetKey: string) => `/api/assets/${assetKey}/thumb`;
+	const names = $derived(Object.fromEntries([...(folder?.items ?? []), ...(recent ?? [])].map((x) => [x.assetKey, x.fileName])));
+	const ownThumb = (assetKey: string) => `/api/assets/${assetKey}/thumb${thumbVersion[assetKey] ? `?v=${thumbVersion[assetKey]}` : ''}`;
 
 	/**
 	 * Immich's thumbnail where there is one, since it is already made; Sidecar's own otherwise. `onerror`
@@ -297,16 +314,20 @@
 				<h2 class="text-sm font-medium text-[#c6c6c6]">Imported</h2>
 				<span class="text-xs text-fg-2">{folder.items?.length ?? 0} of {folder.limit}{folder.full ? ', full' : ''}</span>
 				{#if folder.items?.length}
-					<button type="button" aria-pressed={moreInfo} class="ml-auto text-xs text-fg-2 underline underline-offset-4" onclick={() => (moreInfo = !moreInfo)}>
-						{moreInfo ? 'Less' : 'More'} info
-					</button>
+					<span class="ml-auto flex gap-3">
+						{@render selectToggle()}
+						<button type="button" aria-pressed={moreInfo} class="text-xs text-fg-2 underline underline-offset-4" onclick={() => (moreInfo = !moreInfo)}>
+							{moreInfo ? 'Less' : 'More'} info
+						</button>
+					</span>
 				{/if}
 			</div>
 			{#if folder.items?.length}
 				<ul class="flex gap-3 overflow-x-auto pb-1">
 					{#each folder.items as f (f.assetKey)}
 						<li class="w-40 shrink-0 overflow-hidden rounded bg-[#262626] sm:w-[calc((100%-2.25rem)/4)]">
-							<a href="/edit/{f.assetKey}" class="block hover:bg-[#393939]">
+							<a href="/edit/{f.assetKey}" class="relative block hover:bg-[#393939] {selected.includes(f.assetKey) ? 'ring-2 ring-fg' : ''}" onclick={(e) => toggleSelect(e, f.assetKey)}>
+								{@render tick(f.assetKey)}
 								<img src={ownThumb(f.assetKey)} alt="" class="aspect-[3/2] w-full bg-[#1f1f1f] object-cover" loading="lazy" />
 								<span class="block truncate p-2 text-sm">{f.fileName}</span>
 							</a>
@@ -340,12 +361,16 @@
 		</section>
 	{/if}
 
-	<h2 class="mt-8 mb-3 text-sm font-medium text-[#c6c6c6]">Recent</h2>
+	<div class="mt-8 mb-3 flex items-baseline gap-2">
+		<h2 class="text-sm font-medium text-[#c6c6c6]">Recent</h2>
+		{#if recentElsewhere?.length}<span class="ml-auto">{@render selectToggle()}</span>{/if}
+	</div>
 	{#if recentElsewhere?.length}
 		<ul class="grid grid-cols-2 gap-3 sm:grid-cols-4">
 			{#each recentElsewhere as r (r.assetKey)}
 				<li>
-					<a href="/edit/{r.assetKey}" class="block overflow-hidden rounded bg-[#262626] hover:bg-[#393939]">
+					<a href="/edit/{r.assetKey}" class="relative block overflow-hidden rounded bg-[#262626] hover:bg-[#393939] {selected.includes(r.assetKey) ? 'ring-2 ring-fg' : ''}" onclick={(e) => toggleSelect(e, r.assetKey)}>
+						{@render tick(r.assetKey)}
 						<img
 							src={r.immichAssetId ? thumbnailUrl(r.immichAssetId) : ownThumb(r.assetKey)}
 							alt=""
@@ -361,4 +386,19 @@
 	{:else if recent}
 		<p class="text-sm text-[#8d8d8d]">{folder?.items?.length ? 'Photos you open from elsewhere appear here.' : 'Photos you open appear here.'}</p>
 	{/if}
+	{#if selecting && selected.length}
+		<SelectionBar keys={selected} {names} onclear={stopSelecting} ondone={(changed) => (thumbVersion = { ...thumbVersion, ...Object.fromEntries(changed.map((k) => [k, Date.now()])) })} />
+	{/if}
+	<FolderBrowser />
 </main>
+
+{#snippet selectToggle()}
+	<button type="button" aria-pressed={selecting} class="text-xs text-fg-2 underline underline-offset-4" onclick={() => (selecting ? stopSelecting() : (selecting = true))}>{selecting ? 'Cancel' : 'Select'}</button>
+{/snippet}
+
+{#snippet tick(key: string)}
+	{#if selecting}
+		<span class="absolute top-1.5 left-1.5 grid size-5 place-items-center rounded-full text-xs {selected.includes(key) ? 'bg-fg text-ground' : 'bg-ground/70 text-transparent ring-1 ring-fg-2'}" aria-hidden="true">✓</span>
+		<span class="sr-only">{selected.includes(key) ? 'Selected:' : 'Not selected:'}</span>
+	{/if}
+{/snippet}

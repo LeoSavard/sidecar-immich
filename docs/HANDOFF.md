@@ -5,7 +5,91 @@ For whoever picks this up next, person or agent. [`ARCHITECTURE.md`](ARCHITECTUR
 checked), [`ROADMAP.md`](ROADMAP.md) what's known to be missing. This page is the state of play; update it when
 you stop.
 
-*Last updated 2026-11-05.*
+*Last updated 2026-11-06.*
+
+## The programme from 2026-11-06: the whole roadmap, one pull request per feature
+
+The owner's call: build every item in ROADMAP, plus a raw denoiser of our own, HDR merge, panoramas and
+HDRIs, **one pull request per feature**. The desktop target is parked. The research for the new work is
+[`research/multi-frame-and-denoise.md`](research/multi-frame-and-denoise.md). Order, by dependency — shared
+primitives first, because several features stand on each:
+
+| # | Item | Needs from the owner | Status |
+|---|---|---|---|
+| **Primitives** ||||
+| 1 | Guided filter (WGSL), first used for the depth map's second refinement pass | an A/B on depth edges | #59 |
+| 2 | Gaussian/Laplacian pyramid on the GPU | — | #60 |
+| 3 | Noise model per camera and ISO, and a variance-stabilising transform around the wavelet denoiser | an A/B on high-ISO frames | #61 (A/B pending) |
+| 4 | Linear float DNG writer (what every merge produces) | — | #62 |
+| 5 | Highlight-aware demosaic (clip mask inside RCD) | — (measured against `hilite-truth`) | #63 — measured, closed |
+| **Editing** ||||
+| 6 | Gradients: linear and radial mask layers | — | #64 |
+| 7 | Colour grading wheels (lift/gamma/gain on tonal ranges) | — | #65 |
+| 8 | Clarity, texture, local contrast (built on #1's guided filter: fast, halo-light) | an A/B | #72 |
+| 9 | Dehaze without depth (dark channel prior, on #1) | an A/B | #73 |
+| 10 | ACES reference gamut compression | an A/B on LED and neon | #74 (already present; now in ACEScg, `PROCESS_VERSION` 9) |
+| 11 | Hue-preserving tone mapping / a scene-to-display transform | the look is the owner's | Already present: `tone_apply` maps luminance and scales RGB by the ratio, fading to neutral over the last stop. Choosing a different scene-to-display look (sigmoid, AgX-style) waits on the owner |
+| 12 | Detail per layer (sharpening and noise reduction through a mask) | — | #75 |
+| 13 | Sky mask from the depth map, edges by the compositing equation (beat the guided filter here) | an A/B | #76 |
+| 14 | Upright: keystone from the photo's lines | — | #77 |
+| 15 | Heal, clone and spot removal; red-eye | — | #78 |
+| 16 | Camera profiles (DCP forward matrix, HueSatMap, LookTable) | which profiles to test | #79 (the file's own; `.dcp` files and a picker to come) |
+| 17 | 3D LUT loading; defringe; film-negative inversion | an A/B on fringing; where LUTs belong | #80 negatives, #81 defringe, #82 3D LUTs (on #81; log-footage LUTs to come) |
+| 18 | Rec.2020 export with a synthesised ICC; soft proofing with a gamut check | a printer profile to check against a print; whether the warning should follow the intent | #66 Rec.2020, #83 soft proofing (on #82) |
+| **Workflow** ||||
+| 19 | Presets and styles; copy-paste of a settings subset; sync across a selection | per person or shared presets | #84 (auto-sync to come) |
+| 20 | Snapshots and virtual copies | — | #85 snapshots and the split view, #86 virtual copies |
+| 21 | Browsing the editing folder; other folder layouts (name-walk fallback, tokens, locales) | whether a root can opt out of browsing | #87 layouts and the name walk, #88 browsing (on #87) |
+| 22 | Histogram and overlays in the no-WebGPU fallback | — | #89 (AF marker and Measure still hidden) |
+| 23 | Models on demand (Settings → Models) | which model goes on demand first | #90 (registry, scan, Settings; download with the first on-demand model) |
+| 24 | Parametric auto-edit (grey-world/edge WB, percentile tone anchoring, face-aware exposure) | whether an Auto is wanted despite the measurements | #91 (measured; nothing beats the defaults, so not wired) |
+| 25 | Colour ranges and skin; hair-edge refinement; subject- and depth-weighted peaking | a portrait for the skin A/B | #92 colour ranges, #93 subject peaking and eyes, #94 hair edges, #98 uniformity (both on #92) |
+| 26 | Apple's own disparity as a second depth source | an A/B on a Portrait capture | |
+| 27 | iPhone parity: the harness runs on the phone and posts back | the owner opens one URL on the iPhone | #95 (harness built; the run is the owner's) |
+| **Multi-frame** ||||
+| 28 | Alignment and features (shared) | test sets, chosen by the owner | #67 |
+| 29 | HDR merge → linear DNG | a bracket set | #68 (tool; editor to come) |
+| 30 | Panorama → linear DNG | a pano set | #69 (tool; editor to come) |
+| 31 | HDRI → OpenEXR and Radiance HDR | a 360° set, if one exists | #70 (no 360° set to test end to end) |
+| 32 | Focus stacking | a focus stack, if one exists | #71 (none in the library) |
+| **Denoiser** ||||
+| 33 | burn-on-wgpu training benchmark; noise synthesis from dark frames; training; a Denoise job | dark frames per camera; whether the library may train published weights | |
+| **Film** ||||
+| 34 | Halation; grain per dye layer | A/Bs of Dye layers and Halation | #96 grain per dye layer, #97 halation (on #96) |
+| 35 | A print stock, so colour negatives render as seen | which print stock, and its data sheet | |
+| 36 | Alternative processes: tintype, cyanotype, cyanotype digital negatives | the step tablet scan for the last | #99 cyanotype and tintype (digital negatives to come) |
+| **Studies** ||||
+| 37 | `DEFAULT_WHITE_EV` across a few hundred library files | the verdict, by eye | |
+| 38 | Highlight reconstruction on real blown frames, generation 3 | the verdict, by eye | |
+
+**Not in the programme, and why:** X-Trans at full resolution (parked by the owner, 2026-10-16); the HDR gain
+map's stages 2–4 (blocked on checking a formula against an HDR display — `dev/hdr-gainmap-probe`); AI
+upscaling (the weights carry no licence); the desktop app (parked, 2026-11-06); support claims for AMD and
+Intel GPUs (needs that hardware — a `/dev/dri` compose profile can be written, not verified).
+
+**How each item is built:** a branch off `main`, one pull request, the CI gate run locally, parity when a
+shader changes, a browser check when the editor changes — and where the result is a look rather than a
+fact, an A/B on two ports for the owner (the working conventions below). Pixels change only behind a new
+control or a `PROCESS_VERSION` bump with its migration.
+
+## The programme paused, 2026-11-06: one branch with every open pull request
+
+The owner asked to stop after #99 for a status update and a test image. **`integration-2026-11`** holds all 43
+open pull requests (#57–#99), each applied as one squashed three-way merge in PR order, then one commit of fixes
+where they meet. It is for testing; the pull requests stay the unit of review and merge. What the fixes decided:
+
+- **Pre-passes, in order:** retouch spots → lens → defringe → camera profile → develop, in the browser and the
+  worker alike (defringe judges a fringe as the camera recorded it, before the profile re-renders colour).
+- **The whole-frame maps** (adjacency, Texture and Clarity, Dehaze) read the picture *before* defringe and the
+  profile, as the worker's always did; the browser's density map had followed the profile pass.
+- **Rec.2020 meets the LUT and proof code:** a LUT applies to it as to the others; a soft proof in it (no screen
+  shows it) proofs with the LittleCMS profile built from its primaries.
+- **Smoke scripts:** `editor-smoke` clicks the presets PR's Copy…/Copy these/Paste; `measure-smoke` expects the
+  +0.30 EV it applies, not 0.5 stops.
+
+Checked on it: fmt, clippy, every workspace test, `npm run check`; all 35 parity cases (largest mean ΔE 0.0019);
+`editor-smoke` wide, narrow and fallback; and the feature smokes on the photos their pull requests used. The
+image `sidecar:programme-2026-11` is built from it.
 
 ## Where it stands, 2026-11-05
 
@@ -27,8 +111,15 @@ Two more of the owner's calls from that day, recorded where they belong: **model
 downloaded by the user, never shipped** (ROADMAP, "Models on demand", which adds a fourth licence status for
 weights), and the order above.
 
-What V2 puts next, after these: Workstream B's one real piece is effectively done (a configuration with no
-Immich runs, now with sign-in), so **Workstream C, the desktop target**, starting with the shell experiment.
+**The shell experiment, 2026-11-06** ([`research/shell-experiment.md`](research/shell-experiment.md)): Electron
+45 gives WebGPU on Linux under X11/XWayland with flags the app sets, renders Sidecar's parity fixtures
+21/21 on the NVIDIA GPU, but not on native Wayland, where Chromium refuses Vulkan; wgpu 30 can already
+present P3 and HDR to a colour-managed Wayland desktop. The owner then **parked the desktop target**
+(2026-11-06): no personal need for it; it stays on the roadmap with this research as its starting point.
+Still to run if it is ever picked up: AMD, Intel and a real compositor, with `dev/shell-probe/`.
+
+What comes next instead (owner, 2026-11-06): **the rest of the roadmap**, one pull request per feature — the
+custom raw denoiser, panoramas, HDR merge and HDRIs, and the items listed in ROADMAP.
 The standalone deployment's remaining gap is **browsing the editing folder** (#28's `find_by_name`, on
 `library-name-search`).
 

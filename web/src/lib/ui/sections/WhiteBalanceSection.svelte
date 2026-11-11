@@ -15,8 +15,18 @@ White balance (DESIGN.md §7, module 1). The sliders read as-shot until moved; m
 		/** The eyedropper waiting for a tap on the photo; undefined where it can't work (no WebGPU, read-only). */
 		picking?: boolean;
 		onpick?: (on: boolean) => void;
+		/** The name of the camera profile the file carries (DESIGN.md §7, "Camera profiles"), if it carries one. */
+		fileProfile?: string;
 	};
-	let { edit, onchange, oncommit, developed, asShot, picking, onpick }: Props = $props();
+	let { edit, onchange, oncommit, developed, asShot, picking, onpick, fileProfile }: Props = $props();
+
+	function setProfile(fromFile: boolean) {
+		onchange((e) => {
+			if (fromFile) e.cameraProfile = 'file';
+			else delete e.cameraProfile;
+		});
+		oncommit();
+	}
 
 	const TEMP_TRACK = 'linear-gradient(90deg,#5f7fb6,#9aa0a6 45%,#c9a15f)';
 	const TINT_TRACK = 'linear-gradient(90deg,#6f9f6f,#9aa0a6 50%,#b07aa6)';
@@ -50,4 +60,11 @@ White balance (DESIGN.md §7, module 1). The sliders read as-shot until moved; m
 	{#if picking}<p class="text-xs text-fg-2">Tap something in the photo that should be grey or white. Esc cancels.</p>{/if}
 	<Slider id="wb-temp" label="Temperature" value={edit.whiteBalance.mode === 'asShot' ? Math.round(asShot.temperatureK) : edit.whiteBalance.temperatureK} min={2000} max={12000} step={10} defaultValue={Math.round(asShot.temperatureK)} trackGradient={TEMP_TRACK} format={(v) => `${decimals(v)} K`} onchange={(v) => set('temperatureK', v)} {oncommit} />
 	<Slider id="wb-tint" label="Tint" value={edit.whiteBalance.mode === 'asShot' ? Math.round(asShot.tint) : edit.whiteBalance.tint} min={-150} max={150} defaultValue={0} bipolar trackGradient={TINT_TRACK} format={(v) => signed(v)} onchange={(v) => set('tint', v)} {oncommit} />
+	{#if fileProfile && !developed}
+		<div class="flex flex-wrap items-center gap-1.5 text-xs" role="radiogroup" aria-label="Camera profile">
+			<span class="text-fg-2">Profile</span>
+			<button type="button" role="radio" aria-checked={!edit.cameraProfile} class="rounded-full px-2.5 py-1 {!edit.cameraProfile ? 'bg-fg text-ground' : 'bg-raised text-fg'}" onclick={() => setProfile(false)}>Camera matrix</button>
+			<button type="button" role="radio" aria-checked={edit.cameraProfile === 'file'} class="rounded-full px-2.5 py-1 {edit.cameraProfile === 'file' ? 'bg-fg text-ground' : 'bg-raised text-fg'}" onclick={() => setProfile(true)}>{fileProfile} (from the file)</button>
+		</div>
+	{/if}
 </div>

@@ -41,6 +41,27 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ## Compact-ICC-Profiles — CC0-1.0
 Clinton Ingram. `assets/icc/sRGB-v4.icc`, `assets/icc/DisplayP3-v4.icc`, `assets/icc/AdobeCompat-v4.icc`.
 
+## LittleCMS — MIT
+Soft proofing (`crates/api/src/proof.rs`) composes its transforms with LittleCMS 2, whose C sources the lcms2-sys
+crate vendors and compiles in; the lcms2 crate (Kornel Lesiński, MIT) wraps them. Source: https://github.com/mm2/Little-CMS.
+
+MIT License
+
+Copyright (c) 2023 Marti Maria Saguer
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the Software without restriction, including without limitation the
+rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit
+persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the
+Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE
+WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
 ## jpeg-encoder — (MIT OR Apache-2.0) AND IJG
 This software is based in part on the work of the Independent JPEG Group.
 
@@ -120,6 +141,17 @@ converted by the Dockerfile's `ml-onnx` stages, for that image and for `dev/ml-m
   https://huggingface.co/onnx-community/depth-anything-v2-small, simplified at 518 × 518 with onnxsim
   (Apache-2.0). Only the Small model is Apache-2.0: the Base and Large weights are CC-BY-NC-4.0 and not used.
   Paper: Yang et al., "Depth Anything V2", NeurIPS 2024.
+
+## exrs (`exr` crate) — BSD-3-Clause
+Copyright (c) 2020 Johannes Vollmer and contributors. Used unmodified from crates.io to write OpenEXR files
+(`sidecar_merge::hdri`). Redistributions in binary form reproduce this notice; neither the name of the
+copyright holder nor the names of its contributors may be used to endorse or promote products derived from it
+without specific prior written permission. Provided "as is", without warranty of any kind.
+
+## Panorama and HDRI methods — from the papers
+Brown and Lowe (IJCV 2007), Shum and Szeliski (IJCV 2000), Horn (JOSA A 1987), Lucas and Kanade (IJCAI 1981),
+Burt and Adelson (ACM ToG 1983), Goldman and Chen (ICCV 2005), Ward's RGBE (Graphics Gems II, 1991), ISO 12232.
+Implemented from the publications; no code was copied.
 
 ## MPL-2.0 crates: buildid, colored
 Used unmodified from crates.io through burn and CubeCL. MPL-2.0 applies to these crates' own files; their source

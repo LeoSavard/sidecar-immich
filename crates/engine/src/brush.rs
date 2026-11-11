@@ -91,6 +91,7 @@ pub(crate) struct CompositeParams {
 pub struct Brush {
     stroke: wgpu::RenderPipeline,
     composite: wgpu::RenderPipeline,
+    gradient: wgpu::RenderPipeline,
     lens: wgpu::RenderPipeline,
     /// The edge passes: into the blur's 16-bit textures, and back into a mask.
     edge_blur: wgpu::RenderPipeline,
@@ -204,6 +205,7 @@ impl Brush {
             &[Some(segment)],
         )?;
         let composite = pipeline(gpu, "client/brush_composite.wgsl", None, &[])?;
+        let gradient = pipeline(gpu, "client/gradient.wgsl", None, &[])?;
         let lens = pipeline(gpu, "client/lens_mask.wgsl", None, &[])?;
         let edge_blur = pipeline_to(gpu, "client/mask_edge.wgsl", EDGE, None, &[])?;
         let edge_mask = pipeline(gpu, "client/mask_edge.wgsl", None, &[])?;
@@ -216,6 +218,7 @@ impl Brush {
         Ok(Self {
             stroke,
             composite,
+            gradient,
             lens,
             edge_blur,
             edge_mask,
@@ -314,6 +317,36 @@ impl Brush {
             ],
         });
         self.draw(enc, target, false, &self.composite, &bind, None);
+    }
+
+    /// A gradient layer's base mask (`client/gradient.wgsl`), `params.size` pixels: the shape the layer's
+    /// range, strokes and edge then apply to (`paint`).
+    pub fn gradient(
+        &self,
+        gpu: &Gpu,
+        params: &sidecar_color::params::GradientParams,
+    ) -> wgpu::Texture {
+        let size = [params.size[0] as u32, params.size[1] as u32];
+        let target = mask_texture(gpu, size);
+        let ubo = gpu
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: None,
+                contents: bytemuck::bytes_of(params),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &self.gradient.get_bind_group_layout(0),
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: ubo.as_entire_binding(),
+            }],
+        });
+        let mut enc = gpu.device.create_command_encoder(&Default::default());
+        self.draw(&mut enc, &target, true, &self.gradient, &bind, None);
+        gpu.queue.submit([enc.finish()]);
+        target
     }
 
     /// A mask of `size`: `base` (the models' mask, any size; `None` starts empty) through `range`
@@ -807,5 +840,41 @@ mod tests {
             / (w * h) as f32;
         // Bilinear against bicubic on hard stripes: the edges differ by a fraction, the rest not at all.
         assert!(mean < 0.03 && worst < 0.6, "mean {mean}, worst {worst}");
+    }
+
+    /// The shader draws what `Gradient::weight` computes, to 8 bits, linear and radial.
+    #[test]
+    fn gradients_draw_as_the_reference_weighs() {
+        let Ok(gpu) = crate::test_gpu() else {
+            return eprintln!("skipping: no GPU");
+        };
+        let brush = Brush::new(gpu).unwrap();
+        let size = [320u32, 200u32];
+        for g in [
+            sidecar_color::params::Gradient::Linear {
+                from: [0.1, 0.2],
+                to: [0.8, 0.9],
+            },
+            sidecar_color::params::Gradient::Radial {
+                centre: [0.4, 0.6],
+                axes: [0.3, 0.15],
+                angle: -25.0,
+                feather: 70.0,
+            },
+        ] {
+            let p = g.uniform(size, size, |q| q);
+            let got = read_mask(gpu, &brush.gradient(gpu, &p)).unwrap();
+            let mut worst = 0f32;
+            for y in 0..size[1] {
+                for x in 0..size[0] {
+                    let want = sidecar_color::params::Gradient::weight(
+                        &p,
+                        [x as f32 + 0.5, y as f32 + 0.5],
+                    );
+                    worst = worst.max((got[(y * size[0] + x) as usize] - want).abs());
+                }
+            }
+            assert!(worst <= 1.0 / 255.0 + 1e-4, "{g:?}: off by {worst}");
+        }
     }
 }

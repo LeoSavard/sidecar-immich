@@ -29,4 +29,10 @@ stock?: string,
  * sees the surface's reflectance times the light. Only read with a `stock`; daylight, the default, is
  * left out of the serialized edit, so film rendering made before this hashes as it did.
  */
-light?: string, };
+light?: string, 
+/**
+ * 0–100: halation — light that crossed the emulsion, reflected off the back of the film base and exposed the
+ * red-sensitive bottom layer again, a red glow around bright things. 100 is a film with no anti-halation
+ * backing (`HALATION_MAX`); 0, and absent, is none.
+ */
+halation?: number, };

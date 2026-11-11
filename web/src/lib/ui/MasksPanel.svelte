@@ -4,7 +4,8 @@ a brush or not, or one painted from nothing — and its own light and colour: ev
 added on top of it where the mask is. "Show" greys out what the selected mask leaves out. -->
 <script lang="ts">
 	import type { Band, MaskAdjustment, MaskEdge, MixerBand } from '$lib/types';
-	import { BRUSH, DEPTH, MASK_LABELS, type BrushMode, type BrushSettings, type MaskSet } from '$lib/masks';
+	import { BRUSH, COLOR, DEPTH, GRADIENT, MASK_LABELS, type BrushMode, type BrushSettings, type MaskSet } from '$lib/masks';
+	import type { Gradient } from '$lib/types';
 	import { curvePointOffset, isIdentityCurve, withCurvePoint } from '$lib/state/edit-view';
 	import Slider from '$lib/ui/Slider.svelte';
 	import ColorMixer from '$lib/ui/ColorMixer.svelte';
@@ -44,7 +45,7 @@ added on top of it where the mask is. "Show" greys out what the selected mask le
 	/** "Subject", "Not subject", and a number after the first when a mask is used twice. */
 	function label(i: number): string {
 		const m = masks[i];
-		const base = MASK_LABELS[m.mask] ?? m.mask;
+		const base = m.mask === GRADIENT && m.gradient ? (m.gradient.kind === 'linear' ? 'Linear gradient' : 'Radial gradient') : (MASK_LABELS[m.mask] ?? m.mask);
 		const same = masks.slice(0, i).filter((o) => o.mask === m.mask).length;
 		return `${m.invert ? 'Not ' : ''}${base}${same ? ` ${same + 1}` : ''}`;
 	}
@@ -92,6 +93,9 @@ added on top of it where the mask is. "Show" greys out what the selected mask le
 		<div class="flex flex-wrap items-center gap-1.5 text-xs">
 			<span class="text-fg-2">Add</span>
 			<button type="button" disabled={disabled || !canPaint} class="rounded-full bg-raised px-2.5 py-1 text-fg disabled:opacity-40" onclick={() => onadd(BRUSH)}>{MASK_LABELS[BRUSH]}</button>
+			<button type="button" disabled={disabled || !canPaint} class="rounded-full bg-raised px-2.5 py-1 text-fg disabled:opacity-40" onclick={() => onadd('gradient-linear')}>Linear gradient</button>
+			<button type="button" disabled={disabled || !canPaint} class="rounded-full bg-raised px-2.5 py-1 text-fg disabled:opacity-40" onclick={() => onadd('gradient-radial')}>Radial gradient</button>
+			<button type="button" {disabled} class="rounded-full bg-raised px-2.5 py-1 text-fg disabled:opacity-40" onclick={() => onadd(COLOR)}>{MASK_LABELS[COLOR]}</button>
 			{#each models as name (name)}
 				<button type="button" {disabled} class="rounded-full bg-raised px-2.5 py-1 text-fg disabled:opacity-40" onclick={() => onadd(name)}>{MASK_LABELS[name] ?? name}</button>
 			{/each}
@@ -121,6 +125,42 @@ added on top of it where the mask is. "Show" greys out what the selected mask le
 				<Slider id="mask-edge-feather" label="Feather" value={layer.edge.feather} min={0} max={100} defaultValue={100} {disabled} format={(v) => `${decimals(v)} %`} onchange={(v) => setEdge(i, { feather: v })} {oncommit} />
 				<Slider id="mask-edge-shift" label="Shift" value={layer.edge.shift} min={-100} max={100} defaultValue={0} bipolar {disabled} format={(v) => (v < 0 ? `${decimals(-v)} in` : v > 0 ? `${decimals(v)} out` : '0')} onchange={(v) => setEdge(i, { shift: v })} {oncommit} />
 				<p class="text-xs text-muted">Width is how far the edge reaches; Feather how soft it is across that width; Shift moves it inward or outward.</p>
+			{/if}
+			{#if layer.mask === GRADIENT && layer.gradient}
+				{@const g = layer.gradient}
+				{@render group('Shape')}
+				{#if g.kind === 'linear'}
+					<p class="text-xs text-muted">Full effect at the larger handle, none at the smaller, falling evenly between — as a graduated ND filter's density does. Drag either end, or the line to move both.</p>
+				{:else}
+					{@const set = (patch: Partial<Extract<Gradient, { kind: 'radial' }>>) => onchange(i, { gradient: { ...g, ...patch } })}
+					<p class="text-xs text-muted">Full effect inside, fading to none at the outline. Drag the centre to move it, the handles to size and turn it; Invert puts the effect outside.</p>
+					<Slider id="gradient-size" label="Size" value={Math.round(g.axes[0] * 100)} min={1} max={100} defaultValue={25} {disabled} format={(v) => `${decimals(v)} %`} onchange={(v) => set({ axes: [v / 100, (g.axes[1] * v) / 100 / Math.max(g.axes[0], 0.01)] })} {oncommit} />
+					<Slider id="gradient-roundness" label="Roundness" value={Math.round((g.axes[1] / Math.max(g.axes[0], 0.01)) * 100)} min={5} max={100} defaultValue={72} {disabled} format={(v) => `${decimals(v)} %`} onchange={(v) => set({ axes: [g.axes[0], (g.axes[0] * v) / 100] })} {oncommit} />
+					<Slider id="gradient-angle" label="Angle" value={g.angle} min={-90} max={90} defaultValue={0} bipolar {disabled} format={(v) => `${decimals(v)}°`} onchange={(v) => set({ angle: v })} {oncommit} />
+					<Slider id="gradient-feather" label="Feather" value={g.feather} min={0} max={100} defaultValue={50} {disabled} format={(v) => `${decimals(v)} %`} onchange={(v) => set({ feather: v })} {oncommit} />
+				{/if}
+			{/if}
+			{#if layer.mask === COLOR}
+				{@const c = layer.color ?? { hue: 55, width: 40, saturation: [8, 60] as [number, number], feather: 10 }}
+				{@render group('Colours')}
+				<div class="h-2 rounded-full" style="background: linear-gradient(to right, {[0, 60, 120, 180, 240, 300, 360].map((h) => `oklch(0.7 0.13 ${h})`).join(', ')})" aria-hidden="true"></div>
+				<Slider id="range-hue" label="Hue" value={c.hue} min={0} max={360} defaultValue={55} {disabled} format={(v) => `${decimals(v)}°`} onchange={(v) => onchange(i, { color: { ...c, hue: v } })} {oncommit} />
+				<Slider id="range-width" label="Width" value={c.width} min={5} max={180} defaultValue={40} {disabled} format={(v) => `${decimals(v)}°`} onchange={(v) => onchange(i, { color: { ...c, width: v } })} {oncommit} />
+				<Slider id="range-sat-from" label="Saturation from" value={c.saturation[0]} min={0} max={100} defaultValue={8} {disabled} format={(v) => decimals(v)} onchange={(v) => onchange(i, { color: { ...c, saturation: [v, c.saturation[1]] } })} {oncommit} />
+				<Slider id="range-sat-to" label="to" value={c.saturation[1]} min={0} max={100} defaultValue={60} {disabled} format={(v) => decimals(v)} onchange={(v) => onchange(i, { color: { ...c, saturation: [c.saturation[0], v] } })} {oncommit} />
+				<Slider id="range-feather" label="Softness" value={c.feather} min={1} max={40} defaultValue={10} {disabled} format={(v) => decimals(v)} onchange={(v) => onchange(i, { color: { ...c, feather: v } })} {oncommit} />
+				{@render group('Uniformity')}
+				<Slider id="range-uniform-hue" label="Hue" value={c.uniformityHue ?? 0} min={0} max={100} defaultValue={0} {disabled} format={(v) => decimals(v)} onchange={(v) => onchange(i, { color: { ...c, uniformityHue: v } })} {oncommit} />
+				<Slider id="range-uniform-sat" label="Saturation" value={c.uniformitySaturation ?? 0} min={0} max={100} defaultValue={0} {disabled} format={(v) => decimals(v)} onchange={(v) => onchange(i, { color: { ...c, uniformitySaturation: v } })} {oncommit} />
+				<p class="text-xs text-muted">Uniformity pulls the hue and saturation of what the range selects toward its centre, evening out blotches and redness while keeping lightness.</p>
+				{#if set?.names?.includes('skin')}
+					<div class="flex items-center gap-1.5 text-xs" role="radiogroup" aria-label="Where">
+						<span class="text-fg-2">Where</span>
+						<button type="button" role="radio" aria-checked={!c.within} {disabled} class={chip(!c.within)} onclick={() => { onchange(i, { color: { ...c, within: undefined } }); oncommit(); }}>Anywhere</button>
+						<button type="button" role="radio" aria-checked={c.within === 'skin'} {disabled} class={chip(c.within === 'skin')} onclick={() => { onchange(i, { color: { ...c, within: 'skin' } }); oncommit(); }}>On skin</button>
+					</div>
+				{/if}
+				<p class="text-xs text-muted">Hue and saturation as the eye sees them (OKLab), judged after the white balance. It starts on skin tones; On skin keeps it to people. Show the mask to see what it picks.</p>
 			{/if}
 			{#if layer.mask === DEPTH}
 				{@const r = layer.range ?? { from: 0, to: 100, feather: 0 }}
@@ -170,6 +210,11 @@ added on top of it where the mask is. "Show" greys out what the selected mask le
 					<button type="button" class="justify-self-end rounded px-2 py-1 text-fg-2 hover:bg-raised" onclick={() => { setCurve([[0, 0], [1, 1]]); oncommit(); }}>Reset curve</button>
 				</div>
 			</details>
+
+			{@render group('Detail')}
+			<p class="text-[11px] text-muted">Added to the Detail section's settings where this mask is; seen in the 1:1 loupe and in exports.</p>
+			<Slider id="mask-sharpness" label="Sharpness" value={layer.sharpness ?? 0} min={-100} max={100} defaultValue={0} bipolar {disabled} format={(v) => signed(v)} onchange={(v) => onchange(i, { sharpness: v || undefined })} {oncommit} />
+			<Slider id="mask-noise" label="Noise reduction" value={layer.noise ?? 0} min={-100} max={100} defaultValue={0} bipolar {disabled} format={(v) => signed(v)} onchange={(v) => onchange(i, { noise: v || undefined })} {oncommit} />
 		</div>
 	{/if}
 	{#if set?.faces.length}<p class="text-[11px] text-muted">{set.faces.length} {set.faces.length === 1 ? 'face' : 'faces'} found.</p>{/if}

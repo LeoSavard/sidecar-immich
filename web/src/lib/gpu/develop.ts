@@ -4,20 +4,32 @@
 import developWgsl from './wgsl/client_develop.wgsl?raw';
 import densityDownWgsl from './wgsl/client_density_down.wgsl?raw';
 import densityBlurWgsl from './wgsl/client_density_blur.wgsl?raw';
+import profileWgsl from './wgsl/client_profile.wgsl?raw';
+import type { ProfilePass } from '$lib/color/pack';
+import defringeWgsl from './wgsl/client_defringe.wgsl?raw';
+import lookWgsl from './wgsl/client_look.wgsl?raw';
 import { DEVELOP_UNIFORM_BYTES } from '$lib/color/pack';
 import { fromHalf } from '$lib/color/transfer';
 import { kernel } from './depth';
+import { LocalMap } from './local';
+import { RetouchPass } from './retouch';
+import type { Spot } from '$lib/types';
 
 /** `MaskParams` (shaders/develop/masks.wgsl), and the texture slots it describes. */
-const MASK_UNIFORM_BYTES = 1568;
+const MASK_UNIFORM_BYTES = 1696;
 const MAX_MASKS = 8;
 /** Each layer's curve: a row of this many entries. */
 const LUT = 4096;
 /** The adjacency map's long edge, at most: `sidecar_color::developer::MAP_LONG`. */
 const MAP_LONG = 1024;
 /** Float offsets in `DevelopParams` (crates/color/src/params.rs): `mono` and `developer`. */
+const FILM = 68;
 const MONO = 72;
 const DEVELOPER = 80;
+/** `DevelopParams.local`: Texture, Clarity, on, Dehaze. */
+const LOCAL = 128;
+/** Layers of develop's whole-frame maps: local contrast, Dehaze's transmission, the airlight. */
+const MAP_LAYERS = 3;
 
 /** One of a spectral stock's tables: `side`³ of four floats, read corner by corner (rgba32float can't filter). */
 function slideTexture(device: GPUDevice, label: string, side: number): GPUTexture {
@@ -29,6 +41,10 @@ function slideTexture(device: GPUDevice, label: string, side: number): GPUTextur
 		usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
 	});
 }
+
+/** A pass after develop through a 3D table (`client/look.wgsl`): its uniform and the table, RGBA floats `size` on a side. */
+export type PostTable = { uniform: Uint8Array; size: number; rgba: Float32Array };
+type Post = { ubo: GPUBuffer; table: GPUTexture; rgba: Float32Array };
 
 export class DevelopPass {
 	readonly device: GPUDevice;
@@ -64,14 +80,46 @@ export class DevelopPass {
 	private boundDensity?: GPUTexture;
 	private densityDown: GPUComputePipeline;
 	private densityBlur: GPUComputePipeline;
+	/** The whole-frame maps (`./local`): the averaged-down picture they are made from, Texture and Clarity's map,
+	 * Dehaze's map and airlight, and the array develop binds them in (`MAP_LAYERS`), or what it binds without. */
+	private localMap: LocalMap;
+	private local?: { small: GPUTexture; map: GPUTexture; haze: GPUTexture; air: GPUTexture; maps: GPUTexture; params: GPUBuffer };
+	private noMaps: GPUTexture;
+	private boundMaps?: GPUTexture;
+	/** Retouch (`./retouch`): the proxy with the edit's spots applied, and what it was made from. */
+	private retouchPass: RetouchPass;
+	private retouched?: { out: GPUTexture; scratch: GPUTexture; key: string };
+	/** The camera profile pass (`client/profile.wgsl`): what it was given, and what it made of develop's input. */
+	private profilePipeline: GPUComputePipeline;
+	private profile?: { pass: ProfilePass; ubo: GPUBuffer; hueSat: GPUTexture; look: GPUTexture };
+	private profiled?: GPUTexture;
+	private boundInput?: GPUTexture;
+	/** The defringe pass (`client/defringe.wgsl`): its uniform when on, and what it made of develop's input. */
+	private defringePipeline: GPUComputePipeline;
+	private defringeUbo?: GPUBuffer;
+	private defringed?: GPUTexture;
+	/**
+	 * The LUT pass (`client/look.wgsl`), run after develop for the edit's LUT and then for a soft proof, each with
+	 * its uniform and table when on; and the textures develop and the first of them render into on the way.
+	 */
+	private lookPipeline: GPUComputePipeline;
+	private look?: Post;
+	private proof?: Post;
+	private stages: GPUTexture[] = [];
 
-	private constructor(device: GPUDevice, pipeline: GPURenderPipeline, layout: GPUBindGroupLayout, maskLayout: GPUBindGroupLayout, densityDown: GPUComputePipeline, densityBlur: GPUComputePipeline) {
+	private constructor(device: GPUDevice, pipeline: GPURenderPipeline, layout: GPUBindGroupLayout, maskLayout: GPUBindGroupLayout, densityDown: GPUComputePipeline, densityBlur: GPUComputePipeline, localMap: LocalMap, retouchPass: RetouchPass, profilePipeline: GPUComputePipeline, defringePipeline: GPUComputePipeline, lookPipeline: GPUComputePipeline) {
 		this.device = device;
 		this.pipeline = pipeline;
 		this.layout = layout;
 		this.maskLayout = maskLayout;
 		this.densityDown = densityDown;
 		this.densityBlur = densityBlur;
+		this.localMap = localMap;
+		this.noMaps = device.createTexture({ label: 'no maps', size: [1, 1, MAP_LAYERS], format: 'rgba32float', usage: GPUTextureUsage.TEXTURE_BINDING });
+		this.retouchPass = retouchPass;
+		this.profilePipeline = profilePipeline;
+		this.defringePipeline = defringePipeline;
+		this.lookPipeline = lookPipeline;
 		this.ubo = device.createBuffer({ label: 'develop params', size: DEVELOP_UNIFORM_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 		// Zeroed on creation: no masks until `setMasks` says otherwise.
 		this.maskUbo = device.createBuffer({ label: 'develop masks', size: MASK_UNIFORM_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
@@ -99,7 +147,8 @@ export class DevelopPass {
 				{ binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '3d' } },
 				{ binding: 4, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '2d' } },
 				{ binding: 5, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '3d' } },
-				{ binding: 6, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '3d' } }
+				{ binding: 6, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '3d' } },
+				{ binding: 7, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } }
 			]
 		});
 		// Mirrors crates/engine/src/develop.rs: the mask uniforms, a linear sampler, a texture per slot.
@@ -119,20 +168,52 @@ export class DevelopPass {
 			fragment: { module, entryPoint: 'fs', targets: [{ format: 'rgba16float' }] },
 			primitive: { topology: 'triangle-list' }
 		});
-		const [densityDown, densityBlur] = await Promise.all([
+		const [densityDown, densityBlur, localMap, retouchPass, profilePipeline, defringePipeline, lookPipeline] = await Promise.all([
 			kernel(device, 'density down', densityDownWgsl, ['uniform', 'texture', 'storage']),
-			kernel(device, 'density blur', densityBlurWgsl, ['uniform', 'texture', 'storage'])
+			kernel(device, 'density blur', densityBlurWgsl, ['uniform', 'texture', 'storage']),
+			LocalMap.create(device),
+			RetouchPass.create(device),
+			kernel(device, 'camera profile', profileWgsl, ['uniform', 'texture', 'texture3d', 'texture3d', 'storage']),
+			kernel(device, 'defringe', defringeWgsl, ['uniform', 'texture', 'storage']),
+			kernel(device, 'look', lookWgsl, ['uniform', 'texture', 'storage', 'texture3d'])
 		]);
-		return new DevelopPass(device, pipeline, layout, maskLayout, densityDown, densityBlur);
+		return new DevelopPass(device, pipeline, layout, maskLayout, densityDown, densityBlur, localMap, retouchPass, profilePipeline, defringePipeline, lookPipeline);
 	}
 
 	get output(): GPUTexture | undefined {
 		return this.target;
 	}
 
-	/** The proxy as uploaded, for the lens pass to read. */
+	/** The proxy as the lens pass reads it: as uploaded, with the edit's retouch spots applied (`setSpots`). */
 	get proxy(): GPUTexture | undefined {
-		return this.source;
+		return this.retouched?.out ?? this.source;
+	}
+
+	/**
+	 * The edit's retouch spots (`sidecar_color::params::Spot`), in the proxy's frame; `wb` the camera's as-shot
+	 * multipliers. Applied to the proxy only when they or the proxy changed; returns whether `proxy` changed, so
+	 * the passes that read it run again.
+	 */
+	setSpots(spots: Spot[], wb: [number, number, number]): boolean {
+		const src = this.source;
+		if (!src) return false;
+		const key = spots.length ? JSON.stringify([spots, wb, src.label, src.width, src.height]) : '';
+		if (key === (this.retouched?.key ?? '')) return false;
+		if (!spots.length) {
+			this.retouched?.out.destroy();
+			this.retouched?.scratch.destroy();
+			this.retouched = undefined;
+		} else {
+			if (this.retouched?.out.width !== src.width || this.retouched?.out.height !== src.height) {
+				this.retouched?.out.destroy();
+				this.retouched?.scratch.destroy();
+				this.retouched = { out: this.retouchPass.target(src, 'retouched'), scratch: this.retouchPass.target(src, 'retouch scratch'), key };
+			}
+			this.retouchPass.apply(src, this.retouched.out, this.retouched.scratch, spots, wb);
+			this.retouched.key = key;
+		}
+		this.bindGroup = undefined;
+		return true;
 	}
 
 	/** Develop from `texture` (the proxy's size) instead of the proxy; `undefined` goes back to the proxy. */
@@ -147,15 +228,141 @@ export class DevelopPass {
 		this.source?.destroy();
 		this.target?.destroy();
 		this.input = undefined;
+		this.retouched?.out.destroy();
+		this.retouched?.scratch.destroy();
+		this.retouched = undefined;
 		this.source = this.device.createTexture({ label: 'source', size: [width, height], format: 'rgba16float', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC });
 		this.device.queue.writeTexture({ texture: this.source }, f16, { bytesPerRow: width * 8 }, [width, height]);
 		this.target = this.device.createTexture({
 			label: 'developed',
 			size: [width, height],
 			format: 'rgba16float',
-			usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC
+			usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.STORAGE_BINDING
 		});
 		this.bindGroup = undefined;
+	}
+
+	/**
+	 * The camera profile pass for the edit (`Packed.profile`), or null for none: run over develop's input on every
+	 * render, as `DevelopPass::render` runs it on the server.
+	 */
+	setProfile(pass: ProfilePass | null) {
+		if (!pass) {
+			if (this.profile) {
+				for (const t of [this.profile.hueSat, this.profile.look]) t.destroy();
+				this.profile.ubo.destroy();
+				this.profile = undefined;
+			}
+			return;
+		}
+		const p = this.profile;
+		if (!p || p.pass.hueSat !== pass.hueSat || p.pass.look !== pass.look) {
+			if (p) for (const t of [p.hueSat, p.look]) t.destroy();
+			const u = new Uint32Array(pass.uniform.buffer, pass.uniform.byteOffset, pass.uniform.byteLength / 4);
+			// `ProfileParams`: hue_sat at float 28, look at 32 (after two mat3x3f and wb).
+			const table = (at: number, data: Float32Array) => {
+				const [h, s, v] = [u[at], u[at + 1], u[at + 2]];
+				const ok = h > 0 && data.length === h * s * v * 4;
+				const t = this.device.createTexture({ label: 'profile table', size: ok ? [s, h, v] : [1, 1, 1], dimension: '3d', format: 'rgba32float', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+				if (ok) this.device.queue.writeTexture({ texture: t }, data, { bytesPerRow: s * 16, rowsPerImage: h }, [s, h, v]);
+				return t;
+			};
+			this.profile = {
+				pass,
+				ubo: p?.ubo ?? this.device.createBuffer({ label: 'profile params', size: pass.uniform.byteLength, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }),
+				hueSat: table(28, pass.hueSat),
+				look: table(32, pass.look)
+			};
+		}
+		this.profile!.pass = pass;
+		this.device.queue.writeBuffer(this.profile!.ubo, 0, pass.uniform);
+	}
+
+	/**
+	 * A 3D LUT after develop (`LookLut::uniform` and its table, RGBA floats `size` on a side), or null for none.
+	 * The table uploads once for as long as the same one is passed.
+	 */
+	setLook(look: PostTable | null) {
+		this.look = this.post(this.look, look, 'look');
+	}
+
+	/**
+	 * A soft proof after the look (`lut::proof_uniform` and the proof's table from `GET /api/proofs/{id}/table`),
+	 * or null for none. It changes only what is shown; the export never sees it.
+	 */
+	setProof(proof: PostTable | null) {
+		this.proof = this.post(this.proof, proof, 'proof');
+	}
+
+	private post(old: Post | undefined, next: PostTable | null, label: string): Post | undefined {
+		if (!next) {
+			old?.ubo.destroy();
+			old?.table.destroy();
+			return undefined;
+		}
+		const ubo = old?.ubo ?? this.device.createBuffer({ label: `${label} params`, size: next.uniform.byteLength, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+		this.device.queue.writeBuffer(ubo, 0, next.uniform);
+		if (old && old.rgba === next.rgba) return { ...old, ubo };
+		old?.table.destroy();
+		const n = next.size;
+		const table = this.device.createTexture({ label: `${label} table`, size: [n, n, n], dimension: '3d', format: 'rgba32float', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+		this.device.queue.writeTexture({ texture: table }, next.rgba, { bytesPerRow: n * 16, rowsPerImage: n }, [n, n, n]);
+		return { ubo, table, rgba: next.rgba };
+	}
+
+	/** The defringe pass's uniform (`Packed.defringe`), or null for none: run over develop's input on every render. */
+	setDefringe(uniform: Uint8Array | null) {
+		if (!uniform) {
+			this.defringeUbo?.destroy();
+			this.defringeUbo = undefined;
+			return;
+		}
+		this.defringeUbo ??= this.device.createBuffer({ label: 'defringe params', size: uniform.byteLength, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+		this.device.queue.writeBuffer(this.defringeUbo, 0, uniform);
+	}
+
+	/** The input through the defringe pass when it is on. */
+	private defringedInput(): GPUTexture {
+		const input = this.input ?? this.proxy!;
+		if (!this.defringeUbo) return input;
+		if (this.defringed?.width !== input.width || this.defringed?.height !== input.height) {
+			this.defringed?.destroy();
+			this.defringed = this.storage('defringed', input.width, input.height);
+		}
+		const encoder = this.device.createCommandEncoder();
+		this.dispatch(encoder, this.defringePipeline, this.defringeUbo, input, this.defringed);
+		this.device.queue.submit([encoder.finish()]);
+		return this.defringed;
+	}
+
+	/** Develop's input as develop reads it: defringed when that is on, then through the camera profile pass when
+	 *  there is one — the order the worker runs them in. */
+	private developInput(): GPUTexture {
+		const input = this.defringedInput();
+		const p = this.profile;
+		if (!p) return input;
+		if (this.profiled?.width !== input.width || this.profiled?.height !== input.height) {
+			this.profiled?.destroy();
+			this.profiled = this.storage('profiled', input.width, input.height);
+		}
+		const bind = this.device.createBindGroup({
+			layout: this.profilePipeline.getBindGroupLayout(0),
+			entries: [
+				{ binding: 0, resource: { buffer: p.ubo } },
+				{ binding: 1, resource: input.createView() },
+				{ binding: 2, resource: p.hueSat.createView() },
+				{ binding: 3, resource: p.look.createView() },
+				{ binding: 4, resource: this.profiled.createView() }
+			]
+		});
+		const encoder = this.device.createCommandEncoder();
+		const pass = encoder.beginComputePass();
+		pass.setPipeline(this.profilePipeline);
+		pass.setBindGroup(0, bind);
+		pass.dispatchWorkgroups(Math.ceil(input.width / 16), Math.ceil(input.height / 16));
+		pass.end();
+		this.device.queue.submit([encoder.finish()]);
+		return this.profiled;
 	}
 
 	setUniforms(bytes: ArrayBuffer | ArrayBufferView) {
@@ -168,7 +375,56 @@ export class DevelopPass {
 	/** Black and white, a developer with adjacency: `crates/engine`'s `needs_density_map`. */
 	private get needsDensityMap(): boolean {
 		const u = this.uniform;
-		return u[MONO] > 0.5 && u[MONO + 2] < 0.5 && u[DEVELOPER] !== 0;
+		// Black and white's developer, or colour film's halation (`needs_density_map` in the engine).
+		return u[MONO + 2] < 0.5 && ((u[MONO] > 0.5 && u[DEVELOPER] !== 0) || (u[MONO] < 0.5 && u[FILM + 2] > 0));
+	}
+
+	/** Texture or Clarity is on: `crates/engine`'s `needs_local_map`. */
+	private get needsLocalMap(): boolean {
+		return this.uniform[LOCAL + 2] > 0.5;
+	}
+
+	/** Dehaze is not 0: `crates/engine`'s `needs_haze_map`. */
+	private get needsHazeMap(): boolean {
+		return this.uniform[LOCAL + 3] !== 0;
+	}
+
+	/**
+	 * The whole-frame maps over the picture develop reads, as `DevelopPass::render` gathers them on the server:
+	 * averaged down by the adjacency map's whole number, then Texture and Clarity's and Dehaze's as each is wanted,
+	 * copied into the array develop binds. Rebuilt with every draw that needs them, as the adjacency map is: the
+	 * lens pass may have redrawn the input in place, and Dehaze follows the white balance.
+	 */
+	private buildMaps(input: GPUTexture) {
+		const [w, h] = [input.width, input.height];
+		const k = Math.max(1, Math.ceil(Math.max(w, h) / MAP_LONG));
+		const [mw, mh] = [Math.ceil(w / k), Math.ceil(h / k)];
+		if (this.local?.map.width !== mw || this.local?.map.height !== mh) {
+			if (this.local) for (const t of [this.local.small, this.local.map, this.local.haze, this.local.air, this.local.maps]) t.destroy();
+			const wide = (label: string, size: [number, number]) =>
+				this.device.createTexture({ label, size, format: 'rgba32float', usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST });
+			this.local = {
+				small: this.storage('maps source', mw, mh),
+				map: wide('local map', [mw, mh]),
+				haze: wide('haze map', [mw, mh]),
+				air: wide('airlight', [1, 1]),
+				maps: this.device.createTexture({ label: 'develop maps', size: [mw, mh, MAP_LAYERS], format: 'rgba32float', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST }),
+				params: this.local?.params ?? this.device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST })
+			};
+			this.bindGroup = undefined;
+		}
+		const l = this.local;
+		this.device.queue.writeBuffer(l.params, 0, new Float32Array([k, 0, 0, 0]));
+		let encoder = this.device.createCommandEncoder();
+		this.dispatch(encoder, this.densityDown, l.params, input, l.small);
+		this.device.queue.submit([encoder.finish()]);
+		if (this.needsLocalMap) this.localMap.build(l.small, [w, h], k, l.map);
+		if (this.needsHazeMap) this.localMap.haze(l.small, [w, h], k, this.uniform, l.haze, l.air);
+		encoder = this.device.createCommandEncoder();
+		encoder.copyTextureToTexture({ texture: l.map }, { texture: l.maps, origin: [0, 0, 0] }, [mw, mh]);
+		encoder.copyTextureToTexture({ texture: l.haze }, { texture: l.maps, origin: [0, 0, 1] }, [mw, mh]);
+		encoder.copyTextureToTexture({ texture: l.air }, { texture: l.maps, origin: [0, 0, 2] }, [1, 1]);
+		this.device.queue.submit([encoder.finish()]);
 	}
 
 	private storage(label: string, w: number, h: number, usage = 0): GPUTexture {
@@ -196,7 +452,8 @@ export class DevelopPass {
 	 * averaged down by a whole number, developed to the film's log exposure, blurred over the developer's reach.
 	 */
 	private buildDensityMap(masks: GPUBindGroup) {
-		const input = this.input ?? this.source!;
+		// Before the defringe and profile passes, as the worker's map is made.
+		const input = this.input ?? this.proxy!;
 		const [w, h] = [input.width, input.height];
 		const k = Math.max(1, Math.ceil(Math.max(w, h) / MAP_LONG));
 		const [mw, mh] = [Math.ceil(w / k), Math.ceil(h / k)];
@@ -217,6 +474,9 @@ export class DevelopPass {
 		const d = this.density;
 		const own = this.uniform.slice();
 		own[MONO + 2] = 1;
+		// The film's exposure, without Texture, Clarity or Dehaze, as on the server.
+		own[LOCAL + 2] = 0;
+		own[LOCAL + 3] = 0;
 		this.device.queue.writeBuffer(d.ubo, 0, own);
 		const sigma = (this.uniform[DEVELOPER + 1] * Math.max(w, h)) / k;
 		this.device.queue.writeBuffer(d.params[0], 0, new Float32Array([k, 0, 0, 0]));
@@ -307,7 +567,7 @@ export class DevelopPass {
 		});
 	}
 
-	private groupFor(ubo: GPUBuffer, input: GPUTexture, density: GPUTexture): GPUBindGroup {
+	private groupFor(ubo: GPUBuffer, input: GPUTexture, density: GPUTexture, maps: GPUTexture = this.noMaps): GPUBindGroup {
 		return this.device.createBindGroup({
 			layout: this.layout,
 			entries: [
@@ -317,7 +577,8 @@ export class DevelopPass {
 				{ binding: 3, resource: this.mono.createView() },
 				{ binding: 4, resource: density.createView() },
 				{ binding: 5, resource: this.slideExposures.createView() },
-				{ binding: 6, resource: this.slideResponses.createView() }
+				{ binding: 6, resource: this.slideResponses.createView() },
+				{ binding: 7, resource: maps.createView({ dimension: '2d-array' }) }
 			]
 		});
 	}
@@ -328,8 +589,47 @@ export class DevelopPass {
 		const density = this.needsDensityMap && this.density ? this.density.map : this.noMask;
 		if (density !== this.boundDensity) this.bindGroup = undefined;
 		this.boundDensity = density;
-		this.bindGroup ??= this.groupFor(this.ubo, this.input ?? this.source, density);
-		this.drawWith(this.bindGroup, target, masks);
+		const wantMaps = this.needsLocalMap || this.needsHazeMap;
+		const input = this.developInput();
+		// The maps read the picture before the defringe and profile passes, as the worker's do.
+		if (wantMaps) this.buildMaps(this.input ?? this.proxy!);
+		const maps = wantMaps && this.local ? this.local.maps : this.noMaps;
+		if (maps !== this.boundMaps || input !== this.boundInput) this.bindGroup = undefined;
+		this.boundMaps = maps;
+		this.boundInput = input;
+		this.bindGroup ??= this.groupFor(this.ubo, input, density, maps);
+		// The look, then a soft proof, over the developed picture: the look as the worker applies it, the proof
+		// for the screen alone.
+		const posts = [this.look, this.proof].filter((p): p is Post => !!p);
+		if (!posts.length) return this.drawWith(this.bindGroup, target, masks);
+		const stage = (i: number) => {
+			const t = this.stages[i];
+			if (t?.width === target.width && t?.height === target.height) return t;
+			t?.destroy();
+			return (this.stages[i] = this.device.createTexture({ label: `developed, stage ${i}`, size: [target.width, target.height], format: 'rgba16float', usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING }));
+		};
+		let from = stage(0);
+		this.drawWith(this.bindGroup, from, masks);
+		const encoder = this.device.createCommandEncoder();
+		posts.forEach((p, i) => {
+			const to = i === posts.length - 1 ? target : stage(i + 1);
+			const bind = this.device.createBindGroup({
+				layout: this.lookPipeline.getBindGroupLayout(0),
+				entries: [
+					{ binding: 0, resource: { buffer: p.ubo } },
+					{ binding: 1, resource: from.createView() },
+					{ binding: 2, resource: to.createView() },
+					{ binding: 3, resource: p.table.createView() }
+				]
+			});
+			const pass = encoder.beginComputePass();
+			pass.setPipeline(this.lookPipeline);
+			pass.setBindGroup(0, bind);
+			pass.dispatchWorkgroups(Math.ceil(to.width / 16), Math.ceil(to.height / 16));
+			pass.end();
+			from = to;
+		});
+		this.device.queue.submit([encoder.finish()]);
 	}
 
 	private drawWith(group: GPUBindGroup, target: GPUTexture, masks: GPUBindGroup) {
@@ -349,10 +649,16 @@ export class DevelopPass {
 		this.draw(this.target, this.maskBind);
 	}
 
+	/** Develop into `target` (a `variantTarget`) instead of the output: the split view's compared version. */
+	renderInto(target: GPUTexture) {
+		this.maskBind ??= this.maskGroup(this.maskUbo, this.maskTextures);
+		this.draw(target, this.maskBind);
+	}
+
 	/** A texture of the developed picture's size and format, for `renderVariant`. */
 	variantTarget(label: string): GPUTexture {
 		const t = this.target!;
-		return this.device.createTexture({ label, size: [t.width, t.height], format: 'rgba16float', usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
+		return this.device.createTexture({ label, size: [t.width, t.height], format: 'rgba16float', usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING });
 	}
 
 	/**
@@ -363,6 +669,89 @@ export class DevelopPass {
 		const ubo = this.device.createBuffer({ size: MASK_UNIFORM_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 		this.device.queue.writeBuffer(ubo, 0, maskParams);
 		this.draw(target, this.maskGroup(ubo, textures));
+	}
+
+	/** The source's camera RGB, box-averaged to at most `edge` on its long side: a negative's starting base and balance. */
+	async sourcePixels(edge: number): Promise<[number, number, number][]> {
+		const t = this.source!;
+		const k = Math.max(1, Math.ceil(Math.max(t.width, t.height) / edge));
+		const [w, h] = [Math.floor(t.width / k), Math.floor(t.height / k)];
+		const bytesPerRow = 256 * Math.ceil((t.width * 8) / 256);
+		const buf = this.device.createBuffer({ size: bytesPerRow * t.height, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+		const encoder = this.device.createCommandEncoder();
+		encoder.copyTextureToBuffer({ texture: t }, { buffer: buf, bytesPerRow }, [t.width, t.height]);
+		this.device.queue.submit([encoder.finish()]);
+		await buf.mapAsync(GPUMapMode.READ);
+		const all = new Uint16Array(buf.getMappedRange());
+		const stride = bytesPerRow / 2;
+		const out: [number, number, number][] = [];
+		for (let by = 0; by < h; by++)
+			for (let bx = 0; bx < w; bx++) {
+				const c = [0, 0, 0];
+				for (let y = by * k; y < (by + 1) * k; y++)
+					for (let x = bx * k; x < (bx + 1) * k; x++) for (let ch = 0; ch < 3; ch++) c[ch] += fromHalf(all[y * stride + x * 4 + ch]);
+				out.push([c[0] / (k * k), c[1] / (k * k), c[2] / (k * k)]);
+			}
+		buf.unmap();
+		buf.destroy();
+		return out;
+	}
+
+	/**
+	 * The developed picture's luminance, box-averaged to at most `edge` on its long side: what Upright finds lines
+	 * in. Read back once per request.
+	 */
+	async luminance(edge: number): Promise<{ lum: Float32Array; size: [number, number] }> {
+		const t = this.target!;
+		const k = Math.max(1, Math.ceil(Math.max(t.width, t.height) / edge));
+		const [w, h] = [Math.floor(t.width / k), Math.floor(t.height / k)];
+		const bytesPerRow = 256 * Math.ceil((t.width * 8) / 256);
+		const buf = this.device.createBuffer({ size: bytesPerRow * t.height, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+		const encoder = this.device.createCommandEncoder();
+		encoder.copyTextureToBuffer({ texture: t }, { buffer: buf, bytesPerRow }, [t.width, t.height]);
+		this.device.queue.submit([encoder.finish()]);
+		await buf.mapAsync(GPUMapMode.READ);
+		const lum = new Float32Array(w * h);
+		const all = new Uint16Array(buf.getMappedRange());
+		const stride = bytesPerRow / 2;
+		for (let y = 0; y < h * k; y++) {
+			for (let x = 0; x < w * k; x++) {
+				const i = y * stride + x * 4;
+				lum[Math.floor(y / k) * w + Math.floor(x / k)] += 0.2126 * fromHalf(all[i]) + 0.7152 * fromHalf(all[i + 1]) + 0.0722 * fromHalf(all[i + 2]);
+			}
+		}
+		buf.unmap();
+		buf.destroy();
+		for (let i = 0; i < lum.length; i++) lum[i] /= k * k;
+		return { lum, size: [w, h] };
+	}
+
+	/**
+	 * The proxy's log₂ luminance as the lens pass reads it (retouched), box-averaged to at most `edge` on its long
+	 * side: what a heal's source is chosen by. Read back once per request.
+	 */
+	async proxyLuminance(edge: number): Promise<{ lum: Float32Array; size: [number, number] }> {
+		const t = this.proxy!;
+		const k = Math.max(1, Math.ceil(Math.max(t.width, t.height) / edge));
+		const [w, h] = [Math.floor(t.width / k), Math.floor(t.height / k)];
+		const bytesPerRow = 256 * Math.ceil((t.width * 8) / 256);
+		const buf = this.device.createBuffer({ size: bytesPerRow * t.height, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+		const encoder = this.device.createCommandEncoder();
+		encoder.copyTextureToBuffer({ texture: t }, { buffer: buf, bytesPerRow }, [t.width, t.height]);
+		this.device.queue.submit([encoder.finish()]);
+		await buf.mapAsync(GPUMapMode.READ);
+		const lum = new Float32Array(w * h);
+		const all = new Uint16Array(buf.getMappedRange());
+		const stride = bytesPerRow / 2;
+		for (let y = 0; y < h * k; y++)
+			for (let x = 0; x < w * k; x++) {
+				const i = y * stride + x * 4;
+				lum[Math.floor(y / k) * w + Math.floor(x / k)] += fromHalf(all[i]) + fromHalf(all[i + 1]) + fromHalf(all[i + 2]);
+			}
+		buf.unmap();
+		buf.destroy();
+		for (let i = 0; i < lum.length; i++) lum[i] = Math.log2(Math.max(lum[i] / (3 * k * k), 1e-5));
+		return { lum, size: [w, h] };
 	}
 
 	/**

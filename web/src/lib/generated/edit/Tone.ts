@@ -39,7 +39,21 @@ highlightBleach: number,
  * scene's top end into the picture, and the shoulder compresses it. Stored per edit, so an edit from
  * before `PROCESS_VERSION` 7 keeps the Highlights it was approved with.
  */
-highlightReachEv: number, contrast: number, 
+highlightReachEv: number, 
+/**
+ * Compress out-of-gamut colour in ACEScg (AP1), the space the ACES Reference Gamut Compression's thresholds
+ * were derived for, rather than in the working Rec.2020 it ran in before `PROCESS_VERSION` 9. Stored per
+ * edit so an older one keeps the saturated colours it was approved with; left out of the serialized edit
+ * when on.
+ */
+gamutAp1?: boolean, 
+/**
+ * Highlights, Shadows and Contrast as per-pixel functions of luminance in stops from grey (`Light`,
+ * `develop/light.wgsl`), the same for a RAW and a developed file, and the fade to neutral keyed on clipped
+ * samples — since `PROCESS_VERSION` 10. Off, they are the tone curve's bump, the white point's reach and
+ * the curve's steepness, as an older edit was approved with. Left out of the serialized edit when on.
+ */
+perPixelLight?: boolean, contrast: number, 
 /**
  * Control points over display-encoded values, `[x, y]` in 0…1. Manually drawn only, as of
  * `PROCESS_VERSION` 2 — Highlights and Shadows are `highlights`/`shadows` below, not points in here.

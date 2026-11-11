@@ -111,6 +111,9 @@ const CONTROLS: Control[] = [
 	{ label: 'Shadows', get: (e) => e.tone.shadows ?? 0, show: (v) => signed(v) },
 	{ label: 'Whites', get: view.whites, show: (v) => signed(v) },
 	{ label: 'Blacks', get: view.blacks, show: (v) => signed(v) },
+	{ label: 'Texture', get: (e) => e.presence?.texture ?? 0, show: (v) => signed(v) },
+	{ label: 'Clarity', get: (e) => e.presence?.clarity ?? 0, show: (v) => signed(v) },
+	{ label: 'Dehaze', get: (e) => e.presence?.dehaze ?? 0, show: (v) => signed(v) },
 	{ label: 'Highlight recovery', get: view.highlightRecovery, show: (v) => `${decimals(v)} %` },
 	{ label: 'Saturation', get: (e) => e.saturation ?? 0, show: (v) => signed(v) },
 	...BANDS.flatMap((b) => FIELDS.map((f): Control => ({ label: `${cap(b)} ${f}`, get: (e) => e.mixer[b][f], show: (v) => signed(v) }))),
@@ -162,11 +165,22 @@ export function describeChanges(from: EditParams, to: EditParams): string[] {
 		if (from.lensBlur.range !== to.lensBlur.range) out.push(`Depth of field ${decimals(to.lensBlur.range)}`);
 	}
 	if ((from.haze ?? 0) !== (to.haze ?? 0)) out.push(`Haze ${signed(to.haze ?? 0)}`);
+	if (JSON.stringify(from.colorGrading ?? null) !== JSON.stringify(to.colorGrading ?? null)) out.push(to.colorGrading ? 'Colour grading adjusted' : 'No colour grading');
 	if (ownCurve(from) !== ownCurve(to)) out.push('Curve edited');
 	out.push(...describeGeometry(from.geometry ?? NO_GEOMETRY, to.geometry ?? NO_GEOMETRY));
 	if (!!from.lens !== !!to.lens) out.push(to.lens ? 'Lens correction on' : 'Lens correction off');
 	else if (from.lens && to.lens && JSON.stringify(from.lens) !== JSON.stringify(to.lens)) out.push('Lens correction adjusted');
 	out.push(...describeMasks(from.masks ?? [], to.masks ?? []));
+	const [s0, s1] = [from.spots ?? [], to.spots ?? []];
+	if (s1.length > s0.length) out.push(s1.length - s0.length === 1 ? 'Spot added' : `${s1.length - s0.length} spots added`);
+	else if (s1.length < s0.length) out.push(s0.length - s1.length === 1 ? 'Spot removed' : `${s0.length - s1.length} spots removed`);
+	else if (JSON.stringify(s0) !== JSON.stringify(s1)) out.push('Spots adjusted');
+	if ((from.cameraProfile ?? null) !== (to.cameraProfile ?? null)) out.push(to.cameraProfile ? "The file's camera profile" : 'Camera matrix');
+	if (!from.negative !== !to.negative) out.push(to.negative ? 'Film negative' : 'Positive');
+	else if (from.negative && to.negative && JSON.stringify(from.negative) !== JSON.stringify(to.negative)) out.push('Negative adjusted');
+	if ((from.lut?.id ?? '') !== (to.lut?.id ?? '')) out.push(to.lut ? `LUT ${to.lut.name}` : 'No LUT');
+	else if (from.lut && to.lut && JSON.stringify(from.lut) !== JSON.stringify(to.lut)) out.push(`LUT ${to.lut.name} adjusted`);
+	if (JSON.stringify(from.defringe ?? null) !== JSON.stringify(to.defringe ?? null)) out.push(to.defringe ? 'Defringe adjusted' : 'No defringe');
 	return out;
 }
 
@@ -197,7 +211,9 @@ const MASK_CONTROLS: { label: string; get: (m: MaskAdjustment) => number; show: 
 	{ label: 'blacks', get: (m) => m.blacks ?? 0, show: (v) => signed(v) },
 	{ label: 'saturation', get: (m) => m.saturation, show: (v) => signed(v) },
 	{ label: 'temperature', get: (m) => m.temperature, show: (v) => signed(v) },
-	{ label: 'tint', get: (m) => m.tint, show: (v) => signed(v) }
+	{ label: 'tint', get: (m) => m.tint, show: (v) => signed(v) },
+	{ label: 'sharpness', get: (m) => m.sharpness ?? 0, show: (v) => signed(v) },
+	{ label: 'noise reduction', get: (m) => m.noise ?? 0, show: (v) => signed(v) }
 ];
 
 const layerCurve = (m: MaskAdjustment) => JSON.stringify((m.curve ?? []).filter((p) => !isAnchor(p[0])));
@@ -225,7 +241,15 @@ function describeMasks(from: MaskAdjustment[], to: MaskAdjustment[]): string[] {
 
 /** Sections one version can take from another, as the editor groups its tools. */
 export const PICKS: { id: string; label: string; take: (into: EditParams, from: EditParams) => void }[] = [
-	{ id: 'lens', label: 'Lens correction', take: (e, f) => (e.lens = structuredClone(f.lens ?? null)) },
+	{
+		id: 'lens',
+		label: 'Lens correction',
+		take: (e, f) => {
+			e.lens = structuredClone(f.lens ?? null);
+			if (f.defringe) e.defringe = structuredClone(f.defringe);
+			else delete e.defringe;
+		}
+	},
 	{
 		id: 'geometry',
 		label: 'Crop and straighten',
@@ -234,7 +258,23 @@ export const PICKS: { id: string; label: string; take: (into: EditParams, from: 
 			else delete e.geometry;
 		}
 	},
-	{ id: 'wb', label: 'White balance', take: (e, f) => (e.whiteBalance = structuredClone(f.whiteBalance)) },
+	{
+		id: 'wb',
+		label: 'White balance',
+		take: (e, f) => {
+			e.whiteBalance = structuredClone(f.whiteBalance);
+			if (f.cameraProfile) e.cameraProfile = f.cameraProfile;
+			else delete e.cameraProfile;
+		}
+	},
+	{
+		id: 'grading',
+		label: 'Colour grading',
+		take: (e, f) => {
+			if (f.colorGrading) e.colorGrading = structuredClone(f.colorGrading);
+			else delete e.colorGrading;
+		}
+	},
 	{
 		id: 'light',
 		label: 'Light',
@@ -249,6 +289,8 @@ export const PICKS: { id: string; label: string; take: (into: EditParams, from: 
 			e.tone.blackEv = f.tone.blackEv;
 			e.tone.highlights = f.tone.highlights ?? 0;
 			e.tone.shadows = f.tone.shadows ?? 0;
+			if (f.presence) e.presence = structuredClone(f.presence);
+			else delete e.presence;
 		}
 	},
 	{
@@ -261,6 +303,11 @@ export const PICKS: { id: string; label: string; take: (into: EditParams, from: 
 			else delete e.monochrome;
 			if (f.grain) e.grain = structuredClone(f.grain);
 			else delete e.grain;
+			// A roll's base and contrast are the same frame to frame.
+			if (f.negative) e.negative = structuredClone(f.negative);
+			else delete e.negative;
+			if (f.lut) e.lut = structuredClone(f.lut);
+			else delete e.lut;
 		}
 	},
 	{ id: 'curve', label: 'Curve', take: (e, f) => (e.tone.curve = structuredClone(f.tone.curve)) },

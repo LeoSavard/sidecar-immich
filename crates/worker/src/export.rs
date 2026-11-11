@@ -76,7 +76,37 @@ pub struct Kit {
     pub warp: sidecar_engine::warp::WarpPass,
     pub brush: sidecar_engine::brush::Brush,
     pub depth: sidecar_engine::depth::DepthPass,
+    pub retouch: sidecar_engine::retouch::RetouchPass,
     pub lensfun: std::sync::Arc<crate::lensfun::Lensfun>,
+}
+
+/// The edit's retouch spots applied to `source`, a texture `flip` away from the edit's oriented frame (0 for an
+/// oriented one), as a new texture; `None` when the edit has none. First of all, before detail and the lens.
+pub fn retouch(
+    kit: &Kit,
+    rendering: &Rendering,
+    edit: &EditParams,
+    source: &wgpu::Texture,
+    flip: i32,
+) -> Option<wgpu::Texture> {
+    if edit.spots.is_empty() {
+        return None;
+    }
+    let m = sidecar_color::geometry::sensor_from_oriented(flip);
+    let size = [source.width(), source.height()];
+    let spots: Vec<_> = edit
+        .spots
+        .iter()
+        .map(|s| {
+            sidecar_engine::retouch::PixelSpot::new(s, size, |p| {
+                sidecar_color::geometry::map(&m, p)
+            })
+        })
+        .collect();
+    // Red eye judges red in white-balanced light: the camera's as-shot balance, as the browser does.
+    let m = rendering.color.as_shot_mul;
+    let wb = [m[0] as f32, m[1] as f32, m[2] as f32];
+    Some(kit.retouch.apply(&kit.gpu, source, &spots, wb))
 }
 
 pub fn detail_settings(edit: &EditParams) -> sidecar_engine::detail::DetailSettings {
@@ -87,6 +117,21 @@ pub fn detail_settings(edit: &EditParams) -> sidecar_engine::detail::DetailSetti
         sharpen_amount: d.sharpen_amount as f32,
         sharpen_radius: d.sharpen_radius as f32,
         sharpen_iterations: d.sharpen_iterations,
+        noise_model: d.noise_model,
+        // Slot `i` is `edit.masks[i]`, as the mask textures are.
+        layers: edit
+            .masks
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.renders() && (m.noise != 0.0 || m.sharpness != 0.0))
+            .map(|(slot, m)| sidecar_engine::detail::LayerDetail {
+                slot,
+                noise: m.noise as f32,
+                sharpness: m.sharpness as f32,
+                amount: (m.amount / 100.0) as f32,
+                invert: m.invert,
+            })
+            .collect(),
     }
 }
 
@@ -197,20 +242,40 @@ impl Rendering {
                 if !layer.renders() {
                     return None;
                 }
-                let base = masks.get(i).cloned().flatten().map(|m| {
-                    sidecar_engine::upload_rgba16(
-                        &kit.gpu,
-                        &m.oriented(sidecar_engine::inverse_flip(flip)),
-                    )
-                });
+                // Painted masks are at the source's resolution up to 4,096 px on the long edge: a mask is
+                // sampled through a linear filter, and nothing a brush or a gradient draws needs more.
+                let scale = (MASK_EDGE as f64 / frame[0].max(frame[1]) as f64).min(1.0);
+                let size = frame.map(|v| ((v as f64 * scale).round() as u32).max(1));
+                let base = match (
+                    &layer.gradient,
+                    layer.mask == sidecar_color::params::GRADIENT,
+                ) {
+                    // A gradient is drawn, in the source's orientation, from where it sits in the photo as
+                    // shown.
+                    (Some(g), true) => {
+                        let shown = if flip & 4 != 0 {
+                            [size[1], size[0]]
+                        } else {
+                            size
+                        };
+                        Some(kit.brush.gradient(
+                            &kit.gpu,
+                            &g.uniform(shown, size, |p| {
+                                sidecar_color::geometry::map(&to_source, p)
+                            }),
+                        ))
+                    }
+                    _ => masks.get(i).cloned().flatten().map(|m| {
+                        sidecar_engine::upload_rgba16(
+                            &kit.gpu,
+                            &m.oriented(sidecar_engine::inverse_flip(flip)),
+                        )
+                    }),
+                };
                 if layer.strokes.is_empty() && layer.range.is_none() && layer.edge.is_none() {
                     return Some(self.correct(kit, &geometry, base?));
                 }
-                // A range, strokes or an edge: painted, the range windowing the base first, the edge last. At the source's resolution
-                // up to 4,096 px on the long edge: a mask is sampled through a linear filter, and nothing a
-                // brush draws needs more.
-                let scale = (MASK_EDGE as f64 / frame[0].max(frame[1]) as f64).min(1.0);
-                let size = frame.map(|v| ((v as f64 * scale).round() as u32).max(1));
+                // A range, strokes or an edge: painted, the range windowing the base first, the edge last.
                 let strokes: Vec<_> = layer
                     .strokes
                     .iter()
@@ -347,6 +412,7 @@ pub fn masks_for<'a>(
     textures: &'a [Option<wgpu::Texture>],
     frame: [f32; 4],
     slide_response: &'a [f32],
+    look: Option<&'a crate::luts::Loaded>,
 ) -> sidecar_engine::Masks<'a> {
     let mut params = packed.masks;
     params.frame = frame;
@@ -356,6 +422,11 @@ pub fn masks_for<'a>(
         curves: &packed.mask_curves,
         mono: &packed.mono_lut,
         density: None,
+        local: None,
+        haze: None,
+        profile: packed.profile.as_ref(),
+        defringe: packed.defringe.as_deref(),
+        look: look.map(crate::luts::Loaded::look),
         slide_exposure: &packed.slide_exposure,
         slide_response,
     }
@@ -477,9 +548,11 @@ pub fn srgb_encode(v: f32) -> f32 {
 }
 
 pub fn icc_for(space: DisplaySpace) -> &'static [u8] {
+    static REC2020: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
     match space {
         DisplaySpace::Srgb => SRGB_ICC,
         DisplaySpace::DisplayP3 => P3_ICC,
+        DisplaySpace::Rec2020 => REC2020.get_or_init(sidecar_color::icc::rec2020),
     }
 }
 
@@ -574,12 +647,31 @@ pub fn render(
     stage(tx, "decode", 0.02);
     stage(tx, "demosaic", 0.15);
     let (mut source, flip, rendering) = full_source_for(kit, &req.path)?;
+    if let Some(retouched) = retouch(kit, &rendering, &req.edit, &source, flip) {
+        stage(tx, "retouch", 0.3);
+        source = retouched;
+    }
 
+    // Masks cover the whole frame, here and in develop: the detail pass reads them for its layers.
+    let mask_textures = rendering.mask_textures(
+        kit,
+        &req.edit,
+        masks,
+        flip,
+        [source.width(), source.height()],
+    );
     let settings = detail_settings(&req.edit);
     if !settings.is_noop() {
         stage(tx, "detail", 0.35);
-        let sigma = kit.detail.noise_sigma(&kit.gpu, &source)?;
-        source = kit.detail.apply(&kit.gpu, source, sigma, &settings);
+        let noise = kit.detail.noise(&kit.gpu, &source)?;
+        let frame = [0.0, 0.0, source.width() as f32, source.height() as f32];
+        let layer_masks = sidecar_engine::detail::DetailMasks {
+            textures: mask_textures.iter().map(Option::as_ref).collect(),
+            frame,
+        };
+        source = kit
+            .detail
+            .apply(&kit.gpu, source, &noise, &settings, Some(&layer_masks));
     }
     if req.edit.lens.is_some() {
         stage(tx, "lens", 0.42);
@@ -598,19 +690,19 @@ pub fn render(
     let packed = rendering.pack(&req.edit, req.color_space);
     let profile = crate::stocks::for_edit(&req.edit);
     let slide_response = crate::stocks::response(&profile);
-    let mask_textures = rendering.mask_textures(
-        kit,
-        &req.edit,
-        masks,
-        flip,
-        [source.width(), source.height()],
-    );
+    let look = crate::luts::for_edit(&req.edit, req.color_space)?;
     let developed = kit.develop.render(
         &kit.gpu,
         &source,
         &packed.uniform,
         &packed.lut,
-        &masks_for(&packed, &mask_textures, [0.0; 4], slide_response),
+        &masks_for(
+            &packed,
+            &mask_textures,
+            [0.0; 4],
+            slide_response,
+            look.as_ref(),
+        ),
     )?;
     drop(source);
     drop(mask_textures);

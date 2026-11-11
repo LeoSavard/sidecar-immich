@@ -2,21 +2,29 @@
 //! Colour maths shared by the worker and the browser (via wasm32). Everything the develop shaders need that
 //! is cheaper to compute once per edit than once per pixel lives here.
 
+pub mod auto;
 pub mod camera;
 pub mod cct;
+pub mod color_range;
+pub mod dcp;
 pub mod depth;
 pub mod developer;
 mod film_data;
 pub mod geometry;
+pub mod icc;
 pub mod lens;
+pub mod lut;
+pub mod mask_refine;
 pub mod mat;
 pub mod params;
+pub mod process;
 pub mod slide;
 pub mod spectral;
 mod spectral_data;
 pub mod spline;
 pub mod stock;
 pub mod tone;
+pub mod upright;
 
 pub use params::{DevelopParams, DisplaySpace, EditParams, Packed, SourceKind, pack};
 
@@ -34,7 +42,11 @@ mod uniforms {
                 R::of::<crate::params::DevelopParams>(),
                 R::of::<crate::params::MaskLayer>(),
                 R::of::<crate::params::MaskParams>(),
+                R::of::<crate::params::ProfileParams>(),
+                R::of::<crate::params::DefringeParams>(),
+                R::of::<crate::lut::LookParams>(),
                 R::of::<crate::params::EdgeParams>(),
+                R::of::<crate::params::GradientParams>(),
                 R::of::<crate::depth::DepthParams>(),
                 R::of::<crate::depth::DepthRefineParams>(),
                 R::of::<crate::geometry::WarpParams>(),
@@ -60,6 +72,10 @@ mod uniforms {
         assert_eq!(
             number(develop, "DEVELOPER") * 4,
             std::mem::offset_of!(DevelopParams, developer)
+        );
+        assert_eq!(
+            number(develop, "FILM") * 4,
+            std::mem::offset_of!(DevelopParams, film)
         );
         assert_eq!(
             number(pack, "DEVELOP_UNIFORM_BYTES"),

@@ -107,6 +107,11 @@ impl Ml {
         })
     }
 
+    /// The folder the shipped weights were found in.
+    pub fn models_dir(&self) -> &Path {
+        &self.models
+    }
+
     fn start(&self) -> Result<Running> {
         let (ours, theirs) = UnixStream::pair()?;
         let child = Command::new(&self.program)

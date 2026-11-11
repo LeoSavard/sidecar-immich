@@ -7,6 +7,8 @@ version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+flate2 = "1"
+half.workspace = true
 base64.workspace = true
 roxmltree.workspace = true
 jxl-oxide.workspace = true

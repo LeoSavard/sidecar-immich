@@ -47,9 +47,15 @@ fn grain_octave(p: vec2i, spacing: f32, octave: u32) -> f32 {
 // The grain at pixel `p` of the frame, for a grain `size` pixels across at this rendering: variance 1 where
 // both octaves are larger than a pixel, less where pixels average them.
 fn grain_noise(p: vec2i, size: f32) -> f32 {
+  return grain_noise_layer(p, size, 0u);
+}
+
+// `grain_noise` drawn from octaves of its own: layer 0 is the one grain of black and white and neutral rendering,
+// layers 1–3 colour film's red, green and blue emulsions, each grained independently of the others.
+fn grain_noise_layer(p: vec2i, size: f32, layer: u32) -> f32 {
   let half = 0.5 * size;
-  let clumps = grain_octave(p, max(size, 1.0), 0u) * min(size, 1.0);
-  let grains = grain_octave(p, max(half, 1.0), 1u) * min(half, 1.0);
+  let clumps = grain_octave(p, max(size, 1.0), 2u * layer) * min(size, 1.0);
+  let grains = grain_octave(p, max(half, 1.0), 2u * layer + 1u) * min(half, 1.0);
   return (clumps + 0.5 * grains) * 0.8944271910; // 1 / sqrt(1 + 0.5²)
 }
 
@@ -70,5 +76,14 @@ fn grain_apply(c: vec3f, n: f32, stops: f32, stain: f32, tone: vec4f, developed:
     let t = clamp((log2(max(y, 1e-10) / 0.18) - tone.x) / (tone.y - tone.x), 0.0, 1.0);
     sigma = stops * sqrt((0.2 + t) / 1.2) * (1.0 - stain * t);
   }
+  return c * exp2(sigma * n - 0.5 * sigma * sigma * GRAIN_LN2);
+}
+
+// Colour film's grain (`Grain::layered`): each channel is its own emulsion, so each flickers by its own noise `n`,
+// by as much as its own density gives it — `grain_apply`'s rule, applied to each layer's exposure rather than to
+// the luminance. Each channel keeps its mean.
+fn grain_apply_layers(c: vec3f, n: vec3f, stops: f32, stain: f32, tone: vec4f) -> vec3f {
+  let t = clamp((log2(max(c, vec3f(1e-10)) / 0.18) - tone.x) / (tone.y - tone.x), vec3f(0.0), vec3f(1.0));
+  let sigma = stops * sqrt((0.2 + t) / 1.2) * (1.0 - stain * t);
   return c * exp2(sigma * n - 0.5 * sigma * sigma * GRAIN_LN2);
 }

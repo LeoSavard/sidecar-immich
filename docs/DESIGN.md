@@ -7,6 +7,392 @@ Source: the architecture plan (PWA entry, XMP sidecars, server-side demosaic, We
 
 Where the code differs from the text below, the code and these notes win.
 
+- **The guided filter, as a primitive** (`sidecar_engine::guided`; `client/guided_stats`, `_box`, `_coef`,
+  `_apply.wgsl`, so the browser composes the same passes): He, Sun and Tang's filter in He and Sun's fast
+  subsampled form. Statistics on a grid `subsample` times coarser than the output, each texel the mean of its
+  footprint (products averaged, not multiplied after averaging, since the covariance needs E[I·p]); box means
+  normalised by the taps inside the image; coefficients and their box means on that grid in rgba32float —
+  the variance is a difference of means and half precision cancels it — then q = mean(a)·I + mean(b) at full
+  resolution against the full-resolution guide. The guide is linear luminance, or log₂ luminance so that ε
+  is relative to the level (a doubling of light counts the same in the shadows as in the highlights). Checked
+  against an f64 implementation of the paper's equations (largest difference 9.4e-4, half-float output), and
+  for its defining behaviour: a noisy step keeps the guide's edge while each flat side is smoothed, at
+  subsample 1 and 4, linear and log guide; a constant input is returned unchanged. No feature uses it yet.
+
+- **Gaussian and Laplacian pyramids on the GPU** (`sidecar_engine::pyramid`; `client/pyr_reduce.wgsl`,
+  `client/pyr_expand.wgsl`, composed by the browser too): Burt and Adelson's 5-tap binomial kernel, levels of
+  ceil(n/2), a clamped border, and an expansion that renormalises its weights per parity so a flat level
+  expands to itself. One expand pass serves three uses (`mode`): the expansion, a Laplacian level (fine −
+  expansion), and collapse (band + expansion) — the same arithmetic both ways, so collapsing a pyramid
+  returns the image to half-float rounding (1.7e-3 over six levels at 203×117, an odd size, in the test).
+  The shared primitive under local Laplacian filtering, multi-band blending, exposure fusion and focus
+  stacking; no feature uses it yet.
+
+- **Gamut compression in ACEScg** (`PROCESS_VERSION` 9, `Tone::gamut_ap1`, `develop/gamut.wgsl`): the ACES
+  Reference Gamut Compression was already in the pipeline, but it ran in the working Rec.2020, while its
+  thresholds and limits were derived in ACEScg (AP1). The working colour now goes to AP1 for it and comes back,
+  with a Bradford adaptation from D65 to the ACES white, so a neutral stays exactly on the achromatic axis
+  (`mat::rec2020_to_ap1`; a test checks the shader's constants against it). Edits from before version 9 keep
+  compressing in Rec.2020, and "take up today's rendering" moves them; the editor's reference list now also
+  carries `noiseModel`, which version 8 had left off.
+  Measured: monochromatic lights from 400 to 700 nm, the extreme LEDs and neon approach, shift hue 6.17° on
+  average in OKLab, against 6.33° before. Greens and yellows improve; violet and deep red worsen by a few
+  tenths of a degree. The two spaces are close, so the change is small: mean ΔE76 0.6 on the parity source,
+  13 % of pixels above 1, and the largest moves in the most saturated red-orange transitions. Parity cases
+  `graded-p3` (new) and `gamut-legacy` (old) are both ΔE 0.0000 between renderers. It wants the owner's A/B on
+  LED and neon frames.
+
+- **Detail per layer** (§15, `MaskAdjustment::{sharpness, noise}`, `detail/strength.wgsl`): a mask layer adds
+  sharpening and luminance noise reduction to the Detail section's own, −100…100 each, where its mask is.
+  The detail pass reads a strength map: noise reduction in red, sharpening in green, 0…1 per pixel. It is
+  the global settings plus each layer's offset weighted by its mask as develop weighs it (inverted, times
+  its amount). The wavelet shrink's luminance threshold and the Richardson–Lucy blend take their strength
+  from it. With no layers it is one texel of the global values, so nothing else changed. Chroma noise
+  reduction and the sharpening radius stay global.
+  - Masks are in develop's frame and detail runs on the sensor's pixels before the lens pass, so a layer's
+    mask is read at the same place in the frame: a distorting lens's few pixels off near the corners, under
+    an edge that is usually feathered.
+  - Like the global Detail, it is the server's: the 1:1 loupe and export. The editor's preview doesn't run
+    detail, and the panel says so.
+  Checked:
+  - Engine: a layer over half a noisy frame, with no global noise reduction, takes its half's noise from
+    0.0050 to 0.0001 and leaves the other half as it was. Inverted, it does the other half; at half its
+    amount it lands in between.
+  - `web/scripts/detail-layer-smoke.mjs` on the worker's loupe: a brush layer over the left half denoises
+    that half of a 1:1 tile (0.54 → 0.24) and leaves the right half identical.
+
+- **Noise reduction against each photo's measured noise** (`PROCESS_VERSION` 8, `Detail::noise_model`):
+  `sidecar_engine::noise` fits σ² = a·y + b to the luminance of a central 1024² crop — 5×5 local mean as the
+  level, a 4-neighbour high-pass (noise gain √1.25) as the noise, the flattest 40 % of each of 24 log-spaced
+  level bins, a robust MAD per bin, weighted least squares with a and b held non-negative (Foi, Trimeche,
+  Katkovnik and Egiazarian 2008). `to_opponent.wgsl` then applies the generalized Anscombe transform for
+  that model, chroma scaled by its derivative as before, and `from_opponent.wgsl` inverts luminance with
+  Mäkitalo and Foi's closed-form exact unbiased inverse (2013), falling back to the algebraic one below D = 1.
+  The noise level after the transform is still measured, so a model that is a little off changes only the
+  balance across levels, never the overall strength. Checked: a known model is recovered from synthetic
+  Poisson-Gaussian patches (gain within 0.3 %, read within 2 %); the transform gives unit variance at every
+  level and the inverse returns the mean; on eight bands a stop apart, 6 to 800 photo-electrons, the model
+  denoises every band by the same factor (0.06–0.10 of its noise) where the fixed transform kept 59 % of the
+  deepest band's noise and 6.5 % of the brightest's; every band's mean moves by under a tenth of its noise (the
+  deepest by +14 % of its level at about six photo-electrons, where soft thresholding of skewed noise is not
+  quite unbiased; the fixed transform moved it −7 %). `sidecar-dev noise` and `denoise-truth` are the tools.
+  An edit saved before version 8 that denoised keeps the fixed transform (`migrate`); one that never did gets
+  the model if it starts to; "take up today's rendering" switches it on.
+
+- **Writing a linear DNG** (`sidecar_raw::dng_write`; read back by `linear_dng`): what every merge will
+  produce, so its result is an original like any other (docs/research/multi-frame-and-denoise.md).
+  Camera-native linear RGB as 16-bit IEEE floats — `PhotometricInterpretation` LinearRaw, `SampleFormat` 3 —
+  in 256² tiles, Deflate with TIFF Technical Note 3's floating-point predictor, the directory first so readers
+  that look for it near the start find it. The source camera's `ColorMatrix1/2` with their illuminants and
+  `AsShotNeutral`, `BaselineExposure`, the measured noise in DNG's own `NoiseProfile`, and `WhiteLevel` 1 —
+  the specification's default for floats, stated because LibRaw otherwise assumes 65535 and scales every
+  sample to zero. `LinearResponseLimit` says where a sample stops being a measurement (1.0 for a single
+  frame; absent for a merge with nothing saturated, whose every value is light), and the reader flags clipping
+  there and nowhere else for a float file. Checked: written and read back to half-float precision at an odd
+  size with light up to 5× white; LibRaw — an independent decoder — opens it and reads the same picture
+  (bright/dark ratio 21.95 against 21.91 after its integer conversion; LibRaw only takes a file as tiled when
+  a tile fits inside the image both ways, so nothing smaller than 256 px an edge); ExifTool validates it.
+  `sidecar-dev to-dng <raw> <out.dng> [png]` writes one from a raw's full-resolution demosaic, and the DNG
+  develops identically to that demosaic (ΔE2000 mean 0.000, p99 0.000, max 1.1). `sidecar-dev compare-png`
+  is the measure. A 20.8 MP frame is 69 MB and takes 9–17 s to write.
+
+- **Gradients** (§15): a layer whose `mask` is `gradient` carries a `Gradient` — `linear` (full at `from`, none
+  at `to`) or `radial` (full inside an ellipse's inner `1 − feather` of its radius, none at its edge) — in the
+  photo as shown before lens correction, the frame strokes are stored in. Its mask is drawn analytically by
+  `client/gradient.wgsl` and becomes the layer's *base*, exactly as a model's mask is for other layers, so
+  range, strokes, edge, invert and amount apply unchanged. The weight is linear in position: a layer adds stops
+  weighted by its mask, so that is a density linear in position — a soft graduated ND filter. The uniform is
+  packed in Rust (`Gradient::uniform`, through the wasm in the browser), mapping the shape as *points* into
+  the target frame, so the worker's unoriented textures and any turn or mirror come out right without a
+  special case (tested: a quarter turn gives every point the same weight). The editor's handles are placed
+  by solving `screenToSource` with a few Newton steps, since lens correction, crop and straighten have no
+  closed-form inverse. Checked: the shader against `Gradient::weight` to one 8-bit step; and
+  `web/scripts/gradient-smoke.mjs` end to end — added in the editor, two stops down, its handle dragged, saved —
+  with the browser's canvas and the worker's `/preview` both darker at the top and unchanged at the bottom.
+
+- **Dehaze without depth** (§7, `Presence::dehaze`, `sidecar_engine::haze`, `client/haze_*.wgsl`,
+  `develop/haze.wgsl`; a slider under Clarity): Koschmieder's I = J·t + A·(1 − t) on the scene's light, where it
+  holds. This works without the depth model; the Depth section's Haze is the same air, with distance from the
+  model.
+  - **Transmission:** the dark channel prior (He, Sun and Tang), computed on the white-balanced working space at
+    the adjacency map's grid: a patch of 1.2 % of the long edge, ω 0.95.
+  - **Airlight:** the colour where the patch-minimum dark channel is greatest. One workgroup reduces it on the
+    GPU, so the browser reads nothing back.
+  - **Refinement:** the guided filter's coefficients against log luminance (radius 4 %, ε 0.01), applied inside
+    develop at each pixel's own value.
+  - **The amount** changes the air's extinction: t → t^e, e = 1 − amount. +100 removes the haze the prior
+    finds, −100 doubles the optical depth, and removing and adding are the same physics. It is written
+    without division: I' = A + (I − A)·t^(e−1), with t ≥ 0.1.
+  - **Per-pixel boundary constraint** (Meng et al., ICCV 2013): the scene's radiance can't be negative, so
+    t ≥ 1 − min(I/A). It never exceeds the true transmission. It removed an orange tint that the guided map's
+    too-low transmission put into lit hair against a blown sky, by over-inverting it past zero.
+  - **Bindings:** develop was at the fragment stage's sixteen sampled textures, so the whole-frame maps (local
+    contrast, Dehaze's, the airlight) now travel as one three-layer array (`MAP_LAYERS`) in both renderers.
+  Checked:
+  - A synthetic scene hazed over a depth ramp under a sky: the airlight is found to within 0.1 %, and the
+    dehazed render's error from the clear scene falls from 0.200 to 0.027. Doubling the haze raises the error
+    1.28×. A tile matches the whole frame.
+  - Parity case `dehaze`: ΔE 0.0000.
+  - `local-smoke.mjs`: Dehaze +80 raises local contrast in the canvas (+27 %) and in the worker's preview
+    (+30 %), and the saved edit holds it.
+  - On a real overcast frame, +60 restores distant colour and contrast. It also deepens near subjects, since
+    the prior removes airlight wherever it thinks it sees some. That is a look for the owner's A/B.
+
+- **Texture and Clarity — local contrast** (§7, `EditParams::presence`, `develop/local.wgsl`, sliders at the
+  foot of Light): detail in log luminance at two scales, raised or lowered. Each band is the difference
+  between edge-preserving bases: self-guided filters of the source's log luminance (the guided filter, #59,
+  with a new "filter the guide itself" channel). Texture's base is a radius of 0.3 % of the long edge with
+  ε = 0.04 (detail under about ⅕ stop); Clarity's is 2.5 % with ε = 0.25 (detail under about ½ stop). The
+  coefficients are computed once per frame on the adjacency map's grid (≤ 1,024 on the long edge, the whole
+  frame, lens-corrected like it), packed into one RGBA32F texture (`client/local_pack.wgsl`), and applied
+  inside develop against each pixel's own luminance. That is the fast guided filter's point: edges come
+  from the full-resolution pixel, so preview and export agree and a loupe tile given the whole frame's map
+  matches the whole. The change is one gain on all three channels, so hue and saturation stay, and it is
+  limited smoothly to ±1.5 stops. Exposure, white balance and masks don't move the bands, because they come
+  from the source. The browser builds the same map with the same passes (`web/src/lib/gpu/local.ts`); the
+  adjacency map's own render leaves local contrast out on both sides. At 0 the pass doesn't run: no
+  `PROCESS_VERSION` bump.
+  Checked:
+  - Engine: a ±0.15-stop ripple 60 px across rises 1.78× at Clarity +100.
+  - Halos: a 3.3-stop edge shows −0.11 stop on its dark side 8 px out at Clarity +100 (the guided filter's
+    windows that straddle an edge; bounded in the test). Texture shows none.
+  - Both bands at 0 change nothing, bit for bit, and a tile matches the whole frame to 1e-3.
+  - Parity case `local`: ΔE 0.0000.
+  - `web/scripts/local-smoke.mjs` in Chromium on the GPU: Clarity +80 raises local contrast 11 % in the
+    canvas and in the worker's preview at the same brightness; −80 on both lowers it 21 %; the saved edit
+    holds it; both back at 0 leaves nothing in the edit. The constants are a look and want the owner's A/B.
+
+- **Colour grading** (§7, `develop/grading.wgsl`, `EditParams::color_grading`): four wheels — shadows,
+  midtones, highlights, global — each a hue, a saturation and a luminance, plus Blending and Balance. It runs
+  after the tone map and the mixer, on the picture as it will be seen, in OKLab: a wheel adds a fixed (a, b)
+  toward its hue — chroma only, up to 0.06 — and its luminance shifts L only, up to ±0.15, so a colour can't
+  change brightness by accident and lightness can't tint. The ranges are smooth weights over OKLab L that sum to
+  one: shadows fall from black to a crossover at L = 0.5 (Balance moves it from 0.25 to 0.75), highlights rise
+  from it to white, midtones are the rest; Blending sets the exponent that widens or narrows them. Lightness
+  is applied before colour, so a darkened shadow is tinted as the tone it becomes. Absent, the edit carries no
+  field and the pass doesn't run, so no `PROCESS_VERSION` bump. The uniform grew to 512 bytes, the new fields at
+  its end so the browser's float offsets are unchanged. The wheel draws its ring in CSS `oklch()`, so the colour
+  under a point is the hue it pushes toward. Checked: packing (at rest is off; a wheel moves only chroma),
+  a `grading` parity case (ΔE 0.0000 against native), and in Chromium on the GPU — dragging the shadows wheel
+  to upper left gives hue 153°, saturation 67, changes the picture and saves.
+
+- **Rec.2020 export** (§9): `DisplaySpace::Rec2020`, export only — no screen shows it and no WebGPU canvas
+  takes it, so the editor's viewing choice stays sRGB or P3. The working space already is linear Rec.2020, so
+  its matrix is the identity and the encoding is the sRGB curve every export uses. The file carries an ICC v4
+  profile *synthesised* from the primaries (`sidecar_color::icc::rgb_profile`, written from ICC.1:2022):
+  colorants adapted to D50 by Bradford, `chad`, D50 `wtpt`, and the sRGB function as a parametric type-3
+  curve. Checked: built from sRGB's primaries it matches the bundled Compact-ICC-Profiles `sRGB-v4.icc` tag by
+  tag (within 6e-4); Rec.2020's unadapted luminance row is BT.2020's 0.2627, 0.6780, 0.0593; and an export
+  through the server, read back by ExifTool, states R (0.6735, 0.2790, −0.0019), G (0.1657, 0.6753, 0.0300),
+  B (0.1251, 0.0456, 0.7968) — the published D50 Rec.2020 colorants. Names end `-rec2020`.
+
+- **Aligning frames** (`sidecar_merge::align`, a new crate for the multi-frame work): FAST-9 corners scored and
+  spread over a grid, oriented by intensity centroid, described by steered BRIEF with BRIEF's Gaussian sampling
+  pattern from a fixed seed, matched by Hamming distance with the ratio test and a cross-check, and a
+  homography by RANSAC over normalised four-point DLTs refined on its inliers — all from the papers. It runs on
+  log luminance, so a bracket's exposure difference is an offset both FAST and BRIEF ignore: one aligner for
+  brackets and panoramas, and a homography is the exact model for a camera turning about its lens. Checked: a
+  known homography (pan, turn, perspective) recovered from a copy two stops darker to under 0.75 px at the
+  corners; unrelated frames don't align (the same frame turned half round does, as it should). On the library,
+  `sidecar-dev align` aligns a 9-frame ZV-1 bracket across 8 EV with 366–528 inliers and sub-pixel error — and
+  shows a 2 px handheld drift per frame — and finds a four-frame D3 panorama by its overlaps.
+
+- **HDRIs** (`sidecar_merge::hdri`, `sidecar-dev hdri <out.exr|.hdr> <raw>… [--brackets n] [--space
+  rec709|rec2020|acescg] [--half] [--absolute] …`): merge first, stitch second, as the research says —
+  each direction's bracket through the HDR merge (`merge_bracket`, now shared with `hdr`), then the merged
+  frames through the panorama solve onto a 2 : 1 equirectangular canvas of the whole sphere (`layout(…,
+  sphere: true)`). The bracket size is found from the EXIF exposures' repeating pattern unless given. Output is
+  scene-linear and white-balanced (the reference's as-shot white), in linear Rec.709 (the default; what most
+  renderers assume), Rec.2020 or ACEScg, with no tone curve. The absolute scale is ISO 12232's saturation
+  speed — a value of 1 is 78·N²/(0.65·S·t) cd/m² — written as OpenEXR's `whiteLuminance` and Radiance's
+  `EXPOSURE` (or applied to the pixels with `--absolute`); makers' ISO ratings make it good to about a third
+  of a stop, and the tool says so. OpenEXR through the `exr` crate (BSD-3-Clause, ZIP scanlines, f32 or half);
+  Radiance RGBE with run-length scanlines written here. Checked: both files round-trip (RGBE to its 8-bit
+  mantissa, EXR exactly, with `chromaticities` and `whiteLuminance` read back), bracket periods found, a
+  sphere layout 2 : 1 and wrapping, and the D3 panorama placed on the sphere (3 % of it) with the right colour.
+  No 360° set exists in the library to test the whole path; the owner may shoot one.
+
+- **Focus stacking** (`sidecar_merge::focus`, `sidecar-dev stack <out.dng> <raw>… [--depth <png>]`):
+  defocus is a low-pass filter, so a point is sharpest in the frame focused on it. Instead of picking the
+  sharpest sample per pixel (which follows noise where there's no detail, and leaves halos where it switches),
+  a **depth map** is built: the index of the frame with the highest sum-modified Laplacian (Nayar and Nakagawa,
+  PAMI 1994) of log luminance. Each index is trusted by how far that frame stands out from the mean, then
+  spread by normalised push–pull into the flat regions that carry no focus information. A point between two
+  focus planes takes from both, linearly, and the frames are joined by the multi-band blend — now
+  `sidecar_merge::blend`, shared with the panorama. Alignment is a chain of homographies (neighbours differ
+  least in focus) composed onto the middle frame, so focus breathing's scale is included, and the output keeps
+  what every frame saw. It runs in two streaming passes, one full frame at a time. Checked on a synthetic stack
+  (five focus planes over a depth ramp with a near square): the depth map finds both, and the stack's error
+  is 0.026 against 0.075 for the best single frame and 0.025 for a nearest-focus oracle. The tool refuses
+  what isn't a stack: an alignment must pass Brown–Lowe's inlier test, its scale must stay within focus
+  breathing (±10 %), and the aligned neighbours' coarse pictures — box-blurred past any defocus — must agree
+  within 0.15 stops (`focus::MOVED`); `--force` overrides. No focus stack was found in the library: a scan of
+  every burst whose EXIF focus distance changes monotonically turned up refocusing on moving subjects, which
+  the guards reject (the first one tried failed at the third pair).
+
+- **Panoramas** (`sidecar_merge::pano`, `sidecar-dev pano <out.dng> <raw>… [--projection …] [--scale s]
+  [--no-crop] [--lensfun <dir>] [--png <out>]`): frames turned about one point, stitched into one linear DNG,
+  after Brown and Lowe (IJCV 2007), from the papers. Every pair is matched on proxies and kept when its inliers
+  pass Brown–Lowe's test; each inlier is then **refined by Lucas–Kanade** on its 15 × 15 patch (translation and
+  a log-luminance offset), because FAST's corner positions slide along curved edges as the view changes —
+  that alone took the synthetic rig's residual from 0.60 to 0.10 px and its focal-length error from 2 % to
+  0.05 %. The camera only turns: focal length starts from the homographies (Shum–Szeliski's orthogonality
+  conditions), rotations from a spanning tree by Horn's absolute orientation, then Levenberg–Marquardt over
+  every rotation and the focal length (Huber loss, outliers dropped, adjusted again). Distortion, lateral CA
+  and vignetting are the file's or lensfun's profile; without one the adjustment fits k₁ and the exposure
+  solve fits vignetting. **Wave correction** levels the horizon from the plane of the cameras' horizontal axes
+  (each frame's EXIF orientation says which sensor axis that is). **Exposure** is one gain per frame — exact
+  in linear raw — solved by robust least squares on log luminance sampled over every overlap, EXIF as a weak
+  prior. Seams follow the nearest optical axis; **multi-band blending** (Burt–Adelson, push–pull fill outside
+  each frame, bands up to 2⁷) runs in linear light, so noise stays unbiased. Projections: rectilinear,
+  cylindrical, spherical (equirectangular, wrapping a full turn), chosen by coverage when not given; the
+  output is cropped to the largest covered rectangle; one full frame is held at a time. Checked on synthetic
+  rigs rendered from a scene on the sphere, with barrel distortion, 25 % vignetting and 2 EV of exposure:
+  focal to 0.05 %, k₁ to 0.0001, rotations to 0.05°, gains to 0.01 %, a level horizon, and the canvas matching
+  the scene's radiance to a median 0.00 %, p95 1.2 % — and 2.9 % across the join of an eight-frame full
+  turn. On the library's D3 panorama (2024-08-16, 60 mm Micro-Nikkor, portrait frames): the solved focal
+  length is 60.8 mm against EXIF's 60, gains within 0.06 EV, no visible seam, 6880 × 4152 in 11 s — and
+  LSP_1020 is left out, rightly: 9 % overlap of defocused grass gives 10 agreeing matches of 54.
+
+- **HDR merge** (`sidecar_merge::hdr`, `sidecar-dev hdr <out.dng> <raw>…`): a bracket merged into one linear
+  DNG. Raw is linear, so no response curve is estimated; each frame is scaled into the reference's radiance and
+  the frames are averaged with inverse-variance weights from each frame's *measured* noise model (Granados et
+  al., CVPR 2010) — a sample at or near saturation weighs nothing. A second pass drops samples further than
+  4σ from the first estimate, so something that moved is taken from fewer frames instead of smeared (after
+  Granados et al. 2013). The reference is the median exposure; frames are aligned to it on proxies
+  (`sidecar_merge::align`) and the homography carried to full resolution; the exposure steps are *measured*
+  as a chain outward from the reference, each frame against its neighbour (far apart, too few pixels are well
+  exposed in both), with EXIF as the fallback when a measurement strays more than half a stop. It streams —
+  frames demosaiced one at a time into running sums, twice — so memory is two accumulators, not nine frames.
+  A pixel no frame measured takes the darkest frame's saturated value, and the DNG's `LinearResponseLimit`
+  then says where that is. Checked on a synthetic bracket (14 → 11.5 stops of scene, Poisson–Gaussian noise,
+  clipping): highlights two frames clipped come back within 3 %, shadows less noisy than the best single frame,
+  a moving patch in one frame removed by the second pass. On a 9-frame, 8 EV ZV-1 bracket from the library:
+  every frame aligned (174–504 inliers, rms ≤ 1.06 px), steps measured at 1.00 ± 0.04 EV where EXIF said
+  0.97–1.09, 35 s for 9 × 20 MP, and the DNG develops clean.
+
+
+
+
+
+- **The sky mask** (§15, `sidecar_engine::sky`, mask name `sky`, `MASK_REVISION` 6): found in the depth
+  map, drawn by the photo.
+  - **Coarse:** the far plane, by hysteresis. Seeds are within 6 % of the depth range from the farthest,
+    connected to the top edge and brighter than most of the frame; the flood reaches out to 25 %, across the
+    model's blurred skyline.
+  - **Like sky, pixel by pixel:** smooth (log-luminance σ under 0.2 stop over 5 × 5 at the depth map's size,
+    which brick and foliage aren't); not green once white-balanced (green under 38 % of r + g + b, which
+    excludes blurred foliage); not the subject; and within 1.5 stops of the seeds' level. A diffuse wall lit
+    by an overcast sky returns at most its albedo times half the sky, so a pale far facade is left out.
+  - **The edge:** the compositing equation in linear light, I = α·S + (1 − α)·G. A trimap comes from the
+    coarse mask, widened 2 % either way; S and G are the nearby certain colours' means (normalised
+    convolution over 4 %); α is solved per pixel by least squares in RGB. This is the known-colour case of
+    alpha matting, in place of the guided filter the plan named: the guided filter, fed a mask the model had
+    already shifted, could only compromise (skyline error 0.34 → 0.25 against 0.34 → 0.07 here).
+  Checked:
+  - A synthetic landscape with a ragged tree against a gradient sky: skyline error 0.37 → 0.10, pixels on the
+    wrong side 8,043 → 1,791. A far region that is dark, green or textured is not sky.
+  - On four library frames (`web/scripts/mask-dump.mjs`): the treeline of an overcast street follows the
+    photo, and its brick building is left out (it was taken before the level bound). Blurred backyard foliage
+    is left out, and only the sky between its branches kept. A blown window behind a cat is partly taken —
+    far, white and above, so genuinely ambiguous. A blown window behind a portrait is barely touched.
+
+- **Upright** (§15, `sidecar_color::upright`, Crop → Upright: Level · Vertical · Full): straighten and keystone
+  from the photo's own lines.
+  - **Segments:** found by gradient-orientation region growing, as LSD does (written from the paper; its
+    reference code is AGPL), each region's principal axis.
+  - **The two families:** near-vertical segments (20°) and near-horizontal ones (15°). Only the segments that
+    share their family's vanishing point are kept: RANSAC over pairs, a segment pointing at the candidate within
+    1°, scored by length. A photo's fur, hair and car flanks lean without converging.
+  - **The solve:** the editor's own sliders (Straighten; Vertical and Horizontal, its K·R·K⁻¹ virtual camera) by
+    Nelder–Mead through `geometry`'s own map, so the mapped lines stand true with no sign convention to get
+    wrong. The cost weights each segment by its length in the picture: by its mapped length, keystone could
+    lower the cost by shrinking lines, and it did.
+  - **Aspect:** when EXIF gives the focal length and the crop factor, the real lens's own correction sets it.
+    A rotation stretches the centre vertically by 1/cos(tilt), and the real camera needed a different tilt for
+    the same vanishing point than the fixed virtual one does.
+  - The crop is refitted. In the browser, it runs on the developed picture's luminance, through wasm.
+  Checked:
+  - A synthetic facade rendered through a known geometry, supersampled (aliased edges pulled every angle toward
+    the pixel grid and under-corrected): Full recovers 3.01°, 34.6, −15.1 against 3.00°, 35, −15.
+  - Among 60 random stray segments, the consensus keeps 126 of 130 facade lines and 2 strays; the strays
+    alone give no answer.
+  - `web/scripts/upright-smoke.mjs` in Chromium: Vertical on an overcast street stands its building up. On a
+    cat at a window, it makes the blurred window posts vertical (vertical 40, a heavy crop). On a night
+    portrait it says there aren't enough straight lines and leaves the geometry alone.
+
+- **Retouch: heal, clone, red eye** (§15, `EditParams::spots`, `client/retouch.wgsl`, `sidecar_engine::retouch`,
+  `web/src/lib/gpu/retouch.ts`, Processing → Retouch): spots on the photo's camera-native linear light, before
+  everything else, in order — a spot can take from what an earlier one healed. Positions are in the masks' frame
+  (oriented, before lens correction); the radius is a share of the long edge.
+  - **Heal** is gradient-domain cloning (Pérez, Gangnet and Blake 2003): the source's texture, its edge made to
+    meet the target's surroundings by a harmonic function — on a disc, exactly the Poisson integral of the edge
+    mismatch, so one pass with no iteration. The mismatch is taken in log light, so a source lit differently is
+    corrected by a ratio, as light differs.
+  - **Clone** copies; **red eye** takes red down to the mean of green and blue where, white-balanced by the
+    camera's as-shot multipliers, it stands well above them.
+  - Each spot runs over its own box and is copied back: the cost is the spots' area. In the browser the pass sits
+    inside `DevelopPass`, whose `proxy` is then the retouched source the lens pass, depth effects and develop all
+    read. The worker applies it first in export, the server preview and the loupe (to the whole frame, before
+    tiles are cut), mapping spots to the sensor's orientation (`geometry::sensor_from_oriented`).
+  - A tap with a tool armed adds a spot. Heal and clone choose their own source: of the places 2.2–3.6 radii
+    away and inside the photo, the one whose surroundings (rings of log luminance) best match the target's.
+    Both centres can be dragged.
+  Checked:
+  - Engine: a blemish on a textured surface whose light falls off across it, healed from a patch lit two thirds
+    of a stop differently, ends 0.037 stops from the clean surface, against 0.62 for a clone of the same patch;
+    nothing outside the spot moves. Red eye fixes a red pupil and leaves a neutral one alone.
+  - Parity case `retouch` (a heal, a feathered clone and a red eye): ΔE 0.0000.
+  - `web/scripts/retouch-smoke.mjs` in Chromium: a tap with Heal makes one spot with its source found away from
+    it, drawn on the photo. It changes the canvas at the spot (54) and nowhere else (0.04), and the worker's
+    preview likewise (18 against 0.00); removing it leaves no spots in the edit.
+
+- **Camera profiles from the file** (§7, `sidecar_color::dcp`, `EditParams::camera_profile`, `client/profile.wgsl`;
+  White balance → Profile): a DNG carries the profile it was made with ("Adobe Standard" from Adobe's converter),
+  and it is now read and can be rendered — from the DNG specification (1.6, chapter 6), which is public. No
+  profile is shipped.
+  - **Parsing:** `ForwardMatrix1/2`, `ProfileHueSatMapDims/Data1/2/Encoding` and `ProfileLookTableDims/Data/Encoding`,
+    from a DNG's first IFD or a `.dcp` file (`linear_dng::profile_in`; `sidecar-dev profile <file>…`).
+  - **With the file's profile:** develop's matrix comes from the forward matrices (white-balanced camera →
+    XYZ D50, Bradford to D65, normalised as `resolve` does). A pre-pass then applies the HueSatMap and LookTable in
+    linear ProPhoto RGB, as the specification orders them: the HueSatMap before exposure, the LookTable at the file's
+    own BaselineExposure plus the person's exposure. Then it returns to the camera RGB develop expects. It's a
+    pre-pass because develop is at the fragment stage's sixteen textures, and the HueSatMap is a characterisation of
+    the camera. It is the same WGSL in both renderers (inside `DevelopPass`), and `pack` hands both the uniform and
+    the tables, interpolated by the white balance's temperature as the matrices are.
+  - **Not used:** the profile's tone curve is the maker's contrast look, and Sidecar's own tone curve stays in charge.
+  - **Edits:** an edit that doesn't ask renders as before, so there is no `PROCESS_VERSION` bump.
+  Checked:
+  - The pass matches the CPU reference (`dcp::apply`) on GPU colours; an identity table changes nothing and a
+    neutral stays neutral.
+  - Parity case `profile` (forward matrices, a HueSatMap, a LookTable with value divisions): ΔE 0.0000.
+  - Against the files' own Adobe-rendered previews (`sidecar-dev profile-check`), comparing the chroma-weighted
+    hue histograms of the coloured midtones (the preview may be cropped, so not pixel by pixel): Canon EOS M3
+    0.186 → 0.128 with the profile, Nikon D7000 0.195 → 0.185. With the LookTable read at Sidecar's own grey
+    placement instead of the file's baseline, the D7000 went the other way (0.276), which is how the right
+    exposure was settled. An X100F's preview matched neither (0.94), so it isn't a usable reference.
+
+- **Film negatives** (§7, `EditParams::negative`, Film → Negative): a negative photographed or scanned is
+  inverted by its density, at the start of develop, before anything else.
+  - **The model:** transmittance is 10^−D, and above the base a negative's density is γ·log₁₀ of the
+    exposure. So the scene's light per channel is (T_base / T)^(1/γ). Dividing by the base removes the orange
+    mask and the light it was lit by exactly, and γ (about 0.6 for colour negative) undoes the film's contrast.
+    The base's own level is subtracted so unexposed film is black, and grey is scaled into place
+    (`NEGATIVE_SCALE`).
+  - **Turning it on:** the base starts at the clearest film in the frame (each channel's 99.5th percentile; the
+    rebate if it shows), and the white balance starts so the inverted picture's mean is grey: with the mask
+    divided out, only the light's and the stock's balance is left. "Pick the film base" takes it from the rebate
+    instead.
+  - **White-balance eyedropper:** on a negative, it inverts what it samples first.
+  - **Copied with the Film settings:** a roll's base and γ are the same frame to frame.
+  Checked:
+  - A scene exposed onto film of γ 0.6 through two different masks inverts to the same light, in proportion to
+    the exposure above the threshold, to 1e-9.
+  - Parity case `negative`: ΔE 0.0000.
+  - `web/scripts/negative-smoke.mjs` in Chromium: Film negative saves a base, γ 0.6 and a custom white
+    balance. It inverts the canvas (luminance correlation with before −0.97) and the worker's preview (−0.95),
+    and turning it off leaves a positive as shot.
+
 - **D1 and D5 are both closed, neither merged** (pull request #46, closed 2026-10-29). The owner's rule,
   2026-10-27: what is merged and deployed should be what has been tested. Both were written, and neither
   earned its way in.
@@ -424,6 +810,10 @@ Where the code differs from the text below, the code and these notes win.
   demosaics at full size when asked for more than half the sensor.
 
 - **Immich checksums:** Immich hashes file contents only for its internal library. External-library assets get `sha1("path:" + originalPath)` as their checksum, so checksum search can't find them. Resolution therefore relies on the date layout and filename search for external RAWs, confirms candidates by hashing the local files, and finds the Immich asset by `originalPath`.
+- **Layouts that aren't the template's** (2026-11-06): a root's template is searched, not joined. `sidecar_template::find_by_date_and_name` turns the folder part into one pattern per level — date tokens as their text (`{{W}}`/`{{WW}}`, the ISO week, among them), `{{MMMM}}`/`{{MMM}}` as any month name in English, French, German, Spanish, Italian, Portuguese or Dutch and any abbreviation of it, every other token (`{{album}}`, `{{hh}}`, an event) as anything — and matches folders case-insensitively, the exact join first so the usual layout costs what it did. When that misses, and Immich's filename search can't answer (or there is no Immich), the **name walk** (`find_by_name`, from #28) looks through each library for the exact name, bounded at 20,000 folders, newest first, hidden folders and symlinks left alone; whatever it finds is confirmed as the date path's finds are. Without Immich the picker's search walks the libraries too, by part of a name. So `2019/Holidays/` opens where the template says `2019/07.July/2019-07-04/`. This is finding an original for the editor, not a library: nothing is indexed or kept.
+- **The histogram and overlays without WebGPU** (2026-11-06): in fallback, the view pass that draws the clipping and peaking overlays, and the histogram pass, don't run, so the server does what they do over the image its preview is about to encode (`sidecar_worker::overlays`). Same bins (R, G, B and luma of the sRGB-encoded picture, 256 each), same white and black thresholds (half a code value from either end, on the brightest channel), same colours (red, blue, and the peaking yellow), same order. The 1,026 counts come back in an `x-histogram` header beside the JPEG, which the editor reads as it reads the GPU's. Focus peaking reads the focus mask made with the preview's proxy, taken through the lens correction and the geometry as the picture is. Toggling an overlay asks for a new preview. Checked by `fallback-overlays-smoke.mjs`: each channel counts every pixel, the pixels painted red are the clipped count (77,404 of 77,968 through JPEG), the editor's clipped share matches the server's (8.1 % against 8.11 %), and clipping and peaking appear when switched on.
+- **Auto-edit, measured before it was built** (2026-11-06; ROADMAP "Context-aware auto-edit"): the textbook estimators are implemented from their papers (`sidecar_color::auto`: grey-world, white-patch at the 99th percentile, shades-of-grey, grey-edge; Reinhard's log-average key for exposure) and measured on this library with two tools, before any Auto button. **White balance** (`sidecar-dev autowb 150 <library>`), the angle to each camera's own as-shot light over 150 RAWs from 2003 to 2026: grey-world 4.59° median (p90 14.1°), white-patch 4.52°, shades-of-grey p=4 4.38°, **p=6 4.13° (p90 12.2°)**, grey-edge p=1 4.35°, p=6 5.26°; a third or fewer within 3°. The camera's estimate is not the truth, but it has its own metering to go on, and every statistical method sits 4–5° from it — the level the literature reports for them — so on a RAW that recorded an as-shot white balance, replacing it would usually make things worse. **Exposure** (`sidecar-dev autotone 150 <library>`), against the owner's own Lightroom `crs:Exposure2012` on 150 photos: leaving exposure at 0 is within 0.11 stop of the person on average, while the key asks for +1.36 on average and correlates 0.30. Even recentred, damped and gated (the best of 35 settings, checked on a held-out half) it does worse than nothing: 0.133 against 0.101. The person set Whites and Blacks on 13 of 170 photos. So Sidecar's default rendering is already where its owner leaves a photo, and **no automatic adjustment is wired in**. The estimators stay, tested, for what has no as-shot light to keep: shades-of-grey p=6 is the one to use there. Face-weighted exposure (`key_ev`'s weights) could not be measured without the models in the tool and is not wired either.
+- **Focus peaking, refined** (2026-11-06; ROADMAP "Subject-aware tools"): **Subject**, beside Focus peaking once the subject mask exists, peaks with the focus measure multiplied by the subject mask (`$lib/peaking`), so it answers "is the subject sharp?" rather than "where is anything sharp?"; the weighted mask replaces the focus mask's source, so the lens correction still moves it with the picture. **Eyes first**: while peaking is on, each face YuNet found has its eyes rated from the focus measure — the highest value within 15 % of the face's width of the eye's landmark, against the same threshold the view peaks at — and ringed over the photo, green when sharp, amber dashed when soft, largest face first, each with its score in its label. Checked by `web/scripts/peaking-smoke.mjs` on a portrait (both eyes rated, 87 % and 60 %; Subject takes the lit pixels from 1,038 to 471) and by eye in a crop that placed the rings on the eyes.
 - **Immich is 3.2.0** on the server (floating `v3` tag). The API behaviour relied on is unchanged from 3.1.0. `GET /api/users/me` needs `user.read`, so the sign-in key needs `user.read, asset.read, asset.view, asset.upload, asset.update, stack.create`.
 - **Uniform layouts** are mirrored by hand in `#[repr(C)]` Rust structs and checked against the WGSL by parsing it with naga in tests. `encase` 0.12 dropped glam support and `webgpu-utils` isn't needed: the browser packs uniforms with the same Rust code compiled to WebAssembly (`crates/color-wasm`).
 - **Vulkan in containers** also needs `libegl1`, `libxext6` and `libx11-6` in the image; NVIDIA's ICD fails to initialise without libEGL.
@@ -810,6 +1200,8 @@ Draft 1's local hash index is gone: the strict layout makes step 2 two or three 
 
 **Immich's own edits.** Immich 3.x can crop, rotate and mirror an asset itself. Those edits live in Immich's database and change its thumbnails, not the file. Sidecar develops the untouched original and ignores them; when the RAW's asset reports `isEdited`, the editor says so. If a share ever delivers Immich's edited rendering instead of the original, the hash won't match and step 2 still finds the RAW by its stem.
 
+**Browsing folders.** Without Immich there is no library to share from, and the editing folder lists only what was imported; a photo already on disk could be opened only by knowing its path (`/open?path=`, off by default). The home page's **Folders** section is a file browser over the folders Immich doesn't stand in front of: the editing folder, and every root when no Immich is configured. A library Immich serves is never listed — Immich decides who sees which of its photos, and listing its folders would step round that. `GET /api/folders`, `GET /api/folders/{root}/list?dir=` (one level: subfolders, dated ones newest first, and the editable files with their size and whether a sidecar sits beside them; at most 5,000 entries) and `POST /api/folders/{root}/open { path }`, which admits the file as `/open` does and answers with its key. Paths are plain names below the root for this user (`per_user` included), checked again after links are resolved, so `..`, an absolute path or a link out of the root lead nowhere. A browser, not a catalogue: nothing is indexed, decoded or written by looking — the darktable warning about XMPs written on import applies. Thumbnails would need a decode per file and are left out. Checked by `folders_smoke` (`web/scripts/folders-smoke.mjs`) and `paths_stay_inside_the_root`.
+
 ## 4. Edit state on disk
 
 - **File.** Reuse whichever sidecar exists (`DSC_1234.NEF.xmp`, then `DSC_1234.xmp`); otherwise create `DSC_1234.NEF.xmp` — the name Immich and darktable both look for.
@@ -1088,6 +1480,36 @@ point alone, exactly as it did.
 4. **Tone map.** Luminance Y (Rec.2020 weights) → `log2(Y / 0.18)` mapped from [BlackEV, WhiteEV] to [0, 1] → sigmoid (contrast, pivot) → user curve LUT → decode to Y′ → `rgb × Y′ / Y`, which keeps channel ratios and therefore hue. The curve is Fritsch–Carlson monotone cubic over display-encoded values, baked into 4,096 entries in an `r32float` 1D texture and interpolated manually (`r32float` isn't filterable without an optional feature). Shadows / Midtones / Highlights sliders in the UI move curve control points — the same spline.
 5. **Color mixer.** Linear → OKLab → LCh. Bands: red, orange, yellow, green, aqua, blue, purple, magenta. Raised-cosine weights span neighbouring band centres and sum to 1. `h += Σ wᵢ·hueᵢ`, `C ×= 1 + Σ wᵢ·satᵢ`, `L += Σ wᵢ·lumᵢ · smoothstep(0.02, 0.08, C)` so neutrals stay put. Back to linear.
 
+**Light, per pixel** (`PROCESS_VERSION` 10, `Tone::per_pixel_light`; `develop/light.wgsl`, mirrored by
+`sidecar_color::params::light_stops`). Highlights, Shadows and Contrast act on each pixel's luminance alone, in
+stops from middle grey, u = log₂(Y / 0.18), on the scene's light after Clarity and Dehaze and before film, black and
+white and the tone map — one function for a RAW and a developed file, which differ only in the rendering that
+follows. A pixel is its light Y times its colour (R/Y, G/Y, B/Y): the controls choose a new Y and keep the ratios,
+as dimming or brightening real light does. The A/B of 2026-11-09 against keeping OKLab a and b instead (so a
+darkened colour stays as colourful) went this way: the owner found the ratios natural — "the light curve is fixed
+and the adjustments nudge the lightness" — and the other floating and digital.
+
+- **Contrast** is a slope in stops per stop through grey: 1 + (stored − 1) × 0.5, so +100 is 1.5 and −70 is 0.65.
+- **Highlights** and **Shadows** change the slope of the tones past a ramp that begins ½ stop from grey and is
+  1 stop wide (a smoothstep, integrated, so the curve has no kink): Highlights −100 takes the slope to a quarter
+  above +1½ stops, darkening the bright tones and bringing what lay past white into view; Shadows +100 does the same
+  below −1½, lifting the deep shadows while black stays black. The slope never falls below a quarter of
+  Contrast's, so tones never turn over, a slider does more the further it goes, and grey stays put (all tested).
+  The strength (`LIGHT_SLOPE_RANGE`, a quarter at full travel) was set a step past the half first tried, at the
+  owner's asking, for creative room.
+- What it costs, measured with `web/scripts/tone-audit.mjs` (docs/research/tone-review-2026-11.md): within the
+  range a slider changes, a texture keeps its share of the slope — at least a quarter of its contrast — and outside
+  it nothing moves. A per-pixel control cannot both move a band and keep that band's contrast; that would take a
+  spatial filter, which the owner chose against for the light controls.
+- **The fade to neutral** is keyed on the clipped samples around a pixel (the ingest's alpha) instead of on the
+  output's brightness: a bright colour that was measured keeps its colour at any level, and a reconstructed one —
+  which has none of its own — fades whatever Highlights does to it. This ends the magenta a clipped sky showed
+  when pulled well below white.
+
+Before version 10, Highlights and Shadows were a bump on the display-encoded curve (`tone_curve_lut`), Highlights
+also moved the white point (`highlight_reach`), and Contrast set the curve's steepness; an older edit renders that
+way, and taking up today's rendering moves it to this.
+
 **Developed files take a display-referred path.** A JPEG, HEIC, PNG or TIFF was rendered for display by
 whatever wrote it — tone curve, white clip, gamut — and none of that can be undone, so the stages above that
 exist to render sensor light don't apply to it. `SourceKind::Developed` (from `RawInfo.source_kind`, passed to
@@ -1294,6 +1716,18 @@ dyes beyond 388–719 nm hold their end values, where the eye sees under 0.1 % o
 table at the display's white, so the slide keeps its density: a slide's middle grey is darker than Sidecar's
 neutral rendering of the same exposure, as it is on a light table.
 
+**Alternative processes** (`Monochrome.process`, Film → Print, `sidecar_color::process`). Black and white printed
+as a **cyanotype** or made as a **tintype**, each in colours computed from a model of its materials under D65, not
+picked. A cyanotype is Prussian blue formed in cotton-rag paper (reflectance 0.80 → 0.86 across the spectrum); its
+absorbance is a broad band centred at 700 nm (σ 110 nm) over a weak 15 % everywhere, and its peak density is solved
+so the print's visual density reaches the ≈ 1.3 measured on cyanotypes — the band's shape decides the colour, the
+measurement the range. The photo's luminance picks a density by Beer–Lambert, per channel. A tintype is collodion
+silver (a warm grey, 30 % → 50 % reflectance) beside black japan (4 %), mixed additively, about 3.5 stops. Each
+process's lightest surface is shown at 0.9 of white. Generic processes, so the materials are approximations of
+their published characteristics, every number in `process.rs`. Checked: `cyanotype_is_prussian_blue_on_white` (deepest
+tone hue 249°, visual Dmax 1.30), `tintype_is_warm_silver_on_black`, parity cases `cyanotype` and `tintype` (ΔE 0).
+Digital negatives for real cyanotypes need a step tablet scan and are still to come.
+
 **Grain.** `EditParams.grain { amount, size }` makes each spot's exposure flicker as a negative's grains make
 it, before the tone map, in colour or black and white, on a RAW or a developed file (`develop/grain.wgsl`). The
 noise is procedural, not a stored map: two octaves of value noise — clumps at the grain's size, grains at half
@@ -1309,6 +1743,34 @@ pixels from the frame's long edge at each rendering, so grain keeps its share of
 Where an octave is finer than a pixel, its lattice is the pixels and its strength falls with grain size over
 pixel size — Selwyn's law, granularity × √(area seen) constant — so the proxy shows what a scaled-down export
 would, and the full-size export shows the grain itself.
+
+**Halation** (`Film.halation`, Film → Halation). Light that crossed the emulsion reflects off the back of the film
+base and exposes the red-sensitive bottom layer again: a red glow just beside bright things. Without an
+anti-halation backing (CineStill's films, their rem-jet removed) the reflected share is of the order of 10–20 %; with
+one, about 1 % — so 100 is `HALATION_MAX` = 0.15. The base is about 0.13 mm thick and total internal reflection
+past the critical angle (≈ 42° at n ≈ 1.5) puts the strongest reflection in a ring about 0.24 mm out, modelled as a
+Gaussian of `HALATION_MM` = 0.12 mm on a 36 mm frame (a ring kernel is the refinement if pictures ask for it).
+Rendered with black and white's adjacency map machinery, which colour film never uses: the map pass returns the red
+layer's linear exposure, the blur takes halation's reach (carried in the developer's reach lane, which colour leaves
+free), and develop adds `k ×` the blurred red back — into red, and `HALATION_GREEN` = 15 % of it into green, the
+reflected light being mostly red — as light, before the grain. Divided by `1 + k`, so a flat field is left as it
+was, as a print's colour correction takes out a uniform cast: what remains is the glow. Generic colour film only (a
+named spectral stock's chain is its sheet's). Checked: `halation_glows_red_beside_bright_things` (beside a
+highlight, red goes from 0.011 to 1.0 and green to 0.31; far from it nothing moves), and parity case
+`film-halation` (ΔE 0; each side builds its own map).
+
+**Grain per dye layer** (`Grain.layered`, Film → Dye layers). Colour film has three emulsions — red-, green- and
+blue-sensitive — each grained on its own, its grain growing with that layer's own density. In film rendering from a
+RAW, Dye layers gives each channel its own noise (octaves of its own from the same hash, so the browser and the
+server still agree) and its own σ from its own exposure (`grain_apply_layers`), each keeping its mean. Independent in
+the working space, where the layers are, the three show on screen as colour in the grain: the Rec.2020 → sRGB
+matrix's negative terms even correlate them negatively, and film's interlayer effects more so. Black and white has
+one emulsion and a developed file is a print, so both keep one grain; so does the neutral rendering. New grain in
+film rendering starts with Dye layers on; an edit saved before the field existed reads it as off and keeps its grain.
+Checked: `grain_per_dye_layer_decorrelates_the_channels` (one grain moves the channels together, correlation 1.00;
+per layer −0.44; the level is one grain's to 0.1 %), `grain_per_dye_layer_only_in_colour_film`, and the parity case
+`grain-film-layers` (ΔE 0). The relative grain of the three layers is taken as equal: no datasheet surveyed gives it
+per layer, so a named stock's would need measuring.
 
 The flicker is in exposure, `exp2(σ·n)`, with its mean kept (`− σ² ln 2 / 2`). Grain is denser where the
 negative is, so σ grows with the pixel's place between the black and white points (`√((0.2 + t)/1.2)`); the
@@ -1754,6 +2216,22 @@ edit.example.com {
 }
 ```
 
+### Models
+
+Settings → **Models** lists the machine-learning models Sidecar can run (`sidecar_worker::models::MODELS`), what
+each enables, its weights' licence and what that restricts, and whether this server has it: *on this server*, *not
+in this image* (the plain image has no `sidecar-ml`), *not downloaded*, or *needs updating*. Weights arrive two
+ways. **Shipped**: cleared for distribution and baked into the `-ml` image — BiRefNet lite, MediaPipe's
+multi-class model, YuNet and Depth Anything V2 Small. **On demand** (ROADMAP, "Models on demand"): fetched by an
+administrator from the publisher's own URL, pinned by SHA-256, converted on the server, never shipped. Only
+weights travel; a model's graph is compiled into `sidecar-ml`, so what can run is this list, fixed per release.
+The models folder (`SIDECAR_MODELS_DIR`, `models/` in the cache by default) is scanned rather than recorded, so
+a file copied in by hand counts like a download, and a file stamped for another converter (`<file>.json`) reads
+as needing an update rather than loading into a structure that changed under it. No model is on demand yet:
+the download and its conversion come with the first feature that needs one, so that they are built against
+real weights. Weights with no licence at all are never listed. Checked by `scans_the_image_and_the_models_folder`,
+`every_model_has_a_licence` and `web/scripts/models-smoke.mjs`.
+
 ### Publishing and licences
 
 Sidecar is published as an Apache-2.0 Docker image on GitHub Container Registry, and reuses existing code wherever it fits, with credit. Apache-2.0 is as permissive as MIT and adds an explicit patent grant and the `NOTICE`-file convention for credits; MIT would also work. This is the common reading of these licences, not legal advice.
@@ -1862,6 +2340,59 @@ After V1: lens correction, then crop and straighten, then local masks (§15).
 | Mask layers — models' masks, brush (gradients and sky still to come) | Second bind group in the develop pass: each module's inputs blend by mask weight | Same shaders at full resolution | `sc:Masks` — the mask's name, strokes, and adjustments named like the global ones |
 
 **Lens correction.** Profiles come from the file when it carries one — DNG opcodes (iPhone ProRAW and Lightroom's DNGs), Sony's and Fujifilm's own tables, each verified as the build log describes — otherwise from the lensfun database, matched on the lens ExifTool identifies. The models are reimplemented from lensfun's documentation, and the database (CC BY-SA 3.0) is downloaded on first use, not shipped (§12). Absent `sc:Lens` means off, so photos edited in V1 render unchanged; new edits default to on.
+
+**Defringe.** Lateral CA is the lens profile's job; what it leaves is longitudinal CA — the lens focusing blue-violet and green at a different distance from the rest, so a high-contrast edge in front of or behind the focal plane carries a purple or green rim. No profile models it, because it depends on the focus distance and the edge's own defocus. Defringe (`EditParams.defringe`, Lens → Defringe) takes the colour out of such rims and only such rims:
+
+- A pixel is a candidate when its OKLab hue falls in the band's range (purple 280°–345°, green 120°–165° by default, each editable; 10° soft edges) — hue in a perceptual space, so the band matches what the eye calls purple at every lightness.
+- It is a fringe only near an edge: the largest log-luminance range along x and along y within `FRINGE_REACH` (0.08 % of the frame's long edge, ≈ 5 px on a 24 MP frame — the width longitudinal CA has at ordinary apertures) must exceed `FRINGE_EDGE_STOPS` (a smoothstep from 0.7 to 1.5 stops). A purple flower or a green shirt has no such contrast within that reach across most of its area, so it keeps its colour; its outline against a much brighter or darker background is what defringe can touch.
+- The fix moves the colour toward a neutral of the same luminance by `amount × band × edge`, in the working space, and returns it to camera RGB: the pass (`client/defringe.wgsl`) runs as a compute pre-pass over develop's input — the lens-corrected proxy on the phone, the full-resolution frame on the worker, the reach measured against the whole frame when a tile renders — so everything downstream sees a picture without the rims, and develop keeps its sampled-texture budget.
+- Parity: the `defringe` case (ΔE 0); `web/scripts/defringe-smoke.mjs` checks the editor and the worker end to end.
+
+**3D LUTs.** A creative LUT is a table from display-encoded colour to display-encoded colour, built in one particular space; the `.cube` file (Adobe's Cube LUT Specification 1.0, which Resolve and most grading tools write) doesn't say which. So the edit does: `EditParams.lut` names the table, its amount and the space it was built for — sRGB (photo tools; the default), Rec.709 with BT.1886's γ 2.4 (video tools) or Display P3. Film → LUT holds the controls.
+
+- **Where it applies:** last, over develop's display-linear output (`client/look.wgsl`, a compute pass after develop in the engine and the browser alike), so everything the LUT's maker saw is upstream of it. The colour goes into the LUT's primaries, is held to that gamut — as the tool that built the table held it — encoded, normalised to the file's `DOMAIN_MIN`/`DOMAIN_MAX`, and looked up by tetrahedral interpolation (Kasson, Nin, Plouffe and Hafner, 1995), which keeps greys on the table's own greys where trilinear drifts.
+- **Amount** mixes in the LUT's encoding, as a grading tool's opacity does. What the gamut held back is returned in proportion to what the LUT leaves, so 0 % is the picture exactly, out-of-gamut colour included.
+- **Storage:** uploaded files live on the api, in `<state>/luts/`, named by the first 16 hex digits of their SHA-256: an edit names the very table it was made with, and the same file uploaded twice is one LUT. The api hands each to the worker on upload and on every start (`PUT /v1/luts/{id}`, kept in the worker's cache), and serves the browser the parsed table (`GET /api/luts/{id}`, immutable). An edit naming a LUT the server doesn't have renders without it in the editor, with a warning, and its export fails, saying which LUT is missing, rather than leaving the look out quietly. 1D LUTs, and 3D tables over 129³, are refused at upload.
+- **Checks:** `sidecar_color::lut::sample` is the CPU reference; the engine test holds the GPU pass to it within f16 rounding, at full amount, half, and none. The parity case `look` (a Rec.709 LUT over a P3 display) is ΔE 0. `web/scripts/lut-smoke.mjs` uploads a red↔blue swap and checks the editor, the worker, Amount 0 and None.
+- **Still to come:** LUTs for log footage (LogC, S-Log3), which would take scene-linear light in place of the tone map, not follow it.
+
+**Soft proofing.** How the picture will look printed through an output profile, and which of its colours the print can't hold — a view, never part of the edit or the export. Proof beside the photo's toggles opens it: a printer profile (one of the server's, or an `.icc` uploaded now), the intent into it (perceptual, relative colorimetric, saturation), black point compensation, Paper and ink, and the gamut warning.
+
+- **One chain, one table.** The api composes display → print → display with LittleCMS (`crates/api/src/proof.rs`): the editor's own display space (sRGB or Display P3) into the profile by the chosen intent, with black point compensation if asked, and back relative colorimetric — or absolute, for Paper and ink, so the paper's white and the ink's black show as themselves. The result is one 33³ table over the display's encoded colour (`GET /api/proofs/{id}/table`), applied by the LUT pass after develop and the edit's own LUT (`client/look.wgsl`, `lut::proof_uniform`). No knowledge of the viewer's monitor is needed: the proof is shown in the space the editor already renders.
+- **The gamut warning comes from the same chain.** LittleCMS's gamut check, run twice with different alarm colours so a node that comes back as the alarm both times is out; its verdict is the table's alpha, so the warning and the proof beside it cannot disagree (the failure documented for a parallel GPU path). Out of gamut is colorimetric — whether the print can match the colour at all, before any intent decides what to do with it — so a display black deeper than the ink's is out, and a dark photo through a newsprint-like profile is mostly grey. Warned colours show as mid grey (red and blue stay the clipping warnings').
+- **Why LittleCMS:** it is the reference implementation of ICC transforms, intents and black point compensation (MIT, compiled in through `lcms2-sys`). moxcms, pure Rust, was tried first: it has no black point compensation, treats absolute colorimetric as relative, and mis-transformed one of the two CMYK profiles tested.
+- **Profiles** are uploaded like LUTs and kept in `<state>/proofs/` under their SHA-256's first 16 hex digits. Real printer profiles are licensed, so none is in the repository: the tests build a small-gamut output profile with LittleCMS itself, and `a_real_profile` (ignored; `SIDECAR_PROOF_ICC=…`) and `web/scripts/proof-smoke.mjs` run one from disk.
+- **Not yet:** the fallback preview without WebGPU shows no proof; ink limits and the output sharpening a print wants are a print module's, not a proof's.
+
+**Presets, copy and paste, sync.** "Apply this to the other 200 frames" is the gap that bites after a shoot, so a look travels three ways, all built on one definition of what a section carries: `PICKS` in `web/src/lib/state/edit-view.ts`, the History tool's "use its …" sections. A control added to a section travels with copies and presets without either changing.
+
+- **Copy and paste** (History → Look): Copy… chooses the sections — the look's by default (white balance, light, film, curve, colour, detail; lens correction, crop and masks belong to their own photo) — and remembers the choice; Paste takes them into this photo as one undoable change. The clipboard is the browser's (`look-clipboard.ts`).
+- **Presets** (History → Presets): named sets of sections and their values, kept per person on the server (`sidecar_api::presets`, `GET/POST /api/presets`, `DELETE /api/presets/{id}`). Only the chosen sections' values are stored, taken onto a fresh photo's edit, so a preset carries nothing else of the photo it was made from. Export writes a `.sidecar-preset.json` file (`format`, `version`, `name`, `sections`, `edit`) and Import reads one, keeping the sections this build knows: presets are a distribution channel as much as a convenience.
+- **Sync across a selection** (home page → Select): the copied look or a preset applied to every photo chosen, each saved through the same `PUT /api/assets/{key}/edit` the editor uses, on top of its own head, so every photo's history shows the change and can step back from it. A photo whose sidecar is read-only or whose folder can't take one is reported, not skipped silently (`batch.ts`). Light keeps each photo's own rendering references (`baselineEv`, `whiteZeroEv`), as the History tool's pick does. Masks re-derive per photo from their names, so a pasted subject mask is that photo's subject.
+- Checked end to end by `web/scripts/presets-smoke.mjs`: copy, paste, a preset saved, applied to a selection of two and in the editor, exported and imported.
+
+**Snapshots.** Named states of one photo's edit, for A/B while editing. A snapshot is a labelled version in the photo's history (`sc:History`), which already keeps every version and never folds a labelled one into a later checkpoint or prunes it — so snapshots are in the sidecar, travel with the photo, and need nothing new on the server. History → Take snapshot saves the edit now and names the version that leaves current (`EditSession.snapshot`); each snapshot can be opened again or set beside the edit.
+
+- **Split view** (Split beside Loupe, or a snapshot's *Side by side*): the compared version — as shot until one is chosen — left of a line, the edit right of it, framed alike by the edit's crop so the two meet. The compared side is developed into a texture of its own (`DevelopPass.renderInto`) only when what it shows changes; the view pass draws the two with scissor rectangles either side of a hairline (`ViewPass.render`'s `split`). The line drags, and moves with the arrow keys. The camera's pane and the split both take half the canvas, so turning one on turns the other off.
+- Checked by `web/scripts/snapshots-smoke.mjs`: two snapshots at ±1 EV, each band of the split matched against renders of each, before and after the line is dragged.
+- Virtual copies — a second entry sharing one RAW — are the other half of this item and come separately.
+
+**Virtual copies.** A second entry for one photo — two deliverable looks from one file — with its own edit, history and exports. A copy is another head in the photo's own history (`sidecar_xmp::VirtualCopy` in `sc:History.copies`): it starts at any version, its saves move only its head, and its versions are nodes of the same tree, so the History tool shows where it branched. Nothing is written beside the photo but its one sidecar, and `sc:Edit` — the photo's own edit, which other programs read — never changes for a copy.
+
+- **Keys.** A copy's key is the photo's and `~c` with six hex digits. The edit routes (`…/edit`, `…/history`, checkout, labels, thumbnails, exports) take it as they take the photo's own; everything about the file itself — proxy, masks, metadata, the loupe and previews — stays keyed on the photo's, so a copy costs no decode, cache or mask of its own. Any other `~` suffix is not a key.
+- **Saving** goes through `SidecarDoc::commit_to`: `History::with_copy` swaps the copy's head into place for the commit, the photo's own head waiting in the copy's slot, so pruning sees every head while it runs and never squashes one.
+- **Editor.** History → Virtual copies lists the photo and its copies; New virtual copy saves what is on screen and starts the copy from that version; a copy can be renamed or removed (its versions stay in the tree). The editor names the copy it shows; moving between entries reloads the page, which is built around one key.
+- **Recent** lists a copy under its own name and key, with a thumbnail of its own edit. **Exports** of a copy render its edit and carry its name: `IMG_1234-mono-v3.jpg`.
+- Checked by `copies-smoke.mjs` and the xmp tests (`a_virtual_copy_saves_beside_the_photo`, `pruning_keeps_a_virtual_copys_head`).
+
+**Colour ranges.** A mask layer that selects by colour (`mask` = `color`, `MaskAdjustment.color`; Capture One's colour editor and Skin Tone tool are the reference): a hue sector — centre and width — with a saturation band and a soft edge, optionally only within a model mask (On skin, which is the skin preset: a range of skin hues times the skin mask, so wood and sand of the same hue are left alone). Every layer adjustment then works through it — exposure, contrast, white balance, the mixer, a curve, strokes and edges.
+
+- **Colour as the edit sees it.** Camera RGB through the edit's own white balance and camera matrix, then OKLab (`sidecar_color::color_range`): hue is perceptual, and saturation is OKLab chroma over lightness, which a change of exposure leaves alone — a face selected stays selected when it is brightened. Pixels below about 0.8 % linear (hue there is noise) and clipped pixels (no colour left) are not selected. The selection follows the white balance: change it and the range is judged again.
+- **One function, both sides.** The worker (`Worker::color_selection`, beside the model masks it would otherwise load) and the browser (`$lib/color-range`, through wasm's `sc_color_select`) run the same Rust on the same input — the proxy at 1,024 px and the model mask — so the selection is the same where the picture is developed. It is a mask, so it then goes through the same composite, lens correction and edge as any other layer.
+- **Uniformity** (`ColorRange.uniformity_hue`, `uniformity_saturation`, Masks → Uniformity): after the mixer, each colour range pulls the hue — the short way round — and the saturation (OKLab chroma over lightness) of what it selected toward its centre (its hue; the middle of its saturation band), by the pull times the layer's weight (`mask_uniformity`, `MaskLayer.uniformity`, which grows the mask uniform to 1,696 bytes). Lightness is kept, so evening out redness doesn't move brightness. Lightness uniformity — smoothing blotches of light and dark — is a local operation, not a per-pixel one, and is still to come, as is an eyedropper that centres the range on a tapped patch. Checked: `uniformity_pulls_hue_and_saturation_to_the_centre` (four patches from 7° to 83° all to 45.0° ± 0.03, their saturations together, lightness kept to 0.0001) and parity case `uniformity` (ΔE ≤ 0.002 mean; it moves 46,101 of the fixture's 131,072 pixels).
+- Checked by `color_range` tests (OKLab hues of the primaries, skin selected at two exposures and sky, grey, black and clipped not, a sector across 0°) and `web/scripts/color-range-smoke.mjs`: with the layer's exposure raised, 91 % of what brightens was a warm hue under the default range and 99–100 % was blue once moved to 240°, in the canvas and the worker's preview alike.
+
+**Hair-accurate edges.** The part masks — hair, skin, face and body skin, clothes — come from MediaPipe's 256² model: right about *what* is hair, blocky about *where* it ends. The worker now serves them refined against the photo (`sidecar_color::mask_refine`, used by `Worker::mask` and so by every layer, overlay and colour range's On skin, in the browser and on export alike): joint bilateral upsampling (Kopf et al. 2007) to the proxy at 1,024 px, its taps the coarse texels themselves, weighted by distance in texels and by the photo's OKLab colour difference at their centres (σ = 0.04) — colour rather than luminance, because hair against a sky of the same brightness differs in colour. The guide is the photo as shot, so a refined mask depends on the photo alone and is made once and kept beside the model's (`<name>-refined.png`). BiRefNet's subject mask is already 1,024² and is served as it was. Measured with `sidecar-dev maskedge` (the photo's luminance gradient along the mask's half-way contour; higher is an edge sitting on the photo's): skin 0.975 → 1.100, clothes 1.197 → 1.281 on a portrait; hair 2.313 → 2.336 and 2.316 → 2.496 on two others. Better on every mask measured and never worse, but modestly: the model's soft transitions stay soft (the share of the mask in transition doesn't drop), since that softness is the model's own uncertainty. A matting model would be the next step if pictures ask for crisper strands.
 
 **Masks.**
 

@@ -4,18 +4,23 @@
 	import { tick, untrack } from 'svelte';
 	import { DevelopPass, requestDevice } from '$lib/gpu/develop';
 	import { CLIP_HIGHS, CLIP_LOWS, MASK_INVERTED, PEAKING, SHOW_MASK, ViewPass, type ViewGeometry, type Viewport } from '$lib/gpu/view';
-	import { BRUSH, DEPTH, MaskLibrary, brushStroke, rangeUniform, type BrushSettings, type MaskSet } from '$lib/masks';
+	import { ColorSelections } from '$lib/color-range';
+	import { decodeGrey, rateEyes, weighByMask, type Eye, type Grey } from '$lib/peaking';
+	import { BRUSH, COLOR, DEPTH, GRADIENT, MaskLibrary, brushStroke, rangeUniform, type BrushSettings, type MaskSet } from '$lib/masks';
 	import { DepthPass } from '$lib/gpu/depth';
 	import { MaskPainter, simplify } from '$lib/gpu/brush';
 	import { HistogramPass, type HistogramData } from '$lib/gpu/histogram';
 	import { LensPass, correctedPoint, sourcePoint } from '$lib/gpu/lens';
 	import { ColorPacker, type SlideProfile } from '$lib/color/pack';
 	import { cachedProfile, loadProfile } from '$lib/film';
+	import { cachedTable, loadTable } from '$lib/luts';
+	import { cachedTable as cachedProof, loadTable as loadProof, type ProofOptions } from '$lib/proofs';
+	import ProofControls from '$lib/ui/ProofControls.svelte';
 	import { api } from '$lib/api';
 	import type { Reading } from '$lib/measure';
 	import { saveSettings, settings, SPACE_LABELS } from '$lib/settings';
 	import { EditSession, type EditState } from '$lib/state/edit-session.svelte';
-	import { copyLook, pasteLook, readLookClipboard, type LookClipboard } from '$lib/state/look-clipboard';
+	import LookTools from '$lib/ui/LookTools.svelte';
 	import Histogram from '$lib/ui/Histogram.svelte';
 	import Loupe from '$lib/ui/Loupe.svelte';
 	import Readout from '$lib/ui/Readout.svelte';
@@ -23,8 +28,14 @@
 	import HistoryPanel from '$lib/ui/HistoryPanel.svelte';
 	import MasksPanel from '$lib/ui/MasksPanel.svelte';
 	import CropOverlay from '$lib/ui/CropOverlay.svelte';
+	import GradientHandles from '$lib/ui/GradientHandles.svelte';
+	import GradingSection from '$lib/ui/sections/GradingSection.svelte';
 	import LensSection from '$lib/ui/sections/LensSection.svelte';
+	import SnapshotsBar from '$lib/ui/SnapshotsBar.svelte';
+	import VirtualCopies from '$lib/ui/VirtualCopies.svelte';
 	import CropSection from '$lib/ui/sections/CropSection.svelte';
+	import RetouchSection from '$lib/ui/sections/RetouchSection.svelte';
+	import type { RetouchTool, SpotSettings } from '$lib/ui/sections/section';
 	import WhiteBalanceSection from '$lib/ui/sections/WhiteBalanceSection.svelte';
 	import LightSection from '$lib/ui/sections/LightSection.svelte';
 	import FilmSection from '$lib/ui/sections/FilmSection.svelte';
@@ -39,17 +50,30 @@
 
 	const SPACES: DisplaySpace[] = ['srgb', 'display-p3'];
 
-	type Section = 'lens' | 'crop' | 'wb' | 'light' | 'film' | 'curve' | 'color' | 'depth' | 'masks' | 'detail' | 'history';
+	type Section = 'lens' | 'crop' | 'wb' | 'light' | 'film' | 'curve' | 'color' | 'grading' | 'depth' | 'masks' | 'retouch' | 'detail' | 'history';
 
-	const key = page.params.key!;
+	/**
+	 * The photo's key, and the key of the edit open: the same, or a virtual copy's `<key>~<copy id>` (DESIGN.md
+	 * §15, "Virtual copies"). The file — proxy, masks, metadata, renders — is the photo's; the edit, its history
+	 * and its exports are the copy's.
+	 */
+	const editKey = page.params.key!;
+	const key = editKey.split('~')[0];
 	let canvas: HTMLCanvasElement;
 	let meta = $state<Meta | null>(null);
 	let defaults: EditParams;
 	let status = $state('Opening…');
 	/** The white balance eyedropper is waiting for a tap on the photo. */
 	let pickingWhite = $state(false);
+	/** The film-base eyedropper (`Negative::base`), waiting for a tap. */
+	let pickingBase = $state(false);
 	/** Tap-to-focus (the lens blur) is waiting for a tap on the photo. */
 	let pickingFocus = $state(false);
+	/** Retouch: the tool armed, the spot selected, what the next spot gets, and the spots on screen. */
+	let retouchTool = $state<RetouchTool>('off');
+	let spotSelected = $state<number | null>(null);
+	let spotSettings = $state<SpotSettings>({ radius: 0.02, feather: 0, opacity: 100 });
+	let spotMarks = $state<{ at: { x: number; y: number }; from: { x: number; y: number } | null; r: number }[]>([]);
 	let error = $state('');
 	/**
 	 * The white balance the camera recorded, resolved once per photo. It is the Temperature slider's detent, so
@@ -82,7 +106,6 @@
 	 */
 	let deviceColor: CameraColor | null = null;
 	const cameraColor = () => deviceColor ?? meta!.info.color;
-	let lookClipboard = $state<LookClipboard | null>(readLookClipboard());
 	let lut = $state<Float32Array | null>(null);
 	/** The profile of the spectral colour stock this edit names, once the server has sent it. */
 	let slideProfile: SlideProfile | undefined;
@@ -104,7 +127,47 @@
 	let clipHigh = $state(false);
 	let clipLow = $state(false);
 	let peaking = $state(false);
+	/** Soft proofing, a view of the picture and not part of the edit: on or off, and its options, remembered per browser. */
+	let proofOn = $state(false);
+	let proof = $state<ProofOptions | null>(readProof());
+	function readProof(): ProofOptions | null {
+		try {
+			return JSON.parse(localStorage.getItem('sidecar.proof') ?? 'null');
+		} catch {
+			return null;
+		}
+	}
+	function setProof(next: ProofOptions | null) {
+		proof = next;
+		try {
+			localStorage.setItem('sidecar.proof', JSON.stringify(next));
+		} catch {
+			// A private window: the choice lasts the page.
+		}
+		schedule(true);
+	}
 	let before = $state(false);
+	/**
+	 * Split view: the compared version (or the photo as shot) left of the line, the edit right of it, framed alike.
+	 * The compared side is developed into a texture of its own, again only when what it shows changes.
+	 */
+	let split = $state(false);
+	let splitAt = $state(0.5);
+	let splitTexture: GPUTexture | undefined;
+	let splitShows = '';
+	/** The camera's pane and the split both take the canvas's other half, so one turns the other off. */
+	function setSplit(on: boolean) {
+		split = on;
+		if (on) showCamera = false;
+		schedule(true);
+	}
+	function dragSplit(e: PointerEvent) {
+		if (e.type === 'pointerdown') (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+		else if (!(e.currentTarget as HTMLElement).hasPointerCapture(e.pointerId)) return;
+		const r = canvas.getBoundingClientRect();
+		splitAt = Math.min(Math.max((e.clientX - r.left) / r.width, 0.02), 0.98);
+		schedule();
+	}
 	let section = $state<Section>('light');
 	let showPhoneHistogram = $state(true);
 	/** The keyboard shortcuts, listed over the editor (`?`). */
@@ -140,6 +203,11 @@
 	let layoutTick = $state(0);
 	/** Screen position (CSS px, relative to the canvas's positioned ancestor) of the AF point marker. */
 	let markerPos = $state<{ x: number; y: number } | null>(null);
+	/** Focus peaking on the subject alone, and each face's eyes rated for sharpness (`$lib/peaking`). */
+	let peakSubject = $state(false);
+	let focusGrey: Grey | null = null;
+	let eyes = $state<Eye[]>([]);
+	let eyeMarks = $state<{ x: number; y: number; sharp: boolean; label: string }[]>([]);
 	let showAfPoint = $state(true);
 	/** A JPEG, HEIC, PNG or TIFF: something else already developed it, so some controls have nothing to act on. */
 	const developed = $derived(meta?.info.sourceKind === 'developed');
@@ -156,7 +224,7 @@
 	let viewport: Viewport = { zoom: 1, panX: 0, panY: 0 };
 
 	/** The edit, its saving and its versions (`$lib/state/edit-session`); the page draws what follows a change. */
-	const session = new EditSession(key, {
+	const session = new EditSession(editKey, {
 		redraw: () => schedule(true),
 		settled: () => {
 			if (fallback) renderPreview();
@@ -220,6 +288,10 @@
 	let lensMadeFrom = '';
 	/** The masks the models made for this photo, fetched when a mask is first needed (`$lib/masks`). */
 	let maskLibrary: MaskLibrary | undefined;
+	/** Colour-range layers' selections, and the develop uniform and white balance of what is being shown. */
+	let colorSelections: ColorSelections | undefined;
+	let shownUniform: Uint8Array | undefined;
+	let shownBalance = '';
 	let maskSet = $state<MaskSet | null>(null);
 	/** The layer being edited, and whether its mask is shown over the photo. */
 	let maskSelected = $state<number | null>(null);
@@ -240,7 +312,7 @@
 	 * Layers with brush strokes, painted at the proxy's size by layer slot: what they were painted from, a
 	 * version that moves with every live stroke, and the lens-corrected copy develop reads.
 	 */
-	const layerTextures = new Map<number, { key: string; version: number; painted: GPUTexture; corrected?: GPUTexture; correctedFrom: string }>();
+	const layerTextures = new Map<number, { key: string; version: number; painted: GPUTexture; corrected?: GPUTexture; correctedFrom: string; shape?: GPUTexture }>();
 	/**
 	 * The stroke being painted: its finger, layer, settings, its points so far (fractions of the photo), and
 	 * those not drawn yet — pointer events only collect them; each frame draws what arrived since the last.
@@ -279,7 +351,9 @@
 	let keepOldRendering = $state(false);
 	/** What Highlights/Shadows alone would do to an identity curve — the curve editor's "ghost" line, drawn
 	 * behind the real one so a slider's effect stays visible even once a manual curve has its own shape. */
-	const ghostLut = $derived.by(() => (edit ? (packer?.toneCurveLut([], edit.tone.highlights ?? 0, edit.tone.shadows ?? 0) ?? null) : null));
+	// Highlights and Shadows bend the curve only in an edit from before `PROCESS_VERSION` 10; since, they are the
+	// light stage's and the curve has nothing of theirs to draw.
+	const ghostLut = $derived.by(() => (edit && edit.tone.perPixelLight === false ? (packer?.toneCurveLut([], edit.tone.highlights ?? 0, edit.tone.shadows ?? 0) ?? null) : null));
 	let display: DisplaySpace = 'srgb';
 	let developDirty = true;
 	let frame = 0;
@@ -336,11 +410,57 @@
 		if (stock) loadProfile(stock, () => schedule(true));
 		slideProfile = stock ? cachedProfile(stock) : undefined;
 		const packed = packer.pack(source, cameraColor(), meta!.info.sourceKind ?? 'raw', display, slideProfile);
+		shownUniform = packed.uniform;
+		shownBalance = JSON.stringify(source.whiteBalance);
 		if (!before) {
 			lut = packed.lut;
 			maskCurves = packed.maskCurves;
 		}
 		return packed;
+	}
+
+	/** The edit's LUT for the develop pass, once its table is here; until then, and for none, no look. */
+	function lookFor(l: EditParams['lut']) {
+		if (!l) return null;
+		loadTable(l.id, () => schedule(true));
+		const t = cachedTable(l.id);
+		const uniform = t && packer.packLook($state.snapshot(l), display, t.header);
+		return t && uniform ? { uniform, size: t.header.size, rgba: t.rgba } : null;
+	}
+
+	/** The soft proof for the develop pass, once its table is here; until then, and when off, none. */
+	function proofFor() {
+		const o = proof;
+		if (!proofOn || !o?.id) return null;
+		loadProof(o, display, () => schedule(true));
+		const t = cachedProof(o, display);
+		return t ? { uniform: packer.packProof(display, t.header, o.warn), size: t.header.size, rgba: t.rgba } : null;
+	}
+
+	/** Develop what is shown — the edit, or the compared version while `before` — into the output or `into`. */
+	function developShown(into?: GPUTexture) {
+		const shown = before ? compareEdit() : edit!;
+		// The spots first: they change the proxy every pass after reads.
+		const m = cameraColor().asShotMul;
+		if (develop.setSpots($state.snapshot(shown.spots ?? []), [m[0], m[1], m[2]])) {
+			lensMadeFrom = '';
+			depthMadeFrom = undefined;
+			refinedFrom = undefined;
+		}
+		correctLens();
+		depthEffects();
+		const packed = repack();
+		develop.setUniforms(packed.uniform);
+		develop.setProfile(packed.profile);
+		develop.setDefringe(packed.defringe);
+		develop.setLook(lookFor(shown.lut));
+		develop.setProof(proofFor());
+		develop.setToneLut(packed.lut);
+		develop.setMono(packed.monoLut);
+		develop.setSlide(packed.slideExposure, slideProfile?.response ?? NO_TABLE);
+		develop.setMasks(packed.masks, (shown.masks ?? []).map((m, i) => layerTexture(i, m)), packed.maskCurves);
+		if (into) develop.renderInto(into);
+		else develop.render();
 	}
 
 	function draw() {
@@ -357,16 +477,19 @@
 		}
 		if (!develop?.output) return;
 		if (stroke && preview) drawStroke();
+		// The split's compared side, developed as the flip to it would be, into its own texture.
+		const splitKey = split && !before ? `${compare?.id ?? 'as shot'}|${display}|${develop.proxy?.label}|${develop.proxy?.width}` : '';
+		if (splitKey && (splitKey !== splitShows || !splitTexture)) {
+			splitTexture?.destroy();
+			splitTexture = develop.variantTarget('split, compared');
+			before = true;
+			developShown(splitTexture);
+			before = false;
+			splitShows = splitKey;
+			developDirty = true;
+		}
 		if (developDirty) {
-			correctLens();
-			depthEffects();
-			const packed = repack();
-			develop.setUniforms(packed.uniform);
-			develop.setToneLut(packed.lut);
-			develop.setMono(packed.monoLut);
-			develop.setSlide(packed.slideExposure, slideProfile?.response ?? NO_TABLE);
-			develop.setMasks(packed.masks, ((before ? compareEdit() : edit).masks ?? []).map((m, i) => layerTexture(i, m)), packed.maskCurves);
-			develop.render();
+			developShown();
 			developDirty = false;
 			histogramStale = true;
 		}
@@ -386,8 +509,15 @@
 		const maskFlags = overlay ? SHOW_MASK | (showing.invert ? MASK_INVERTED : 0) : 0;
 		const shown = displayFrame();
 		const geometry: ViewGeometry | undefined = shown ? { toPicture: shown.frame.toPicture, size: shown.frame.size } : undefined;
-		view.render(develop.output, canvas, viewport, (clipHigh ? CLIP_HIGHS : 0) | (clipLow ? CLIP_LOWS : 0) | (peaking ? PEAKING : 0) | maskFlags, geometry);
+		view.render(develop.output, canvas, viewport, (clipHigh ? CLIP_HIGHS : 0) | (clipLow ? CLIP_LOWS : 0) | (peaking ? PEAKING : 0) | maskFlags, geometry, split && !before && splitTexture ? { texture: splitTexture, at: splitAt } : undefined);
 		markerPos = cropping ? null : imageToScreen(afPoint());
+		spotMarks = !cropping && (section === 'retouch' || retouchTool !== 'off') ? markSpots() : [];
+		eyeMarks = peaking && !cropping
+			? eyes.flatMap((e) => {
+					const p = imageToScreen({ x: e.at[0], y: e.at[1] });
+					return p ? [{ ...p, sharp: e.sharp, label: `${e.side === 'right' ? 'Right' : 'Left'} eye of face ${e.face + 1}: ${e.sharp ? 'sharp' : 'soft'} (${Math.round(e.score * 100)} %)` }] : [];
+				})
+			: [];
 		// The zoom readout: device pixels per output pixel, which is what the double tap's 100 % means. 0 at fit,
 		// where there is nothing to say and nothing to go back to.
 		zoomPercent = viewport.zoom > 1.001 ? Math.round(imageRect().fit * viewport.zoom * 100) : 0;
@@ -545,6 +675,126 @@
 		changed();
 	}
 
+	/**
+	 * Upright: the picture as developed, its lines found and the geometry solved so they stand true
+	 * (`sidecar_color::upright`). The lens's focal length, in picture diagonals, sets Aspect when the photo
+	 * gives it with a crop factor. False when the photo hasn't the lines for the mode.
+	 */
+	async function upright(mode: 'level' | 'vertical' | 'full'): Promise<boolean> {
+		const size = pictureSize();
+		if (!edit || !size || !develop) return false;
+		const { lum, size: lumSize } = await develop.luminance(800);
+		const info = meta?.info;
+		const crop = info?.lensIdentity?.cropFactor;
+		const focal = info && info.focalLengthMm > 0 && crop ? (info.focalLengthMm * crop) / 43.27 : null;
+		const was: Geometry = $state.snapshot(edit.geometry) ?? NO_GEOMETRY;
+		const next = packer.upright(was, size, lum, lumSize, mode, focal);
+		if (!next) return false;
+		edit.geometry = next;
+		changed();
+		committed();
+		return true;
+	}
+
+	// ---------- retouch
+
+	/** A point of the proxy (0…1, before lens correction) → the canvas, in CSS pixels. */
+	function spotToScreen(p: [number, number]) {
+		const proxy = develop?.proxy;
+		if (!proxy) return null;
+		return imageToScreen(correctedPoint(lensUniform, proxy.width, proxy.height, { x: p[0], y: p[1] }));
+	}
+
+	/** The spots as the overlay draws them: centre, source and radius on screen. */
+	function markSpots() {
+		const proxy = develop?.proxy;
+		if (!proxy || !develop.output || !edit?.spots?.length) return [];
+		const r = imageRect();
+		const outW = displayFrame()?.frame.size[0] ?? develop.output.width;
+		const scale = r.w / outW / devicePixelRatio;
+		return edit.spots.flatMap((s) => {
+			const at = spotToScreen(s.at);
+			if (!at) return [];
+			return [{ at, from: s.kind === 'redEye' ? null : spotToScreen(s.from), r: s.radius * Math.max(proxy.width, proxy.height) * scale }];
+		});
+	}
+
+	/**
+	 * Where a heal or clone at `p` (radius `r`, a share of the long edge) should take from: of the places two to
+	 * four radii away, inside the photo, the one whose surroundings — rings of log luminance around it — are most
+	 * like the target's, so the edge it blends into is the same kind of surface.
+	 */
+	async function chooseSource(p: [number, number], r: number): Promise<[number, number]> {
+		const { lum, size } = await develop.proxyLuminance(512);
+		const [w, h] = size;
+		const long = Math.max(w, h);
+		const at = (x: number, y: number) => lum[Math.min(h - 1, Math.max(0, Math.round(y))) * w + Math.min(w - 1, Math.max(0, Math.round(x)))];
+		const rings = (cx: number, cy: number) => {
+			const v: number[] = [];
+			for (const k of [1.2, 1.45, 1.7])
+				for (let a = 0; a < 24; a++) {
+					const t = (a / 24) * 2 * Math.PI;
+					v.push(at(cx + Math.cos(t) * k * r * long, cy + Math.sin(t) * k * r * long));
+				}
+			return v;
+		};
+		const [tx, ty] = [p[0] * w, p[1] * h];
+		const target = rings(tx, ty);
+		let best: [number, number] = [p[0] + 2.5 * r * (long / w), p[1]];
+		let bestScore = Infinity;
+		for (const d of [2.2, 2.8, 3.6])
+			for (let a = 0; a < 24; a++) {
+				const t = (a / 24) * 2 * Math.PI;
+				const [cx, cy] = [tx + Math.cos(t) * d * r * long, ty + Math.sin(t) * d * r * long];
+				const reach = 1.8 * r * long;
+				if (cx < reach || cy < reach || cx > w - reach || cy > h - reach) continue;
+				const c = rings(cx, cy);
+				const score = c.reduce((s, v, i) => s + Math.abs(v - target[i]), 0) / c.length;
+				if (score < bestScore) [bestScore, best] = [score, [cx / w, cy / h]];
+			}
+		return best;
+	}
+
+	/** A tap with a retouch tool armed: a spot there, selected. */
+	async function addSpot(e: PointerEvent) {
+		const p = screenToSource(px(e));
+		if (!p || !edit || p.some((v) => v < 0 || v > 1)) return;
+		const kind = retouchTool as Exclude<RetouchTool, 'off'>;
+		const { radius, feather, opacity } = spotSettings;
+		const from = kind === 'redEye' ? p : await chooseSource(p, radius);
+		update((ed) => {
+			ed.spots = [...(ed.spots ?? []), { kind, at: p, from, radius, feather, opacity }];
+		});
+		spotSelected = (edit.spots?.length ?? 1) - 1;
+		committed();
+	}
+
+	/** Drag a spot's centre or its source. */
+	function dragSpot(e: PointerEvent, i: number, which: 'at' | 'from') {
+		e.stopPropagation();
+		if (readOnly) return;
+		const el = e.currentTarget as Element;
+		el.setPointerCapture(e.pointerId);
+		spotSelected = i;
+		const move = (ev: PointerEvent) => {
+			const p = screenToSource(px(ev));
+			if (!p) return;
+			update((ed) => {
+				const s = ed.spots?.[i];
+				if (s) s[which] = [Math.min(1, Math.max(0, p[0])), Math.min(1, Math.max(0, p[1]))];
+			});
+		};
+		const up = () => {
+			el.removeEventListener('pointermove', move as EventListener);
+			el.removeEventListener('pointerup', up);
+			el.removeEventListener('pointercancel', up);
+			committed();
+		};
+		el.addEventListener('pointermove', move as EventListener);
+		el.addEventListener('pointerup', up);
+		el.addEventListener('pointercancel', up);
+	}
+
 	/** A quarter turn. A locked ratio turns with the photo, so the same part of it stays cropped. */
 	function turn(by: 1 | -1) {
 		const g = edit?.geometry ?? NO_GEOMETRY;
@@ -694,7 +944,7 @@
 	 * while something it needs is loading; that redraws when it arrives.
 	 */
 	function layerTexture(i: number, m: MaskAdjustment): GPUTexture | undefined {
-		if (!m.strokes?.length && !m.range && !m.edge && stroke?.layer !== i) return m.mask === BRUSH ? undefined : maskTexture(m.mask);
+		if (!m.strokes?.length && !m.range && !m.edge && stroke?.layer !== i && m.mask !== GRADIENT) return m.mask === BRUSH ? undefined : m.mask === COLOR ? colorTexture(i, m) : maskTexture(m.mask);
 		const entry = layerEntry(i, m);
 		if (!entry) return undefined;
 		const size: [number, number] = [entry.painted.width, entry.painted.height];
@@ -709,12 +959,23 @@
 		return entry.corrected;
 	}
 
+	/** A colour-range layer's selection (`$lib/color-range`), under the white balance of what is shown. */
+	function colorTexture(i: number, m: MaskAdjustment): GPUTexture | undefined {
+		if (!colorSelections || !shownUniform || !m.color) return undefined;
+		return colorSelections.texture(i, $state.snapshot(m.color), shownUniform, shownBalance, () => schedule(true));
+	}
+
 	/** Layer `i` painted from its model mask and strokes, up to date unless a stroke is being drawn on it. */
 	function layerEntry(i: number, m: MaskAdjustment) {
 		const proxy = develop?.proxy;
 		if (!proxy || !painter) return undefined;
 		let base: GPUTexture | undefined;
-		if (m.mask !== BRUSH) {
+		if (m.mask === GRADIENT) {
+			if (!m.gradient) return undefined;
+		} else if (m.mask === COLOR) {
+			base = colorTexture(i, m);
+			if (!base) return undefined;
+		} else if (m.mask !== BRUSH) {
 			base = maskLibrary?.ready(m.mask);
 			if (!base) {
 				maskLibrary?.load(m.mask).then(() => schedule(true), () => {});
@@ -725,10 +986,17 @@
 		if (!entry || entry.painted.width !== proxy.width || entry.painted.height !== proxy.height) {
 			entry?.painted.destroy();
 			entry?.corrected?.destroy();
+			entry?.shape?.destroy();
 			entry = { key: '', version: 0, painted: painter.mask([proxy.width, proxy.height], `layer ${i}`), correctedFrom: '' };
 			layerTextures.set(i, entry);
 		}
-		const key = JSON.stringify([m.mask, m.range ?? null, m.edge ?? null, m.strokes ?? []]);
+		const key = JSON.stringify([m.mask, m.range ?? null, m.edge ?? null, m.strokes ?? [], m.gradient ?? null, m.mask === COLOR ? [m.color ?? null, shownBalance] : null]);
+		if (m.mask === GRADIENT && m.gradient) {
+			// The shape is the base, drawn at the proxy's size whenever it moves.
+			entry.shape ??= painter.mask([proxy.width, proxy.height], `layer ${i} shape`);
+			if (entry.key !== key) painter.gradient(entry.shape, packer.gradientUniform($state.snapshot(m.gradient), [proxy.width, proxy.height]));
+			base = entry.shape;
+		}
 		if (entry.key !== key && stroke?.layer !== i) {
 			painter.paint(entry.painted, base, $state.snapshot(m.strokes) ?? [], rangeUniform(m.range));
 			// The edge last, over the range and the strokes. (While a stroke is drawn it shows without the edge.)
@@ -764,6 +1032,7 @@
 		for (const e of layerTextures.values()) {
 			e.painted.destroy();
 			e.corrected?.destroy();
+			e.shape?.destroy();
 		}
 		layerTextures.clear();
 	}
@@ -773,6 +1042,8 @@
 		if (!maskLibrary || maskSet) return;
 		maskLibrary.manifest().then((set) => {
 			maskSet = set;
+			// Faces arrived: the eyes can be rated.
+			if (set.faces.length) applyPeaking();
 			schedule(true);
 		});
 	}
@@ -780,8 +1051,16 @@
 	function addMask(name: string) {
 		if (!edit) return;
 		const m: MaskAdjustment = { mask: name, invert: false, amount: 100, exposure: 0, contrast: 0, saturation: 0, temperature: 0, tint: 0 };
+		// A gradient starts where it is most often wanted: a linear one darkening the sky from the top, a radial
+		// one on the middle of the frame.
+		if (name === 'gradient-linear' || name === 'gradient-radial') {
+			m.mask = GRADIENT;
+			m.gradient = name === 'gradient-linear' ? { kind: 'linear', from: [0.5, 0.2], to: [0.5, 0.55] } : { kind: 'radial', centre: [0.5, 0.5], axes: [0.25, 0.18], angle: 0, feather: 50 };
+		}
 		// Depth on its own is a gradient from far to near; a layer on it starts as the nearer half.
 		if (name === DEPTH) m.range = { from: 50, to: 100, feather: 15 };
+		// A colour range starts on skin tones, anywhere in the photo (`ColorRange::default`).
+		if (name === COLOR) m.color = { hue: 55, width: 40, saturation: [8, 60], feather: 10 };
 		edit.masks = [...(edit.masks ?? []), m];
 		maskSelected = edit.masks.length - 1;
 		maskShown = true;
@@ -818,6 +1097,36 @@
 
 	// ---------- the brush
 
+	/**
+	 * The other way: a point of the photo before lens correction (0…1) → CSS pixels over the canvas, for a
+	 * gradient's handles. There is no closed form through lens correction, crop and straighten, so it is
+	 * solved — a few Newton steps on `screenToSource`, from where the point would be without them.
+	 */
+	function sourceToScreen(q: [number, number], _frame: number): { x: number; y: number } | null {
+		if (!develop?.output) return null;
+		const r = imageRect();
+		let s = { x: r.x + q[0] * r.w, y: r.y + q[1] * r.h };
+		for (let k = 0; k < 8; k++) {
+			const f = screenToSource(s);
+			const fx = screenToSource({ x: s.x + 1, y: s.y });
+			const fy = screenToSource({ x: s.x, y: s.y + 1 });
+			if (!f || !fx || !fy) return null;
+			const e = [q[0] - f[0], q[1] - f[1]];
+			if (Math.hypot(e[0], e[1]) < 1e-6) break;
+			const [a, b, c, d] = [fx[0] - f[0], fy[0] - f[0], fx[1] - f[1], fy[1] - f[1]];
+			const det = a * d - b * c;
+			if (Math.abs(det) < 1e-15) return null;
+			s = { x: s.x + (d * e[0] - b * e[1]) / det, y: s.y + (-c * e[0] + a * e[1]) / det };
+		}
+		return { x: s.x / devicePixelRatio, y: s.y / devicePixelRatio };
+	}
+
+	/** The proxy's size, which a gradient's axes are measured against; the markup passes `layoutTick`. */
+	function proxySize(_frame: number): [number, number] | null {
+		const p = develop?.proxy;
+		return p ? [p.width, p.height] : null;
+	}
+
 	/** A canvas pixel → the photo before lens correction (0…1), where strokes are stored. */
 	function screenToSource(p: { x: number; y: number }): [number, number] | null {
 		const proxy = develop?.proxy;
@@ -851,10 +1160,63 @@
 			return;
 		}
 		pickingWhite = false;
-		const wb = packer.whiteFromNeutral(cameraColor(), rgb);
+		// On a negative, the neutral is what develop makes of the sample: inverted.
+		const neutral = edit?.negative ? invertNegative(rgb, edit.negative) : rgb;
+		const wb = packer.whiteFromNeutral(cameraColor(), neutral);
 		const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, Math.round(v)));
 		update((ed) => {
 			ed.whiteBalance = { mode: 'custom', temperatureK: clamp(wb.temperatureK, 2000, 12000), tint: clamp(wb.tint, -150, 150) };
+		});
+		committed();
+	}
+
+	/** A camera colour of the negative as develop inverts it (`Negative::invert`). */
+	function invertNegative(c: [number, number, number], n: { base: [number, number, number]; gamma: number }): [number, number, number] {
+		const g = 1 / Math.min(3, Math.max(0.2, n.gamma));
+		return c.map((v, k) => Math.max(0, (Math.max(n.base[k], 1e-6) / Math.max(v, 1e-6 * Math.max(n.base[k], 1e-6))) ** g - 1) * 0.0018) as [number, number, number];
+	}
+
+	/**
+	 * Turn a film negative on or off. On, it starts from the clearest film in the frame as its base (each channel's
+	 * 99.5th percentile, the rebate if it shows) and a white balance that makes the inverted picture's mean grey —
+	 * the mask is gone once the base is divided out, and what is left is the light's and the stock's balance.
+	 */
+	async function setNegative(on: boolean) {
+		if (!edit || !packer) return;
+		if (!on) {
+			update((ed) => {
+				delete ed.negative;
+				ed.whiteBalance = { ...ed.whiteBalance, mode: 'asShot' };
+			});
+			committed();
+			return;
+		}
+		const px = await develop.sourcePixels(256);
+		const pick = (k: number) => {
+			const v = px.map((p) => p[k]).sort((a, b) => a - b);
+			return v[Math.floor(v.length * 0.995)] ?? 1;
+		};
+		const negative = { base: [pick(0), pick(1), pick(2)] as [number, number, number], gamma: 0.6 };
+		const mean = [0, 0, 0];
+		for (const p of px) invertNegative(p, negative).forEach((v, k) => (mean[k] += v / px.length));
+		const wb = packer.whiteFromNeutral(cameraColor(), mean as [number, number, number]);
+		const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, Math.round(v)));
+		update((ed) => {
+			ed.negative = negative;
+			ed.whiteBalance = { mode: 'custom', temperatureK: clamp(wb.temperatureK, 2000, 12000), tint: clamp(wb.tint, -150, 150) };
+		});
+		committed();
+	}
+
+	/** The film-base eyedropper: the camera RGB around the tap becomes the negative's base. */
+	async function pickBase(e: PointerEvent) {
+		pickingBase = false;
+		const p = screenToSource(px(e));
+		if (!p || !edit?.negative || p.some((v) => v < 0 || v > 1)) return;
+		const rgb = await develop.sampleSource(p, 4);
+		if (!rgb || rgb.some((v) => v <= 0)) return;
+		update((ed) => {
+			if (ed.negative) ed.negative.base = rgb;
 		});
 		committed();
 	}
@@ -967,13 +1329,14 @@
 	/** The references as they stand, for putting back: every field `adopt_current_rendering` sets. One left out
 	 *  is never taken up, so the edit stays behind and the offer comes back the moment it was taken. */
 	function referencesOf(e: EditParams) {
-		return { processVersion: e.processVersion, baselineEv: e.exposure.baselineEv, whiteEv: e.tone.whiteEv, whiteZeroEv: e.tone.whiteZeroEv, shoulderOrder: e.tone.shoulderOrder, highlightBleach: e.tone.highlightBleach, highlightReachEv: e.tone.highlightReachEv };
+		return { processVersion: e.processVersion, baselineEv: e.exposure.baselineEv, whiteEv: e.tone.whiteEv, whiteZeroEv: e.tone.whiteZeroEv, shoulderOrder: e.tone.shoulderOrder, highlightBleach: e.tone.highlightBleach, highlightReachEv: e.tone.highlightReachEv, gamutAp1: e.tone.gamutAp1, noiseModel: e.detail.noiseModel };
 	}
 
 	function setReferences(e: EditParams, r: ReturnType<typeof referencesOf>) {
 		e.processVersion = r.processVersion;
 		e.exposure = { ...e.exposure, baselineEv: r.baselineEv };
-		e.tone = { ...e.tone, whiteEv: r.whiteEv, whiteZeroEv: r.whiteZeroEv, shoulderOrder: r.shoulderOrder, highlightBleach: r.highlightBleach, highlightReachEv: r.highlightReachEv };
+		e.tone = { ...e.tone, whiteEv: r.whiteEv, whiteZeroEv: r.whiteZeroEv, shoulderOrder: r.shoulderOrder, highlightBleach: r.highlightBleach, highlightReachEv: r.highlightReachEv, gamutAp1: r.gamutAp1 };
+		e.detail = { ...e.detail, noiseModel: r.noiseModel };
 	}
 
 	/**
@@ -1205,6 +1568,22 @@
 	 * one is running sets a flag and is served by another round after it, so dragging a slider can't queue a
 	 * render per frame.
 	 */
+	/** The server's histogram (`x-histogram`: `histogram.wgsl`'s 1,026 counts, base64), as the GPU pass reports one. */
+	function histogramFromHeader(b64: string | null): HistogramData | null {
+		if (!b64) return null;
+		const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+		if (bytes.byteLength !== 1026 * 4) return null;
+		const v = new Uint32Array(bytes.buffer);
+		const luma = v.slice(768, 1024);
+		return { r: v.slice(0, 256), g: v.slice(256, 512), b: v.slice(512, 768), luma, clippedHigh: v[1024], clippedLow: v[1025], total: luma.reduce((a, x) => a + x, 0) };
+	}
+
+	// Without WebGPU, an overlay switched on or off is a new preview from the server.
+	$effect(() => {
+		void [clipHigh, clipLow, peaking];
+		if (fallback) untrack(() => renderPreview());
+	});
+
 	async function renderPreview() {
 		if (!edit || !meta) return;
 		if (previewBusy) {
@@ -1222,9 +1601,13 @@
 				const body = JSON.stringify({
 					edit: shownEdit,
 					colorSpace: display,
-					longEdge: Math.round(Math.min(Math.max(innerWidth, innerHeight) * devicePixelRatio, 2560))
+					longEdge: Math.round(Math.min(Math.max(innerWidth, innerHeight) * devicePixelRatio, 2560)),
+					// Painted in by the server, as the view pass would draw them; none while cropping.
+					overlays: cropping ? 0 : (clipHigh ? CLIP_HIGHS : 0) | (clipLow ? CLIP_LOWS : 0) | (peaking ? PEAKING : 0)
 				});
 				const r = await api(`/api/assets/${key}/preview`, { method: 'POST', headers: { 'content-type': 'application/json' }, body });
+				const counted = histogramFromHeader(r.headers.get('x-histogram'));
+				if (counted) histogram = counted;
 				const url = URL.createObjectURL(await r.blob());
 				if (previewUrl) URL.revokeObjectURL(previewUrl);
 				previewUrl = url;
@@ -1290,7 +1673,33 @@
 
 	function useFocusMask(png: ArrayBuffer) {
 		focusMaskBytes = png;
+		decodeGrey(png)
+			.then((g) => {
+				focusGrey = g;
+				applyPeaking();
+			})
+			.catch(() => {});
 		return view.loadFocusMask(png);
+	}
+
+	/**
+	 * The focus mask the view peaks with: the photo's own, or weighted by the subject mask when Subject is on; and
+	 * the eyes rated from the photo's own (an eye is sharp or not whatever else is).
+	 */
+	async function applyPeaking() {
+		if (!focusGrey || !focusMaskBytes) return;
+		eyes = maskSet?.faces?.length ? rateEyes(focusGrey, maskSet.faces) : [];
+		if (peakSubject && maskSet?.names.includes('subject')) {
+			try {
+				const subject = await decodeGrey(await (await api(`/api/assets/${key}/masks/subject`)).blob());
+				view.setFocusMaskPixels(weighByMask(focusGrey, subject));
+			} catch {
+				await view.loadFocusMask(focusMaskBytes);
+			}
+		} else await view.loadFocusMask(focusMaskBytes);
+		// The lens pass corrects whichever mask is current: make it run again.
+		lensMadeFrom = '';
+		schedule(true);
 	}
 
 	/**
@@ -1344,6 +1753,7 @@
 		]);
 		depthPass = await DepthPass.create(device);
 		maskLibrary = new MaskLibrary(device, key);
+		colorSelections = new ColorSelections(device, key, packer);
 		// For tests and for looking, as `?inspect` already leaves the proxy on the window: a real device loss
 		// followed by the real recovery. Destroying it invalidates every pipeline and texture built above, so
 		// what runs afterwards is the rebuild and nothing else.
@@ -1417,7 +1827,7 @@
 			})
 			.catch(() => {});
 		try {
-			const [metaResp, stateResp] = await Promise.all([api(`/api/assets/${key}/meta`), api(`/api/assets/${key}/edit`)]);
+			const [metaResp, stateResp] = await Promise.all([api(`/api/assets/${key}/meta`), api(`/api/assets/${editKey}/edit`)]);
 			meta = await metaResp.json();
 			const state: EditState = await stateResp.json();
 			// A browser without WebGPU still edits: the server runs the develop pass instead. Logged, not
@@ -1580,7 +1990,7 @@
 		clearTimeout(holdTimer);
 		// With the brush on, one finger paints; a second one turns it into a pinch.
 		if (painting && pointers.size === 1) startStroke(e);
-		else if (pointers.size === 1 && !pickingWhite && !pickingFocus && !probing) holdTimer = setTimeout(() => setBefore(true), 450);
+		else if (pointers.size === 1 && !pickingWhite && !pickingFocus && !probing && retouchTool === 'off') holdTimer = setTimeout(() => setBefore(true), 450);
 		if (pointers.size === 2) {
 			cancelStroke();
 			clearTimeout(holdTimer);
@@ -1625,8 +2035,16 @@
 		const now = performance.now();
 		const still = Math.hypot(px(e).x - downAt.x, px(e).y - downAt.y) < 8 * devicePixelRatio && now - downAt.t < 300;
 		if (still && pointers.size === 0) {
+			if (retouchTool !== 'off' && !fallback && !readOnly && develop?.output) {
+				addSpot(e);
+				return;
+			}
 			if (pickingWhite && !fallback && develop?.output) {
 				pickWhite(e);
+				return;
+			}
+			if (pickingBase && !fallback && develop?.output) {
+				pickBase(e);
 				return;
 			}
 			if (pickingFocus && !fallback && develop?.output) {
@@ -1747,11 +2165,13 @@
 		{ id: 'film', label: 'Film', short: 'Film' },
 		// Not "Colour": that is the group it sits in, and a section named after its group reads as the same thing.
 		{ id: 'color', label: 'Mixer', short: 'Mixer' },
+		{ id: 'grading', label: 'Colour grading', short: 'Grading' },
 		{ id: 'light', label: 'Light', short: 'Light' },
 		{ id: 'curve', label: 'Curve', short: 'Curve' },
 		{ id: 'crop', label: 'Crop and straighten', short: 'Crop' },
 		{ id: 'depth', label: 'Depth', short: 'Depth' },
 		{ id: 'masks', label: 'Masks', short: 'Masks' },
+		{ id: 'retouch', label: 'Retouch', short: 'Retouch' },
 		{ id: 'detail', label: 'Detail', short: 'Detail' },
 		{ id: 'lens', label: 'Lens', short: 'Lens' },
 		{ id: 'history', label: 'History', short: 'History' }
@@ -1759,10 +2179,10 @@
 	const sectionById = (id: Section) => allSections.find((x) => x.id === id)!;
 	/** The tools as the panel groups them: a group with one section is that section. */
 	const allGroups: { id: string; label: string; short: string; children: Section[] }[] = [
-		{ id: 'colour', label: 'Colour', short: 'Colour', children: ['wb', 'film', 'color'] },
+		{ id: 'colour', label: 'Colour', short: 'Colour', children: ['wb', 'film', 'color', 'grading'] },
 		{ id: 'light', label: 'Light', short: 'Light', children: ['light', 'curve'] },
 		{ id: 'crop', label: 'Crop and straighten', short: 'Crop', children: ['crop'] },
-		{ id: 'processing', label: 'Processing', short: 'Processing', children: ['depth', 'masks', 'detail', 'lens'] },
+		{ id: 'processing', label: 'Processing', short: 'Processing', children: ['depth', 'masks', 'retouch', 'detail', 'lens'] },
 		{ id: 'history', label: 'History', short: 'History', children: ['history'] }
 	];
 	/**
@@ -1776,7 +2196,7 @@
 	const groupOf = (id: Section) => groups.find((g) => g.children.includes(id)) ?? groups[0];
 </script>
 
-<svelte:head><title>{meta?.fileName ?? 'Sidecar'}</title></svelte:head>
+<svelte:head><title>{meta?.fileName ?? 'Sidecar'}{session.copy ? ` — ${session.copy.name}` : ''}</title></svelte:head>
 <svelte:window onkeydown={keydown} />
 
 {#snippet lensSection()}
@@ -1784,11 +2204,11 @@
 {/snippet}
 
 {#snippet cropSection()}
-	{#if edit && meta}<CropSection {edit} {readOnly} originalRatio={originalRatio()} ongeometry={setGeometry} onturn={turn} onreset={resetGeometry} oncommit={committed} />{/if}
+	{#if edit && meta}<CropSection {edit} {readOnly} originalRatio={originalRatio()} ongeometry={setGeometry} onturn={turn} onreset={resetGeometry} oncommit={committed} onupright={fallback ? undefined : upright} />{/if}
 {/snippet}
 
 {#snippet wbSection()}
-	{#if edit}<WhiteBalanceSection {edit} onchange={update} oncommit={committed} {developed} asShot={asShotWb} picking={fallback || readOnly ? undefined : pickingWhite} onpick={(on) => (pickingWhite = on)} />{/if}
+	{#if edit}<WhiteBalanceSection {edit} onchange={update} oncommit={committed} {developed} asShot={asShotWb} picking={fallback || readOnly ? undefined : pickingWhite} onpick={(on) => (pickingWhite = on)} fileProfile={meta?.info.color.profile?.name} />{/if}
 {/snippet}
 
 {#snippet lightSection()}
@@ -1796,7 +2216,7 @@
 {/snippet}
 
 {#snippet filmSection()}
-	{#if edit}<FilmSection {edit} onchange={update} oncommit={committed} {developed} />{/if}
+	{#if edit}<FilmSection {edit} onchange={update} oncommit={committed} {developed} onnegative={fallback || readOnly ? undefined : setNegative} pickingBase={fallback || readOnly ? undefined : pickingBase} onpickbase={(on) => (pickingBase = on)} />{/if}
 {/snippet}
 
 {#snippet curveSection()}
@@ -1805,6 +2225,26 @@
 
 {#snippet detailSection()}
 	{#if edit}<DetailSection {edit} onchange={update} oncommit={committed} assetKey={key} {loupeCenter} colorSpace={displaySpace} />{/if}
+{/snippet}
+
+{#snippet retouchSection()}
+	{#if edit}
+		<RetouchSection
+			{edit}
+			onchange={update}
+			oncommit={committed}
+			tool={retouchTool}
+			selected={spotSelected}
+			settings={spotSettings}
+			readOnly={readOnly || fallback}
+			ontool={(t) => {
+				retouchTool = t;
+				schedule();
+			}}
+			onselect={(i) => (spotSelected = i)}
+			onsettings={(p) => (spotSettings = { ...spotSettings, ...p })}
+		/>
+	{/if}
 {/snippet}
 
 {#snippet masksSection()}
@@ -1830,13 +2270,12 @@
 {/snippet}
 
 {#snippet historySection()}
-	<!-- The colour sections as a look: copied here, pasted onto another photo (`$lib/state/look-clipboard`). -->
-	<div class="mb-2 flex flex-wrap items-center gap-1.5 text-xs">
-		<span class="text-fg-2">Look</span>
-		<button type="button" class="rounded-full bg-raised px-2.5 py-1 text-fg disabled:opacity-40" disabled={!edit} title="Copy this photo's white balance, light, curve, colour and detail" onclick={() => { if (edit && meta) { copyLook($state.snapshot(edit), meta.fileName); lookClipboard = readLookClipboard(); } }}>Copy look</button>
-		<button type="button" class="rounded-full bg-raised px-2.5 py-1 text-fg disabled:opacity-40" disabled={!edit || !lookClipboard || readOnly} onclick={() => { if (edit && pasteLook(edit)) { changed(); committed(); } }}>Paste look</button>
-		{#if lookClipboard}<span class="min-w-0 truncate text-fg-2">from {lookClipboard.from}</span>{/if}
-	</div>
+	<!-- The look taken elsewhere: copied, pasted, kept as presets (`$lib/ui/LookTools`). -->
+	{#if edit && meta}<LookTools edit={() => $state.snapshot(edit!)} defaults={() => defaults} fileName={meta.fileName} {readOnly} onchange={update} oncommit={committed} />{/if}
+	<SnapshotsBar history={session.versions} {readOnly} ontake={(name) => session.snapshot(name)} onopen={(id) => session.openVersion(id)} onsplit={(id) => { session.setCompare(id); setSplit(true); }} />
+	{#if meta}
+		<VirtualCopies photoKey={key} fileName={meta.fileName} current={session.copy} copies={session.copies} {readOnly} onnew={async (name) => { const k = await session.newCopy(key, name); if (k) location.assign(`/edit/${k}`); }} onrename={(id, name) => session.renameCopy(key, id, name)} onremove={(id) => session.removeCopy(key, id)} />
+	{/if}
 	{#if session.versions}
 		<HistoryPanel history={session.versions} compareId={compare?.id ?? null} busy={session.versionsBusy || session.saving} onopen={(id) => session.openVersion(id)} oncompare={(id) => session.setCompare(id)} onpick={(id, section) => session.pickFrom(id, section)} onlabel={(id, label) => session.labelVersion(id, label)} />
 
@@ -1863,13 +2302,17 @@
 	>
 		<summary class="cursor-pointer py-1 text-xs font-medium">{s.label}</summary>
 		<div class="pt-2">
-			{#if s.id === 'lens'}{@render lensSection()}{:else if s.id === 'crop'}{@render cropSection()}{:else if s.id === 'wb'}{@render wbSection()}{:else if s.id === 'light'}{@render lightSection()}{:else if s.id === 'film'}{@render filmSection()}{:else if s.id === 'curve'}{@render curveSection()}{:else if s.id === 'color'}{@render colorSection()}{:else if s.id === 'depth'}{@render depthSection()}{:else if s.id === 'masks'}{@render masksSection()}{:else if s.id === 'history'}{@render historySection()}{:else if detailOpen}{@render detailSection()}{/if}
+			{#if s.id === 'lens'}{@render lensSection()}{:else if s.id === 'crop'}{@render cropSection()}{:else if s.id === 'wb'}{@render wbSection()}{:else if s.id === 'light'}{@render lightSection()}{:else if s.id === 'film'}{@render filmSection()}{:else if s.id === 'curve'}{@render curveSection()}{:else if s.id === 'color'}{@render colorSection()}{:else if s.id === 'grading'}{@render gradingSection()}{:else if s.id === 'depth'}{@render depthSection()}{:else if s.id === 'masks'}{@render masksSection()}{:else if s.id === 'retouch'}{@render retouchSection()}{:else if s.id === 'history'}{@render historySection()}{:else if detailOpen}{@render detailSection()}{/if}
 		</div>
 	</details>
 {/snippet}
 
 {#snippet colorSection()}
 	{#if edit}<ColorSection {edit} onchange={update} oncommit={committed} />{/if}
+{/snippet}
+
+{#snippet gradingSection()}
+	{#if edit}<GradingSection {edit} onchange={update} oncommit={committed} />{/if}
 {/snippet}
 
 <div class="flex h-dvh flex-col overflow-hidden bg-ground text-fg select-none [-webkit-touch-callout:none] lg:flex-row">
@@ -1888,6 +2331,26 @@
 			onpointerleave={() => (brushCursor = null)}
 			oncontextmenu={(e) => e.preventDefault()}
 		></canvas>
+		{#if split && !fallback && !sideBySide}
+			<!-- The split's line, dragged to move it; the arrow keys move it too. -->
+			<div
+				class="absolute inset-y-0 z-10 w-6 -translate-x-1/2 cursor-ew-resize touch-none"
+				style="left: {splitAt * 100}%"
+				role="slider"
+				tabindex="0"
+				aria-label="Split between {compare?.label ?? (developed ? 'as saved' : 'as shot')} and the edit"
+				aria-valuemin={0}
+				aria-valuemax={100}
+				aria-valuenow={Math.round(splitAt * 100)}
+				onpointerdown={dragSplit}
+				onpointermove={dragSplit}
+				onkeydown={(e) => { if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') { splitAt = Math.min(Math.max(splitAt + (e.key === 'ArrowLeft' ? -0.05 : 0.05), 0.02), 0.98); schedule(); e.preventDefault(); } }}
+			>
+				<div class="mx-auto h-full w-0.5 bg-fg/80"></div>
+				<span class="absolute top-2 right-4 rounded bg-ground/80 px-1.5 py-0.5 text-[0.6875rem] whitespace-nowrap text-fg-2">{compare?.label ?? (developed ? 'As saved' : 'As shot')}</span>
+				<span class="absolute top-2 left-4 rounded bg-ground/80 px-1.5 py-0.5 text-[0.6875rem] text-fg-2">Edit</span>
+			</div>
+		{/if}
 		{#if sideBySide}
 			<!-- After the canvas, so the canvas keeps its corner and everything drawn over it keeps its place. -->
 			<!-- The same gestures as the canvas, in the canvas's coordinates: either side zooms and pans both. -->
@@ -1943,9 +2406,38 @@
 				/>
 			{/if}
 		{/if}
+		{#if !fallback && !toolsHidden && !cropping && !readOnly && proxyLoaded && maskSelected !== null && (wide || section === 'masks') && edit?.masks?.[maskSelected]?.gradient && proxySize(layoutTick)}
+			{@const i = maskSelected}
+			{@const tick = layoutTick}
+			<GradientHandles
+				gradient={edit.masks[i].gradient!}
+				shown={proxySize(tick)!}
+				toScreen={(p) => sourceToScreen(p, tick)}
+				toSource={(x, y) => screenToSource({ x: x * devicePixelRatio, y: y * devicePixelRatio })}
+				onchange={(g) => { setMask(i, { gradient: g }); schedule(true); }}
+				oncommit={committed}
+			/>
+		{/if}
 		{#if brushCursor && painting}
 			<div class="pointer-events-none absolute rounded-full border border-white/80 shadow-[0_0_0_1px_rgba(0,0,0,0.5)]" style="left: {brushCursor.x - brushCursor.r}px; top: {brushCursor.y - brushCursor.r}px; width: {brushCursor.r * 2}px; height: {brushCursor.r * 2}px;"></div>
 		{/if}
+		{#each spotMarks as m, i (i)}
+			<svg class="pointer-events-none absolute inset-0 h-full w-full overflow-visible" aria-hidden="true">
+				{#if m.from}
+					<line x1={m.at.x} y1={m.at.y} x2={m.from.x} y2={m.from.y} stroke="white" stroke-opacity="0.6" stroke-width="1" />
+					<circle cx={m.from.x} cy={m.from.y} r={m.r} fill="none" stroke="white" stroke-dasharray="4 3" stroke-width="1.5" />
+				{/if}
+				<circle cx={m.at.x} cy={m.at.y} r={m.r} fill="none" stroke={spotSelected === i ? '#fadb26' : 'white'} stroke-width={spotSelected === i ? 2 : 1.5} />
+			</svg>
+			<button type="button" class="absolute h-4 w-4 -translate-x-1/2 -translate-y-1/2 touch-none rounded-full border-2 border-white bg-black/30" style="left: {m.at.x}px; top: {m.at.y}px;" aria-label="Spot {i + 1}" onpointerdown={(e) => dragSpot(e, i, 'at')}></button>
+			{#if m.from}
+				<button type="button" class="absolute h-4 w-4 -translate-x-1/2 -translate-y-1/2 touch-none rounded-full border-2 border-dashed border-white bg-black/30" style="left: {m.from.x}px; top: {m.from.y}px;" aria-label="Spot {i + 1}'s source" onpointerdown={(e) => dragSpot(e, i, 'from')}></button>
+			{/if}
+		{/each}
+		{#each eyeMarks as m, k (k)}
+			<!-- Each face's eyes, rated by the focus measure: green is sharp, amber soft (`$lib/peaking`). -->
+			<span class="pointer-events-none absolute h-5 w-5 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 {m.sharp ? 'border-[#3ddc84]' : 'border-dashed border-[#f5a524]'} shadow-[0_0_0_1px_rgba(0,0,0,0.4)]" style="left: {m.x}px; top: {m.y}px;" role="img" aria-label={m.label} title={m.label}></span>
+		{/each}
 		{#if markerPos && showAfPoint}
 			<!-- While a tool is armed the marker steps aside: it is 28 px over the autofocus point, which on most
 			     cameras is the middle of the frame, and that is exactly where someone aims to sample a neutral.
@@ -2003,20 +2495,25 @@
 		{/if}
 		{#if before}<span class="absolute top-[max(1rem,env(safe-area-inset-top))] left-24 rounded bg-ground/80 px-2 py-1 text-xs">{compare?.label ?? (developed ? 'As saved' : 'As shot')}</span>{/if}
 		<div class="absolute top-[max(0.75rem,env(safe-area-inset-top))] right-3 grid justify-items-end gap-1.5">
-			{#if !wide && showPhoneHistogram && !fallback}
+			{#if !wide && showPhoneHistogram}
 				<div class="transition-opacity {painting ? 'opacity-30' : ''}" title={painting ? 'Paused while painting' : undefined}>
 					<Histogram data={histogram} {clipHigh} {clipLow} compact ontoggle={(w) => { if (w === 'high') clipHigh = !clipHigh; else clipLow = !clipLow; schedule(); }} />
 				</div>
 			{/if}
-			{#if !wide && !fallback}
+			{#if !wide}
 				<!-- With the photo's other toggles, above them: in the tool row it was pushed off a 390-pixel screen. -->
 				<button type="button" aria-pressed={showPhoneHistogram} class="rounded-full px-2.5 py-1 text-[0.6875rem] {showPhoneHistogram ? 'bg-fg text-ground' : 'bg-ground/80 text-fg-2'}" onclick={() => (showPhoneHistogram = !showPhoneHistogram)}>Histogram</button>
 				<button type="button" aria-pressed={peaking} class="rounded-full px-2.5 py-1 text-[0.6875rem] {peaking ? 'bg-fg text-ground' : 'bg-ground/80 text-fg-2'}" onclick={() => { peaking = !peaking; schedule(); }}>Focus</button>
+			{/if}
+			{#if !wide && !fallback}
 				<!-- Beside Focus, because checking detail is something one does at any time, not only while sharpening
 				     (the October interface review, item 8). Detail keeps its own loupe. -->
 				<button type="button" aria-pressed={loupeOver} class="rounded-full px-2.5 py-1 text-[0.6875rem] {loupeOver ? 'bg-fg text-ground' : 'bg-ground/80 text-fg-2'}" onclick={() => (loupeOver = !loupeOver)}>Loupe</button>
+				<button type="button" aria-pressed={proofOn} class="rounded-full px-2.5 py-1 text-[0.6875rem] {proofOn ? 'bg-fg text-ground' : 'bg-ground/80 text-fg-2'}" onclick={() => { proofOn = !proofOn; schedule(true); }}>Proof</button>
+				{#if proofOn}<ProofControls value={proof} onchange={setProof} />{/if}
+				<button type="button" aria-pressed={split} class="rounded-full px-2.5 py-1 text-[0.6875rem] {split ? 'bg-fg text-ground' : 'bg-ground/80 text-fg-2'}" onclick={() => setSplit(!split)}>Split</button>
 				{#if cameraOffered}
-					<button type="button" aria-pressed={showCamera} class="rounded-full px-2.5 py-1 text-[0.6875rem] {showCamera ? 'bg-fg text-ground' : 'bg-ground/80 text-fg-2'}" onclick={() => (showCamera = !showCamera)}>Camera</button>
+					<button type="button" aria-pressed={showCamera} class="rounded-full px-2.5 py-1 text-[0.6875rem] {showCamera ? 'bg-fg text-ground' : 'bg-ground/80 text-fg-2'}" onclick={() => { showCamera = !showCamera; if (showCamera) split = false; schedule(); }}>Camera</button>
 				{/if}
 				{/if}
 				{#if !wide}
@@ -2078,7 +2575,7 @@
 			{#if !toolsHidden}
 			<header class="flex items-center justify-between gap-3 px-6 pt-3 pb-2 lg:flex-col lg:items-stretch lg:gap-2 lg:px-4">
 				<div class="min-w-0 text-xs text-fg-2">
-					<p class="truncate text-sm text-fg">{meta.fileName}</p>
+					<p class="truncate text-sm text-fg">{meta.fileName}{#if session.copy}<span class="text-fg-2"> — {session.copy.name}</span>{/if}</p>
 					<p class="truncate">{cameraLine(meta.info)}</p>
 				</div>
 				<div class="flex shrink-0 gap-2">
@@ -2150,12 +2647,12 @@
 
 			{#if wide}
 			<div class="px-4 pb-2">
-				<!-- Without WebGPU there's no histogram or overlay (the view pass draws them), but it's still the
-				     desktop layout: the phone's tab bar below isn't for it. -->
-				{#if !fallback}
+				<!-- Without WebGPU the server counts the histogram and paints the overlays into its preview
+				     (`sidecar_worker::overlays`); the measuring tools still need the picture here. -->
 				<div class="transition-opacity {painting ? 'opacity-30' : ''}" title={painting ? 'Paused while painting' : undefined}>
 					<Histogram data={histogram} {clipHigh} {clipLow} ontoggle={(w) => { if (w === 'high') clipHigh = !clipHigh; else clipLow = !clipLow; schedule(); }} />
 				</div>
+				{#if !fallback}
 				<details class="mt-1">
 					<summary class="cursor-pointer text-[0.6875rem] text-fg-2">Measure</summary>
 					<div class="mt-1">
@@ -2170,13 +2667,18 @@
 					</div>
 				</details>
 				{/if}
-				<div class="mt-1 flex items-center justify-between gap-2 text-[0.6875rem]">
-					<div class="flex items-center gap-2">
-						{#if !fallback}
+				<div class="mt-1 flex flex-wrap items-center justify-between gap-2 text-[0.6875rem]">
+					<div class="flex flex-wrap items-center gap-2">
 						<button type="button" aria-pressed={peaking} class="rounded-full px-2 py-0.5 {peaking ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" onclick={() => { peaking = !peaking; schedule(); }}>Focus peaking</button>
+						{#if !fallback}
+						{#if peaking && maskSet?.names.includes('subject')}
+							<button type="button" aria-pressed={peakSubject} class="rounded-full px-2 py-0.5 {peakSubject ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" title="Peak only on the subject: is the subject sharp?" onclick={() => { peakSubject = !peakSubject; applyPeaking(); }}>Subject</button>
+						{/if}
 							<button type="button" aria-pressed={loupeOver} class="rounded-full px-2 py-0.5 {loupeOver ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" title="The detail at full resolution, over the photo (Z opens Detail's own)" onclick={() => (loupeOver = !loupeOver)}>Loupe</button>
+							<button type="button" aria-pressed={proofOn} class="rounded-full px-2 py-0.5 {proofOn ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" title="Soft proof: how the photo will look printed through a printer profile, and what the print can't hold" onclick={() => { proofOn = !proofOn; schedule(true); }}>Proof</button>
+							<button type="button" aria-pressed={split} class="rounded-full px-2 py-0.5 {split ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" title="The compared version — as shot until you choose one in History — left of a line you can drag, the edit right of it" onclick={() => setSplit(!split)}>Split</button>
 							{#if cameraOffered}
-								<button type="button" aria-pressed={showCamera} class="rounded-full px-2 py-0.5 {showCamera ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" title="The camera's own rendering beside the edit" onclick={() => (showCamera = !showCamera)}>Camera</button>
+								<button type="button" aria-pressed={showCamera} class="rounded-full px-2 py-0.5 {showCamera ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" title="The camera's own rendering beside the edit" onclick={() => { showCamera = !showCamera; if (showCamera) split = false; schedule(); }}>Camera</button>
 							{/if}
 						{#if meta?.info.afPoint}
 							<button type="button" aria-pressed={showAfPoint} class="rounded-full px-2 py-0.5 {showAfPoint ? 'bg-fg text-ground' : 'bg-raised text-fg-2'}" onclick={() => (showAfPoint = !showAfPoint)}>AF point</button>
@@ -2191,6 +2693,7 @@
 						{/each}
 					</div>
 				</div>
+				{#if proofOn && !fallback}<div class="mt-1"><ProofControls value={proof} onchange={setProof} /></div>{/if}
 			</div>
 
 			{:else}
@@ -2210,13 +2713,13 @@
 			{/if}
 			{#if !toolsHidden}
 			<div class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-6 pt-1">
-				{#if section === 'lens'}{@render lensSection()}{:else if section === 'crop'}{@render cropSection()}{:else if section === 'wb'}{@render wbSection()}{:else if section === 'light'}{@render lightSection()}{:else if section === 'film'}{@render filmSection()}{:else if section === 'curve'}{@render curveSection()}{:else if section === 'color'}{@render colorSection()}{:else if section === 'depth'}{@render depthSection()}{:else if section === 'masks'}{@render masksSection()}{:else if section === 'history'}{@render historySection()}{:else}{@render detailSection()}{/if}
+				{#if section === 'lens'}{@render lensSection()}{:else if section === 'crop'}{@render cropSection()}{:else if section === 'wb'}{@render wbSection()}{:else if section === 'light'}{@render lightSection()}{:else if section === 'film'}{@render filmSection()}{:else if section === 'curve'}{@render curveSection()}{:else if section === 'color'}{@render colorSection()}{:else if section === 'grading'}{@render gradingSection()}{:else if section === 'depth'}{@render depthSection()}{:else if section === 'masks'}{@render masksSection()}{:else if section === 'retouch'}{@render retouchSection()}{:else if section === 'history'}{@render historySection()}{:else}{@render detailSection()}{/if}
 			</div>
 			{/if}
 
 			{/if}
 			{#if wide}
-			<div class="min-h-0 flex-1 overflow-y-auto px-4">
+			<div class="relative min-h-0 flex-1 overflow-y-auto px-4">
 				{#each groups as g (g.id)}
 					{#if g.children.length === 1}
 						{@render sectionDetails(sectionById(g.children[0]), true)}
@@ -2250,4 +2753,4 @@
 	</div>
 {/if}
 
-{#if exporting}<ExportSheet assetKey={key} colorSpace={displaySpace} prepare={() => session.prepareExport()} onclose={() => (exporting = false)} />{/if}
+{#if exporting}<ExportSheet assetKey={editKey} colorSpace={displaySpace} prepare={() => session.prepareExport()} onclose={() => (exporting = false)} />{/if}

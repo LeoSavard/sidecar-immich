@@ -76,6 +76,8 @@ pub const XYZ_TO_REC2020: M3 = [
     [0.0176398574, -0.0427706133, 0.9421031212],
 ];
 
+pub const IDENTITY: M3 = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+
 pub const REC2020_TO_SRGB: M3 = [
     [1.6604910021, -0.5876411388, -0.0728498633],
     [-0.1245504745, 1.1328998971, -0.0083494226],
@@ -104,9 +106,121 @@ pub fn bradford(src: [f64; 2], dst: [f64; 2]) -> M3 {
     )
 }
 
+/// ACES AP1's primaries (ACEScg, SMPTE ST 2065-1 / S-2014-004) and the ACES white point.
+pub const AP1_PRIMARIES: [[f64; 2]; 3] = [[0.713, 0.293], [0.165, 0.830], [0.128, 0.044]];
+pub const ACES_WHITE: [f64; 2] = [0.32168, 0.33767];
+
+/// Linear Rec.2020 (D65) → ACEScg, adapting D65 to the ACES white by Bradford, so a neutral stays neutral:
+/// (1, 1, 1) in, (1, 1, 1) out. `develop/gamut.wgsl` holds it as a constant; a test checks the two agree.
+pub fn rec2020_to_ap1() -> M3 {
+    mul(
+        &inverse(&rgb_to_xyz(AP1_PRIMARIES, ACES_WHITE)),
+        &mul(&bradford(D65, ACES_WHITE), &inverse(&XYZ_TO_REC2020)),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The A/B's measurable half: monochromatic lights from 400 to 700 nm — the most saturated colours there are,
+    /// what LEDs and neon approach — taken into linear Rec.2020, compressed as `develop/gamut.wgsl` does in
+    /// Rec.2020 (before `PROCESS_VERSION` 9) and in ACEScg (since), and each result's OKLab hue compared with
+    /// the light's own. Compressing where the thresholds were derived must not shift hue more.
+    #[test]
+    fn compressing_in_ap1_keeps_spectral_hues_at_least_as_well() {
+        let (thr, lim, pwr) = ([0.815, 0.803, 0.880], [1.147, 1.264, 1.312], 1.2f64);
+        let curve = |d: f64, l: f64, t: f64| {
+            if d < t {
+                return d;
+            }
+            let scl = (l - t) / (((1.0 - t) / (l - t)).powf(-pwr) - 1.0).powf(1.0 / pwr);
+            let nd = (d - t) / scl;
+            t + scl * nd / (1.0 + nd.powf(pwr)).powf(1.0 / pwr)
+        };
+        let compress = |c: V3| -> V3 {
+            let ach = c[0].max(c[1]).max(c[2]);
+            if ach <= 0.0 {
+                return [0.0; 3];
+            }
+            std::array::from_fn(|k| ach - curve((ach - c[k]) / ach, lim[k], thr[k]) * ach)
+        };
+        let to_ap1 = rec2020_to_ap1();
+        let from_ap1 = inverse(&to_ap1);
+        let rec_to_xyz = inverse(&XYZ_TO_REC2020);
+        let hue = |xyz: V3| {
+            let m1 = [
+                [0.8189330101, 0.3618667424, -0.1288597137],
+                [0.0329845436, 0.9293118715, 0.0361456387],
+                [0.0482003018, 0.2643662691, 0.6338517070],
+            ];
+            let lms = apply(&m1, &xyz).map(|v| v.max(0.0).cbrt());
+            let a = 1.9779984951 * lms[0] - 2.4285922050 * lms[1] + 0.4505937099 * lms[2];
+            let b = 0.0259040371 * lms[0] + 0.7827717662 * lms[1] - 0.8086757660 * lms[2];
+            b.atan2(a).to_degrees()
+        };
+        let diff = |a: f64, b: f64| ((a - b + 540.0) % 360.0 - 180.0).abs();
+        let (mut old, mut new, mut n) = (0.0, 0.0, 0.0);
+        for (i, cmf) in crate::spectral_data::CMF.iter().enumerate() {
+            let nm = 380 + 10 * i;
+            if !(400..=700).contains(&nm) {
+                continue;
+            }
+            let xyz = cmf.map(|v| v * 0.5 / cmf[1].max(1e-3));
+            let rec = apply(&XYZ_TO_REC2020, &xyz);
+            if rec.iter().all(|v| *v >= 0.0) {
+                continue;
+            }
+            let h = hue(xyz);
+            let a = compress(rec);
+            let b = apply(&from_ap1, &compress(apply(&to_ap1, &rec)));
+            let (da, db) = (
+                diff(hue(apply(&rec_to_xyz, &a)), h),
+                diff(hue(apply(&rec_to_xyz, &b)), h),
+            );
+            eprintln!("{nm} nm: hue shift {da:5.1}° in Rec.2020, {db:5.1}° in ACEScg");
+            old += da;
+            new += db;
+            n += 1.0;
+        }
+        eprintln!(
+            "mean over {n} out-of-gamut lights: {:.2}° in Rec.2020, {:.2}° in ACEScg",
+            old / n,
+            new / n
+        );
+        assert!(
+            n > 5.0 && new <= old + 1e-9,
+            "ACEScg {new} against Rec.2020 {old}"
+        );
+    }
+
+    /// `develop/gamut.wgsl` holds Rec.2020 → ACEScg and its inverse as constants: they must be this module's.
+    #[test]
+    fn the_gamut_shader_holds_rec2020_to_ap1() {
+        let wgsl = include_str!("../../../shaders/develop/gamut.wgsl");
+        let read = |name: &str| -> M3 {
+            let at = wgsl.find(&format!("const {name} = mat3x3f(")).expect(name);
+            let body = &wgsl[at..wgsl[at..].find(");").unwrap() + at];
+            let v: Vec<f64> = body
+                .split(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-'))
+                .filter(|t| t.contains('.'))
+                .filter_map(|t| t.parse().ok())
+                .collect();
+            assert_eq!(v.len(), 9, "{name}");
+            std::array::from_fn(|r| std::array::from_fn(|c| v[c * 3 + r]))
+        };
+        let (f, i) = (rec2020_to_ap1(), inverse(&rec2020_to_ap1()));
+        for (name, want) in [("REC2020_TO_AP1", f), ("AP1_TO_REC2020", i)] {
+            let got = read(name);
+            for r in 0..3 {
+                for c in 0..3 {
+                    assert!((got[r][c] - want[r][c]).abs() < 1e-9, "{name}[{r}][{c}]");
+                }
+            }
+        }
+        let n = apply(&f, &[1.0, 1.0, 1.0]);
+        assert!(n.iter().all(|v| (v - 1.0).abs() < 1e-8), "neutral {n:?}");
+    }
 
     /// The primaries route reproduces the sRGB matrix written out above, so it can be trusted for Adobe RGB.
     #[test]

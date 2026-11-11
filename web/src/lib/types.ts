@@ -7,11 +7,16 @@ import type { DisplaySpace } from './generated/edit/DisplaySpace';
 import type { EditParams } from './generated/edit/EditParams';
 import type { LensProfile } from './generated/edit/LensProfile';
 import type { Mixer } from './generated/edit/Mixer';
+export type { ColorGrading } from './generated/edit/ColorGrading';
+export type { Spot } from './generated/edit/Spot';
+export type { SpotKind } from './generated/edit/SpotKind';
 export type { Crop } from './generated/edit/Crop';
 export type { Detail } from './generated/edit/Detail';
 export type { DisplaySpace } from './generated/edit/DisplaySpace';
 export type { EditParams } from './generated/edit/EditParams';
 export type { Frame } from './generated/edit/Frame';
+export type { Gradient } from './generated/edit/Gradient';
+export type { GradeWheel } from './generated/edit/GradeWheel';
 export type { Geometry } from './generated/edit/Geometry';
 export type { Lens } from './generated/edit/Lens';
 export type { LensProfile } from './generated/edit/LensProfile';
@@ -49,6 +54,8 @@ export type HistoryState = { head: string; nodes: HistoryNode[] };
 export type CameraColor = {
 	asShotMul: [number, number, number];
 	calibrations: { temperatureK: number; xyzToCamera: number[][] }[];
+	/** The camera profile the file carries (`sidecar_color::dcp::Profile`); only its name is read here. */
+	profile?: { name: string } | null;
 };
 
 export type Meta = {

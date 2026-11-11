@@ -140,6 +140,11 @@ The global Saturation slider (PR #4: one commit for the core, one for the UI) is
   (GitHub honours the file automatically).
 - **Fast checks**: `./dev/run cargo check -p <crate>`, `./dev/run cargo test -p <crate>`,
   `./dev/run bash -c 'cd web && npm run check'`.
+- **Parity on a phone.** CI's parity drives headless Chromium; a phone's browser can't be driven, so it sends its
+  renders instead. With `parity_uploads = true` (the dev config has it), open `/debug/parity?post` on the phone —
+  through a tunnel to `./dev/serve`, since Safari's WebGPU needs HTTPS — and the page posts its renders as a run
+  under `<state>/parity/<run>/`. Then `sidecar-dev parity compare web/static/parity testdata/parity-out <run dir>`
+  checks them against this machine's native renders (`parity native` first, if the fixtures changed).
 - **Before pushing, run what CI runs** (`.github/workflows/ci.yml`), or the branch goes red and so does every
   branch above it. `check` and `test` passing is *not* the gate; clippy is, with warnings denied:
 

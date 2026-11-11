@@ -13,7 +13,7 @@ use crate::tone;
 /// `migrate_highlight_shadow_anchors`) — an edit saved under version 1 needs its curve read differently, not
 /// just a field that defaults to off, so this is a real bump rather than an additive field. See
 /// docs/ROADMAP.md, "Curve editor: Highlights and Shadows stop sharing points with the manual curve".
-pub const PROCESS_VERSION: u32 = 7;
+pub const PROCESS_VERSION: u32 = 10;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
@@ -69,6 +69,373 @@ pub struct EditParams {
     #[serde(skip_serializing_if = "is_zero")]
     #[cfg_attr(feature = "ts", ts(as = "Option<f64>", optional))]
     pub haze: f64,
+    /// Colour grading wheels (DESIGN.md §7, "Colour grading"): a colour and a lightness for the shadows,
+    /// midtones and highlights, and one for all of it. Absent, and left out of the serialized edit, is none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub color_grading: Option<ColorGrading>,
+    /// Texture and Clarity (DESIGN.md §7, "Local contrast"): fine and middle detail in log luminance, raised or
+    /// lowered against an edge-preserving base. Absent, and left out of the serialized edit, is none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub presence: Option<Presence>,
+    /// Heal, clone and red-eye spots (DESIGN.md §15, "Retouch"), applied in order to the photo before anything
+    /// else. Empty, and left out of the serialized edit, is none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<Vec<Spot>>", optional))]
+    pub spots: Vec<Spot>,
+    /// The camera profile to render with (DESIGN.md §7, "Camera profiles"): `FILE_PROFILE` for the one the
+    /// photo's file carries (`CameraColor::profile`); absent, and left out of the serialized edit, for the camera
+    /// matrices alone, as before profiles existed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub camera_profile: Option<String>,
+    /// The photo is a film negative to invert (DESIGN.md §7, "Negatives"). Absent, and left out of the serialized
+    /// edit, is a positive.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub negative: Option<Negative>,
+    /// Purple and green fringes taken out (DESIGN.md §15, "Defringe"). Absent, and left out of the serialized edit,
+    /// is none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub defringe: Option<Defringe>,
+    /// A 3D LUT applied after develop as a look (DESIGN.md §15, "3D LUTs"). Absent, and left out of the
+    /// serialized edit, is none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub lut: Option<crate::lut::LookLut>,
+}
+
+/// Local contrast at two scales and haze, each −100…100. Texture and Clarity: 0 leaves the picture alone, 100
+/// doubles the band's contrast in stops, −100 removes it.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "edit/"))]
+pub struct Presence {
+    /// Fine detail: what lies within `TEXTURE_RADIUS` of the long edge, of up to about a fifth of a stop.
+    pub texture: f64,
+    /// Middle detail: between `TEXTURE_RADIUS` and `CLARITY_RADIUS`, of up to about half a stop.
+    pub clarity: f64,
+    /// Haze, by the dark channel prior (DESIGN.md §7, "Dehaze"): 100 removes what the prior finds, −100 doubles
+    /// it. Works without the depth model; the Depth section's Haze is the same air with distance from the model.
+    pub dehaze: f64,
+}
+
+/// The texture band's guided-filter radius and ε (in log₂ units squared): detail finer than this share of the
+/// long edge, and gentler than √ε stops, is the band; anything stronger is an edge and kept as it is.
+pub const TEXTURE_RADIUS: f64 = 0.003;
+pub const TEXTURE_EPS: f64 = 0.04;
+/// The clarity band's: out to this share of the long edge, gentler than √ε stops.
+pub const CLARITY_RADIUS: f64 = 0.025;
+pub const CLARITY_EPS: f64 = 0.25;
+
+impl Presence {
+    /// The uniform's `local`: each band's change in contrast (−1…1), 1 when either is non-zero, and Dehaze
+    /// (−1…1).
+    pub fn uniform(p: Option<&Presence>) -> [f32; 4] {
+        let Some(p) = p else { return [0.0; 4] };
+        let unit = |v: f64| (v.clamp(-100.0, 100.0) / 100.0) as f32;
+        let (t, c) = (unit(p.texture), unit(p.clarity));
+        let on = if t != 0.0 || c != 0.0 { 1.0 } else { 0.0 };
+        [t, c, on, unit(p.dehaze)]
+    }
+}
+
+/// One grading wheel: a colour to push toward and how far, and a lightness change.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "edit/"))]
+pub struct GradeWheel {
+    /// Degrees, 0…360, around OKLCh's hue circle (0 a pinkish red, about 140 green, 265 blue).
+    pub hue: f64,
+    /// 0…100: how far toward that hue, up to `GRADE_CHROMA` in OKLab chroma.
+    pub saturation: f64,
+    /// −100…100: lighter or darker, up to `GRADE_LIGHTNESS` in OKLab lightness.
+    pub luminance: f64,
+}
+
+/// Colour grading: the picture's tonal ranges each pushed toward a colour, after the tone map and the mixer,
+/// in OKLab — so a wheel's colour moves chroma only, never lightness, and its luminance moves lightness only.
+/// The three ranges are smooth weights over lightness that always sum to one.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "edit/"))]
+pub struct ColorGrading {
+    pub shadows: GradeWheel,
+    pub midtones: GradeWheel,
+    pub highlights: GradeWheel,
+    /// Everywhere, whatever the lightness.
+    pub global: GradeWheel,
+    /// 0…100: how much the ranges overlap; 50 is the default.
+    pub blending: f64,
+    /// −100…100: where shadows give way to highlights; negative favours the highlights (the split moves
+    /// darker), positive the shadows.
+    pub balance: f64,
+}
+
+impl Default for ColorGrading {
+    fn default() -> Self {
+        Self {
+            shadows: GradeWheel::default(),
+            midtones: GradeWheel::default(),
+            highlights: GradeWheel::default(),
+            global: GradeWheel::default(),
+            blending: 50.0,
+            balance: 0.0,
+        }
+    }
+}
+
+/// The furthest a wheel at 100 moves OKLab chroma: about what separates a neutral from a clearly tinted grey.
+pub const GRADE_CHROMA: f64 = 0.06;
+/// The furthest a wheel's luminance at ±100 moves OKLab lightness.
+pub const GRADE_LIGHTNESS: f64 = 0.15;
+
+impl ColorGrading {
+    /// The uniform's four wheels (a, b and lightness shifts) and its split (on, crossover lightness, overlap
+    /// exponent): what `develop/grading.wgsl` takes. All zero when every wheel is at rest.
+    pub fn uniform(g: Option<&ColorGrading>) -> ([[f32; 4]; 4], [f32; 4]) {
+        let Some(g) = g else {
+            return ([[0.0; 4]; 4], [0.0; 4]);
+        };
+        let wheel = |w: &GradeWheel| {
+            let c = w.saturation.clamp(0.0, 100.0) / 100.0 * GRADE_CHROMA;
+            let h = w.hue.to_radians();
+            [
+                (c * h.cos()) as f32,
+                (c * h.sin()) as f32,
+                (w.luminance.clamp(-100.0, 100.0) / 100.0 * GRADE_LIGHTNESS) as f32,
+                0.0,
+            ]
+        };
+        let wheels = [
+            wheel(&g.shadows),
+            wheel(&g.midtones),
+            wheel(&g.highlights),
+            wheel(&g.global),
+        ];
+        let on = wheels.iter().any(|w| w.iter().any(|v| *v != 0.0));
+        // The crossover in OKLab lightness, 0.5 at balance 0; the overlap exponent from 2 (narrow) to 0.5 (wide).
+        let mid = 0.5 - g.balance.clamp(-100.0, 100.0) / 100.0 * 0.25;
+        let q = 2.0 * 0.25f64.powf(g.blending.clamp(0.0, 100.0) / 100.0);
+        (wheels, [on as u8 as f32, mid as f32, q as f32, 0.0])
+    }
+}
+
+/// What a spot does.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "edit/"))]
+pub enum SpotKind {
+    /// The source's texture, its light matched to the target's surroundings (gradient-domain cloning).
+    #[default]
+    Heal,
+    /// The source as it is.
+    Clone,
+    /// A red pupil's red taken down to its green and blue.
+    RedEye,
+}
+
+/// One retouch spot. Positions are in the photo as the masks are — oriented, before lens correction — as fractions
+/// of its width and height; the radius is a share of the long edge.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "edit/"))]
+pub struct Spot {
+    pub kind: SpotKind,
+    /// The place retouched.
+    pub at: [f64; 2],
+    /// Where heal and clone take from (unused by red eye).
+    pub from: [f64; 2],
+    pub radius: f64,
+    /// 0…100: how much of the radius the edge fades over.
+    pub feather: f64,
+    /// 0…100.
+    pub opacity: f64,
+}
+
+impl Default for Spot {
+    fn default() -> Self {
+        Self {
+            kind: SpotKind::Heal,
+            at: [0.5, 0.5],
+            from: [0.6, 0.5],
+            radius: 0.02,
+            feather: 0.0,
+            opacity: 100.0,
+        }
+    }
+}
+
+/// `EditParams::camera_profile` for the profile the photo's own file carries.
+pub const FILE_PROFILE: &str = "file";
+
+/// The camera profile pass's uniform (`client/profile.wgsl`, 96 bytes). Its WGSL declaration,
+/// `shaders/uniforms/profile_params.wgsl`, is generated from this struct (`sidecar-uniform`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable, Uniform)]
+pub struct ProfileParams {
+    /// White-balanced camera RGB → linear ProPhoto RGB (D50): the profile's forward matrix, as develop's matrix
+    /// carries it, taken on into the space the DNG specification applies its tables in.
+    #[uniform(wgsl = "mat3x3f")]
+    pub to_prophoto: [[f32; 4]; 3],
+    #[uniform(wgsl = "mat3x3f")]
+    pub from_prophoto: [[f32; 4]; 3],
+    /// The camera multipliers develop applies (`DevelopParams::wb_mul`); w unused.
+    pub wb: [f32; 4],
+    /// The HueSatMap's hue, saturation and value divisions (0 for none), and 1 when its values are sRGB-spaced.
+    pub hue_sat: [u32; 4],
+    /// The LookTable's, likewise.
+    pub look: [u32; 4],
+    /// x: the exposure the LookTable applies at — the file's BaselineExposure and the person's exposure, as the DNG
+    /// specification has it; y: develop's own (`DevelopParams::exposure`), which the input already carries; z, w
+    /// unused.
+    pub exposure: [f32; 4],
+}
+
+/// What the camera profile pass needs: its uniform and its two tables, four floats an entry (hue shift, saturation
+/// scale, value scale, unused), saturation fastest, then hue, then value — a 3D texture's order.
+#[derive(Clone, Debug)]
+pub struct ProfilePass {
+    pub uniform: Vec<u8>,
+    pub hue_sat: Vec<f32>,
+    pub look: Vec<f32>,
+}
+
+/// A film negative photographed or scanned: inverted by its density. A negative's transmittance T at a point is
+/// 10^−D, and above its base the density is γ·log₁₀ of the exposure it had (the straight line of its
+/// characteristic curve) — so the scene's light, per channel, is (T_base / T)^(1/γ). Dividing by the base removes
+/// the orange mask and the light it was lit by exactly; γ undoes the film's contrast. Develop subtracts the base's
+/// own level, so unexposed film is black, and scales grey into place (`NEGATIVE_SCALE`).
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "edit/"))]
+pub struct Negative {
+    /// The film base's camera RGB, as the photo holds it: an unexposed part of the film (its rebate, between frames).
+    pub base: [f64; 3],
+    /// The film's contrast, the slope of its characteristic curve: about 0.6 for colour negative.
+    pub gamma: f64,
+}
+
+impl Default for Negative {
+    fn default() -> Self {
+        Self {
+            base: [1.0; 3],
+            gamma: 0.6,
+        }
+    }
+}
+
+/// What multiplies the inverted exposure above the base's (`(T_base / T)^(1/γ) − 1`) to put a typical negative's grey
+/// near 0.18: grey sits about two decades of exposure above the film's threshold, 10^2 in those units.
+pub const NEGATIVE_SCALE: f64 = 0.0018;
+
+impl Negative {
+    /// The uniform's `negative`: the base and 1/γ; zero when there is none.
+    pub fn uniform(n: Option<&Negative>) -> [f32; 4] {
+        let Some(n) = n else { return [0.0; 4] };
+        [
+            n.base[0].max(1e-6) as f32,
+            n.base[1].max(1e-6) as f32,
+            n.base[2].max(1e-6) as f32,
+            (1.0 / n.gamma.clamp(0.2, 3.0)) as f32,
+        ]
+    }
+
+    /// A camera colour of the negative inverted, as develop inverts it: what the eyedropper reads back.
+    pub fn invert(&self, c: [f64; 3]) -> [f64; 3] {
+        let g = 1.0 / self.gamma.clamp(0.2, 3.0);
+        std::array::from_fn(|k| {
+            ((self.base[k].max(1e-6) / c[k].max(1e-6 * self.base[k].max(1e-6))).powf(g) - 1.0)
+                .max(0.0)
+                * NEGATIVE_SCALE
+        })
+    }
+}
+
+/// Axial chromatic aberration: a lens focuses the colours at slightly different distances, so beside a high-contrast
+/// edge one colour is sharp and another blurred, and a fringe of that colour shows — purple (blue and red out of
+/// focus) or green. The fringe's signature is the pair: a fringe hue *and* a steep luminance edge within a few
+/// pixels. Pixels with both are taken toward neutral at their own luminance; a purple flower, with no edge in
+/// reach, keeps its colour.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "edit/"))]
+pub struct Defringe {
+    /// 0…100.
+    pub purple: f64,
+    /// The purple hues taken, OKLab hue in degrees, from and to.
+    pub purple_hue: [f64; 2],
+    pub green: f64,
+    pub green_hue: [f64; 2],
+}
+
+impl Default for Defringe {
+    fn default() -> Self {
+        Self {
+            purple: 0.0,
+            purple_hue: [280.0, 345.0],
+            green: 0.0,
+            green_hue: [120.0, 165.0],
+        }
+    }
+}
+
+/// How far from an edge a fringe reaches, as a share of the long edge (a few pixels of a 24 MP frame), and the
+/// contrast across that reach, in stops, that counts as an edge — from its start to full.
+pub const FRINGE_REACH: f64 = 0.0008;
+pub const FRINGE_EDGE_STOPS: [f64; 2] = [0.7, 1.5];
+
+/// The defringe pass's uniform (`client/defringe.wgsl`, 144 bytes). Its WGSL declaration,
+/// `shaders/uniforms/defringe_params.wgsl`, is generated from this struct (`sidecar-uniform`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable, Uniform)]
+pub struct DefringeParams {
+    /// Develop's matrix and its inverse: white-balanced camera RGB ↔ linear Rec.2020, where hue is judged.
+    #[uniform(wgsl = "mat3x3f")]
+    pub cam_to_work: [[f32; 4]; 3],
+    #[uniform(wgsl = "mat3x3f")]
+    pub work_to_cam: [[f32; 4]; 3],
+    /// Develop's camera multipliers; w unused.
+    pub wb: [f32; 4],
+    /// Amount (0…1) and the hue band (radians, from and to); w unused.
+    pub purple: [f32; 4],
+    pub green: [f32; 4],
+    /// x: the reach as a share of the long edge; y, z: the edge's contrast in stops, from and to; w: the whole
+    /// frame's long edge in pixels, 0 to take the texture's.
+    pub reach: [f32; 4],
+}
+
+impl Defringe {
+    /// The pass's uniform for this edit's develop uniform, or `None` when there is nothing to do.
+    pub fn uniform(d: Option<&Defringe>, develop: &DevelopParams) -> Option<Vec<u8>> {
+        let d = d.filter(|d| d.purple > 0.0 || d.green > 0.0)?;
+        let cam: M3 =
+            std::array::from_fn(|r| std::array::from_fn(|c| develop.cam_to_work[c][r] as f64));
+        let band = |amount: f64, hue: [f64; 2]| {
+            [
+                (amount.clamp(0.0, 100.0) / 100.0) as f32,
+                hue[0].to_radians() as f32,
+                hue[1].to_radians() as f32,
+                0.0,
+            ]
+        };
+        let u = DefringeParams {
+            cam_to_work: develop.cam_to_work,
+            work_to_cam: to_mat3(&mat::inverse(&cam)),
+            wb: [develop.wb_mul[0], develop.wb_mul[1], develop.wb_mul[2], 0.0],
+            purple: band(d.purple, d.purple_hue),
+            green: band(d.green, d.green_hue),
+            reach: [
+                FRINGE_REACH as f32,
+                FRINGE_EDGE_STOPS[0] as f32,
+                FRINGE_EDGE_STOPS[1] as f32,
+                0.0,
+            ],
+        };
+        Some(bytemuck::bytes_of(&u).to_vec())
+    }
 }
 
 /// A lens blur by distance: how far it reaches, where the focus is, and how deep the sharp band around it is.
@@ -112,6 +479,13 @@ impl Default for EditParams {
             masks: Vec::new(),
             lens_blur: None,
             haze: 0.0,
+            color_grading: None,
+            presence: None,
+            spots: Vec::new(),
+            camera_profile: None,
+            negative: None,
+            defringe: None,
+            lut: None,
         }
     }
 }
@@ -123,6 +497,23 @@ impl EditParams {
     pub fn migrate(&mut self) {
         if self.process_version < 2 {
             self.migrate_highlight_shadow_anchors();
+        }
+        if self.process_version < 10 {
+            // Its Highlights, Shadows and Contrast bent the tone curve, and its bright colours faded by brightness:
+            // that is the picture the person approved.
+            self.tone.per_pixel_light = false;
+        }
+        if self.process_version < 9 {
+            // Its saturated lights were compressed in Rec.2020 and that is the colour the person approved.
+            self.tone.gamut_ap1 = false;
+        }
+        if self.process_version < 8
+            && (self.detail.denoise_luminance > 0.0 || self.detail.denoise_chroma > 0.0)
+        {
+            // Its noise reduction was tuned by eye under the fixed transform; the same strengths under the
+            // photo's own noise model would denoise its shadows and highlights differently. An edit that
+            // never denoised has nothing to keep, and gets the measured model if it starts to.
+            self.detail.noise_model = false;
         }
         if self.process_version < 7 {
             // Its Highlights bent the curve below white and left anything past it alone, and that is the
@@ -182,7 +573,10 @@ impl EditParams {
             self.tone.shoulder_order = DEFAULT_SHOULDER_ORDER;
             self.tone.highlight_bleach = Tone::default().highlight_bleach;
             self.tone.highlight_reach_ev = HIGHLIGHT_REACH_EV;
+            self.tone.gamut_ap1 = true;
         }
+        self.tone.per_pixel_light = true;
+        self.detail.noise_model = true;
         self.process_version = PROCESS_VERSION;
     }
 
@@ -352,6 +746,20 @@ pub struct Tone {
     /// scene's top end into the picture, and the shoulder compresses it. Stored per edit, so an edit from
     /// before `PROCESS_VERSION` 7 keeps the Highlights it was approved with.
     pub highlight_reach_ev: f64,
+    /// Compress out-of-gamut colour in ACEScg (AP1), the space the ACES Reference Gamut Compression's thresholds
+    /// were derived for, rather than in the working Rec.2020 it ran in before `PROCESS_VERSION` 9. Stored per
+    /// edit so an older one keeps the saturated colours it was approved with; left out of the serialized edit
+    /// when on.
+    #[serde(skip_serializing_if = "is_true")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<bool>", optional))]
+    pub gamut_ap1: bool,
+    /// Highlights, Shadows and Contrast as per-pixel functions of luminance in stops from grey (`Light`,
+    /// `develop/light.wgsl`), the same for a RAW and a developed file, and the fade to neutral keyed on clipped
+    /// samples — since `PROCESS_VERSION` 10. Off, they are the tone curve's bump, the white point's reach and
+    /// the curve's steepness, as an older edit was approved with. Left out of the serialized edit when on.
+    #[serde(skip_serializing_if = "is_true")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<bool>", optional))]
+    pub per_pixel_light: bool,
     pub contrast: f64,
     /// Control points over display-encoded values, `[x, y]` in 0…1. Manually drawn only, as of
     /// `PROCESS_VERSION` 2 — Highlights and Shadows are `highlights`/`shadows` below, not points in here.
@@ -400,6 +808,8 @@ impl Default for Tone {
             shoulder_order: DEFAULT_SHOULDER_ORDER,
             highlight_bleach: 1.0,
             highlight_reach_ev: HIGHLIGHT_REACH_EV,
+            gamut_ap1: true,
+            per_pixel_light: true,
             contrast: 1.0,
             curve: vec![[0.0, 0.0], [1.0, 1.0]],
             highlights: 0.0,
@@ -455,6 +865,16 @@ pub struct Detail {
     pub sharpen_iterations: u32,
     pub denoise_luminance: f64,
     pub denoise_chroma: f64,
+    /// Denoise against this photo's measured noise, σ² = a·level + b (`sidecar_engine::noise`), rather than the
+    /// fixed transform edits before `PROCESS_VERSION` 8 were denoised with, which assumed one balance of shot
+    /// and read noise for every camera and ISO. Left out of the serialized edit when on.
+    #[serde(skip_serializing_if = "is_true")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<bool>", optional))]
+    pub noise_model: bool,
+}
+
+fn is_true(v: &bool) -> bool {
+    *v
 }
 
 impl Default for Detail {
@@ -465,6 +885,7 @@ impl Default for Detail {
             sharpen_iterations: 10,
             denoise_luminance: 0.0,
             denoise_chroma: 0.0,
+            noise_model: true,
         }
     }
 }
@@ -496,6 +917,12 @@ pub struct Film {
     #[serde(skip_serializing_if = "is_daylight")]
     #[cfg_attr(feature = "ts", ts(as = "Option<String>", optional))]
     pub light: String,
+    /// 0–100: halation — light that crossed the emulsion, reflected off the back of the film base and exposed the
+    /// red-sensitive bottom layer again, a red glow around bright things. 100 is a film with no anti-halation
+    /// backing (`HALATION_MAX`); 0, and absent, is none.
+    #[serde(skip_serializing_if = "is_zero")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<f64>", optional))]
+    pub halation: f64,
 }
 
 impl Default for Film {
@@ -505,9 +932,22 @@ impl Default for Film {
             interlayer: 45.0,
             stock: String::new(),
             light: "daylight".into(),
+            halation: 0.0,
         }
     }
 }
+
+/// Halation at 100: the share of the red layer's exposure reflected back into it, as off a film base with no
+/// anti-halation backing (CineStill's films, with their rem-jet removed, are the familiar case), where a backed film
+/// keeps it near 1 %.
+pub const HALATION_MAX: f64 = 0.15;
+/// How far halation spreads: a Gaussian of this standard deviation in mm on a 36 mm frame. The light reflects off
+/// the back of a base about 0.13 mm thick, the strongest of it at the critical angle (≈ 42° for n ≈ 1.5), so it
+/// lands in a ring about 0.24 mm out: a Gaussian of 0.12 mm puts most of its weight within that.
+pub const HALATION_MM: f64 = 0.12;
+/// The share of the halo that exposes the green layer too: the reflected light is mostly red, which the green
+/// layer above barely sees.
+pub const HALATION_GREEN: f64 = 0.15;
 
 /// Film grain: the exposure each spot of the picture got, made to flicker the way silver halide's grains,
 /// developed or not, make it; the tone curve then takes it, so grain is strongest in the midtones, fades into
@@ -523,6 +963,13 @@ pub struct Grain {
     pub amount: f64,
     /// 0–100: the grain's size on a 35 mm frame (`Grain::microns`), 5 µm to 40 µm.
     pub size: f64,
+    /// In colour film rendering, a grain of its own in each dye layer — red, green and blue each flickering
+    /// independently, each by its own layer's density — as colour film's three emulsions are grained apart.
+    /// Off (and absent, so an edit made before it keeps its grain) is one grain for all three, as black and white
+    /// has and a print is left with.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<bool>", optional))]
+    pub layered: bool,
 }
 
 impl Default for Grain {
@@ -530,6 +977,7 @@ impl Default for Grain {
         Self {
             amount: 40.0,
             size: 50.0,
+            layered: false,
         }
     }
 }
@@ -625,6 +1073,15 @@ pub struct MaskAdjustment {
     #[serde(skip_serializing_if = "is_zero")]
     #[cfg_attr(feature = "ts", ts(as = "Option<f64>", optional))]
     pub blacks: f64,
+    /// −100…100: sharpening added to the global Detail amount where the mask is (DESIGN.md §15, "Detail per
+    /// layer"). Like the global one it is the server's — the loupe and export — not the editor's preview.
+    #[serde(skip_serializing_if = "is_zero")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<f64>", optional))]
+    pub sharpness: f64,
+    /// −100…100: luminance noise reduction added to the global amount where the mask is, as `sharpness`.
+    #[serde(skip_serializing_if = "is_zero")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<f64>", optional))]
+    pub noise: f64,
     /// A curve over display-encoded values, applied after the global curve where the mask is. Highlights and
     /// Shadows move its 75 % and 25 % points, as the global sliders move the global curve's. Empty is none.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -639,10 +1096,18 @@ pub struct MaskAdjustment {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub range: Option<MaskRange>,
+    /// For a colour-range layer (`mask` = `color`): the colours it selects. None otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub color: Option<crate::color_range::ColorRange>,
     /// The layer's edge feathered and moved, after the range and the strokes. None is the mask as painted.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub edge: Option<MaskEdge>,
+    /// The shape of a `gradient` layer's mask. None for any other kind.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub gradient: Option<Gradient>,
     /// Brush strokes over the mask, in the order they were painted.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     #[cfg_attr(feature = "ts", ts(as = "Option<Vec<Stroke>>", optional))]
@@ -654,7 +1119,7 @@ pub struct MaskAdjustment {
     pub other: serde_json::Map<String, serde_json::Value>,
 }
 
-fn is_zero(v: &f64) -> bool {
+pub(crate) fn is_zero(v: &f64) -> bool {
     *v == 0.0
 }
 
@@ -675,10 +1140,14 @@ impl Default for MaskAdjustment {
             tint: 0.0,
             whites: 0.0,
             blacks: 0.0,
+            sharpness: 0.0,
+            noise: 0.0,
             curve: Vec::new(),
             mixer: Mixer::default(),
             range: None,
+            color: None,
             edge: None,
+            gradient: None,
             strokes: Vec::new(),
             other: Default::default(),
         }
@@ -764,6 +1233,11 @@ pub struct Monochrome {
     #[serde(skip_serializing_if = "is_zero")]
     #[cfg_attr(feature = "ts", ts(as = "Option<f64>", optional))]
     pub development: f64,
+    /// An alternative process the black and white is printed or made as (`crate::process`): `cyanotype` or
+    /// `tintype`. Empty, the default and left out of the serialized edit, is a silver gelatin print.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<String>", optional))]
+    pub process: String,
 }
 
 fn is_daylight(v: &str) -> bool {
@@ -782,6 +1256,7 @@ impl Default for Monochrome {
             light: "daylight".into(),
             developer: "standard".into(),
             development: 0.0,
+            process: String::new(),
         }
     }
 }
@@ -871,6 +1346,132 @@ impl EdgePlan {
     }
 }
 
+/// A gradient layer's shape (DESIGN.md §15, "Gradients"), in the photo as shown before lens correction — the
+/// frame strokes are stored in — so it stays on what it was placed over whatever lens correction, crop or
+/// straighten do.
+///
+/// The weight falls *linearly* with position across the transition. A layer adds stops weighted by its mask,
+/// so a linear weight is a density linear in position: what a soft graduated neutral-density filter is.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "edit/"))]
+pub enum Gradient {
+    /// Full weight at and before `from`, none at and beyond `to`, along the line between them. Points are
+    /// `[x, y]` as fractions of the photo's width and height.
+    Linear { from: [f64; 2], to: [f64; 2] },
+    /// Full weight inside an ellipse, fading to none at its edge. `centre` as fractions of width and height;
+    /// `axes` the two semi-axes as fractions of the long edge; `angle` the first axis's direction, degrees
+    /// clockwise from horizontal; `feather` 0…100, how much of the radius the fade takes (0 is a hard edge).
+    Radial {
+        centre: [f64; 2],
+        axes: [f64; 2],
+        angle: f64,
+        feather: f64,
+    },
+}
+
+/// The gradient pass's uniform (48 bytes, `client/gradient.wgsl`). Its WGSL declaration,
+/// `shaders/uniforms/gradient_params.wgsl`, is generated from this struct (`sidecar-uniform`); the `uniforms`
+/// test checks the file and every offset.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable, Uniform)]
+pub struct GradientParams {
+    /// The target, in pixels.
+    pub size: [f32; 2],
+    /// 0 linear, 1 radial.
+    pub kind: u32,
+    /// Radial: the share of the radius inside which the weight is full.
+    pub inner: f32,
+    /// Linear: `from` in xy, `to` in zw. Radial: the centre in xy. Target pixels.
+    pub a: [f32; 4],
+    /// Radial: the two semi-axes as vectors from the centre, xy and zw. Target pixels.
+    pub b: [f32; 4],
+}
+
+impl Gradient {
+    /// The uniform for a target `target` pixels big. `display` is the photo as shown (the frame the gradient
+    /// is stored in), and `to_target` maps a point there, as fractions, into the target's fractions — the
+    /// identity in the browser, the orientation still to apply on the worker. Axes are mapped as points, so
+    /// any turn or mirror between the two frames comes out right.
+    pub fn uniform(
+        &self,
+        display: [u32; 2],
+        target: [u32; 2],
+        to_target: impl Fn([f64; 2]) -> [f64; 2],
+    ) -> GradientParams {
+        let px = |p: [f64; 2]| {
+            let q = to_target(p);
+            [
+                (q[0] * target[0] as f64) as f32,
+                (q[1] * target[1] as f64) as f32,
+            ]
+        };
+        let size = [target[0] as f32, target[1] as f32];
+        match self {
+            Gradient::Linear { from, to } => {
+                let (f, t) = (px(*from), px(*to));
+                GradientParams {
+                    size,
+                    kind: 0,
+                    inner: 0.0,
+                    a: [f[0], f[1], t[0], t[1]],
+                    b: [0.0; 4],
+                }
+            }
+            Gradient::Radial {
+                centre,
+                axes,
+                angle,
+                feather,
+            } => {
+                let (w, h) = (display[0].max(1) as f64, display[1].max(1) as f64);
+                let long = w.max(h);
+                let (s, c) = angle.to_radians().sin_cos();
+                // The ends of the two semi-axes, as fractions of the shown photo.
+                let end = |len: f64, dir: [f64; 2]| {
+                    [
+                        centre[0] + len.max(1e-6) * long * dir[0] / w,
+                        centre[1] + len.max(1e-6) * long * dir[1] / h,
+                    ]
+                };
+                let o = px(*centre);
+                let ea = px(end(axes[0], [c, s]));
+                let eb = px(end(axes[1], [-s, c]));
+                GradientParams {
+                    size,
+                    kind: 1,
+                    inner: (1.0 - feather.clamp(0.0, 100.0) / 100.0) as f32,
+                    a: [o[0], o[1], 0.0, 0.0],
+                    b: [ea[0] - o[0], ea[1] - o[1], eb[0] - o[0], eb[1] - o[1]],
+                }
+            }
+        }
+    }
+
+    /// The weight at a point of the target, as the shader computes it — for tests and the worker's checks.
+    pub fn weight(p: &GradientParams, at: [f32; 2]) -> f32 {
+        if p.kind == 0 {
+            let d = [p.a[2] - p.a[0], p.a[3] - p.a[1]];
+            let len2 = (d[0] * d[0] + d[1] * d[1]).max(1e-12);
+            let t = ((at[0] - p.a[0]) * d[0] + (at[1] - p.a[1]) * d[1]) / len2;
+            return 1.0 - t.clamp(0.0, 1.0);
+        }
+        let v = [at[0] - p.a[0], at[1] - p.a[1]];
+        let proj = |ax: [f32; 2]| {
+            (v[0] * ax[0] + v[1] * ax[1]) / (ax[0] * ax[0] + ax[1] * ax[1]).max(1e-12)
+        };
+        let r = (proj([p.b[0], p.b[1]]).powi(2) + proj([p.b[2], p.b[3]]).powi(2)).sqrt();
+        if p.inner >= 1.0 {
+            return (r <= 1.0) as u8 as f32;
+        }
+        (1.0 - (r - p.inner) / (1.0 - p.inner)).clamp(0.0, 1.0)
+    }
+}
+
 /// One brush stroke on a mask. Coordinates are in the photo as it is shown before lens correction — the
 /// frame the models' masks are made in — so a stroke stays on what it was painted over whatever the lens
 /// correction, crop or straighten later do.
@@ -903,7 +1504,7 @@ impl Default for Stroke {
 }
 
 /// The masks the models make, which an adjustment can name. Kept in step with the worker's `masks::NAMES`.
-pub const MASK_NAMES: [&str; 7] = [
+pub const MASK_NAMES: [&str; 8] = [
     "subject",
     "skin",
     "face-skin",
@@ -911,15 +1512,28 @@ pub const MASK_NAMES: [&str; 7] = [
     "hair",
     "clothes",
     "depth",
+    "sky",
 ];
 /// A mask painted from nothing: only its strokes.
 pub const BRUSH: &str = "brush";
+
+/// A layer whose mask is a shape (`Gradient`), drawn rather than found by a model or painted.
+pub const GRADIENT: &str = "gradient";
 
 impl MaskAdjustment {
     /// Whether this version knows how to render it: a mask it knows by name, and nothing a newer version
     /// added to say it is something else.
     pub fn renders(&self) -> bool {
-        (self.uses_model() || self.mask == BRUSH) && self.other.is_empty()
+        let color = self.mask == crate::color_range::COLOR
+            && self
+                .color
+                .as_ref()
+                .is_none_or(|c| c.within.as_deref().is_none_or(|w| MASK_NAMES.contains(&w)));
+        (self.uses_model()
+            || self.mask == BRUSH
+            || color
+            || (self.mask == GRADIENT && self.gradient.is_some()))
+            && self.other.is_empty()
     }
 
     /// Whether its mask starts from one the models make.
@@ -948,9 +1562,12 @@ pub struct MaskLayer {
     pub flags: [f32; 4],
     /// Added to `DevelopParams::mixer` at full weight.
     pub mixer: [[f32; 4]; 8],
+    /// A colour range's uniformity (`ColorRange`): x, y how far hue and saturation are pulled toward the range's
+    /// centre (0…1), z that hue (radians, OKLab), w that saturation (OKLab chroma over lightness). Zero for none.
+    pub uniformity: [f32; 4],
 }
 
-/// The mask layers' uniform (1,568 bytes). Its WGSL declaration,
+/// The mask layers' uniform (1,696 bytes). Its WGSL declaration,
 /// `shaders/uniforms/mask_params.wgsl`, is generated from this struct (`sidecar-uniform`); the
 /// `uniforms` test checks the file and every offset.
 #[repr(C)]
@@ -1007,9 +1624,13 @@ pub enum DisplaySpace {
     #[default]
     Srgb,
     DisplayP3,
+    /// ITU-R BT.2020 primaries, for export only: no screen shows it and no canvas takes it. The working space
+    /// already is linear Rec.2020, so its matrix is the identity, and the file carries a profile synthesised
+    /// from the primaries (`crate::icc::rec2020`).
+    Rec2020,
 }
 
-/// The develop modules' uniform (432 bytes). Its WGSL declaration,
+/// The develop modules' uniform (608 bytes). Its WGSL declaration,
 /// `shaders/uniforms/develop_params.wgsl`, is generated from this struct (`sidecar-uniform`); the
 /// `uniforms` test checks the file and every offset.
 #[repr(C)]
@@ -1044,10 +1665,11 @@ pub struct DevelopParams {
     /// map's log exposure, w unused.
     pub mono: [f32; 4],
     /// Grain (`Grain::uniform`): standard deviation in stops (0 none), size as a share of the long edge, the
-    /// share a staining developer hides at the white point, unused.
+    /// share a staining developer hides at the white point, 1 for a grain per dye layer.
     pub grain: [f32; 4],
     /// Black and white's developer (`crate::developer`): adjacency, its reach as a share of the long edge,
-    /// development's contrast factor, compensation. `[0, 0, 1, 0]` does nothing; all zero in colour.
+    /// development's contrast factor, compensation. `[0, 0, 1, 0]` does nothing. In colour all zero but the reach,
+    /// which carries halation's (`HALATION_MM`) when it is on: the map's blur reads it either way.
     pub developer: [f32; 4],
     /// A named stock's curve (`crate::stock::Curve`), from a RAW: 1 on, the toe in stops from grey, its width,
     /// the shoulder's strength.
@@ -1070,12 +1692,71 @@ pub struct DevelopParams {
     pub slide_tone: [f32; 4],
     /// The base curve's shape above middle grey: x the shoulder's order (0 = the logistic, as before
     /// `PROCESS_VERSION` 6), y Contrast as an exponent for the S-curve that grades the straight segment,
-    /// since a fixed segment has no steepness of its own for Contrast to set. z, w unused.
+    /// since a fixed segment has no steepness of its own for Contrast to set. z 1 to compress out-of-gamut
+    /// colour in ACEScg (`Tone::gamut_ap1`), 0 in Rec.2020 as before `PROCESS_VERSION` 9. w unused.
     pub tone_shape: [f32; 4],
+    /// Colour grading (`ColorGrading::uniform`): per wheel — shadows, midtones, highlights, global — the OKLab a
+    /// and b to add and the lightness shift.
+    pub grade: [[f32; 4]; 4],
+    /// Colour grading: x 1 on, y the shadows/highlights crossover in OKLab lightness, z the overlap exponent.
+    pub grade_split: [f32; 4],
+    /// Texture and Clarity (`Presence::uniform`): the fine and middle bands' change in contrast, −1…1; z 1 when
+    /// either is on, so develop reads the local-contrast map; w Dehaze, −1…1 (0: no haze map is read).
+    pub local: [f32; 4],
+    /// A film negative inverted (`Negative::uniform`): the film base's camera RGB, and 1/γ; all zero for a positive.
+    pub negative: [f32; 4],
+    /// An alternative process (`process::uniform`): x 1 cyanotype, 2 tintype, 0 none; y the cyanotype's peak
+    /// density, z its luminance absorbance per unit density. `process_dark`: the cyanotype's absorbance per channel
+    /// per unit density, or the tintype's black japan; w their luminance. `process_light`: the paper or the
+    /// silver, w its luminance. Linear Rec.2020, as shown.
+    pub process: [f32; 4],
+    pub process_dark: [f32; 4],
+    pub process_light: [f32; 4],
+    /// The light controls, per pixel (`light_uniform`): Highlights' and Shadows' slope changes, Contrast as a slope
+    /// less one, w unused. All zero is the identity, and is all an edit before
+    /// `PROCESS_VERSION` 10 packs.
+    pub light: [f32; 4],
 }
 
 /// Contrast slider value → logistic steepness.
 pub const CONTRAST_SCALE: f64 = 7.0;
+
+/// How far Highlights and Shadows at ±100 change the slope of the tones past their ramps (`develop/light.wgsl`):
+/// Highlights −100 and Shadows +100 take it to a quarter, so a texture there keeps at least a quarter of its
+/// contrast. Set by eye on 2026-11-09, a step stronger than the half first tried, for creative room.
+pub const LIGHT_SLOPE_RANGE: f64 = 0.75;
+/// Contrast as a slope in stops per stop around grey: the stored value 1 + slider/100 (0.3…2) taken halfway, so
+/// +100 is 1.5 and −70 is 0.65.
+pub const LIGHT_CONTRAST_GAIN: f64 = 0.5;
+
+/// Where Highlights' and Shadows' ramps begin, in stops from grey, and how wide they are (`develop/light.wgsl`,
+/// which this mirrors).
+const LIGHT_RAMP_FROM: f64 = 0.5;
+const LIGHT_RAMP_WIDTH: f64 = 1.0;
+
+/// The light stage on a luminance `u` stops from grey, for a packed `light`: the stops it renders at. Mirrors
+/// `light_apply` in `develop/light.wgsl`, for tests and for the curve the editor draws.
+pub fn light_stops(u: f64, light: [f32; 4]) -> f64 {
+    let ramp = |t: f64| {
+        let x = (t / LIGHT_RAMP_WIDTH).clamp(0.0, 1.0);
+        LIGHT_RAMP_WIDTH * x.powi(3) * (1.0 - 0.5 * x) + (t - LIGHT_RAMP_WIDTH).max(0.0)
+    };
+    let [h, s, k, _] = light.map(f64::from);
+    (1.0 + k) * (u + h * ramp(u - LIGHT_RAMP_FROM) + s * ramp(-u - LIGHT_RAMP_FROM))
+}
+
+/// `DevelopParams::light` for these tone settings: the identity before `PROCESS_VERSION` 10.
+fn light_uniform(t: &Tone) -> [f32; 4] {
+    if !t.per_pixel_light {
+        return [0.0; 4];
+    }
+    [
+        (t.highlights.clamp(-100.0, 100.0) / 100.0 * LIGHT_SLOPE_RANGE) as f32,
+        (t.shadows.clamp(-100.0, 100.0) / 100.0 * LIGHT_SLOPE_RANGE) as f32,
+        ((t.contrast - 1.0) * LIGHT_CONTRAST_GAIN).max(-0.9) as f32,
+        0.0,
+    ]
+}
 
 /// A developed file's tone settings, from the same stored fields a RAW uses so the editor's sliders need no
 /// second meaning: Blacks and Whites as −1…1 (the slider over 100), Contrast as the S-curve's exponent, and
@@ -1092,7 +1773,11 @@ fn display_tone(edit: &EditParams) -> [f32; 4] {
     [
         blacks as f32,
         whites as f32,
-        t.contrast.max(0.1) as f32,
+        if t.per_pixel_light {
+            1.0
+        } else {
+            t.contrast.max(0.1) as f32
+        },
         knee as f32,
     ]
 }
@@ -1113,10 +1798,14 @@ pub struct Packed {
     /// floats an entry; empty unless a stock is named *and* its profile was given to `pack_with`. The response
     /// table it goes with is the profile's.
     pub slide_exposure: Vec<f32>,
+    /// The camera profile pass, when the edit renders with one that has tables (`FILE_PROFILE`).
+    pub profile: Option<ProfilePass>,
+    /// The defringe pass's uniform (`DefringeParams`), when the edit takes fringes out.
+    pub defringe: Option<Vec<u8>>,
 }
 
 /// Row-major 3×3 → WGSL `mat3x3f` columns.
-fn to_mat3(m: &M3) -> [[f32; 4]; 3] {
+pub(crate) fn to_mat3(m: &M3) -> [[f32; 4]; 3] {
     [0, 1, 2].map(|j| [m[0][j] as f32, m[1][j] as f32, m[2][j] as f32, 0.0])
 }
 
@@ -1135,8 +1824,16 @@ fn tone_params(edit: &EditParams, developed: bool) -> [f32; 4] {
         // where white went, and `display_tone` grades what is there.
         return display_tone(edit);
     }
-    let white_ev = t.white_ev + highlight_reach(t);
-    let mut k = (t.contrast * CONTRAST_SCALE).max(0.5);
+    // Since `PROCESS_VERSION` 10 Highlights and Contrast are the light stage's (`light_uniform`): the white point
+    // and the curve's steepness are the rendering's own.
+    let (white_ev, mut k) = if t.per_pixel_light {
+        (t.white_ev, CONTRAST_SCALE)
+    } else {
+        (
+            t.white_ev + highlight_reach(t),
+            (t.contrast * CONTRAST_SCALE).max(0.5),
+        )
+    };
     let mut black = t.black_ev;
     // A named stock's print puts its fog just above paper black, half a stop under the floor its toe flattens the
     // shadows into, as a printer chooses exposure and grade for a negative; Blacks still moves it from there. The
@@ -1233,8 +1930,27 @@ fn pack_inner(
             crate::cct::temp_tint_to_xy(edit.white_balance.temperature_k, edit.white_balance.tint)
         }
     };
-    let wb = camera::resolve(camera, white_xy);
+    let mut wb = camera::resolve(camera, white_xy);
     let developed = source == SourceKind::Developed;
+    // The file's camera profile, when the edit asks for it: its forward matrix in place of the inverted colour
+    // matrix — white-balanced camera RGB to XYZ under D50, adapted to D65 for the working space and normalised so
+    // the white maps to white, as `resolve` does.
+    let dcp = (!developed && edit.camera_profile.as_deref() == Some(FILE_PROFILE))
+        .then_some(camera.profile.as_deref())
+        .flatten();
+    if let Some(fm) = dcp.and_then(|p| p.forward_at(wb.temperature_k)) {
+        let mut m = mat::mul(
+            &mat::XYZ_TO_REC2020,
+            &mat::mul(&mat::bradford(crate::dcp::D50, mat::D65), &fm),
+        );
+        let white = mat::apply(&m, &[1.0, 1.0, 1.0]);
+        for (row, w) in m.iter_mut().zip(white) {
+            for v in row.iter_mut() {
+                *v /= w;
+            }
+        }
+        wb.cam_to_rec2020 = m;
+    }
     let mono_lut = edit
         .monochrome
         .as_ref()
@@ -1260,6 +1976,7 @@ fn pack_inner(
         })
         .flatten();
     let tone = tone_params(edit, developed);
+    let (grade, grade_split) = ColorGrading::uniform(edit.color_grading.as_ref());
     let mut params = DevelopParams {
         wb_mul: wb.mul.map(|v| v as f32),
         // A developed file is already a picture — its own maker placed its grey — so the baseline is a RAW's
@@ -1269,6 +1986,7 @@ fn pack_inner(
         work_to_disp: to_mat3(match display {
             DisplaySpace::Srgb => &mat::REC2020_TO_SRGB,
             DisplaySpace::DisplayP3 => &mat::REC2020_TO_P3,
+            DisplaySpace::Rec2020 => &mat::IDENTITY,
         }),
         tone,
         // Highlight blending neutralises what white balance does to sensor-clipped pixels; a developed file
@@ -1291,7 +2009,7 @@ fn pack_inner(
             (Some(f), false) => [
                 (f.amount.clamp(0.0, 100.0) / 100.0) as f32,
                 (f.interlayer.clamp(0.0, 100.0) / 100.0 * FILM_INTERLAYER) as f32,
-                0.0,
+                (f.halation.clamp(0.0, 100.0) / 100.0 * HALATION_MAX) as f32,
                 0.0,
             ],
             _ => [0.0; 4],
@@ -1301,7 +2019,16 @@ fn pack_inner(
         } else {
             [0.0; 4]
         },
-        grain: Grain::uniform(edit.grain.as_ref()),
+        // Grain per dye layer only where colour film is rendered from a RAW: black and white has one emulsion, and
+        // a developed file is a print.
+        grain: {
+            let mut g = Grain::uniform(edit.grain.as_ref());
+            let colour_film = !developed && !mono && (edit.film.is_some() || slide.is_some());
+            if colour_film && edit.grain.as_ref().is_some_and(|g| g.layered) {
+                g[3] = 1.0;
+            }
+            g
+        },
         developer: [0.0; 4],
         stock: match stock_curve(edit, developed) {
             Some(c) => [1.0, c.toe_at as f32, c.toe_width as f32, c.shoulder as f32],
@@ -1331,10 +2058,30 @@ fn pack_inner(
             } else {
                 edit.tone.shoulder_order.clamp(0.0, 8.0) as f32
             },
-            edit.tone.contrast.max(0.1) as f32,
-            0.0,
-            0.0,
+            if edit.tone.per_pixel_light {
+                1.0
+            } else {
+                edit.tone.contrast.max(0.1) as f32
+            },
+            // A developed file is never gamut-compressed (it is already in its display's gamut).
+            if edit.tone.gamut_ap1 { 1.0 } else { 0.0 },
+            // The fade to neutral by clipped samples rather than by output level (`PROCESS_VERSION` 10).
+            if edit.tone.per_pixel_light { 1.0 } else { 0.0 },
         ],
+        grade,
+        grade_split,
+        local: Presence::uniform(edit.presence.as_ref()),
+        // A developed file is a picture already, never a negative to invert.
+        negative: if developed {
+            [0.0; 4]
+        } else {
+            Negative::uniform(edit.negative.as_ref())
+        },
+        // Black and white only: a cyanotype or a tintype is printed from a monochrome rendering.
+        process: [0.0; 4],
+        process_dark: [0.0; 4],
+        process_light: [0.0; 4],
+        light: light_uniform(&edit.tone),
         slide_tone: match &slide {
             Some(_) => {
                 let mut t = display_tone(edit);
@@ -1359,6 +2106,13 @@ fn pack_inner(
         ];
         params.grain[0] *= (d.grain * crate::developer::development_grain(m.development)) as f32;
         params.grain[2] = d.stain as f32;
+        if let Some([p, dark, light]) = crate::process::uniform(&m.process) {
+            (params.process, params.process_dark, params.process_light) = (p, dark, light);
+        }
+    }
+    // Halation's reach goes where the map's blur reads it: the developer's reach lane, which colour never uses.
+    if params.film[2] > 0.0 {
+        params.developer[1] = (HALATION_MM * 1000.0 / FRAME_MICRONS) as f32;
     }
     let mut masks = MaskParams {
         frame: [0.0; 4],
@@ -1404,14 +2158,20 @@ fn pack_inner(
                 0.0,
             ],
             mixer: mixer_params(&m.mixer),
+            uniformity: m
+                .color
+                .as_ref()
+                .filter(|_| m.mask == crate::color_range::COLOR)
+                .map_or([0.0; 4], |c| c.uniformity()),
         };
     }
-    let lut = tone_curve_lut(
-        &edit.tone.curve,
-        edit.tone.highlights,
-        edit.tone.shadows,
-        LUT_SIZE,
-    );
+    // Since `PROCESS_VERSION` 10 Highlights and Shadows are the light stage's, not a bump on the curve.
+    let (highlights, shadows) = if edit.tone.per_pixel_light {
+        (0.0, 0.0)
+    } else {
+        (edit.tone.highlights, edit.tone.shadows)
+    };
+    let lut = tone_curve_lut(&edit.tone.curve, highlights, shadows, LUT_SIZE);
     Packed {
         uniform: bytemuck::bytes_of(&params).to_vec(),
         lut,
@@ -1421,12 +2181,306 @@ fn pack_inner(
         mask_curves,
         mono_lut,
         slide_exposure: slide.map(|(lut, _)| lut).unwrap_or_default(),
+        profile: dcp.and_then(|p| {
+            // The LookTable applies after the file's own BaselineExposure and the person's exposure (DNG 1.6, chapter
+            // 6) — not after Sidecar's placement of grey, which is a rendering choice of its own.
+            let look_exposure =
+                2f64.powf(edit.exposure.ev + camera.baseline_exposure.unwrap_or(0.0)) as f32;
+            profile_pass(p, &params, wb.temperature_k, look_exposure)
+        }),
+        // A developed file's fringes were the camera's to take out; it is still offered, as its pixels are light too.
+        defringe: Defringe::uniform(edit.defringe.as_ref(), &params),
     }
+}
+
+/// The camera profile pass for `p` under this develop's uniform: its tables at the white balance's `temperature`,
+/// in a 3D texture's layout, and the matrices that carry develop's white-balanced camera RGB to ProPhoto and back.
+fn profile_pass(
+    p: &crate::dcp::Profile,
+    d: &DevelopParams,
+    temperature: f64,
+    look_exposure: f32,
+) -> Option<ProfilePass> {
+    let hue_sat = p.hue_sat_at(temperature);
+    let look = p.look.clone().filter(crate::dcp::HsvTable::is_valid);
+    if hue_sat.is_none() && look.is_none() {
+        return None;
+    }
+    let cam: M3 = std::array::from_fn(|r| std::array::from_fn(|c| d.cam_to_work[c][r] as f64));
+    let to = mat::mul(&crate::dcp::rec2020_to_prophoto(), &cam);
+    let dims = |t: &Option<crate::dcp::HsvTable>| {
+        t.as_ref()
+            .map_or([0; 4], |t| [t.dims[0], t.dims[1], t.dims[2], t.srgb as u32])
+    };
+    let rgba = |t: &Option<crate::dcp::HsvTable>| {
+        t.as_ref().map_or(vec![], |t| {
+            t.data
+                .chunks(3)
+                .flat_map(|e| [e[0], e[1], e[2], 0.0])
+                .collect()
+        })
+    };
+    let u = ProfileParams {
+        to_prophoto: to_mat3(&to),
+        from_prophoto: to_mat3(&mat::inverse(&to)),
+        wb: [d.wb_mul[0], d.wb_mul[1], d.wb_mul[2], 0.0],
+        hue_sat: dims(&hue_sat),
+        look: dims(&look),
+        exposure: [look_exposure, d.exposure, 0.0, 0.0],
+    };
+    Some(ProfilePass {
+        uniform: bytemuck::bytes_of(&u).to_vec(),
+        hue_sat: rgba(&hue_sat),
+        look: rgba(&look),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An edit that denoised under the fixed transform keeps it; one that never denoised, and every new edit,
+    /// uses the photo's measured noise; taking up today's rendering switches it on.
+    #[test]
+    fn denoising_edits_keep_their_transform_and_new_ones_measure() {
+        assert!(EditParams::default().detail.noise_model);
+        let mut old = EditParams {
+            process_version: 7,
+            ..Default::default()
+        };
+        old.detail.denoise_luminance = 30.0;
+        old.migrate();
+        assert!(!old.detail.noise_model);
+        assert!(old.behind_current_rendering(false));
+        old.adopt_current_rendering(false);
+        assert!(old.detail.noise_model);
+
+        let mut plain = EditParams {
+            process_version: 7,
+            ..Default::default()
+        };
+        plain.migrate();
+        assert!(
+            plain.detail.noise_model,
+            "nothing denoised, nothing to keep"
+        );
+        let json = serde_json::to_value(EditParams::default()).unwrap();
+        assert!(
+            json["detail"].get("noiseModel").is_none(),
+            "left out when on"
+        );
+    }
+
+    /// A linear gradient is full before its start and empty past its end, linear between; a radial one is full
+    /// inside its inner radius and empty outside its ellipse. And a quarter turn between the shown photo and
+    /// the target moves the shape with it: the same point of the photo gets the same weight in either frame.
+    #[test]
+    fn gradients_weigh_as_drawn_in_any_orientation() {
+        let lin = Gradient::Linear {
+            from: [0.2, 0.5],
+            to: [0.6, 0.5],
+        };
+        let p = lin.uniform([1000, 500], [1000, 500], |q| q);
+        let w = |x: f32, y: f32| Gradient::weight(&p, [x, y]);
+        assert_eq!(w(100.0, 250.0), 1.0);
+        assert!(
+            (w(400.0, 10.0) - 0.5).abs() < 1e-6,
+            "halfway, and the same on any line across"
+        );
+        assert_eq!(w(700.0, 250.0), 0.0);
+
+        let rad = Gradient::Radial {
+            centre: [0.5, 0.5],
+            axes: [0.2, 0.1],
+            angle: 30.0,
+            feather: 50.0,
+        };
+        let shown = [1200u32, 800u32];
+        let p = rad.uniform(shown, shown, |q| q);
+        let c = [600.0f32, 400.0];
+        let along = |r: f32, deg: f32, len: f32| {
+            let (s, co) = deg.to_radians().sin_cos();
+            [c[0] + r * len * co, c[1] + r * len * s]
+        };
+        // The long axis is 0.2 × 1200 = 240 px at 30°, the short one 120 px at 120°.
+        assert_eq!(Gradient::weight(&p, along(0.4, 30.0, 240.0)), 1.0);
+        assert!((Gradient::weight(&p, along(0.75, 30.0, 240.0)) - 0.5).abs() < 1e-4);
+        assert!((Gradient::weight(&p, along(0.75, 120.0, 120.0)) - 0.5).abs() < 1e-4);
+        assert_eq!(Gradient::weight(&p, along(1.01, 120.0, 120.0)), 0.0);
+
+        // A quarter turn clockwise into an 800 × 1200 target: (x, y) shown → (1 − y, x).
+        let turned = rad.uniform(shown, [800, 1200], |q| [1.0 - q[1], q[0]]);
+        for &(x, y) in &[(0.5f32, 0.5f32), (0.6, 0.55), (0.45, 0.42), (0.7, 0.5)] {
+            let a = Gradient::weight(&p, [x * 1200.0, y * 800.0]);
+            let b = Gradient::weight(&turned, [(1.0 - y) * 800.0, x * 1200.0]);
+            assert!((a - b).abs() < 1e-4, "({x}, {y}): {a} shown, {b} turned");
+        }
+    }
+
+    #[test]
+    fn a_gradient_layer_round_trips_and_renders() {
+        let m = MaskAdjustment {
+            mask: GRADIENT.into(),
+            gradient: Some(Gradient::Radial {
+                centre: [0.5, 0.4],
+                axes: [0.3, 0.2],
+                angle: 0.0,
+                feather: 60.0,
+            }),
+            exposure: -1.0,
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&m).unwrap();
+        assert_eq!(json["gradient"]["kind"], "radial");
+        let back: MaskAdjustment = serde_json::from_value(json).unwrap();
+        assert_eq!(back, m);
+        assert!(back.renders());
+        let shapeless = MaskAdjustment {
+            mask: GRADIENT.into(),
+            ..Default::default()
+        };
+        assert!(
+            !shapeless.renders(),
+            "a gradient layer with no shape draws nothing"
+        );
+    }
+
+    /// At rest, grading is off and packs to zeros; a wheel pushes chroma along its hue with no lightness
+    /// change, and Balance moves the crossover.
+    #[test]
+    fn grading_packs_its_wheels() {
+        assert_eq!(ColorGrading::uniform(None).1[0], 0.0);
+        assert_eq!(
+            ColorGrading::uniform(Some(&ColorGrading::default())).1[0],
+            0.0
+        );
+        let g = ColorGrading {
+            shadows: GradeWheel {
+                hue: 90.0,
+                saturation: 50.0,
+                luminance: 0.0,
+            },
+            balance: 100.0,
+            ..Default::default()
+        };
+        let (w, split) = ColorGrading::uniform(Some(&g));
+        assert_eq!(split[0], 1.0);
+        assert!(w[0][0].abs() < 1e-6 && (w[0][1] - (0.5 * GRADE_CHROMA) as f32).abs() < 1e-6);
+        assert_eq!(w[0][2], 0.0, "a colour, not a lightness");
+        assert!(
+            (split[1] - 0.25).abs() < 1e-6,
+            "balance 100 puts the crossover in the darks"
+        );
+        let e = EditParams {
+            color_grading: Some(g),
+            ..Default::default()
+        };
+        let p = pack(
+            &e,
+            &crate::camera::nikon_d850(),
+            SourceKind::Raw,
+            DisplaySpace::Srgb,
+        );
+        let d: &DevelopParams = bytemuck::from_bytes(&p.uniform);
+        assert_eq!(d.grade_split[0], 1.0);
+        assert!(
+            serde_json::to_value(EditParams::default())
+                .unwrap()
+                .get("colorGrading")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn presence_packs_its_bands_and_is_absent_at_rest() {
+        assert_eq!(Presence::uniform(None), [0.0; 4]);
+        assert_eq!(Presence::uniform(Some(&Presence::default()))[2], 0.0);
+        let e = EditParams {
+            presence: Some(Presence {
+                texture: -50.0,
+                clarity: 250.0,
+                dehaze: 40.0,
+            }),
+            ..Default::default()
+        };
+        let p = pack(
+            &e,
+            &crate::camera::nikon_d850(),
+            SourceKind::Raw,
+            DisplaySpace::Srgb,
+        );
+        let d: &DevelopParams = bytemuck::from_bytes(&p.uniform);
+        assert_eq!(d.local, [-0.5, 1.0, 1.0, 0.4]);
+        assert!(
+            serde_json::to_value(EditParams::default())
+                .unwrap()
+                .get("presence")
+                .is_none()
+        );
+    }
+
+    /// An edit from before `PROCESS_VERSION` 9 keeps compressing in Rec.2020; a new one, or one that takes up
+    /// today's rendering, compresses in ACEScg; the flag reaches the uniform for a RAW and is left out of the
+    /// serialized edit when on.
+    #[test]
+    fn older_edits_keep_their_gamut_compression() {
+        assert!(EditParams::default().tone.gamut_ap1);
+        let mut old = EditParams {
+            process_version: 8,
+            ..Default::default()
+        };
+        old.migrate();
+        assert!(!old.tone.gamut_ap1);
+        let packed = |e: &EditParams| {
+            let p = pack(
+                e,
+                &crate::camera::nikon_d850(),
+                SourceKind::Raw,
+                DisplaySpace::Srgb,
+            );
+            bytemuck::from_bytes::<DevelopParams>(&p.uniform).tone_shape[2]
+        };
+        assert_eq!(packed(&old), 0.0);
+        assert!(old.behind_current_rendering(false));
+        old.adopt_current_rendering(false);
+        assert!(old.tone.gamut_ap1);
+        assert_eq!(packed(&old), 1.0);
+        let json = serde_json::to_value(EditParams::default()).unwrap();
+        assert!(json["tone"].get("gamutAp1").is_none(), "left out when on");
+    }
+
+    /// A scene exposed onto film of contrast γ, its density above the base γ·log₁₀(H / H₀), read through an orange
+    /// mask lit by a coloured light, inverts to the scene's light above the threshold — the same through either mask,
+    /// in proportion to the exposure.
+    #[test]
+    fn a_negative_inverts_to_the_scene_whatever_its_mask() {
+        let gamma = 0.6;
+        let film = |h: f64, base: [f64; 3]| -> [f64; 3] {
+            let d = gamma * (h / 0.01).log10();
+            base.map(|b| b * 10f64.powf(-d))
+        };
+        let scene = [0.02, 0.18, 0.9];
+        for base in [[0.8, 0.45, 0.25], [0.6, 0.6, 0.6]] {
+            let n = Negative { base, gamma };
+            let out: Vec<[f64; 3]> = scene.iter().map(|&h| n.invert(film(h, base))).collect();
+            for (o, &h) in out.iter().zip(&scene) {
+                let want = (h / 0.01 - 1.0) * NEGATIVE_SCALE;
+                for v in o {
+                    assert!(
+                        (v / want - 1.0).abs() < 1e-9,
+                        "{base:?} {h}: {o:?} against {want}"
+                    );
+                }
+            }
+        }
+        assert_eq!(Negative::uniform(None), [0.0; 4]);
+        assert!(
+            serde_json::to_value(EditParams::default())
+                .unwrap()
+                .get("negative")
+                .is_none()
+        );
+    }
 
     /// Default settings on a developed file must be the identity: every tone value at its neutral, and the
     /// RAW-only highlight blend off whatever the stored strength says.
@@ -1470,7 +2524,7 @@ mod tests {
             SourceKind::Raw,
             DisplaySpace::Srgb,
         );
-        assert_eq!(p.uniform.len(), 432);
+        assert_eq!(p.uniform.len(), 608);
         assert_eq!(p.lut.len(), LUT_SIZE);
         // exposure sits at byte 12, and for a RAW at default it is the baseline, not 1.0
         let gain = |p: &Packed| f32::from_le_bytes(p.uniform[12..16].try_into().unwrap());
@@ -1891,6 +2945,7 @@ mod tests {
         let grain = Some(Grain {
             amount: 50.0,
             size: 50.0,
+            ..Default::default()
         });
         assert_eq!(
             at(&EditParams {
@@ -1961,20 +3016,23 @@ mod tests {
         assert_eq!(
             at(Some(Grain {
                 amount: 0.0,
-                size: 50.0
+                size: 50.0,
+                ..Default::default()
             })),
             [0.0; 4]
         );
         let g = at(Some(Grain {
             amount: 50.0,
             size: 100.0,
+            ..Default::default()
         }));
         assert!((g[0] - 0.3).abs() < 1e-6);
         assert!((g[1] as f64 - 40.0 / 36_000.0).abs() < 1e-9);
         assert!(
             (Grain {
                 amount: 0.0,
-                size: 0.0
+                size: 0.0,
+                ..Default::default()
             }
             .microns()
                 - 5.0)
@@ -2224,6 +3282,8 @@ mod tests {
     #[test]
     fn migrated_edit_packs_the_same_value_at_the_anchor_as_the_old_mechanism_did() {
         let mut e = EditParams::default();
+        // Anchors are a version-1 edit's, which renders Highlights and Shadows on the curve.
+        e.tone.per_pixel_light = false;
         let old_y = 0.25 + (-35.0_f64) / 100.0 * HIGHLIGHT_SHADOW_SCALE;
         e.tone.curve = vec![[0.0, 0.0], [0.25, old_y], [1.0, 1.0]];
         let before = pack(
@@ -2354,8 +3414,8 @@ mod tests {
 
     /// The defect this fixes: everything at or above `white_ev` becomes display white before the LUT sees
     /// it, and the LUT's ends are pinned, so Highlights could bend the curve below white and reach nothing
-    /// that was already at it. Negative Highlights now moves the white point itself, which is the only place
-    /// a blown highlight can be reached from.
+    /// that was already at it. Negative Highlights moved the white point itself, from `PROCESS_VERSION` 7 until
+    /// the light stage took Highlights over in 10; an edit from between keeps it.
     #[test]
     fn highlights_can_reach_past_white_now() {
         let cam = crate::camera::nikon_d850();
@@ -2365,6 +3425,7 @@ mod tests {
             u.tone[1]
         };
         let mut e = EditParams::default();
+        e.tone.per_pixel_light = false;
         let at_rest = white_of(&e);
         assert!((at_rest - DEFAULT_WHITE_EV as f32).abs() < 1e-6);
 
@@ -2382,6 +3443,113 @@ mod tests {
         // Positive Highlights is not a white-point control: it grades what is below white, as it always did.
         e.tone.highlights = 100.0;
         assert!((white_of(&e) - at_rest).abs() < 1e-6);
+    }
+
+    /// Since `PROCESS_VERSION` 10 Highlights, Shadows and Contrast are the light stage's alone: the white point,
+    /// the curve and its steepness stay the rendering's, and the stage gets the stops and the slope.
+    #[test]
+    fn the_light_controls_pack_into_the_light_stage() {
+        let cam = crate::camera::nikon_d850();
+        let packed = |e: &EditParams, kind| {
+            let p = pack(e, &cam, kind, DisplaySpace::Srgb);
+            let u: DevelopParams = *bytemuck::from_bytes(&p.uniform);
+            (u, p.lut)
+        };
+        let rest = EditParams::default();
+        assert!(rest.tone.per_pixel_light);
+        let (u0, lut0) = packed(&rest, SourceKind::Raw);
+        assert_eq!(u0.light, [0.0; 4], "at rest the stage is the identity");
+        assert_eq!(u0.tone_shape[3], 1.0, "the fade keyed on clipped samples");
+
+        let mut e = rest.clone();
+        e.tone.highlights = -100.0;
+        e.tone.shadows = 50.0;
+        e.tone.contrast = 1.4;
+        for kind in [SourceKind::Raw, SourceKind::Developed] {
+            let (u, lut) = packed(&e, kind);
+            let (r, rlut) = packed(&rest, kind);
+            assert_eq!(u.light[0], -LIGHT_SLOPE_RANGE as f32);
+            assert_eq!(u.light[1], (0.5 * LIGHT_SLOPE_RANGE) as f32);
+            assert!((u.light[2] - 0.2).abs() < 1e-6);
+            assert_eq!(
+                u.tone, r.tone,
+                "{kind:?}: the tone map is the rendering's own"
+            );
+            assert_eq!(u.tone_shape[1], r.tone_shape[1]);
+            assert_eq!(lut, rlut, "{kind:?}: no bump on the curve");
+        }
+        assert_eq!(lut0.len(), LUT_SIZE);
+
+        // An edit from before keeps the curve's Highlights, and the identity stage.
+        let mut old: EditParams =
+            serde_json::from_str(r#"{"processVersion":9,"tone":{"highlights":-100}}"#).unwrap();
+        old.migrate();
+        assert!(!old.tone.per_pixel_light);
+        let (u, _) = packed(&old, SourceKind::Raw);
+        assert_eq!(u.light, [0.0; 4]);
+        assert_eq!(u.tone_shape[3], 0.0);
+        assert!(old.behind_current_rendering(false));
+        old.adopt_current_rendering(false);
+        assert!(old.tone.per_pixel_light);
+        assert!(
+            serde_json::to_value(EditParams::default()).unwrap()["tone"]
+                .get("perPixelLight")
+                .is_none(),
+            "left out when on"
+        );
+    }
+
+    /// Each slider does more the further it goes, where it is aimed: Highlights on a tone three stops over grey,
+    /// Shadows on one five stops under.
+    #[test]
+    fn the_light_sliders_do_more_the_further_they_go() {
+        let at = |h: f64, s: f64, u: f64| {
+            let mut t = Tone::default();
+            (t.highlights, t.shadows) = (h, s);
+            light_stops(u, light_uniform(&t))
+        };
+        let down: Vec<f64> = [0.0, -25.0, -50.0, -75.0, -100.0]
+            .map(|h| at(h, 0.0, 3.0))
+            .to_vec();
+        assert!(
+            down.windows(2).all(|w| w[1] < w[0]),
+            "Highlights down: {down:?}"
+        );
+        let up: Vec<f64> = [0.0, 25.0, 50.0, 100.0].map(|h| at(h, 0.0, 3.0)).to_vec();
+        assert!(up.windows(2).all(|w| w[1] > w[0]), "Highlights up: {up:?}");
+        let lift: Vec<f64> = [0.0, 25.0, 50.0, 100.0].map(|s| at(0.0, s, -5.0)).to_vec();
+        assert!(lift.windows(2).all(|w| w[1] > w[0]), "Shadows up: {lift:?}");
+        // Highlights −100 brings at least two stops past white into view.
+        let white = DEFAULT_WHITE_EV;
+        assert!(at(-100.0, 0.0, white + 2.0) <= white, "reaches past white");
+    }
+
+    /// The light stage never turns tones over — a brighter pixel always renders at least as bright — and keeps
+    /// at least half its slope, at every setting of the three controls; grey stays where it is.
+    #[test]
+    fn the_light_stage_is_monotone_and_leaves_grey() {
+        for h in [-100.0, -60.0, -20.0, 0.0, 50.0, 100.0] {
+            for s in [-100.0, -40.0, 0.0, 30.0, 100.0] {
+                for c in [0.3, 1.0, 2.0] {
+                    let mut t = Tone::default();
+                    (t.highlights, t.shadows, t.contrast) = (h, s, c);
+                    let l = light_uniform(&t);
+                    assert!(light_stops(0.0, l).abs() < 1e-9, "grey moved: {h} {s} {c}");
+                    let slope_floor = (1.0 - LIGHT_SLOPE_RANGE) * (1.0 + l[2] as f64);
+                    let mut prev = light_stops(-10.0, l);
+                    for i in 1..=2000 {
+                        let u = -10.0 + i as f64 * 0.01;
+                        let v = light_stops(u, l);
+                        let slope = (v - prev) / 0.01;
+                        assert!(
+                            slope >= slope_floor - 0.02,
+                            "{h} {s} {c}: slope {slope} at {u}"
+                        );
+                        prev = v;
+                    }
+                }
+            }
+        }
     }
 
     /// The scene level that renders as white, which is the number the complaint was really about. Recovery
@@ -2463,5 +3631,46 @@ mod tests {
         let at_rest = tone_of(&e);
         e.tone.highlights = -100.0;
         assert_eq!(tone_of(&e), at_rest, "its tone parameters do not move");
+    }
+
+    /// A grain per dye layer only where colour film is rendered from a RAW, and only when asked for: an edit that
+    /// predates it, black and white, the neutral rendering and a developed file all keep one grain.
+    #[test]
+    fn grain_per_dye_layer_only_in_colour_film() {
+        let cam = crate::camera::SourceSpace::Srgb.camera_color();
+        let layered = |edit: &EditParams, source: SourceKind| {
+            let d: DevelopParams =
+                bytemuck::pod_read_unaligned(&pack(edit, &cam, source, DisplaySpace::Srgb).uniform);
+            d.grain[3]
+        };
+        let grain = Grain {
+            amount: 50.0,
+            layered: true,
+            ..Default::default()
+        };
+        let film = EditParams {
+            film: Some(Film::default()),
+            grain: Some(grain.clone()),
+            ..Default::default()
+        };
+        assert_eq!(layered(&film, SourceKind::Raw), 1.0);
+        assert_eq!(
+            layered(&film, SourceKind::Developed),
+            0.0,
+            "a print has one grain"
+        );
+        let neutral = EditParams {
+            grain: Some(grain.clone()),
+            ..Default::default()
+        };
+        assert_eq!(layered(&neutral, SourceKind::Raw), 0.0);
+        let mono = EditParams {
+            monochrome: Some(Default::default()),
+            ..film.clone()
+        };
+        assert_eq!(layered(&mono, SourceKind::Raw), 0.0);
+        // An edit saved before the field existed reads it as off.
+        let old: Grain = serde_json::from_str(r#"{"amount":40,"size":50}"#).unwrap();
+        assert!(!old.layered);
     }
 }

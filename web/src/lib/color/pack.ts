@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // The Rust colour maths (crates/color) running as WebAssembly. Same code the worker uses for export.
 import wasmUrl from './sidecar_color.wasm?url';
-import type { CameraColor, DisplaySpace, EditParams, Frame, Geometry, Lens, LensProfile, MaskEdge, SourceKind } from '$lib/types';
+import type { ColorRange } from '$lib/generated/edit/ColorRange';
+import type { CameraColor, DisplaySpace, EditParams, Frame, Geometry, Gradient, Lens, LensProfile, MaskEdge, SourceKind } from '$lib/types';
+import type { LookLut } from '$lib/generated/edit/LookLut';
+import type { LutTable } from '$lib/luts';
 
 /** Mirrors `sidecar_color::params::EdgePlan`: the mask edge passes for one mask size. */
 export type EdgePlan = { scale: number; small: [number, number]; radius: number; threshold: number; ramp: number };
@@ -16,6 +19,7 @@ type Exports = {
 	sc_geometry(ptr: number, len: number): number;
 	sc_adopt_rendering(ptr: number, len: number): number;
 	sc_geometry_fit(ptr: number, len: number): number;
+	sc_upright(ptr: number, len: number): number;
 	sc_default_edit(): number;
 	sc_last_error(): number;
 	sc_develop_uniform_bytes(): number;
@@ -23,7 +27,11 @@ type Exports = {
 	sc_source_color(ptr: number, len: number): number;
 	sc_camera_color(ptr: number, len: number): number;
 	sc_pack_depth(ptr: number, len: number): number;
+	sc_pack_look(ptr: number, len: number): number;
+	sc_pack_proof(ptr: number, len: number): number;
 	sc_mask_edge(ptr: number, len: number): number;
+	sc_gradient(ptr: number, len: number): number;
+	sc_color_select(req: number, reqLen: number, uniform: number, uniformLen: number, pixels: number, pixelsLen: number, mask: number, maskLen: number): number;
 };
 
 /**
@@ -40,15 +48,22 @@ export type Packed = {
 	monoLut: Float32Array;
 	/** A spectral colour stock's layer responses over the colour cube; empty unless one is being rendered. */
 	slideExposure: Float32Array;
+	/** The camera profile pass (`DevelopPass.setProfile`), when the edit renders with the file's profile. */
+	profile: ProfilePass | null;
+	/** The defringe pass's uniform (`DevelopPass.setDefringe`), when the edit takes fringes out. */
+	defringe: Uint8Array | null;
 };
+
+/** `sidecar_color::params::ProfilePass`: the pass's uniform and its HueSatMap and LookTable, four floats an entry. */
+export type ProfilePass = { uniform: Uint8Array; hueSat: Float32Array; look: Float32Array };
 
 /** A spectral colour stock's profile, as `GET /api/film/stocks/{id}` sends it (`slide::SlideProfile`). */
 export type SlideProfile = { offsets: [number, number, number]; scale: number; side: number; response: Float32Array };
 
 /** `DevelopParams` (crates/color/src/params.rs). Checked against the wasm on load, so a
  *  struct that grew on one side fails here, by name, rather than as a garbled render. */
-export const DEVELOP_UNIFORM_BYTES = 432;
-const MASK_UNIFORM_BYTES = 1568;
+export const DEVELOP_UNIFORM_BYTES = 608;
+const MASK_UNIFORM_BYTES = 1696;
 const EMPTY = new Float32Array(0);
 const LUT = 4096;
 const MAX_MASKS = 8;
@@ -118,12 +133,30 @@ export class ColorPacker {
 	}
 
 	/**
+	 * `geometry` stood up by the photo's own lines (`sidecar_color::upright::solve`): `lum` is the picture's
+	 * luminance at `lumSize`, `focal` the lens in picture diagonals when known. Null when the photo hasn't the
+	 * straight lines `mode` needs.
+	 */
+	upright(geometry: Geometry, size: [number, number], lum: Float32Array, lumSize: [number, number], mode: 'level' | 'vertical' | 'full', focal: number | null): Geometry | null {
+		try {
+			return JSON.parse(new TextDecoder().decode(this.call(this.x.sc_upright, { geometry, size, lum: Array.from(lum, (v) => Math.round(v * 1e4) / 1e4), lumSize, mode, focal })));
+		} catch {
+			return null;
+		}
+	}
+
+	/**
 	 * The tone curve's own LUT (`sidecar_color::spline::tone_curve_lut`) — the same one `pack()` bakes into
 	 * its result, callable on its own so the curve editor can draw the "ghost" line Highlights/Shadows alone
 	 * would produce (`curve: []`) without a full `pack()` call, which needs camera colour this doesn't have.
 	 */
 	toneCurveLut(curve: [number, number][], highlights: number, shadows: number): Float32Array {
 		return new Float32Array(this.call(this.x.sc_tone_curve_lut, { curve, highlights, shadows }).buffer);
+	}
+
+	/** A gradient layer's uniform for a mask `size` pixels big (`Gradient::uniform`, 48 bytes). */
+	gradientUniform(gradient: Gradient, size: [number, number]): Uint8Array {
+		return this.call(this.x.sc_gradient, { gradient, size });
 	}
 
 	/** A mask edge's passes for a mask `size` pixels big (`MaskEdge::plan`); null when it is too narrow to show. */
@@ -139,6 +172,40 @@ export class ColorPacker {
 		const out = this.framed(this.x.sc_pack_depth(ptr, input.length));
 		this.x.sc_free(ptr, input.length);
 		return out.length ? out.slice() : undefined;
+	}
+
+	/** The LUT pass's uniform (128 bytes) for develop's output in `display`, or `undefined` when the amount leaves nothing to do. */
+	packLook(lut: LookLut, display: DisplaySpace, header: LutTable['header']): Uint8Array | undefined {
+		const input = new TextEncoder().encode(JSON.stringify({ lut, display, header }));
+		const ptr = this.x.sc_alloc(input.length);
+		new Uint8Array(this.x.memory.buffer, ptr, input.length).set(input);
+		const out = this.framed(this.x.sc_pack_look(ptr, input.length));
+		this.x.sc_free(ptr, input.length);
+		return out.length ? out.slice() : undefined;
+	}
+
+	/** A soft proof's uniform for the LUT pass (`lut::proof_uniform`), with the gamut warning painted when `warn`. */
+	packProof(display: DisplaySpace, header: LutTable['header'], warn: boolean): Uint8Array {
+		return this.call(this.x.sc_pack_proof, { display, header, warn }).slice();
+	}
+
+	/**
+	 * A colour-range layer's selection (`color_range::select`), one byte a pixel at the proxy's size: `proxy` is its
+	 * camera RGB, `uniform` the develop uniform the edit packs to, `within` the model mask it is limited to.
+	 */
+	colorSelect(range: ColorRange, uniform: Uint8Array, proxy: { width: number; height: number; rgba: Float32Array }, within: { width: number; height: number; bytes: Uint8Array } | null): Uint8Array {
+		const req = new TextEncoder().encode(JSON.stringify({ range, width: proxy.width, height: proxy.height, maskWidth: within?.width ?? 0, maskHeight: within?.height ?? 0 }));
+		const px = new Uint8Array(proxy.rgba.buffer, proxy.rgba.byteOffset, proxy.rgba.byteLength);
+		const parts = [req, uniform, px, within?.bytes ?? new Uint8Array(0)];
+		const ptrs = parts.map((p) => {
+			const ptr = this.x.sc_alloc(Math.max(p.length, 1));
+			new Uint8Array(this.x.memory.buffer, ptr, p.length).set(p);
+			return ptr;
+		});
+		const out = this.framed(this.x.sc_color_select(ptrs[0], req.length, ptrs[1], uniform.length, ptrs[2], px.length, ptrs[3], parts[3].length));
+		parts.forEach((p, k) => this.x.sc_free(ptrs[k], Math.max(p.length, 1)));
+		if (out.length === 0) throw new Error(new TextDecoder().decode(this.framed(this.x.sc_last_error())));
+		return out;
 	}
 
 	/** The temperature and tint under which `neutral`, a camera RGB, is grey: the white balance eyedropper. */
@@ -182,6 +249,15 @@ export class ColorPacker {
 		};
 		const monoLut = table();
 		const slideExposure = table();
+		const profileBytes = view.getUint32(at, true);
+		let profile: ProfilePass | null = null;
+		if (profileBytes) {
+			const uniform = out.slice(at + 4, at + 4 + profileBytes);
+			at += 4 + profileBytes;
+			profile = { uniform, hueSat: table(), look: table() };
+		}
+		const defringeBytes = view.getUint32(at, true);
+		const defringe = defringeBytes ? out.slice(at + 4, at + 4 + defringeBytes) : null;
 		return {
 			uniform: out.slice(0, U),
 			lut: new Float32Array(out.slice(U, U + lutBytes).buffer),
@@ -190,7 +266,9 @@ export class ColorPacker {
 			masks: out.slice(U + 16 + lutBytes, U + 16 + lutBytes + MASK_UNIFORM_BYTES),
 			maskCurves: new Float32Array(out.slice(U + 16 + lutBytes + MASK_UNIFORM_BYTES, U + 16 + lutBytes + MASK_UNIFORM_BYTES + MAX_MASKS * LUT * 4).buffer),
 			monoLut,
-			slideExposure
+			slideExposure,
+			profile,
+			defringe
 		};
 	}
 }

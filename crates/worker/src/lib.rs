@@ -9,8 +9,11 @@
 pub mod camera;
 pub mod export;
 pub mod lensfun;
+pub mod luts;
 pub mod masks;
 pub mod ml;
+pub mod models;
+pub mod overlays;
 pub mod stocks;
 
 use anyhow::{Context, Result};
@@ -168,6 +171,7 @@ impl Worker {
         std::fs::create_dir_all(cache.join("masks"))?;
         sweep_stale_cache(&cache);
         stocks::set_cache_dir(&cache);
+        luts::set_cache_dir(&cache)?;
         let lensfun = Arc::new(lensfun::Lensfun::open(cache.join("lensfun")));
         let kit = sidecar_engine::Gpu::new_headless().and_then(|gpu| {
             let ingest = sidecar_engine::Ingest::new(&gpu)?;
@@ -177,6 +181,7 @@ impl Worker {
             let warp = sidecar_engine::warp::WarpPass::new(&gpu)?;
             let brush = sidecar_engine::brush::Brush::new(&gpu)?;
             let depth = sidecar_engine::depth::DepthPass::new(&gpu)?;
+            let retouch = sidecar_engine::retouch::RetouchPass::new(&gpu)?;
             Ok(export::Kit {
                 gpu,
                 ingest,
@@ -186,6 +191,7 @@ impl Worker {
                 warp,
                 brush,
                 depth,
+                retouch,
                 lensfun: lensfun.clone(),
             })
         });
@@ -582,7 +588,7 @@ pub struct Session {
     key: String,
     source: Arc<wgpu::Texture>,
     flip: i32,
-    sigma: f32,
+    noise: sidecar_engine::detail::Noise,
     rendering: export::Rendering,
 }
 
@@ -599,6 +605,9 @@ pub struct PreviewRequest {
     /// Long edge of the returned JPEG. The cached proxy at this size is developed — not the original — so
     /// this costs a develop pass over a small image, not a decode.
     pub long_edge: Option<u32>,
+    /// The overlays to paint in (`overlays::CLIP_HIGHS`, `CLIP_LOWS`, `PEAKING`), as the view would draw them.
+    #[serde(default)]
+    pub overlays: u32,
 }
 
 /// The develop pass the browser would have run, run here instead, over the same cached proxy and with the
@@ -611,12 +620,15 @@ fn preview_jpeg(
     proxy: (u32, u32, Bytes),
     masks: &[Option<sidecar_engine::RgbaF32>],
     depth: Option<&masks::DepthMap>,
-) -> Result<Vec<u8>> {
+    focus: Option<sidecar_engine::RgbaF32>,
+) -> Result<(Vec<u8>, Vec<u32>)> {
     let (width, height, bytes) = proxy;
     let source = sidecar_engine::upload_rgba16(
         &kit.gpu,
         &sidecar_engine::RgbaF32::from_f16_bytes(width, height, &bytes),
     );
+    // The proxy is oriented already, as the spots are.
+    let source = export::retouch(kit, rendering, &req.edit, &source, 0).unwrap_or(source);
     let source = rendering.correct(kit, &req.edit, source);
     let depth_texture = depth.map(|d| {
         rendering.refine_depth(
@@ -637,6 +649,7 @@ fn preview_jpeg(
     let packed = rendering.pack(&req.edit, req.color_space);
     let profile = stocks::for_edit(&req.edit);
     let slide_response = stocks::response(&profile);
+    let look = luts::for_edit(&req.edit, req.color_space)?;
     // The proxy is oriented already, as the masks are.
     let mask_textures = rendering.mask_textures(kit, &req.edit, masks, 0, [width, height]);
     let developed = kit.develop.render(
@@ -644,13 +657,33 @@ fn preview_jpeg(
         &source,
         &packed.uniform,
         &packed.lut,
-        &export::masks_for(&packed, &mask_textures, [0.0; 4], slide_response),
+        &export::masks_for(
+            &packed,
+            &mask_textures,
+            [0.0; 4],
+            slide_response,
+            look.as_ref(),
+        ),
     )?;
     let developed = rendering
         .warp(kit, &req.edit, &developed, 0)
         .unwrap_or(developed);
-    let img = sidecar_engine::read_rgba16(&kit.gpu, &developed)?;
-    export::jpeg_bytes(&img, 88, req.color_space)
+    let mut img = sidecar_engine::read_rgba16(&kit.gpu, &developed)?;
+    // The histogram before any overlay is painted in, as the browser counts the developed picture.
+    let histogram = overlays::histogram(&img);
+    // The focus mask goes where the picture went: through the lens correction and the geometry.
+    let focus = focus.map(|mask| -> Result<sidecar_engine::RgbaF32> {
+        let tex = rendering.correct(
+            kit,
+            &req.edit,
+            sidecar_engine::upload_rgba16(&kit.gpu, &mask),
+        );
+        let tex = rendering.warp(kit, &req.edit, &tex, 0).unwrap_or(tex);
+        sidecar_engine::read_rgba16(&kit.gpu, &tex)
+    });
+    let focus = focus.transpose()?;
+    overlays::paint(&mut img, req.overlays, focus.as_ref());
+    Ok((export::jpeg_bytes(&img, 88, req.color_space)?, histogram))
 }
 
 async fn preview(State(w): State<Arc<Worker>>, Json(req): Json<PreviewRequest>) -> Response {
@@ -688,19 +721,37 @@ async fn preview(State(w): State<Arc<Worker>>, Json(req): Json<PreviewRequest>) 
     };
     let masks = w.mask_images(&req.key, &req.edit).await;
     let depth = w.depth_map(&req.key, &req.edit).await;
+    // Focus peaking reads the focus mask made with this proxy.
+    let focus = match req.overlays & overlays::PEAKING {
+        0 => None,
+        _ => w
+            .focus(&req.key, edge)
+            .await
+            .ok()
+            .and_then(|png| masks::decode_grey(&png).ok()),
+    };
     match tokio::task::spawn_blocking(move || {
-        preview_jpeg(&kit, &rendering, &req, proxy, &masks, depth.as_ref())
+        preview_jpeg(&kit, &rendering, &req, proxy, &masks, depth.as_ref(), focus)
     })
     .await
     {
-        Ok(Ok(jpeg)) => (
-            [
-                ("content-type", "image/jpeg"),
-                ("cache-control", "no-store"),
-            ],
-            jpeg,
-        )
-            .into_response(),
+        Ok(Ok((jpeg, histogram))) => {
+            use base64::Engine;
+            let bytes: Vec<u8> = histogram.iter().flat_map(|v| v.to_le_bytes()).collect();
+            (
+                [
+                    ("content-type", "image/jpeg".to_string()),
+                    ("cache-control", "no-store".to_string()),
+                    // `histogram.wgsl`'s 1,026 counts, little-endian u32s, base64.
+                    (
+                        "x-histogram",
+                        base64::engine::general_purpose::STANDARD.encode(bytes),
+                    ),
+                ],
+                jpeg,
+            )
+                .into_response()
+        }
         Ok(Err(e)) => internal(e),
         Err(e) => internal(e.into()),
     }
@@ -730,16 +781,16 @@ fn loupe_png(
         let mut sessions = w.sessions.lock().unwrap();
         sessions.iter().position(|s| s.key == req.key).map(|i| {
             let s = sessions.remove(i);
-            let out = (s.source.clone(), s.flip, s.sigma, s.rendering.clone());
+            let out = (s.source.clone(), s.flip, s.noise, s.rendering.clone());
             sessions.insert(0, s);
             out
         })
     };
-    let (source, flip, sigma, rendering) = match session {
+    let (source, flip, noise, rendering) = match session {
         Some(s) => s,
         None => {
             let (tex, flip, rendering) = export::full_source_for(kit, &req.path)?;
-            let sigma = kit.detail.noise_sigma(&kit.gpu, &tex)?;
+            let noise = kit.detail.noise(&kit.gpu, &tex)?;
             let tex = Arc::new(tex);
             let mut sessions = w.sessions.lock().unwrap();
             // Two loupe requests on a cold photo both decode it; keep one, or the pair fills every slot.
@@ -750,13 +801,18 @@ fn loupe_png(
                     key: req.key.clone(),
                     source: tex.clone(),
                     flip,
-                    sigma,
+                    noise,
                     rendering: rendering.clone(),
                 },
             );
             sessions.truncate(SESSION_LIMIT);
-            (tex, flip, sigma, rendering)
+            (tex, flip, noise, rendering)
         }
+    };
+    // The spots on the whole frame, before any tile is cut: a heal takes from wherever its source is.
+    let source = match export::retouch(kit, &rendering, &req.edit, &source, flip) {
+        Some(t) => Arc::new(t),
+        None => source,
     };
     let (sw, sh) = (source.width(), source.height());
     let (ow, oh) = if flip & 4 != 0 { (sh, sw) } else { (sw, sh) };
@@ -765,36 +821,47 @@ fn loupe_png(
     let packed = rendering.pack(&req.edit, req.color_space);
     let profile = stocks::for_edit(&req.edit);
     let slide_response = stocks::response(&profile);
+    let look = luts::for_edit(&req.edit, req.color_space)?;
     // Masks cover the whole frame; each develop below says where its tile sits in it.
     let mask_textures = rendering.mask_textures(kit, &req.edit, masks, flip, [sw, sh]);
     // Black and white's adjacency map covers the whole frame too: averaged down, lens-corrected at that size as
     // export corrects the whole, then developed and blurred.
-    let density = match sidecar_engine::needs_density_map(&packed.uniform) {
-        true => {
-            let small = kit.develop.density_source(&kit.gpu, &source);
-            let size = [small.width(), small.height()];
-            let small = match rendering.lens_params(&req.edit, size, [0.0; 2], [0.0; 2]) {
-                Some(p) => kit.lens.apply(&kit.gpu, &small, &p, size),
-                None => small,
-            };
-            Some(kit.develop.density_map(
-                &kit.gpu,
-                &small,
-                [sw, sh],
-                &packed.uniform,
-                &packed.lut,
-                &export::masks_for(&packed, &mask_textures, [0.0; 4], slide_response),
-            )?)
+    let small_whole = || {
+        let small = kit.develop.density_source(&kit.gpu, &source);
+        let size = [small.width(), small.height()];
+        match rendering.lens_params(&req.edit, size, [0.0; 2], [0.0; 2]) {
+            Some(p) => kit.lens.apply(&kit.gpu, &small, &p, size),
+            None => small,
         }
+    };
+    let density = match sidecar_engine::needs_density_map(&packed.uniform) {
+        true => Some(kit.develop.density_map(
+            &kit.gpu,
+            &small_whole(),
+            [sw, sh],
+            &packed.uniform,
+            &packed.lut,
+            &export::masks_for(&packed, &mask_textures, [0.0; 4], slide_response, None),
+        )?),
         false => None,
     };
+    // Texture and Clarity's map is the whole frame's as well, at the same size and corrected the same way.
+    let local = sidecar_engine::needs_local_map(&packed.uniform)
+        .then(|| kit.develop.local_map(&kit.gpu, &small_whole(), [sw, sh]));
+    let haze = sidecar_engine::needs_haze_map(&packed.uniform).then(|| {
+        kit.develop
+            .haze_map(&kit.gpu, &small_whole(), [sw, sh], &packed.uniform)
+    });
     let masks_at = |x: u32, y: u32| sidecar_engine::Masks {
         density: density.as_ref(),
+        local: local.as_ref(),
+        haze: haze.as_ref().map(|(m, a)| (m, a)),
         ..export::masks_for(
             &packed,
             &mask_textures,
             [x as f32, y as f32, sw as f32, sh as f32],
             slide_response,
+            look.as_ref(),
         )
     };
     // The whole frame's source, before any tile is cut from it: the refinement reads the photo and the map
@@ -809,6 +876,11 @@ fn loupe_png(
     });
     let depth_params =
         depth.and_then(|d| sidecar_color::depth::pack(&req.edit, d.airlight, [sw, sh], [0.0; 2]));
+    // The detail pass's mask layers, for a region of the source starting at `(x, y)`.
+    let layer_masks = |x: u32, y: u32| sidecar_engine::detail::DetailMasks {
+        textures: mask_textures.iter().map(Option::as_ref).collect(),
+        frame: [x as f32, y as f32, sw as f32, sh as f32],
+    };
     // A rectangle of the sensor's pixels, developed as export develops it: denoised, sharpened, lens-corrected,
     // hazed and blurred by distance, through the masks.
     let develop_rect = |ux: u32, uy: u32, uw: u32, uh: u32| -> Result<Vec<f32>> {
@@ -826,7 +898,13 @@ fn loupe_png(
                     let cw = ((x1.ceil() + reach).clamp(1.0, sw as f64) as u32).max(cx + 1) - cx;
                     let ch = ((y1.ceil() + reach).clamp(1.0, sh as f64) as u32).max(cy + 1) - cy;
                     let region = kit.detail.crop(&kit.gpu, &source, cx, cy, cw, ch);
-                    let region = kit.detail.apply(&kit.gpu, region, sigma, &settings);
+                    let region = kit.detail.apply(
+                        &kit.gpu,
+                        region,
+                        &noise,
+                        &settings,
+                        Some(&layer_masks(cx, cy)),
+                    );
                     let params = rendering
                         .lens_params(
                             &req.edit,
@@ -842,7 +920,13 @@ fn loupe_png(
                     let (cx, cy) = (ux.saturating_sub(m), uy.saturating_sub(m));
                     let (cw, ch) = ((ux + uw + m).min(sw) - cx, (uy + uh + m).min(sh) - cy);
                     let tile = kit.detail.crop(&kit.gpu, &source, cx, cy, cw, ch);
-                    let tile = kit.detail.apply(&kit.gpu, tile, sigma, &settings);
+                    let tile = kit.detail.apply(
+                        &kit.gpu,
+                        tile,
+                        &noise,
+                        &settings,
+                        Some(&layer_masks(cx, cy)),
+                    );
                     kit.detail.crop(&kit.gpu, &tile, ux - cx, uy - cy, uw, uh)
                 }
             };
@@ -951,10 +1035,8 @@ fn loupe_png(
         let mut info = png::Info::with_size(img.width, img.height);
         info.color_type = png::ColorType::Rgb;
         info.bit_depth = png::BitDepth::Eight;
-        if req.color_space == sidecar_color::DisplaySpace::DisplayP3 {
-            info.icc_profile = Some(std::borrow::Cow::Borrowed(include_bytes!(
-                "../../../assets/icc/DisplayP3-v4.icc"
-            )));
+        if req.color_space != sidecar_color::DisplaySpace::Srgb {
+            info.icc_profile = Some(std::borrow::Cow::Borrowed(export::icc_for(req.color_space)));
         }
         png::Encoder::with_info(&mut out, info)?
             .write_header()?
@@ -1109,6 +1191,7 @@ pub fn router(worker: Arc<Worker>) -> Router {
     Router::new()
         .route("/v1/health", get(|| async { "ok" }))
         .route("/v1/capabilities", get(capabilities))
+        .route("/v1/models", get(models_status))
         .route("/v1/render", post(render))
         .route("/v1/loupe", post(loupe))
         .route("/v1/preview", post(preview))
@@ -1123,6 +1206,12 @@ pub fn router(worker: Arc<Worker>) -> Router {
         .route("/v1/assets/{key}/camera", get(camera_handler))
         .route("/v1/film/stocks", get(film_stocks))
         .route("/v1/film/stocks/{id}", get(film_stock))
+        .route(
+            "/v1/luts/{id}",
+            axum::routing::put(lut_put)
+                .delete(lut_delete)
+                .layer(axum::extract::DefaultBodyLimit::max(64 << 20)),
+        )
         .route("/v1/lensfun", get(lensfun_status))
         .route("/v1/lensfun/done", post(lensfun_done))
         .route("/v1/lensfun/{name}", axum::routing::put(lensfun_put))
@@ -1131,6 +1220,13 @@ pub fn router(worker: Arc<Worker>) -> Router {
 
 /// What this worker can do beyond decoding, so the editor shows only the tools that will work: the models'
 /// masks and depth (`sidecar-ml`, in the `-ml` image, and a GPU), and the loupe and full-resolution renders (a GPU).
+/// Each model Sidecar can run and where this server stands with it (`models::status`).
+async fn models_status(State(w): State<Arc<Worker>>) -> Response {
+    let image = w.ml.as_ref().map(|m| m.models_dir().to_path_buf());
+    let user = models::user_dir(&w.cache);
+    Json(models::status(image.as_deref(), &user)).into_response()
+}
+
 async fn capabilities(State(w): State<Arc<Worker>>) -> Response {
     let gpu = w.gpu.is_some();
     Json(serde_json::json!({ "models": gpu && w.ml.is_some(), "gpu": gpu })).into_response()
@@ -1171,6 +1267,21 @@ async fn lensfun_put(
         Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
         Ok(Err(e)) => (StatusCode::BAD_REQUEST, format!("{e:#}")).into_response(),
         Err(e) => internal(e.into()),
+    }
+}
+
+async fn lut_put(Path(id): Path<String>, body: String) -> Response {
+    match tokio::task::spawn_blocking(move || luts::put(&id, &body)).await {
+        Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
+        Ok(Err(e)) => (StatusCode::BAD_REQUEST, format!("{e:#}")).into_response(),
+        Err(e) => internal(e.into()),
+    }
+}
+
+async fn lut_delete(Path(id): Path<String>) -> Response {
+    match luts::remove(&id) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
     }
 }
 

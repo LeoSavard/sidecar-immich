@@ -75,7 +75,8 @@ check(cols.length === 2, `flipping to the compared version puts both columns on 
 const headers = (await page.locator('thead th').allInnerTexts()).map((t) => t.trim()).filter(Boolean);
 check(headers.length === 2 && headers[0] !== headers[1], `each column is named (${headers.join(' | ')})`);
 const shownStops = lift((await row('stops from grey'))[0]);
-check(Math.abs(shownStops - stopsUp) > 0.5, `the compared version reads differently at the same place (${shownStops} vs ${stopsUp} stops)`);
+// The edit is the compared version plus the +0.30 EV above, at least: about that much apart at a mid-tone probe.
+check(Math.abs(shownStops - stopsUp) > 0.2, `the compared version reads differently at the same place (${shownStops} vs ${stopsUp} stops)`);
 if (outDir) await page.screenshot({ path: `${outDir}/measure-compared.png` });
 
 // ---- the text that gets handed to someone else
